@@ -39,6 +39,12 @@ pub struct HtmlStyle {
     pub underline: bool,
     pub kerning: i32,       // Kerning amount (from XMED Section 7 dword98, stored as fixed-point * 65536)
     pub char_spacing: i32,  // Character spacing in pixels (from XMED Section 7 dword9C, stored as fixed-point * 65536)
+    /// Director chapter 15 `hyperlink` (`director_reference.md:2348`).
+    /// Per-character link target — the Lingo-side data string that
+    /// `on hyperlinkClick(me, data, range)` receives. We don't currently
+    /// fire hyperlinkClick events, but the field is stored so scripts that
+    /// inspect `member.word[N].hyperlink` see the assigned value.
+    pub hyperlink: Option<String>,
 }
 
 impl Default for HtmlStyle {
@@ -53,6 +59,7 @@ impl Default for HtmlStyle {
             underline: false,
             kerning: 0,
             char_spacing: 0,
+            hyperlink: None,
         }
     }
 }

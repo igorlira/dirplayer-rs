@@ -4,7 +4,7 @@ use crate::{
     director::lingo::datum::{Datum, datum_bool},
     player::{
         ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{
-            bitmap::{BuiltInPalette, PaletteRef, resolve_color_ref},
+            bitmap::{Bitmap, BuiltInPalette, PaletteRef, resolve_color_ref},
             manager::BitmapRef,
             mask::BitmapMask,
         }, geometry::IntRect, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut
@@ -28,6 +28,7 @@ impl BitmapDatumHandlers {
             "extractAlpha" => Self::extract_alpha(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             "copyPixels" => Self::copy_pixels(datum, args),
+            "applyFilter" => Self::apply_filter(datum, args),
             "createMatte" | "createMask" => Self::create_matte(datum, args),
             "trimWhiteSpace" => Self::trim_whitespace(datum, args),
             "getPixel" => Self::get_pixel(datum, args),
@@ -178,10 +179,16 @@ impl BitmapDatumHandlers {
 
     pub fn create_matte(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // TODO alpha threshold
-            if args.len() != 0 {
+            // Director: imageObject.createMatte({alphaThreshold}). The
+            // alphaThreshold (0..255) excludes pixels whose alpha falls
+            // below that value from the resulting matte; only meaningful
+            // for 32-bit images with an alpha channel. We don't honour
+            // the threshold yet (our matte builder uses the bg color key
+            // path, see Bitmap::create_matte), but accept and ignore the
+            // argument so scripts that pass it don't error out.
+            if args.len() > 1 {
                 return Err(ScriptError::new(
-                    "Invalid number of arguments for createMatte".to_string(),
+                    "createMatte takes at most 1 argument (alphaThreshold)".to_string(),
                 ));
             }
             let bitmap = player.get_datum(datum).to_bitmap_ref()?;
@@ -518,7 +525,11 @@ impl BitmapDatumHandlers {
                 blend.int_value()?
             };
 
-            let line_thickness = ["lineSize", "lineWidth", "width", "strokeWidth"]
+            // Director chapter 15: optional `#lineSize` (default 1) controls
+            // stroke thickness for rect/oval/roundRect/line outlines. Some
+            // scripts use alias keys (#lineWidth, #width, #strokeWidth) for
+            // the same property — accept all four.
+            let thickness = ["lineSize", "lineWidth", "width", "strokeWidth"]
                 .into_iter()
                 .find_map(|key| {
                     let value = PropListUtils::get_by_concrete_key(
@@ -536,10 +547,32 @@ impl BitmapDatumHandlers {
                 .unwrap_or(1)
                 .max(1);
 
+            // Optional `#radius` for #roundRect — defaults to 8 (Director's
+            // visual default for the rounded-rect tool).
+            let radius_d = PropListUtils::get_by_concrete_key(
+                &draw_map,
+                &Datum::Symbol("radius".to_owned()),
+                &player.allocator,
+            )?;
+            let radius_d = player.get_datum(&radius_d);
+            let radius = if radius_d.is_void() { 8 } else { radius_d.int_value()?.max(0) };
+
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
+            let alpha = blend as f32 / 100.0;
             match shape_type.as_str() {
                 "rect" => {
-                    bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, blend as f32 / 100.0);
+                    bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, alpha);
+                }
+                "oval" => {
+                    bitmap.stroke_ellipse(x1, y1, x2, y2, color, &palettes, alpha, thickness);
+                }
+                "roundRect" => {
+                    bitmap.stroke_round_rect(x1, y1, x2, y2, radius, color, &palettes, alpha, thickness);
+                }
+                "line" => {
+                    // For #line, (x1,y1) and (x2,y2) are the line endpoints
+                    // (rather than a bounding rect like the other shapes).
+                    bitmap.draw_line_thick(x1, y1, x2, y2, color, &palettes, alpha, thickness);
                 }
                 "oval" => {
                     bitmap.stroke_ellipse(
@@ -550,7 +583,7 @@ impl BitmapDatumHandlers {
                         color,
                         &palettes,
                         blend as f32 / 100.0,
-                        line_thickness,
+                        thickness,
                     );
                 }
                 "line" => {
@@ -562,11 +595,14 @@ impl BitmapDatumHandlers {
                         color,
                         &palettes,
                         blend as f32 / 100.0,
-                        line_thickness,
+                        thickness,
                     );
                 }
                 _ => {
-                    return Err(ScriptError::new("Invalid shapeType for draw".to_string()));
+                    return Err(ScriptError::new(format!(
+                        "Invalid shapeType '#{}' for draw (expected #rect, #oval, #roundRect, #line)",
+                        shape_type
+                    )));
                 }
             }
             Ok(datum.clone())
@@ -869,6 +905,87 @@ impl BitmapDatumHandlers {
         })
     }
 
+    /// Director chapter 15 `image.applyFilter(filterObj)`. Mutates the bitmap
+    /// in place. The filter is the PropList produced by the global `filter()`
+    /// constructor — its `#filterType` symbol decides the dispatch.
+    ///
+    /// Currently implemented:
+    ///   - `#adjustcolorfilter` — applies hue / saturation / contrast /
+    ///     brightness using Adobe Flash's AdjustColor convention (see source
+    ///     reference in `apply_adjust_color_filter`).
+    ///
+    /// Other filter symbols (#blurfilter / #glowfilter / etc.) are accepted
+    /// without crashing but produce a warning and leave the bitmap unchanged
+    /// — this matches the AGEIA Xtra's behaviour for unimplemented filters.
+    pub fn apply_filter(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.is_empty() {
+                return Err(ScriptError::new(
+                    "applyFilter requires a filter argument".to_string(),
+                ));
+            }
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+
+            // Read the filter PropList. Lookup is case-insensitive on symbol /
+            // string keys to match Director's convention.
+            let (filter_type, props) = match player.get_datum(&args[0]) {
+                Datum::PropList(items, _) => {
+                    let mut filter_type: Option<String> = None;
+                    let mut props: HashMap<String, f64> = HashMap::new();
+                    for (k, v) in items.iter() {
+                        let key = match player.get_datum(k) {
+                            Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+                            _ => continue,
+                        };
+                        if key == "filtertype" {
+                            if let Datum::Symbol(s) | Datum::String(s) = player.get_datum(v) {
+                                filter_type = Some(s.to_lowercase());
+                            }
+                        } else {
+                            // Numeric properties for AdjustColor.
+                            let val = player.get_datum(v).float_value().unwrap_or(0.0);
+                            props.insert(key, val);
+                        }
+                    }
+                    (filter_type, props)
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "applyFilter argument is not a filter object".to_string(),
+                    ));
+                }
+            };
+
+            let kind = filter_type.unwrap_or_default();
+            match kind.as_str() {
+                "adjustcolorfilter" => {
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).ok_or_else(
+                        || ScriptError::new("applyFilter: invalid bitmap".to_string()),
+                    )?;
+                    let brightness = props.get("brightness").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let contrast = props.get("contrast").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let saturation = props.get("saturation").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let hue = props.get("hue").copied().unwrap_or(0.0).clamp(-180.0, 180.0);
+                    apply_adjust_color_filter(bitmap, brightness, contrast, saturation, hue);
+                    bitmap.mark_dirty();
+                }
+                "" => {
+                    return Err(ScriptError::new(
+                        "applyFilter: filter object has no #filterType".to_string(),
+                    ));
+                }
+                other => {
+                    log::warn!(
+                        "applyFilter: filter type '#{}' is not implemented \u{2014} bitmap unchanged",
+                        other
+                    );
+                }
+            }
+
+            Ok(datum.clone())
+        })
+    }
+
     pub fn get_prop_handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.len() == 0 {
             return Err(ScriptError::new("getProp requires at least 1 argument".to_string()));
@@ -975,3 +1092,142 @@ impl BitmapDatumHandlers {
         }
     }
 }
+
+/// Adobe Flash AdjustColor convention (Director chapter 15 inherits this from
+/// the Flash Bitmap Filters surface):
+///   brightness  ∈ [-100, 100]   — additive luminance shift; ±100 maps to
+///                                  ±100/255 added per channel in 0..1 space.
+///   contrast    ∈ [-100, 100]   — multiplicative around 0.5 grey;
+///                                  factor = (100 + contrast) / 100.
+///   saturation  ∈ [-100, 100]   — chroma scale; -100 = full grayscale,
+///                                  0 = identity, +100 = doubled chroma.
+///                                  factor = (100 + saturation) / 100.
+///   hue         ∈ [-180, 180]   — hue rotation in degrees around the
+///                                  Rec. 601 luma axis.
+///
+/// Order matches Flash's internal pipeline: hue → saturation → contrast →
+/// brightness. (Some implementations swap the last two; Flash applies
+/// contrast then brightness, which is what we do here.)
+///
+/// Operates in-place on RGB channels; alpha is preserved. Supports 32-bit and
+/// 16-bit bitmaps (the common cases for textures); 8-bit / palette bitmaps
+/// would need a roundtrip through the palette and are out of scope for now —
+/// the function emits a debug-log warning and skips paletted images.
+fn apply_adjust_color_filter(
+    bitmap: &mut Bitmap,
+    brightness: f64, contrast: f64, saturation: f64, hue_deg: f64,
+) {
+    if bitmap.bit_depth < 16 {
+        log::warn!(
+            "applyFilter(#adjustColorFilter): bitmap is {}-bit / paletted; skipped",
+            bitmap.bit_depth
+        );
+        return;
+    }
+
+    // Pre-compute the contributions of each step so we can apply them per pixel.
+    let cos_h = (hue_deg.to_radians()).cos();
+    let sin_h = (hue_deg.to_radians()).sin();
+    // Rec. 601 luma weights — Flash uses these for the AdjustColor filter.
+    let lr = 0.213_f64;
+    let lg = 0.715_f64;
+    let lb = 0.072_f64;
+    // Hue-rotation matrix (RGB → RGB) around the luminance axis. Standard
+    // formulation: M = L + cos·(I − L) + sin·R, where L is the projection
+    // onto the luma axis (constant rows) and R is the rotation matrix in the
+    // chroma plane.
+    let m00 = lr + cos_h * (1.0 - lr) + sin_h * (-lr);
+    let m01 = lg + cos_h * (-lg)      + sin_h * (-lg);
+    let m02 = lb + cos_h * (-lb)      + sin_h * (1.0 - lb);
+    let m10 = lr + cos_h * (-lr)      + sin_h * (0.143);
+    let m11 = lg + cos_h * (1.0 - lg) + sin_h * (0.140);
+    let m12 = lb + cos_h * (-lb)      + sin_h * (-0.283);
+    let m20 = lr + cos_h * (-lr)      + sin_h * (-(1.0 - lr));
+    let m21 = lg + cos_h * (-lg)      + sin_h * (lg);
+    let m22 = lb + cos_h * (1.0 - lb) + sin_h * (lb);
+
+    let sat_factor = (100.0 + saturation) / 100.0;
+    let contrast_factor = (100.0 + contrast) / 100.0;
+    let bright_shift = brightness / 100.0; // 0..1 scale (±100 maps to ±1.0).
+
+    let width = bitmap.width as i32;
+    let height = bitmap.height as i32;
+    let bytes_per_pixel = (bitmap.bit_depth / 8) as usize;
+
+    // Snapshot the existing matte (if any) so we can restore it after
+    // set_pixel — set_pixel clears it because it doesn't know we're not
+    // changing the alpha shape, just the RGB values.
+    let saved_matte = bitmap.matte.clone();
+
+    // We need a palette map for resolve_color_ref / set_pixel. AdjustColor on
+    // 16/32-bit images doesn't actually need the palette but the API requires
+    // one — pass an empty map (resolve_color_ref handles None palettes).
+    let palettes = crate::player::bitmap::palette_map::PaletteMap::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            // Read alpha first (preserve through transform).
+            let (r0, g0, b0, a) = if bitmap.bit_depth == 32 {
+                let idx = (y as usize * width as usize + x as usize) * bytes_per_pixel;
+                (
+                    bitmap.data[idx],
+                    bitmap.data[idx + 1],
+                    bitmap.data[idx + 2],
+                    bitmap.data[idx + 3],
+                )
+            } else {
+                // 16-bit: get_pixel_color_with_alpha resolves through palette.
+                bitmap.get_pixel_color_with_alpha(&palettes, x as u16, y as u16)
+            };
+
+            // 0..1 floats.
+            let mut r = r0 as f64 / 255.0;
+            let mut g = g0 as f64 / 255.0;
+            let mut b = b0 as f64 / 255.0;
+
+            // 1) Hue rotation.
+            let hr = m00 * r + m01 * g + m02 * b;
+            let hg = m10 * r + m11 * g + m12 * b;
+            let hb = m20 * r + m21 * g + m22 * b;
+            r = hr; g = hg; b = hb;
+
+            // 2) Saturation: blend between luminance grayscale and original.
+            let lum = lr * r + lg * g + lb * b;
+            r = lum + (r - lum) * sat_factor;
+            g = lum + (g - lum) * sat_factor;
+            b = lum + (b - lum) * sat_factor;
+
+            // 3) Contrast: scale around 0.5 grey.
+            r = (r - 0.5) * contrast_factor + 0.5;
+            g = (g - 0.5) * contrast_factor + 0.5;
+            b = (b - 0.5) * contrast_factor + 0.5;
+
+            // 4) Brightness: additive shift.
+            r += bright_shift;
+            g += bright_shift;
+            b += bright_shift;
+
+            // Clamp to 0..1 and back to u8.
+            let r_u = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let g_u = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let b_u = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+            // Write RGB. For 32-bit we write directly to preserve the existing
+            // alpha byte (set_pixel doesn't take alpha). For 16-bit we use
+            // set_pixel which roundtrips through the 5550 packing.
+            if bitmap.bit_depth == 32 {
+                let idx = (y as usize * width as usize + x as usize) * bytes_per_pixel;
+                bitmap.data[idx] = r_u;
+                bitmap.data[idx + 1] = g_u;
+                bitmap.data[idx + 2] = b_u;
+                // Alpha untouched (a is the original).
+                let _ = a;
+            } else {
+                bitmap.set_pixel(x, y, (r_u, g_u, b_u), &palettes);
+            }
+        }
+    }
+
+    bitmap.matte = saved_matte;
+}
+

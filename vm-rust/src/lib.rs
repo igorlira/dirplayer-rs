@@ -423,6 +423,31 @@ pub fn mouse_move(x: f64, y: f64) {
     player_dispatch(PlayerVMCommand::MouseMove((ix, iy)));
 }
 
+/// Right-mouse-button down. Tracked via a separate flag because Director
+/// scripts use `the rightMouseDown` to gate right-drag behaviour. Position
+/// is updated alongside so `the mouseLoc` reflects the click point.
+#[wasm_bindgen]
+pub fn right_mouse_down(x: f64, y: f64) {
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    reserve_player_mut(|player| {
+        player.mouse_loc = (ix, iy);
+        player.movie.right_mouse_down = true;
+    });
+    player_dispatch(PlayerVMCommand::RightMouseDown((ix, iy)));
+}
+
+#[wasm_bindgen]
+pub fn right_mouse_up(x: f64, y: f64) {
+    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
+    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    reserve_player_mut(|player| {
+        player.mouse_loc = (ix, iy);
+        player.movie.right_mouse_down = false;
+    });
+    player_dispatch(PlayerVMCommand::RightMouseUp((ix, iy)));
+}
+
 /// Check if the game wants pointer lock (for FPS mouse look)
 #[wasm_bindgen]
 pub fn wants_pointer_lock() -> bool {

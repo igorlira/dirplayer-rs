@@ -7,6 +7,8 @@ import {
   mouse_move_delta,
   mouse_down,
   mouse_up,
+  right_mouse_down,
+  right_mouse_up,
   key_down,
   key_up,
   wants_pointer_lock,
@@ -446,6 +448,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       return;
     }
 
+    // PointerEvent.button: 0 = left/primary, 2 = right/secondary, 1 = middle.
+    // For "move" the field reads as 0 even when no button is held, so we
+    // only branch on it for down/up.
+    const isRight = (name === "down" || name === "up") && e.button === 2;
     switch (name) {
       case "move":
         if (!document.pointerLockElement) {
@@ -456,6 +462,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         }
         break;
       case "down": {
+        if (isRight) {
+          right_mouse_down(canvasX, canvasY);
+          e.preventDefault();
+          break;
+        }
         const spriteId = player_get_sprite_at(canvasX, canvasY);
         const isEditable = spriteId > 0 && is_sprite_editable_field(spriteId);
         mouse_down(canvasX, canvasY);
@@ -498,6 +509,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         break;
       }
       case "up":
+        if (isRight) {
+          right_mouse_up(canvasX, canvasY);
+          break;
+        }
         mouse_up(canvasX, canvasY);
         textDragRef.current = null;
         break;
@@ -698,6 +713,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onContextMenu={e => e.preventDefault()}
       onKeyDown={e => {
         // When the hidden input is focused (editable field tapped), let its
         // own handlers + onInput drive key dispatch. Otherwise we'd double-fire

@@ -6,6 +6,7 @@ use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
     film_loop::FilmLoopMemberHandlers, font::FontMemberHandlers,
     havok::HavokPhysicsMemberHandlers,
+    physx::PhysXPhysicsMemberHandlers,
     shockwave3d::Shockwave3dMemberHandlers,
     sound::SoundMemberHandlers, text::TextMemberHandlers, palette::PaletteMemberHandlers,
     vector_shape::VectorShapeMemberHandlers,
@@ -47,6 +48,17 @@ fn is_havok_member(datum: &DatumRef) -> Result<bool, ScriptError> {
         };
         Ok(player.movie.cast_manager.find_member_by_ref(&r)
             .map_or(false, |m| matches!(m.member_type, CastMemberType::HavokPhysics(_))))
+    })
+}
+
+fn is_physx_member(datum: &DatumRef) -> Result<bool, ScriptError> {
+    reserve_player_mut(|player| {
+        let r = match player.get_datum(datum) {
+            Datum::CastMember(r) => r.to_owned(),
+            _ => return Ok(false),
+        };
+        Ok(player.movie.cast_manager.find_member_by_ref(&r)
+            .map_or(false, |m| matches!(m.member_type, CastMemberType::PhysXPhysics(_))))
     })
 }
 
@@ -194,6 +206,8 @@ impl CastMemberRefHandlers {
             "getPropRef" => {
                 if is_havok_member(datum)? {
                     HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                } else if is_physx_member(datum)? {
+                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else if is_3d_member(datum)? {
                     Shockwave3dMemberHandlers::call(datum, handler_name, args)
                 } else {
@@ -204,6 +218,8 @@ impl CastMemberRefHandlers {
             "count" => {
                 if is_havok_member(datum)? {
                     HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                } else if is_physx_member(datum)? {
+                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else if is_3d_member(datum)? {
                     Shockwave3dMemberHandlers::call(datum, handler_name, args)
                 } else {
@@ -250,38 +266,51 @@ impl CastMemberRefHandlers {
                     })
                 }
             }
-            // Havok Physics member handlers
-            "initialize" | "Initialize" | "shutdown" | "shutDown" | "Shutdown"
-            | "step" | "reset" | "rigidBody" | "rigidbody" | "spring"
-            | "linearDashpot" | "lineardashpot" | "angularDashpot" | "angulardashpot"
-            | "makeMovableRigidBody" | "makemovablerigidbody"
-            | "makeFixedRigidBody" | "makefixedrigidbody"
-            | "makeSpring" | "makespring"
-            | "makeLinearDashpot" | "makelineardashpot"
-            | "makeAngularDashpot" | "makeangulardashpot"
-            | "deleteRigidBody" | "deleterigidbody"
-            | "deleteSpring" | "deletespring"
-            | "deleteLinearDashpot" | "deletelineardashpot"
-            | "deleteAngularDashpot" | "deleteangulardashpot"
-            | "registerInterest" | "registerinterest"
-            | "removeInterest" | "removeinterest"
-            | "registerStepCallback" | "registerstepcallback"
-            | "removeStepCallback" | "removestepcallback"
-            | "enableCollision" | "enablecollision"
-            | "disableCollision" | "disablecollision"
-            | "enableAllCollisions" | "enableallcollisions"
-            | "disableAllCollisions" | "disableallcollisions" => {
-                // Check if this is a Havok member before delegating
-                let is_havok = reserve_player_ref(|player| {
-                    let r = match player.get_datum(datum) {
-                        Datum::CastMember(r) => r.to_owned(),
-                        _ => return false,
-                    };
-                    player.movie.cast_manager.find_member_by_ref(&r)
-                        .map_or(false, |m| matches!(m.member_type, CastMemberType::HavokPhysics(_)))
-                });
-                if is_havok {
+            // Havok + PhysX (AGEIA) Physics member handlers — overlapping
+            // handler names are routed by member type below. Director Lingo
+            // is fully case-insensitive on handler names, so we use
+            // `match_ci!` to recognize every casing the script may use
+            // (`EnableCollisionCallback`, `enablecollisioncallback`, etc.).
+            _ if match_ci!(handler_name, {
+                // Havok handlers
+                "initialize" | "shutdown" | "step" | "reset"
+                    | "rigidBody" | "spring"
+                    | "linearDashpot" | "angularDashpot"
+                    | "makeMovableRigidBody" | "makeFixedRigidBody"
+                    | "makeSpring" | "makeLinearDashpot" | "makeAngularDashpot"
+                    | "deleteRigidBody" | "deleteSpring"
+                    | "deleteLinearDashpot" | "deleteAngularDashpot"
+                    | "registerInterest" | "removeInterest"
+                    | "registerStepCallback" | "removeStepCallback"
+                    | "enableCollision" | "disableCollision"
+                    | "enableAllCollisions" | "disableAllCollisions"
+                // PhysX additions (Director chapter 15)
+                    | "init" | "destroy" | "pauseSimulation" | "resumeSimulation"
+                    | "simulate" | "getSimulationTime"
+                    | "createRigidBody" | "createRigidBodyFromProxy"
+                    | "getRigidBody" | "getRigidBodies" | "getSleepingBodies"
+                    | "createProxyTemplate" | "addProxyTemplate" | "loadProxyTemplate"
+                    | "createSpring" | "createLinearJoint" | "createAngularJoint" | "createD6Joint"
+                    | "deleteConstraint" | "deleteRigidBodyConstraints"
+                    | "getSpring" | "getConstraint" | "getAllSprings" | "getAllConstraints"
+                    | "createCloth" | "deleteCloth" | "getCloth" | "getCloths" | "createClothResource"
+                    | "createController" | "deleteController" | "getController" | "getControllers"
+                    | "createTerrain" | "createTerrainDesc" | "deleteTerrain" | "getTerrain" | "getTerrains"
+                    | "enableCollisionCallback" | "disableCollisionCallback"
+                    | "enableCollisionGroupFlag" | "getCollisionDisabledPairs"
+                    | "getCollisionCallbackDisabledPairs"
+                    | "notifyCollisions" | "registerForCollisions" | "removeCallback"
+                    | "registerCollisionCallback" | "removeCollisionCallback"
+                    | "getRayCastClosestShape" | "getRayCastAllShapes"
+                    | "rayCastClosest" | "rayCastAll"
+                    | "getBoundingBox" | "getBoundingSphere"
+                    => true,
+                _ => false,
+            }) => {
+                if is_havok_member(datum)? {
                     HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                } else if is_physx_member(datum)? {
+                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else {
                     Self::call_member_type(datum, handler_name, args)
                 }
@@ -293,10 +322,37 @@ impl CastMemberRefHandlers {
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "registerForEvent" | "registerScript"
+            | "registerForEvent" | "registerScript" | "unregisterAllEvents"
             | "image"
             | "modelsUnderRay" | "modelsUnderLoc" | "modelUnderLoc" => {
                 Shockwave3dMemberHandlers::call(datum, handler_name, args)
+            }
+            // Mixer Xtra (chapter 15:8702) — minimum-viable stub. The full
+            // Mixer API has its own audio engine (createSoundObject, sound
+            // playback, filter chains, callbacks) which is out of scope; we
+            // stub the init-time surface so movies that reset the mixer
+            // state on startup don't crash. Music won't actually play.
+            _ if match_ci!(handler_name, {
+                "getSoundObjectList" | "getSoundObject" | "createSoundObject"
+                    | "deleteSoundObject" | "deleteAllSoundObjects" => true,
+                _ => false,
+            }) => {
+                reserve_player_mut(|player| {
+                    if handler_name.eq_ignore_ascii_case("getSoundObjectList") {
+                        // Empty list — no sound objects exist.
+                        Ok(player.alloc_datum(Datum::List(
+                            DatumType::List, std::collections::VecDeque::new(), false,
+                        )))
+                    } else {
+                        // getSoundObject / createSoundObject / deleteSoundObject /
+                        // deleteAllSoundObjects all return void in the stub.
+                        // Real Director returns the SoundObject ref for create
+                        // / get; scripts that subsequently mutate that ref will
+                        // hit their own VOID errors which is the correct
+                        // signal that audio is unimplemented.
+                        Ok(DatumRef::Void)
+                    }
+                })
             }
             _ => Self::call_member_type(datum, handler_name, args),
         }
@@ -333,8 +389,16 @@ impl CastMemberRefHandlers {
                     )));
                 }
             };
-            // preload/unload/stop/play/pause/rewind are no-ops for all member types in a web player
-            if matches!(handler_name, "preload" | "unload" | "stop" | "play" | "pause" | "rewind") {
+            // preload/unload/stop/play/pause/rewind are no-ops for all member types in a web player.
+            // preLoadBuffer is a SWA (Shockwave Audio) member method that preloads the audio
+            // buffer; we decode on demand so it's a no-op too.
+            if matches!(
+                handler_name,
+                "preload" | "preLoad"
+                    | "preloadBuffer" | "preLoadBuffer"
+                    | "unload" | "unLoad"
+                    | "stop" | "play" | "pause" | "rewind"
+            ) {
                 return Ok(DatumRef::Void);
             }
             match &cast_member.member_type {
@@ -348,10 +412,25 @@ impl CastMemberRefHandlers {
                     ButtonMemberHandlers::call(player, datum, handler_name, args)
                 }
                 CastMemberType::HavokPhysics(_) => {
-                    Err(ScriptError::new(format!("Havok handler {} should be dispatched from call()", handler_name)))
+                    HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                }
+                // Defensive route for the physics + 3D member types: the
+                // outer dispatcher in `call()` lists known handler names
+                // explicitly and forwards them to the right per-member
+                // dispatcher, but it's easy to miss a name (e.g.
+                // unregisterAllEvents until recently). Catching them here
+                // lets the per-member handler decide whether to implement
+                // or log+stub, instead of throwing a generic "No handler"
+                // that hides the real member type.
+                CastMemberType::Shockwave3d(_) => {
+                    Shockwave3dMemberHandlers::call(datum, handler_name, args)
+                }
+                CastMemberType::PhysXPhysics(_) => {
+                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 }
                 _ => Err(ScriptError::new(format!(
-                    "No handler {handler_name} for member type"
+                    "No handler {} for member type {:?}",
+                    handler_name, cast_member.member_type.member_type_id()
                 ))),
             }
         })
@@ -535,6 +614,7 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Palette => PaletteMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Shockwave3d => Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::HavokPhysics => HavokPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::PhysXPhysics => PhysXPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Script => {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
@@ -642,6 +722,13 @@ impl CastMemberRefHandlers {
                     "percentStreamed" => Ok(Datum::Int(0)),
                     "loop" => Ok(Datum::Int(0)),
                     "pausedAtStart" => Ok(Datum::Int(0)),
+                    // Mixer Xtra status (chapter 15:8702). Real Director
+                    // returns #playing / #stopped / #paused / #error; our
+                    // mixer stub never plays anything, so #stopped is the
+                    // honest default. Scripts compare against #playing to
+                    // gate audio-driven branches — those branches stay off.
+                    "status" => Ok(Datum::Symbol("stopped".to_string())),
+                    "numBuffersToPreload" | "playbackQuality" | "audioContextLatency" => Ok(Datum::Int(0)),
                     _ => Err(ScriptError::new(format!(
                         "Cannot get castMember prop {} for member of type {:?}",
                         prop, member_type
@@ -763,6 +850,9 @@ impl CastMemberRefHandlers {
             }),
             CastMemberTypeId::HavokPhysics => {
                 HavokPhysicsMemberHandlers::set_prop(member_ref, prop, value)
+            }
+            CastMemberTypeId::PhysXPhysics => {
+                PhysXPhysicsMemberHandlers::set_prop(member_ref, prop, value)
             }
             _ => {
                 // SWA/streaming media properties — accept silently as no-ops
@@ -922,6 +1012,15 @@ impl CastMemberRefHandlers {
                         Ok(())
                     },
                 ),
+                // Mixer Xtra setter stubs — same scope rationale as the
+                // call() arm above. Music init scripts touch these on the
+                // mixer cast member; we accept the writes but discard them.
+                _ if match_ci!(prop, {
+                    "numBuffersToPreload" | "preloadTime" | "playbackQuality"
+                        | "audioContext" | "audioContextLatency"
+                        => true,
+                    _ => false,
+                }) => Ok(()),
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {

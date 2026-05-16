@@ -58,6 +58,7 @@ pub enum DatumType {
     Shockwave3dObjectRef,
     Transform3d,
     HavokObjectRef,
+    PhysXObjectRef,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -155,6 +156,21 @@ pub struct HavokObjectRef {
     pub name: String,
 }
 
+/// Reference to a PhysX (AGEIA) physics object (rigidBody, spring, joint).
+/// Mirrors `HavokObjectRef` but uses ID-based lookup since the AGEIA wrapper
+/// layer references bodies/constraints by uint ID as well as by name.
+#[derive(Clone, Debug)]
+pub struct PhysXObjectRef {
+    pub cast_lib: i32,
+    pub cast_member: i32,
+    /// "rigidBody", "spring", "linearJoint", "angularJoint", "d6Joint", "constraint"
+    pub object_type: String,
+    /// Object ID within the PhysX world (matches `PhysXRigidBody.id` / `PhysXConstraint.id`).
+    pub id: u32,
+    /// Object name (cached for getName / display).
+    pub name: String,
+}
+
 impl FlashObjectRef {
     pub fn from_path_with_member(path: &str, cast_lib: i32, cast_member: i32) -> Self {
         Self {
@@ -237,6 +253,7 @@ pub enum Datum {
     /// 4x4 row-major transform matrix for Shockwave 3D
     Transform3d([f64; 16]),
     HavokObjectRef(HavokObjectRef),
+    PhysXObjectRef(PhysXObjectRef),
 }
 
 impl DatumType {
@@ -289,6 +306,7 @@ impl DatumType {
             DatumType::MouseRef => "mouse_ref",
             DatumType::Transform3d => "transform",
             DatumType::HavokObjectRef => "havok_object_ref",
+            DatumType::PhysXObjectRef => "physx_object_ref",
         }
     }
 }
@@ -339,6 +357,7 @@ impl Datum {
             Datum::Shockwave3dObjectRef(_) => DatumType::Shockwave3dObjectRef,
             Datum::Transform3d(_) => DatumType::Transform3d,
             Datum::HavokObjectRef(_) => DatumType::HavokObjectRef,
+            Datum::PhysXObjectRef(_) => DatumType::PhysXObjectRef,
         }
     }
 

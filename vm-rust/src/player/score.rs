@@ -4498,6 +4498,25 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
             }
         }
     }
+    // Also consult the cast member's own attached script (Director's
+    // "BehaviorScript" export, distinct from sprite-attached behaviors).
+    // Field/Text-typed buttons in some movies (e.g. ClubMarian)
+    // attach the mouseUp handler at the cast level; without this check
+    // the sprite is reported as transparent and clicks pass through.
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+            if let Some(script_ref) = member.get_member_script_ref() {
+                if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+                    if script.get_own_handler("mouseDown").is_some()
+                        || script.get_own_handler("mouseUp").is_some()
+                        || script.get_own_handler("mouseUpOutSide").is_some()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
     true
 }
 

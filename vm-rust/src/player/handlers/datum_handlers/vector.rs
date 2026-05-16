@@ -189,9 +189,14 @@ impl VectorDatumHandlers {
 
         *player.get_datum_mut(datum) = Datum::Vector(vec);
 
-        // Write back to parent transform if this vector came from transform.position/rotation
+        // Write back to parent transform if this vector came from transform.position/rotation.
+        // Mark the parent transform dirty so sync_persistent_transforms propagates the
+        // change to node_transforms — otherwise `obj.transform.position.y = X` mutates
+        // the datum but the renderer never sees it, because the dirty set only tracks
+        // the inner Vector datum (which has no node mapping), not the parent transform.
         if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
             .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
+            super::transform3d::mark_transform_dirty(&parent_ref);
             if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
                 match sub_prop.as_str() {
                     "position" => {

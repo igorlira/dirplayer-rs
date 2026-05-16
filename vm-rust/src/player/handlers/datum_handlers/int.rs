@@ -33,6 +33,19 @@ impl IntDatumHandlers {
             "string" => Ok(player.alloc_datum(Datum::String(int_value.to_string()))),
             "magnitude" => Ok(player.alloc_datum(Datum::Int(int_value.abs()))),
             "sprite" => Ok(player.alloc_datum(Datum::SpriteRef(int_value as i16))),
+            // Director allows trig/math functions as numeric properties via dot
+            // syntax: `n.cos` is equivalent to `cos(n)`. Output is always Float.
+            // Estate's gcam.transform.rotation.z * pi() / 180.cos parses as
+            // (((-z * pi()) / 180).cos) * forward — chained off an int literal.
+            "sin" => Ok(player.alloc_datum(Datum::Float((int_value as f64).sin()))),
+            "cos" => Ok(player.alloc_datum(Datum::Float((int_value as f64).cos()))),
+            "tan" => Ok(player.alloc_datum(Datum::Float((int_value as f64).tan()))),
+            "asin" => Ok(player.alloc_datum(Datum::Float((int_value as f64).asin()))),
+            "acos" => Ok(player.alloc_datum(Datum::Float((int_value as f64).acos()))),
+            "atan" => Ok(player.alloc_datum(Datum::Float((int_value as f64).atan()))),
+            "sqrt" => Ok(player.alloc_datum(Datum::Float((int_value as f64).sqrt()))),
+            "log" => Ok(player.alloc_datum(Datum::Float((int_value as f64).ln()))),
+            "exp" => Ok(player.alloc_datum(Datum::Float((int_value as f64).exp()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get int property {}",
                 prop

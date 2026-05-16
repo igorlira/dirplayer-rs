@@ -63,6 +63,30 @@ impl Shockwave3dObjectDatumHandlers {
             "shader" => Self::get_shader_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
             "texture" => Self::get_texture_prop(player, scene, &s3d_ref.name, prop_name),
             "camera" => Self::get_camera_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
+            "fog" => {
+                // s3d_ref.name is the owning camera name; fog state is per-W3D-member.
+                let rs = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .map(|w3d| (
+                        w3d.runtime_state.fog_enabled,
+                        w3d.runtime_state.fog_near,
+                        w3d.runtime_state.fog_far,
+                        w3d.runtime_state.fog_color,
+                        w3d.runtime_state.fog_mode,
+                    ))
+                    .unwrap_or((false, 1.0, 1000.0, (0.5, 0.5, 0.5), 0));
+                match_ci!(prop_name, {
+                    "enabled" => Ok(player.alloc_datum(Datum::Int(if rs.0 { 1 } else { 0 }))),
+                    "near" => Ok(player.alloc_datum(Datum::Float(rs.1 as f64))),
+                    "far" => Ok(player.alloc_datum(Datum::Float(rs.2 as f64))),
+                    "color" => Ok(player.alloc_datum(color_to_datum([rs.3.0, rs.3.1, rs.3.2, 1.0]))),
+                    "decayMode" => {
+                        let sym = match rs.4 { 1 => "exponential", 2 => "exponential2", _ => "linear" };
+                        Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
+                    },
+                    _ => Ok(player.alloc_datum(Datum::Void)),
+                })
+            },
             "light" => Self::get_light_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
             "group" => Self::get_node_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
             "modelResource" => Self::get_model_resource_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
@@ -86,9 +110,11 @@ impl Shockwave3dObjectDatumHandlers {
             },
             "meshDeform" => Self::get_mesh_deform_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
             "overlay" | "backdrop" => {
-                // overlay/backdrop object: name format "cameraName:index"
+                // overlay/backdrop object: name format "cameraName:index".
+                // camera_overlays/camera_backdrops are keyed by lowercased camera
+                // name (see addOverlay), so the lookup must be case-insensitive.
                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
-                let cam_name = parts.get(0).unwrap_or(&"").to_string();
+                let cam_name = parts.get(0).unwrap_or(&"").to_ascii_lowercase();
                 let ov_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let is_overlay = s3d_ref.object_type == "overlay";
                 let overlay = {
@@ -114,14 +140,29 @@ impl Shockwave3dObjectDatumHandlers {
                     },
                     "loc" => {
                         let ov = overlay.unwrap_or_default();
-                        Ok(player.alloc_datum(Datum::Point([ov.loc[0], ov.loc[1]], 0b11)))
+                        // Preserve int-ness when each component is a whole
+                        // number. Director Lingo distinguishes `int / int =
+                        // int` (truncating) from float division — script flow
+                        // like `point(P1.locH / 32, P1.locV / 32) * 32` to
+                        // snap to a 32-pixel grid relies on integer division
+                        // when locs are integers. Returning floats here makes
+                        // every subsequent arithmetic chain float and the
+                        // snap turns into pixel-precise tracking.
+                        let flag_h = if ov.loc[0].fract() == 0.0 { 0 } else { 1 };
+                        let flag_v = if ov.loc[1].fract() == 0.0 { 0 } else { 1 };
+                        let flags: u8 = (flag_h as u8) | ((flag_v as u8) << 1);
+                        Ok(player.alloc_datum(Datum::Point([ov.loc[0], ov.loc[1]], flags)))
                     },
                     "blend" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.blend).unwrap_or(100.0)))),
                     "scale" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.scale).unwrap_or(1.0)))),
                     "rotation" => Ok(player.alloc_datum(Datum::Float(overlay.map(|o| o.rotation).unwrap_or(0.0)))),
                     "regPoint" => {
                         let ov = overlay.unwrap_or_default();
-                        Ok(player.alloc_datum(Datum::Point([ov.reg_point[0], ov.reg_point[1]], 0b11)))
+                        // Same int-preservation logic as `loc` above.
+                        let flag_h = if ov.reg_point[0].fract() == 0.0 { 0 } else { 1 };
+                        let flag_v = if ov.reg_point[1].fract() == 0.0 { 0 } else { 1 };
+                        let flags: u8 = (flag_h as u8) | ((flag_v as u8) << 1);
+                        Ok(player.alloc_datum(Datum::Point([ov.reg_point[0], ov.reg_point[1]], flags)))
                     },
                     _ => Ok(player.alloc_datum(Datum::Void)),
                 })
@@ -194,8 +235,11 @@ impl Shockwave3dObjectDatumHandlers {
                 let model_name = parts.get(0).unwrap_or(&"");
                 let bone_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 match_ci!(prop_name, {
-                    "transform" | "worldTransform" => {
-                        // Evaluate skeleton and return actual bone world matrix
+                    "transform" => {
+                        // Bone-LOCAL transform — relative to the bone's parent
+                        // bone in the skeleton hierarchy. (Director also has
+                        // `bone.transform` = local; only `worldTransform`
+                        // accumulates.)
                         let bone_matrix = player.movie.cast_manager.find_member_by_ref(member_ref)
                             .and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| {
@@ -203,22 +247,52 @@ impl Shockwave3dObjectDatumHandlers {
                                 let skeleton = scene.skeletons.first()?;
                                 if bone_idx >= skeleton.bones.len() { return None; }
                                 let motion = w3d.runtime_state.current_motion.as_deref()
-                                    .and_then(|name| scene.motions.iter().find(|m| m.name == name))
-                                    .or_else(|| scene.motions.first());
-                                let time = w3d.runtime_state.animation_time;
-                                let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
-                                let t = if duration > 0.0 { time % duration } else { 0.0 };
+                                    .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
+                                let t = compute_motion_t(motion, &w3d.runtime_state);
                                 let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
                                 matrices.get(bone_idx).copied()
                             });
                         if let Some(m) = bone_matrix {
-                            // Return as Transform3d datum
                             let m64: [f64; 16] = [
                                 m[0] as f64, m[1] as f64, m[2] as f64, m[3] as f64,
                                 m[4] as f64, m[5] as f64, m[6] as f64, m[7] as f64,
                                 m[8] as f64, m[9] as f64, m[10] as f64, m[11] as f64,
                                 m[12] as f64, m[13] as f64, m[14] as f64, m[15] as f64,
                             ];
+                            Ok(player.alloc_datum(Datum::Transform3d(m64)))
+                        } else {
+                            Ok(get_persistent_node_transform(player, member_ref, model_name))
+                        }
+                    },
+                    "worldTransform" => {
+                        // World-space bone transform — accumulates the owning
+                        // model's own world transform AND the bone's hierarchy
+                        // matrix. ClubMarian's BehaviorScript 3 uses this to
+                        // pin the head model on top of the body:
+                        //   `player.Head.transform = body.bonesPlayer.bone[6].worldTransform`
+                        // The body has `transform.position = vector(0, 85, 0)`
+                        // and bone[6] (the head bone) sits well above the
+                        // body's local origin. Without applying the body's
+                        // model transform, the bone position came back at
+                        // ~Y=79 (just bone-local) instead of Y≈168 (body
+                        // offset + bone), and the head rendered between the
+                        // legs.
+                        let bone_matrix = player.movie.cast_manager.find_member_by_ref(member_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w3d| {
+                                let scene = w3d.parsed_scene.as_ref()?;
+                                let skeleton = scene.skeletons.first()?;
+                                if bone_idx >= skeleton.bones.len() { return None; }
+                                let motion = w3d.runtime_state.current_motion.as_deref()
+                                    .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
+                                let t = compute_motion_t(motion, &w3d.runtime_state);
+                                let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
+                                matrices.get(bone_idx).copied()
+                            });
+                        if let Some(bone_m) = bone_matrix {
+                            let model_world = get_node_transform(player, member_ref, model_name);
+                            let combined = mat4_mul_f32(&model_world, &bone_m);
+                            let m64: [f64; 16] = combined.map(|v| v as f64);
                             Ok(player.alloc_datum(Datum::Transform3d(m64)))
                         } else {
                             Ok(get_persistent_node_transform(player, member_ref, model_name))
@@ -405,6 +479,61 @@ impl Shockwave3dObjectDatumHandlers {
                 cast_member: s3d_ref.cast_member,
             };
 
+            // Setters on a fog object ref: `cameraFog.near = X`, etc.
+            // Handled before the generic match_ci! since the macro doesn't
+            // support `if` guards for distinguishing prop names by object_type.
+            if s3d_ref.object_type == "fog" {
+                let lower = prop_name.to_ascii_lowercase();
+                if matches!(lower.as_str(), "near" | "far" | "enabled" | "color" | "decaymode") {
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            match lower.as_str() {
+                                "near" => {
+                                    w3d.runtime_state.fog_near = match value {
+                                        Datum::Float(f) => *f as f32,
+                                        Datum::Int(i) => *i as f32,
+                                        _ => 1.0,
+                                    };
+                                }
+                                "far" => {
+                                    w3d.runtime_state.fog_far = match value {
+                                        Datum::Float(f) => *f as f32,
+                                        Datum::Int(i) => *i as f32,
+                                        _ => 1000.0,
+                                    };
+                                }
+                                "enabled" => {
+                                    w3d.runtime_state.fog_enabled = match value {
+                                        Datum::Int(v) => *v != 0,
+                                        _ => false,
+                                    };
+                                }
+                                "color" => {
+                                    w3d.runtime_state.fog_color = match value {
+                                        Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => {
+                                            (*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0)
+                                        }
+                                        _ => (0.5, 0.5, 0.5),
+                                    };
+                                }
+                                "decaymode" => {
+                                    w3d.runtime_state.fog_mode = match value {
+                                        Datum::Symbol(s) => match s.to_ascii_lowercase().as_str() {
+                                            "exponential" => 1,
+                                            "exponential2" => 2,
+                                            _ => 0,
+                                        },
+                                        _ => 0,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             match_ci!(prop_name, {
                 "transform" => {
                     if let Datum::Transform3d(m) = value {
@@ -482,7 +611,19 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 },
                 "shader" => {
-                    let shader_name = value.string_value().unwrap_or_default();
+                    // Director scripts assign `model.shader = sp.shader("Name")`
+                    // — `value` is a Shockwave3dObjectRef of object_type "shader",
+                    // not a String. Reading it via string_value() returns empty
+                    // and we'd silently store an unnamed shader → renderer falls
+                    // back to DefaultShader/DefaultTexture. Pull the name out
+                    // of the ref directly; only fall back to string_value()
+                    // for movies that pass the name as a literal string.
+                    let shader_name = match value {
+                        Datum::Shockwave3dObjectRef(r) if r.object_type == "shader" => r.name.clone(),
+                        Datum::String(s) => s.clone(),
+                        Datum::Symbol(s) => s.clone(),
+                        _ => value.string_value().unwrap_or_default(),
+                    };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             let shader_map = w3d.runtime_state.node_shaders
@@ -690,7 +831,10 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
-                // Camera fog properties
+                // Camera fog properties (flat name form: camera.fog.near = X via Lingo
+                // bytecode that flattens the chain). The two-step form
+                // `camera.fog → fog ref; fog.near = X` lands in the "near"/"far"/...
+                // arms further down with object_type == "fog".
                 "fog.enabled" => {
                     let enabled = match value { Datum::Int(v) => *v != 0, _ => false };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -826,7 +970,37 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 },
                 "blend" => {
-                  if s3d_ref.object_type != "shader" { return Ok(()); }
+                    // For overlay / backdrop refs, write through to the
+                    // CameraOverlay.blend field. Without this, the script
+                    // pattern `View.camera.overlay[N].blend = 0` (used to
+                    // hide the emoticon panel and similar UI overlays) was
+                    // silently swallowed by the original
+                    // `if s3d_ref.object_type != "shader" { return Ok(()); }`
+                    // guard, so overlays could never be hidden after they
+                    // were shown.
+                    if s3d_ref.object_type == "overlay" || s3d_ref.object_type == "backdrop" {
+                        let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
+                        let cam_name = parts.get(0).unwrap_or(&"").to_ascii_lowercase();
+                        let ov_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let new_blend = value.to_float().unwrap_or(100.0);
+                        let is_overlay = s3d_ref.object_type == "overlay";
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                let map = if is_overlay {
+                                    &mut w3d.runtime_state.camera_overlays
+                                } else {
+                                    &mut w3d.runtime_state.camera_backdrops
+                                };
+                                if let Some(list) = map.get_mut(&cam_name) {
+                                    if let Some(ov) = list.get_mut(ov_idx) {
+                                        ov.blend = new_blend;
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    if s3d_ref.object_type != "shader" { return Ok(()); }
                     // blend = 0-100 → opacity 0.0-1.0
                     let blend_val = value.to_float().unwrap_or(100.0) as f32;
                     if s3d_ref.name == "DefaultShader" || blend_val < 99.0 {
@@ -933,9 +1107,11 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 _ => {
                   if s3d_ref.object_type == "overlay" || s3d_ref.object_type == "backdrop" {
-                    // Set overlay/backdrop properties: source, loc, blend, scale, regPoint, rotation
+                    // Set overlay/backdrop properties: source, loc, blend, scale, regPoint, rotation.
+                    // Lookup must be case-insensitive — camera_overlays is keyed by
+                    // lowercased camera name (see addOverlay).
                     let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
-                    let cam_name = parts.get(0).unwrap_or(&"").to_string();
+                    let cam_name = parts.get(0).unwrap_or(&"").to_ascii_lowercase();
                     let ov_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let is_overlay = s3d_ref.object_type == "overlay";
 
@@ -1037,6 +1213,63 @@ impl Shockwave3dObjectDatumHandlers {
                                 "enabled" => sds.enabled = value.int_value().unwrap_or(1) != 0,
                                 _ => {},
                             })
+                        }
+                    }
+                    Ok(())
+                  } else if s3d_ref.object_type == "texture" && prop_name.eq_ignore_ascii_case("member") {
+                    // texture("name").member = castMember — re-snapshot the
+                    // texture's RGBA from the source member's current image.
+                    // newTexture(#fromCastMember) only copies once at creation;
+                    // scripts that build a UI image into a member then assign
+                    // `texture.member = member` rely on this re-bind to push
+                    // the updated pixels to the texture. Without it, overlays
+                    // (Avatar Options, ToolTips, etc.) keep showing whatever
+                    // stale content was captured at newTexture time — usually
+                    // a blank image.
+                    let source_member_ref = match value {
+                        Datum::CastMember(r) => Some(r.clone()),
+                        _ => None,
+                    };
+                    if let Some(src_ref) = source_member_ref {
+                        let rgba_data = {
+                            let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
+                            src_member.and_then(|m| {
+                                match &m.member_type {
+                                    crate::player::cast_member::CastMemberType::Bitmap(bmp_member) => {
+                                        let bmp = player.bitmap_manager.get_bitmap(bmp_member.image_ref)?;
+                                        let w = bmp.width;
+                                        let h = bmp.height;
+                                        let palettes = player.movie.cast_manager.palettes();
+                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                        for y in 0..h as usize {
+                                            for x in 0..w as usize {
+                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                let idx = (y * w as usize + x) * 4;
+                                                rgba[idx] = r;
+                                                rgba[idx + 1] = g;
+                                                rgba[idx + 2] = b;
+                                                rgba[idx + 3] = a;
+                                            }
+                                        }
+                                        Some((w, h, rgba))
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        };
+                        if let Some((w, h, rgba)) = rgba_data {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        let mut tex_data = Vec::with_capacity(8 + rgba.len());
+                                        tex_data.extend_from_slice(&(w as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&(h as u32).to_le_bytes());
+                                        tex_data.extend_from_slice(&rgba);
+                                        scene.texture_images.insert(s3d_ref.name.clone(), tex_data);
+                                        scene.texture_content_version += 1;
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -1584,8 +1817,34 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                                 // else: #synchronized — keep current relative position
                             } else {
-                                // No args: resume paused animation
-                                w3d.runtime_state.animation_playing = true;
+                                // No args. Director docs (§Methods, play()):
+                                // resumes a paused motion. But if nothing is current
+                                // and playList[1] is queued, Director's playList
+                                // semantics implicitly treat playList[1] as the
+                                // active motion (queue() into an empty list begins
+                                // playback). ClubMarian + Coke Studios both rely on
+                                //   bonesPlayer.queue(name, ...) ; bonesPlayer.play()
+                                // — without this branch, current_motion stayed None
+                                // and the renderer evaluated no tracks (avatar T-pose).
+                                // We READ queue[0] but do NOT pop — Director's
+                                // playList includes the current motion at index 1,
+                                // and the script's `if playList.count < 1` gate
+                                // assumes that. Popping would make the script
+                                // re-queue every frame.
+                                if w3d.runtime_state.current_motion.is_some() {
+                                    w3d.runtime_state.animation_playing = true;
+                                } else if let Some(q) = w3d.runtime_state.motion_queue.first().cloned() {
+                                    w3d.runtime_state.current_motion = Some(q.name);
+                                    w3d.runtime_state.animation_playing = true;
+                                    w3d.runtime_state.animation_loop = q.looped;
+                                    w3d.runtime_state.animation_start_time = q.start_time;
+                                    w3d.runtime_state.animation_end_time = q.end_time;
+                                    w3d.runtime_state.animation_scale = q.scale;
+                                    w3d.runtime_state.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                                    w3d.runtime_state.motion_ended = false;
+                                    w3d.runtime_state.previous_motion = None;
+                                    w3d.runtime_state.blend_weight = 1.0;
+                                }
                             }
                         }
                     }
@@ -2487,6 +2746,33 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
+                        } else if prop_name == "textureModeList" {
+                            // Symbol → tex_mode int. Mirrors the getter at the bottom of this file.
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            let mode_val: u8 = match &value {
+                                Datum::Symbol(s) => match s.to_ascii_lowercase().as_str() {
+                                    "none" => 0,
+                                    "reflection" => 4,
+                                    "wrapplanar" => 5,
+                                    "specular" => 6,
+                                    _ => 0,
+                                },
+                                Datum::Int(i) => *i as u8,
+                                _ => 0,
+                            };
+                            let idx = (index as usize).saturating_sub(1);
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                            while shader.texture_layers.len() <= idx {
+                                                shader.texture_layers.push(crate::director::chunks::w3d::types::W3dTextureLayer::default());
+                                            }
+                                            shader.texture_layers[idx].tex_mode = mode_val;
+                                        }
+                                    }
+                                }
+                            }
                         } else if prop_name == "textureList" {
                             // Update the persistent textureList at the given index
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -2858,7 +3144,20 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                             }
                             "textureModeList" => {
-                                Some(player.alloc_datum(Datum::Void))
+                                let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                                let mode = member.and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|w3d| w3d.parsed_scene.as_ref())
+                                    .and_then(|scene| scene.shaders.iter().find(|s| s.name == s3d_ref.name))
+                                    .and_then(|shader| shader.texture_layers.get(idx))
+                                    .map(|layer| match layer.tex_mode {
+                                        0 => "none",
+                                        4 => "reflection",
+                                        5 => "wrapPlanar",
+                                        6 => "specular",
+                                        _ => "none",
+                                    })
+                                    .unwrap_or("none");
+                                Some(player.alloc_datum(Datum::Symbol(mode.to_string())))
                             }
                             "textureRepeatList" => {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -3010,14 +3309,20 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                                 Some(player.alloc_datum(Datum::Void))
                             }
-                            // camera.overlay[n] / camera.backdrop[n] — indexed overlay access
+                            // camera.overlay[n] / camera.backdrop[n] — indexed overlay access.
+                            // camera_overlays is keyed by lowercased camera name (see
+                            // addOverlay), so the lookup must lowercase too — otherwise a
+                            // mixed-case camera (e.g. "GameCamera") returns Void and the
+                            // subsequent `.blend = 0` silently no-ops, leaving every
+                            // overlay rendered at default blend=100.
                             "overlay" | "backdrop" if s3d_ref.object_type == "camera" => {
                                 let is_overlay = prop_name == "overlay";
+                                let cam_key = s3d_ref.name.to_ascii_lowercase();
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 let count = member.and_then(|m| m.member_type.as_shockwave3d())
                                     .map(|w3d| {
                                         let map = if is_overlay { &w3d.runtime_state.camera_overlays } else { &w3d.runtime_state.camera_backdrops };
-                                        map.get(&s3d_ref.name).map(|v| v.len()).unwrap_or(0)
+                                        map.get(&cam_key).map(|v| v.len()).unwrap_or(0)
                                     })
                                     .unwrap_or(0);
                                 if idx < count {
@@ -3025,7 +3330,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         crate::director::lingo::datum::Shockwave3dObjectRef {
                                             cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
                                             object_type: prop_name.to_string(),
-                                            name: format!("{}:{}", s3d_ref.name, idx),
+                                            name: format!("{}:{}", cam_key, idx),
                                         }
                                     )))
                                 } else {
@@ -3582,7 +3887,17 @@ impl Shockwave3dObjectDatumHandlers {
                                     });
                                 }
                                 scene.clod_meshes.insert(res_name.clone(), meshes);
-                                scene.texture_content_version += 1; // trigger GPU re-upload
+                                // Bump BOTH content versions: a `newMesh` +
+                                // `build()` flow inserts into clod_meshes,
+                                // and the renderer's `ensure_member_loaded`
+                                // path checks `mesh_content_version` to
+                                // decide whether to rebuild GPU mesh buffers
+                                // (Mesh3dBuffers VBOs in `mesh_groups`).
+                                // Without this bump the new vertices live
+                                // in `scene.clod_meshes` but never reach the
+                                // GPU — the model renders empty / placeholder.
+                                scene.mesh_content_version += 1;
+                                scene.texture_content_version += 1; // trigger GPU texture re-upload
                             }
                         }
                     }
@@ -3631,6 +3946,19 @@ impl Shockwave3dObjectDatumHandlers {
             },
             "transform" => {
                 Ok(get_persistent_node_transform(player, member_ref, model_name))
+            },
+            "userData" => {
+                // Director chapter 15 (`director_reference.md:80586`):
+                // returns the userData property list of a model. Default is
+                // an empty PropList `[:]`. The returned ref must be the same
+                // across reads so `model.userData.setaProp(#k, v)` mutations
+                // are visible on subsequent accesses (Director's userData is
+                // a live reference, not a snapshot).
+                //
+                // Lazy allocation: first access creates an empty PropList
+                // datum and stashes its DatumRef on the cast member's
+                // runtime_state; subsequent reads return the same ref.
+                Ok(get_or_create_node_user_data(player, member_ref, model_name))
             },
             "worldPosition" => {
                 let wp = get_world_position(player, member_ref, model_name);
@@ -4154,6 +4482,18 @@ impl Shockwave3dObjectDatumHandlers {
                 }
             },
             "textureModeList" => {
+                // Persist the list so `shader.textureModeList[i] = #wrapPlanar`
+                // (which compiles to a generic Datum::List mutation) is visible
+                // to sync_shader_texture_lists at render time.
+                let existing_ref = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.shader_texture_mode_lists.get(shader_name))
+                        .cloned()
+                };
+                if let Some(list_ref) = existing_ref {
+                    return Ok(list_ref);
+                }
                 let mut items = VecDeque::new();
                 if let Some(s) = shader {
                     for layer in &s.texture_layers {
@@ -4170,9 +4510,16 @@ impl Shockwave3dObjectDatumHandlers {
                 while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Symbol("none".to_string())));
                 }
-                Ok(player.alloc_datum(Datum::List(
+                let list_ref = player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,
-                )))
+                ));
+                let shader_name_owned = shader_name.to_string();
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        w3d.runtime_state.shader_texture_mode_lists.insert(shader_name_owned, list_ref.clone());
+                    }
+                }
+                Ok(list_ref)
             },
             "blendFunctionList" => {
                 let mut items = VecDeque::new();
@@ -4334,10 +4681,10 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
             "worldPosition" => {
-                let m = get_node_transform(player, member_ref, camera_name);
-                Ok(player.alloc_datum(Datum::Vector([
-                    m[12] as f64, m[13] as f64, m[14] as f64,
-                ])))
+                // Walk parent chain like model.worldPosition / group.worldPosition.
+                // Cameras can be parented (e.g. attached to a vehicle).
+                let wp = get_world_position(player, member_ref, camera_name);
+                Ok(player.alloc_datum(Datum::Vector(wp)))
             },
             "projection" => Ok(player.alloc_datum(Datum::Symbol("perspective".to_string()))),
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
@@ -4352,6 +4699,19 @@ impl Shockwave3dObjectDatumHandlers {
                     r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64
                 ], 0)))
             },
+            "fog" => {
+                // Director: camera.fog returns a Fog object with .near/.far/
+                // .enabled/.color/.decayMode props. Model as a Shockwave3dObjectRef
+                // with object_type="fog" and the camera name; the per-prop
+                // get/set handlers route to the W3D member's runtime_state.fog_*.
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: "fog".to_string(),
+                    name: camera_name.to_string(),
+                })))
+            },
             "fog.enabled" => Ok(player.alloc_datum(Datum::Int(0))),
             "fog.near" => Ok(player.alloc_datum(Datum::Float(1.0))),
             "fog.far" => Ok(player.alloc_datum(Datum::Float(1000.0))),
@@ -4359,14 +4719,16 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(color_to_datum([0.5, 0.5, 0.5, 1.0])))
             },
             "overlay" | "backdrop" => {
-                // Return overlay/backdrop list — each item is an overlay object ref
+                // Return overlay/backdrop list — each item is an overlay object ref.
+                // camera_overlays is keyed by lowercased camera name (see addOverlay).
                 let is_overlay = prop == "overlay";
+                let cam_key = camera_name.to_ascii_lowercase();
                 let count = {
                     let member = player.movie.cast_manager.find_member_by_ref(member_ref);
                     member.and_then(|m| m.member_type.as_shockwave3d())
                         .map(|w3d| {
                             let map = if is_overlay { &w3d.runtime_state.camera_overlays } else { &w3d.runtime_state.camera_backdrops };
-                            map.get(camera_name).map(|v| v.len()).unwrap_or(0)
+                            map.get(&cam_key).map(|v| v.len()).unwrap_or(0)
                         })
                         .unwrap_or(0)
                 };
@@ -4513,6 +4875,24 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(resource_name.to_string()))),
             "type" => Ok(player.alloc_datum(Datum::Symbol("fromFile".to_string()))),
+            "vertexList" => {
+                // For meshes built via newMesh()+build(), the positions live
+                // in scene.clod_meshes keyed by the resource name. Director
+                // exposes this list as `modelResource(name).vertexList`.
+                let mut items = VecDeque::new();
+                if let Some(meshes) = scene.clod_meshes.get(resource_name) {
+                    for mesh in meshes {
+                        for pos in &mesh.positions {
+                            items.push_back(player.alloc_datum(Datum::Vector(
+                                [pos[0] as f64, pos[1] as f64, pos[2] as f64]
+                            )));
+                        }
+                    }
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            },
             "face.count" | "faceCount" => {
                 let count: u32 = res.map(|r| r.mesh_infos.iter().map(|m| m.num_faces).sum()).unwrap_or(0);
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -4729,6 +5109,29 @@ impl Shockwave3dObjectDatumHandlers {
 }
 
 /// Convert an RGBA color array to a Datum::ColorRef
+/// Mirror of [`scene3d::setup_skinning_for_resource`]'s `t` computation.
+/// Used by bone-transform getters so the matrix returned to Lingo matches
+/// what the skinning shader is using for the same model.
+fn compute_motion_t(
+    motion: Option<&crate::director::chunks::w3d::types::W3dMotion>,
+    rs: &crate::player::cast_member::Shockwave3dRuntimeState,
+) -> f32 {
+    let Some(motion) = motion else { return 0.0; };
+    let duration = motion.duration();
+    let end_time = rs.animation_end_time;
+    let start_time = rs.animation_start_time;
+    let eff_end = if end_time >= 0.0 { end_time.min(duration) } else { duration };
+    let eff_start = start_time.min(eff_end);
+    let range = eff_end - eff_start;
+    if range <= 0.0 { return 0.0; }
+    let time = rs.animation_time;
+    if rs.animation_loop {
+        eff_start + ((time - eff_start) % range + range) % range
+    } else {
+        time.clamp(eff_start, eff_end)
+    }
+}
+
 fn color_to_datum(c: [f32; 4]) -> Datum {
     use crate::player::sprite::ColorRef;
     Datum::ColorRef(ColorRef::Rgb(
@@ -4979,6 +5382,47 @@ fn get_persistent_node_transform(
     datum_ref
 }
 
+/// Returns a `DatumRef` to the userData PropList for the named 3D node.
+/// Lazy-allocates an empty PropList on first access and caches it on the
+/// cast member's `runtime_state.user_data` so subsequent reads return the
+/// same ref — required because Lingo scripts mutate userData in place via
+/// `setaProp` / `addProp` / `deleteProp`.
+fn get_or_create_node_user_data(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> DatumRef {
+    let key = canonical_node_key(player, member_ref, node_name);
+
+    // Try to fetch cached ref first (case-insensitive lookup, mirroring
+    // node_transform_datums above).
+    let existing = {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        member.and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| {
+                w3d.runtime_state.user_data.get(&key)
+                    .or_else(|| {
+                        w3d.runtime_state.user_data.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                            .map(|(_, v)| v)
+                    })
+            })
+            .cloned()
+    };
+    if let Some(datum_ref) = existing {
+        return datum_ref;
+    }
+
+    // First access — allocate empty PropList and stash on the runtime state.
+    let datum_ref = player.alloc_datum(Datum::PropList(VecDeque::new(), false));
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+            w3d.runtime_state.user_data.insert(key, datum_ref.clone());
+        }
+    }
+    datum_ref
+}
+
 /// Sync all persistent transform datums back to node_transforms for the renderer.
 /// Call this before each render frame.
 pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
@@ -5018,11 +5462,54 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
 pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
     // Collect (cast_lib, member_num, shader_name, list_ref) tuples
     let mut entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
+    let mut mode_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_lists {
                     entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+                for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_mode_lists {
+                    mode_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+            }
+        }
+    }
+
+    // Sync texture modes (#wrapPlanar etc.) back to shader.texture_layers[].tex_mode.
+    // Done before the texture-name sync so layer slots already exist when names land.
+    for (cast_lib, cast_member, shader_name, list_ref) in mode_entries {
+        let modes: Vec<u8> = if let Datum::List(_, items, _) = player.get_datum(&list_ref) {
+            items.iter().map(|item_ref| {
+                match player.get_datum(item_ref) {
+                    Datum::Symbol(s) => match s.to_ascii_lowercase().as_str() {
+                        "none" => 0u8,
+                        "reflection" => 4,
+                        "wrapplanar" => 5,
+                        "specular" => 6,
+                        _ => 0,
+                    },
+                    Datum::Int(i) => *i as u8,
+                    _ => 0,
+                }
+            }).collect()
+        } else {
+            continue;
+        };
+
+        let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some(scene) = w3d.scene_mut() {
+                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                        use crate::director::chunks::w3d::types::W3dTextureLayer;
+                        while shader.texture_layers.len() < modes.len() {
+                            shader.texture_layers.push(W3dTextureLayer::default());
+                        }
+                        for (i, mode) in modes.iter().enumerate() {
+                            shader.texture_layers[i].tex_mode = *mode;
+                        }
+                    }
                 }
             }
         }
@@ -5083,6 +5570,12 @@ fn apply_translation(
     node_name: &str,
     dx: f32, dy: f32, dz: f32,
 ) {
+    // Flush any pending persistent Transform3d mutations into node_transforms
+    // first — otherwise a prior `transform.position = v` on the cached datum is
+    // invisible to get_or_init_node_transform (which reads node_transforms and
+    // the parsed scene), and our subsequent set_node_transform writes back the
+    // stale position, silently dropping the Lingo write. Mirrors apply_point_at.
+    sync_persistent_transforms(player);
     let mut m = get_or_init_node_transform(player, member_ref, node_name);
     m[12] += dx;
     m[13] += dy;
@@ -5096,6 +5589,8 @@ fn apply_rotation(
     node_name: &str,
     rx_deg: f32, ry_deg: f32, rz_deg: f32,
 ) {
+    // See apply_translation comment — same flush requirement.
+    sync_persistent_transforms(player);
     let m = get_or_init_node_transform(player, member_ref, node_name);
     // Director uses left-handed coordinates where Y rotation is opposite to OpenGL's
     // right-handed convention, so negate Y.
@@ -5114,6 +5609,8 @@ fn apply_scale(
     node_name: &str,
     sx: f32, sy: f32, sz: f32,
 ) {
+    // See apply_translation comment — same flush requirement.
+    sync_persistent_transforms(player);
     let mut m = get_or_init_node_transform(player, member_ref, node_name);
     // Scale the rotation columns
     for i in 0..3 { m[i] *= sx; }
@@ -5165,8 +5662,20 @@ fn apply_point_at(
         return;
     }
 
-    // Up hint from argument; fall back to world X if forward is parallel
-    let mut up_hint = [up_x, up_y, up_z];
+    // Up hint from argument; fall back to world X if forward is parallel.
+    // Normalize the hint BEFORE the parallelism check — Director scripts
+    // routinely pass non-unit vectors like `vector(0, 45, 0)` (the literal
+    // 45 is just a magnitude; only the direction matters). Without
+    // normalization, a hint magnitude of 45 makes the dot product against
+    // a unit fwd reach ~45 even when the angle between them is small,
+    // and the parallel-axis override fires for any camera with a slight
+    // tilt — replacing world-Y up with world-X up and rolling the camera
+    // 90° around its forward axis. Symptom: avatar appears upside-down
+    // / sideways in MoveUICamera scenes.
+    let mut up_hint = {
+        let l = (up_x * up_x + up_y * up_y + up_z * up_z).sqrt();
+        if l > 1e-6 { [up_x / l, up_y / l, up_z / l] } else { [0.0, 1.0, 0.0] }
+    };
     let dot = up_hint[0]*fwd[0] + up_hint[1]*fwd[1] + up_hint[2]*fwd[2];
     if dot.abs() > 0.999 {
         up_hint = [1.0, 0.0, 0.0];

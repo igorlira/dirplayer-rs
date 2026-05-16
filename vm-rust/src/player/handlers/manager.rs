@@ -916,6 +916,32 @@ impl BuiltInHandlerManager {
             "rgb" => TypeHandlers::rgb(args),
             "list" => TypeHandlers::list(args),
             "image" => TypeHandlers::image(args),
+            "filter" => TypeHandlers::filter(args),
+            "newmatrix" => TypeHandlers::new_matrix(args),
+            "constraintdesc" => TypeHandlers::constraint_desc(args),
+            // Director allows both the method form `bitmap.getPixel(x, y)` and
+            // the global form `getPixel(bitmap, x, y)` (chapter 15). Same for
+            // `setPixel`. Both end up at the BitmapDatumHandlers entry — the
+            // global form just strips the bitmap from arg[0] and forwards the
+            // rest as the method args.
+            "getpixel" => {
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "getPixel requires a bitmap argument".to_string(),
+                    ));
+                }
+                let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
+                BitmapDatumHandlers::get_pixel(&args[0], &rest)
+            }
+            "setpixel" => {
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "setPixel requires a bitmap argument".to_string(),
+                    ));
+                }
+                let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
+                BitmapDatumHandlers::set_pixel(&args[0], &rest)
+            }
             "chars" => StringHandlers::chars(args),
             "paletteindex" => TypeHandlers::palette_index(args),
             "abs" => TypeHandlers::abs(args),

@@ -85,29 +85,34 @@ impl TimeoutDatumHandlers {
             }
         })?;
 
-        // Adjust args based on call type
+        // Adjust arg indices based on call type. `target` is optional in
+        // Director — when omitted, the timeout fires the handler in the
+        // calling script's context (Director searches movie scripts).
+        // `Option<usize>` for target_arg signals "no target supplied".
         let (period_arg, handler_arg, target_arg) = reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(&datum);
             match timeout_datum {
                 Datum::TimeoutFactory => {
-                    // Factory: timeout().new(name, period, handler, target)
-                    // args[0] = name (already used), args[1] = period, args[2] = handler, args[3] = target
-                    if args.len() < 4 {
-                        return Err(ScriptError::new(
-                            "timeout.new() requires 4 arguments: name, period, handler, target".to_string(),
-                        ));
-                    }
-                    Ok((1, 2, 3))
-                }
-                Datum::TimeoutRef(_) => {
-                    // Named: timeout("name").new(period, handler, target)
-                    // args[0] = period, args[1] = handler, args[2] = target
+                    // Factory: timeout().new(name, period, handler {, target})
+                    // args[0] = name (already used), args[1] = period, args[2] = handler, args[3] = target?
                     if args.len() < 3 {
                         return Err(ScriptError::new(
-                            "timeout(name).new() requires 3 arguments: period, handler, target".to_string(),
+                            "timeout.new() requires at least: name, period, handler".to_string(),
                         ));
                     }
-                    Ok((0, 1, 2))
+                    let tgt = if args.len() >= 4 { Some(3) } else { None };
+                    Ok((1usize, 2usize, tgt))
+                }
+                Datum::TimeoutRef(_) => {
+                    // Named: timeout("name").new(period, handler {, target})
+                    // args[0] = period, args[1] = handler, args[2] = target?
+                    if args.len() < 2 {
+                        return Err(ScriptError::new(
+                            "timeout(name).new() requires at least: period, handler".to_string(),
+                        ));
+                    }
+                    let tgt = if args.len() >= 3 { Some(2) } else { None };
+                    Ok((0usize, 1usize, tgt))
                 }
                 _ => Err(ScriptError::new("Invalid timeout datum".to_string())),
             }
@@ -184,7 +189,13 @@ impl TimeoutDatumHandlers {
             }
         })?;
 
-        let target_ref = args[target_arg].clone();
+        // When the script omitted `target`, default to Datum::Void — the
+        // timeout fire path in mod.rs treats that as "search movie scripts
+        // for `handler_name`", matching Director's documented fallback.
+        let target_ref = match target_arg {
+            Some(idx) => args[idx].clone(),
+            None => DatumRef::Void,
+        };
 
         reserve_player_mut(|player| {
             let mut timeout = Timeout {

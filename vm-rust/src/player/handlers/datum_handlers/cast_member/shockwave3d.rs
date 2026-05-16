@@ -592,6 +592,21 @@ impl Shockwave3dMemberHandlers {
 
             // ─── Rendering ───
             "image" => {
+                // Force a sync of runtime shader-list mutations into scene data
+                // before reading. Per-frame draw_frame() does this, but world.image
+                // is often called inside a Lingo handler that just modified
+                // textureList/textureModeList — without this, the first read returns
+                // stale scene state and the avatar reflection is missing.
+                crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
+                // Re-clone scene_data to pick up the just-applied sync.
+                let scene_data = {
+                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                        .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                    let w3d = member.member_type.as_shockwave3d()
+                        .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
+                    w3d.parsed_scene.clone()
+                };
+
                 // member("3d").image returns the rendered 3D world as a bitmap.
                 let w = (info.default_rect.2 - info.default_rect.0).max(1) as u32;
                 let h = (info.default_rect.3 - info.default_rect.1).max(1) as u32;
@@ -908,7 +923,7 @@ impl Shockwave3dMemberHandlers {
             | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
             | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
             | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "registerForEvent" | "registerScript"
+            | "registerForEvent" | "registerScript" | "unregisterAllEvents"
             | "image" => {
                 reserve_player_mut(|player| {
                     let member_ref = match player.get_datum(datum) {
@@ -925,8 +940,66 @@ impl Shockwave3dMemberHandlers {
                             ))
                         })?;
 
-                    // registerForEvent / registerScript — stub (event system not implemented)
+                    if handler_name == "unregisterAllEvents" {
+                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                            .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.runtime_state.registered_events.clear();
+                        }
+                        return Ok(player.alloc_datum(Datum::Void));
+                    }
                     if handler_name == "registerForEvent" || handler_name == "registerScript" {
+                        // member.registerForEvent(eventName, handlerName, scriptObject {, begin, period, repetitions})
+                        // For #timeMS this drives the dispatcher in `dispatch_w3d_timer_events`.
+                        // Other event names are stored but never fired (their producers —
+                        // collision callbacks, animation start/end notifications — aren't wired).
+                        let event_name = args.get(0)
+                            .map(|a| {
+                                let d = player.get_datum(a);
+                                d.string_value().unwrap_or_else(|_| String::new())
+                            })
+                            .unwrap_or_default();
+                        let handler_sym = args.get(1)
+                            .map(|a| {
+                                let d = player.get_datum(a);
+                                d.string_value().unwrap_or_else(|_| String::new())
+                            })
+                            .unwrap_or_default();
+                        let script_instance = args.get(2).and_then(|a| {
+                            match player.get_datum(a) {
+                                Datum::ScriptInstanceRef(r) => Some(r.clone()),
+                                _ => None,
+                            }
+                        });
+                        let begin_ms = args.get(3)
+                            .and_then(|a| player.get_datum(a).int_value().ok())
+                            .map(|v| v.max(0) as u32)
+                            .unwrap_or(0);
+                        let period_ms = args.get(4)
+                            .and_then(|a| player.get_datum(a).int_value().ok())
+                            .map(|v| v.max(0) as u32)
+                            .unwrap_or(0);
+                        let repetitions = args.get(5)
+                            .and_then(|a| player.get_datum(a).int_value().ok())
+                            .map(|v| v.max(0) as u32)
+                            .unwrap_or(0);
+                        let now_ms = crate::player::testing_shared::now_ms();
+                        let event = crate::player::cast_member::RegisteredW3dEvent {
+                            event_name: event_name.trim_start_matches('#').to_string(),
+                            handler_name: handler_sym.trim_start_matches('#').to_string(),
+                            script_instance,
+                            begin_ms,
+                            period_ms,
+                            repetitions,
+                            registered_at_ms: now_ms,
+                            fires_so_far: 0,
+                            last_fire_ms: now_ms,
+                        };
+                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                            .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.runtime_state.registered_events.push(event);
+                        }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
@@ -1384,13 +1457,25 @@ impl Shockwave3dMemberHandlers {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         match obj_type {
-                                            "model" | "group" | "camera" | "light" => {
-                                                scene.nodes.retain(|n| n.name != obj_name);
+                                            "model" | "group" | "camera" => {
+                                                scene.nodes.retain(|n| !n.name.eq_ignore_ascii_case(&obj_name));
+                                            }
+                                            "light" => {
+                                                // Lights live in two places: the scene
+                                                // graph (scene.nodes) and a separate
+                                                // scene.lights Vec the renderer uses
+                                                // for per-frame uniform setup. Without
+                                                // dropping the lights entry, deleted
+                                                // lights keep contributing to lighting
+                                                // and are still visible via
+                                                // sp.light.count.
+                                                scene.nodes.retain(|n| !n.name.eq_ignore_ascii_case(&obj_name));
+                                                scene.lights.retain(|l| !l.name.eq_ignore_ascii_case(&obj_name));
                                             }
                                             "shader" => {
                                                 // DefaultShader cannot be deleted (Director behavior)
-                                                if obj_name != "DefaultShader" {
-                                                    scene.shaders.retain(|s| s.name != obj_name);
+                                                if !obj_name.eq_ignore_ascii_case("DefaultShader") {
+                                                    scene.shaders.retain(|s| !s.name.eq_ignore_ascii_case(&obj_name));
                                                 }
                                             }
                                             "motion" => {
@@ -1999,7 +2084,17 @@ impl Shockwave3dMemberHandlers {
                             .map(|n| n.name.clone()),
                         "group" => scene.nodes.iter()
                             .find(|n| n.node_type == W3dNodeType::Group && n.name.to_lowercase() == obj_name_lower)
-                            .map(|n| n.name.clone()),
+                            .map(|n| n.name.clone())
+                            // "World" is the implicit scene root in W3D — there's
+                            // no actual Group node for it, but Director scripts
+                            // routinely do `sp.group("World").addChild(child)` to
+                            // unparent a node back to the root. Synthesize the
+                            // name so the ref is valid; addChild's setter side
+                            // already handles "World" by clearing the child's
+                            // parent reference.
+                            .or_else(|| if obj_name_lower == "world" {
+                                Some("World".to_string())
+                            } else { None }),
                         "motion" => scene.motions.iter()
                             .find(|m| m.name.to_lowercase() == obj_name_lower)
                             .map(|m| m.name.clone()),
