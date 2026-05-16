@@ -127,11 +127,17 @@ function processSnapshot(
 }
 
 test("browser e2e tests", async ({ page }) => {
+  const snapshotErrors: string[] = [];
+
   // Expose snapshot handler so snapshots are saved as they're taken
   await page.exposeFunction(
     "__playwrightSaveSnapshot",
     (suite: string, name: string, data: string, maxDiffRatio: number) => {
-      processSnapshot(suite, name, data, maxDiffRatio);
+      try {
+        processSnapshot(suite, name, data, maxDiffRatio);
+      } catch (err: any) {
+        snapshotErrors.push(err?.message ?? String(err));
+      }
     }
   );
 
@@ -187,6 +193,12 @@ test("browser e2e tests", async ({ page }) => {
   console.log(
     `${testResults.passed} passed, ${testResults.failed} failed`
   );
+
+  if (snapshotErrors.length > 0) {
+    throw new Error(
+      `${snapshotErrors.length} snapshot comparison failure(s):\n${snapshotErrors.join("\n")}`
+    );
+  }
 
   // Assert all tests passed
   expect(testResults.failed).toBe(0);
