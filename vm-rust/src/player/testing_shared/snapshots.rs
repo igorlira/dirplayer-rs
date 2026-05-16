@@ -74,16 +74,21 @@ impl SnapshotContext {
     /// against the reference file on native. Returns an error if the diff
     /// exceeds `max_diff_ratio`.
     pub fn verify(&self, name: &str, output: SnapshotOutput) -> Result<(), String> {
+        self.verify_with_ratio(name, output, self.max_diff_ratio)
+    }
+
+    /// Like [`verify`], but overrides the diff tolerance for this snapshot only.
+    pub fn verify_with_ratio(&self, name: &str, output: SnapshotOutput, max_diff_ratio: f64) -> Result<(), String> {
         let snapshot_path = format!("{}/{}", self.suite, self.test);
 
         // Emit to browser snapshot collector (no-op on native)
-        emit_snapshot(&snapshot_path, name, &output, self.max_diff_ratio);
+        emit_snapshot(&snapshot_path, name, &output, max_diff_ratio);
 
         // Compare against reference files on native
         #[cfg(not(target_arch = "wasm32"))]
         {
             crate::player::testing::StageSnapshot::from_output(output)
-                .assert_snapshot(&snapshot_path, name, self.max_diff_ratio)?;
+                .assert_snapshot(&snapshot_path, name, max_diff_ratio)?;
         }
 
         Ok(())
