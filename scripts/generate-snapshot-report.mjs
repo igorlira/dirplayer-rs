@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { PNG } from 'pngjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT   = path.resolve(__dirname, '..');
 const TEMPLATE_DIR = path.join(__dirname, 'snapshot-report');
 
 const [,, snapshotsBase = 'vm-rust/tests/snapshots', outputDir = 'test-results/snapshot-report'] = process.argv;
@@ -96,6 +97,12 @@ const css      = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.css'), 'utf8');
 const js       = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.js'), 'utf8');
 const template = fs.readFileSync(path.join(TEMPLATE_DIR, 'template.html'), 'utf8');
 
+let logoHtml = '';
+try {
+  const logoB64 = fs.readFileSync(path.join(REPO_ROOT, 'src', 'assets', 'logo128.png')).toString('base64');
+  logoHtml = `<img src="data:image/png;base64,${logoB64}" alt="" class="dirplayer-logo">`;
+} catch { /* logo not available in this environment */ }
+
 const filterToggle = `<label class="filter-toggle">
     <input type="checkbox" id="diffs-only">
     <span>Show only changed</span>
@@ -158,6 +165,7 @@ function renderCard(s, imgPrefix = '') {
 function buildPage({ title, nav, filter, passCount, diffCount, totalCount, body }) {
   return template
     .replaceAll('{{TITLE}}',    title)
+    .replace('{{LOGO}}',        logoHtml)
     .replace('{{NAV}}',         nav)
     .replace('{{CSS}}',         css)
     .replace('{{JS}}',          js)
