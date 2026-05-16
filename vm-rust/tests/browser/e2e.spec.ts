@@ -182,17 +182,18 @@ test("browser e2e tests", async ({ page }) => {
     throw new Error("Browser test harness exited without publishing test results.");
   }
 
-  // Log results
-  for (const t of testResults.tests) {
-    if (t.status === "pass") {
-      console.log(`✓ ${t.name}`);
-    } else {
-      console.log(`✗ ${t.name}: ${t.error}`);
+  if (testResults) {
+    for (const t of testResults.tests) {
+      if (t.status === "pass") {
+        console.log(`✓ ${t.name}`);
+      } else {
+        console.log(`✗ ${t.name}: ${t.error}`);
+      }
     }
+    console.log(
+      `${testResults.passed} passed, ${testResults.failed} failed`
+    );
   }
-  console.log(
-    `${testResults.passed} passed, ${testResults.failed} failed`
-  );
 
   if (snapshotErrors.length > 0) {
     throw new Error(
@@ -201,5 +202,5 @@ test("browser e2e tests", async ({ page }) => {
   }
 
   // Assert all tests passed
-  expect(testResults.failed).toBe(0);
+  expect(testResults!.failed).toBe(0);
 });

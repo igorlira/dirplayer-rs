@@ -164,10 +164,12 @@ impl<'a, H: TestHarness + ?Sized> IntoFuture for StepUntilBuilder<'a, H> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
+            let handle = super::log_test_action_live(&format!("Wait: {}", self.condition));
             let deadline_ms = now_ms() + self.timeout_secs * 1000.0;
             let mut frames = 0usize;
             while now_ms() < deadline_ms {
                 if check_condition(self.harness, &self.condition).await {
+                    handle.update(&format!("Wait: {} ({} frames)", self.condition, frames));
                     return Ok(());
                 }
                 if !self.harness.step_frame().await {

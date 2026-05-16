@@ -4,10 +4,22 @@
   <meta charset="utf-8">
   <title>dirplayer browser tests</title>
   <style>
-    body { font-family: monospace; margin: 16px; background: #1a1a1a; color: #eee; }
-    #stage_canvas_container { margin: 16px 0; background: #000; display: inline-block; }
+    * { box-sizing: border-box; }
+    body { font-family: monospace; margin: 0; padding: 16px; background: #1a1a1a; color: #eee; height: 100vh; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
+    #layout { display: flex; gap: 16px; flex: 1; overflow: hidden; }
+    #stage_canvas_container { background: #000; display: inline-block; flex-shrink: 0; align-self: flex-start; }
     #stage_canvas_container canvas { display: block; }
-    #output { white-space: pre-wrap; padding: 8px; background: #222; border-radius: 4px; }
+    #output { background: #222; border-radius: 4px; flex: 1; overflow-y: auto; margin: 0; padding: 4px 0; }
+    #output .status-line { padding: 3px 8px; color: #aaa; white-space: pre-wrap; }
+    #output details { border-top: 1px solid #2a2a2a; }
+    #output summary { padding: 3px 8px; cursor: pointer; user-select: none; list-style: none; outline: none; }
+    #output summary::-webkit-details-marker { display: none; }
+    #output summary.running { color: #888; }
+    #output summary.pass { color: #4caf50; }
+    #output summary.fail { color: #f44336; }
+    #output .test-log { padding: 2px 8px 4px 20px; color: #666; }
+    #output .test-log div { white-space: pre-wrap; line-height: 1.4; }
+    #output .test-error { padding: 2px 8px 4px 20px; color: #c0392b; white-space: pre-wrap; }
   </style>
   <script>
     window.__dirplayerTestMode = true;
@@ -24,6 +36,34 @@
       if (window.__playwrightSaveSnapshot) {
         window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0);
       }
+    };
+    window.__currentTestLog = null;
+    window.__testLog = function(msg) {
+      var log = window.__currentTestLog;
+      if (log) {
+        var line = document.createElement('div');
+        line.textContent = msg;
+        log.appendChild(line);
+      }
+      var out = document.getElementById('output');
+      if (out) out.scrollTop = out.scrollHeight;
+    };
+    window.__testLogLive = function(id, msg) {
+      var log = window.__currentTestLog;
+      if (log) {
+        var line = document.createElement('div');
+        line.id = '__tlog_' + id;
+        line.textContent = msg + '...';
+        log.appendChild(line);
+      }
+      var out = document.getElementById('output');
+      if (out) out.scrollTop = out.scrollHeight;
+    };
+    window.__testLogUpdate = function(id, msg) {
+      var line = document.getElementById('__tlog_' + id);
+      if (line) line.textContent = msg;
+      var out = document.getElementById('output');
+      if (out) out.scrollTop = out.scrollHeight;
     };
     window.__testResults = null;
     window.__testEnv = $TEST_ENV_JSON;
@@ -48,12 +88,54 @@
   </script>
 </head>
 <body>
-  <div id="stage_canvas_container"></div>
-  <pre id="output"></pre>
+  <div id="layout">
+    <div id="stage_canvas_container"></div>
+    <div id="output"></div>
+  </div>
   <script type="module">
     import init, * as wasm from './$WASM_JS_FILE';
-    const el = document.getElementById('output');
-    function log(msg) { el.textContent += msg + '\n'; console.log(msg); }
+    const output = document.getElementById('output');
+
+    function statusLine(msg) {
+      const el = document.createElement('div');
+      el.className = 'status-line';
+      el.textContent = msg;
+      output.appendChild(el);
+      output.scrollTop = output.scrollHeight;
+      console.log(msg);
+    }
+
+    function startTest(name) {
+      const details = document.createElement('details');
+      details.open = true;
+      const summary = document.createElement('summary');
+      summary.className = 'running';
+      summary.textContent = '▶ ' + name;
+      const logDiv = document.createElement('div');
+      logDiv.className = 'test-log';
+      details.appendChild(summary);
+      details.appendChild(logDiv);
+      output.appendChild(details);
+      output.scrollTop = output.scrollHeight;
+      window.__currentTestLog = logDiv;
+      return { details, summary, logDiv };
+    }
+
+    function endTest(group, name, pass, error) {
+      window.__currentTestLog = null;
+      group.summary.textContent = (pass ? '✓ ' : '✗ ') + name;
+      group.summary.className = pass ? 'pass' : 'fail';
+      if (!pass) {
+        const errEl = document.createElement('div');
+        errEl.className = 'test-error';
+        errEl.textContent = error;
+        group.logDiv.appendChild(errEl);
+      } else {
+        group.details.open = false;
+      }
+      output.scrollTop = output.scrollHeight;
+      console.log((pass ? '✓ ' : '✗ ') + name + (error ? ': ' + error : ''));
+    }
 
     const results = { tests: [], passed: 0, failed: 0, done: false };
 
@@ -61,17 +143,18 @@
       await init();
       // Wire up timeout triggering now that wasm exports are available
       window.__wasm_trigger_timeout = wasm.trigger_timeout;
-      log('Module loaded. Running tests...');
+      statusLine('Module loaded. Running tests...');
 
       const testFns = Object.keys(wasm)
         .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function');
 
       for (const name of testFns) {
+        const group = startTest(name);
         try {
           await wasm[name]();
           results.tests.push({ name, status: 'pass' });
           results.passed++;
-          log('✓ ' + name);
+          endTest(group, name, true);
         } catch (e) {
           // Check for a Rust panic message (set by our panic hook)
           const panicMsg = window.__testPanic;
@@ -79,19 +162,19 @@
           window.__testPanic = undefined;
           results.tests.push({ name, status: 'fail', error });
           results.failed++;
-          log('✗ ' + name + ': ' + error);
+          endTest(group, name, false, error);
         }
       }
     } catch (e) {
       results.tests.push({ name: '__init', status: 'fail', error: e.message });
       results.failed++;
-      log('ERROR: ' + e.message + '\n' + e.stack);
+      statusLine('ERROR: ' + e.message + '\n' + e.stack);
     }
 
     results.done = true;
     window.__testResults = results;
-    log('');
-    log(results.failed === 0
+    statusLine('');
+    statusLine(results.failed === 0
       ? results.passed + ' passed'
       : results.failed + ' failed, ' + results.passed + ' passed');
   </script>

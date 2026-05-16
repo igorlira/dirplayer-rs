@@ -79,6 +79,7 @@ impl SnapshotContext {
 
     /// Like [`verify`], but overrides the diff tolerance for this snapshot only.
     pub fn verify_with_ratio(&self, name: &str, output: SnapshotOutput, max_diff_ratio: f64) -> Result<(), String> {
+        super::log_test_action(&format!("Snapshot: {}", name));
         let snapshot_path = format!("{}/{}", self.suite, self.test);
 
         // Emit to browser snapshot collector (no-op on native)
