@@ -167,6 +167,7 @@ impl TestHarness for BrowserTestPlayer {
     }
 
     async fn init_movie(&mut self) {
+        crate::player::testing_shared::log_test_action("Init movie");
         reserve_player_mut(|player| {
             player.is_playing = false;
         });
@@ -177,6 +178,7 @@ impl TestHarness for BrowserTestPlayer {
     }
 
     async fn load_movie(&mut self, url: &str) {
+        crate::player::testing_shared::log_test_action(&format!("Load: {}", url));
         let full_url = if url.starts_with("http://") || url.starts_with("https://") {
             url.to_string()
         } else {
@@ -210,6 +212,7 @@ impl TestHarness for BrowserTestPlayer {
     // avoiding concurrent access with the frame loop.
 
     async fn click(&mut self, x: i32, y: i32) {
+        crate::player::testing_shared::log_test_action(&format!("Click ({}, {})", x, y));
         use crate::player::commands::player_dispatch;
         reserve_player_mut(|player| {
             player.mouse_loc = (x, y);

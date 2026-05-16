@@ -11,6 +11,121 @@ pub use conditions::{
 };
 pub use snapshots::{SnapshotOutput, SnapshotContext, emit_snapshot};
 
+/// Emit a human-readable test-action message.
+/// Native: printed to stdout with a `[test]` prefix.
+/// Browser: written to `console.log` and forwarded to `window.__testLog` (if
+/// defined) so the test harness HTML can display it alongside the canvas.
+pub fn log_test_action(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
+        if let Some(window) = web_sys::window() {
+            if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLog")) {
+                if f.is_function() {
+                    if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
+                        let _ = f.call1(&wasm_bindgen::JsValue::NULL, &wasm_bindgen::JsValue::from_str(msg));
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        println!("[test] {}", msg);
+    }
+}
+
+static LOG_ID_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A handle to a log entry that can be updated in-place.
+/// Created by [`log_test_action_live`]; call [`LogHandle::update`] to rewrite
+/// the entry once the operation completes.  If dropped without calling
+/// `update` (e.g. on timeout), the entry is left as-is on browser and the
+/// pending line is terminated with a newline on native.
+pub struct LogHandle {
+    id: u32,
+}
+
+impl LogHandle {
+    pub fn update(self, msg: &str) {
+        let id = self.id;
+        std::mem::forget(self); // skip Drop — we're finalising here
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
+            if let Some(window) = web_sys::window() {
+                if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLogUpdate")) {
+                    if f.is_function() {
+                        if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
+                            let _ = f.call2(
+                                &wasm_bindgen::JsValue::NULL,
+                                &wasm_bindgen::JsValue::from_f64(id as f64),
+                                &wasm_bindgen::JsValue::from_str(msg),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = id;
+            use std::io::Write;
+            print!("\r[test] {}\n", msg);
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
+impl Drop for LogHandle {
+    fn drop(&mut self) {
+        // Only reached when update() was never called (e.g. timeout).
+        // On native, terminate the pending line so subsequent output isn't mangled.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::Write;
+            println!();
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
+/// Like [`log_test_action`] but returns a [`LogHandle`] that lets the caller
+/// rewrite the entry in-place once the operation is done.
+/// Native: prints without a trailing newline so `\r` can overwrite it later.
+/// Browser: creates a uniquely-ID'd element that `update()` can target.
+pub fn log_test_action_live(msg: &str) -> LogHandle {
+    let id = LOG_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
+        if let Some(window) = web_sys::window() {
+            if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLogLive")) {
+                if f.is_function() {
+                    if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
+                        let _ = f.call2(
+                            &wasm_bindgen::JsValue::NULL,
+                            &wasm_bindgen::JsValue::from_f64(id as f64),
+                            &wasm_bindgen::JsValue::from_str(msg),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+        use std::io::Write;
+        print!("[test] {}...", msg);
+        let _ = std::io::stdout().flush();
+    }
+
+    LogHandle { id }
+}
+
 use crate::director::static_datum::StaticDatum;
 use crate::player::{
     commands::{run_player_command, PlayerVMCommand},
@@ -49,10 +164,12 @@ pub trait TestHarness {
     // --- Shared defaults ---
 
     async fn init_movie(&mut self) {
+        log_test_action("Init movie");
         run_movie_init_sequence().await;
     }
 
     async fn step_frames(&mut self, n: usize) {
+        log_test_action(&format!("Step {} frames", n));
         for _ in 0..n {
             if !self.step_frame().await {
                 break;
@@ -153,6 +270,7 @@ pub trait TestHarness {
     // --- Input simulation ---
 
     async fn click(&mut self, x: i32, y: i32) {
+        log_test_action(&format!("Click ({}, {})", x, y));
         reserve_player_mut(|player| {
             player.mouse_loc = (x, y);
             player.movie.mouse_down = true;
@@ -204,12 +322,14 @@ pub trait TestHarness {
     }
 
     async fn key_press(&mut self, key: &str, code: u16) {
+        log_test_action(&format!("Key press"));
         self.key_down(key, code).await;
         self.step_frame().await;
         self.key_up(key, code).await;
     }
 
     async fn type_text(&mut self, text: &str) {
+        log_test_action(&format!("Type: {:?}", text.chars().map(|_| '*').collect::<String>()));
         for ch in text.chars() {
             self.key_press(&ch.to_string(), ch as u16).await;
         }
@@ -261,6 +381,7 @@ pub trait TestHarness {
     /// ```
     async fn click_sprite(&mut self, query: impl Into<SpriteQuery>) -> Result<(), String> {
         let query = query.into();
+        log_test_action(&format!("Click sprite: {}", query));
         let sprite_num = self.find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
@@ -275,6 +396,7 @@ pub trait TestHarness {
     /// ```
     async fn click_sprite_at(&mut self, query: impl Into<SpriteQuery>, dx: i32, dy: i32) -> Result<(), String> {
         let query = query.into();
+        log_test_action(&format!("Click sprite {} at ({:+}, {:+})", query, dx, dy));
         let sprite_num = self.find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, _, _) = self.sprite_rect(sprite_num).await?;

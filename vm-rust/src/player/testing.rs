@@ -57,6 +57,7 @@ impl TestHarness for TestPlayer {
         workspace_root.join("public").join(relative).to_string_lossy().to_string()
     }
     async fn load_movie(&mut self, path: &str) {
+        crate::player::testing_shared::log_test_action(&format!("Load: {}", path));
         let abs_path = if Path::new(path).is_absolute() {
             path.to_string()
         } else {
