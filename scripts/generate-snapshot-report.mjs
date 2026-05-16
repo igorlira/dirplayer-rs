@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Generate a self-contained HTML snapshot comparison report.
+ * Generate a multi-page HTML snapshot comparison report.
+ * Produces an index page listing all test suites and one page per suite.
  * Usage: node scripts/generate-snapshot-report.mjs [snapshots-base] [output-dir]
- * Defaults: vm-rust/tests/snapshots   /tmp/diff-report
+ * Defaults: vm-rust/tests/snapshots   test-results/snapshot-report
  */
 
 import * as fs from 'fs';
@@ -13,7 +14,7 @@ import { PNG } from 'pngjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_DIR = path.join(__dirname, 'snapshot-report');
 
-const [,, snapshotsBase = 'vm-rust/tests/snapshots', outputDir = '/tmp/diff-report'] = process.argv;
+const [,, snapshotsBase = 'vm-rust/tests/snapshots', outputDir = 'test-results/snapshot-report'] = process.argv;
 
 const outDir  = path.join(snapshotsBase, 'output');
 const refDir  = path.join(snapshotsBase, 'reference');
@@ -56,6 +57,12 @@ function walkPngs(dir) {
   return result;
 }
 
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 const snapshots = walkPngs(outDir)
   .map(fp => {
     const rel = path.relative(outDir, fp);
@@ -63,16 +70,13 @@ const snapshots = walkPngs(outDir)
     return {
       rel,
       parts: rel.split(path.sep),
-      out: copyToReport(fp, 'out', rel),
-      ref: copyToReport(path.join(refDir, rel), 'ref', rel),
+      out:  copyToReport(fp, 'out', rel),
+      ref:  copyToReport(path.join(refDir, rel), 'ref', rel),
       diff: copyToReport(diffPath, 'diff', rel),
       diffRatio: computeDiffRatio(diffPath),
     };
   })
   .sort((a, b) => a.rel.localeCompare(b.rel));
-
-const diffCount = snapshots.filter(s => s.diff !== null && s.ref !== null).length;
-const passCount = snapshots.length - diffCount;
 
 // Group by suite/platform/test (first 3 path components)
 const groups = new Map();
@@ -82,13 +86,22 @@ for (const s of snapshots) {
   groups.get(key).push(s);
 }
 
-function esc(str) {
-  return String(str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+// Sort groups by changed count desc, then name asc
+const sortedGroups = [...groups.entries()].map(([key, snaps]) => {
+  const changedCount = snaps.filter(s => s.diff !== null && s.ref !== null).length;
+  return { key, snaps, changedCount };
+}).sort((a, b) => b.changedCount - a.changedCount || a.key.localeCompare(b.key));
 
-function renderCard(s) {
+const css      = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.css'), 'utf8');
+const js       = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.js'), 'utf8');
+const template = fs.readFileSync(path.join(TEMPLATE_DIR, 'template.html'), 'utf8');
+
+const filterToggle = `<label class="filter-toggle">
+    <input type="checkbox" id="diffs-only">
+    <span>Show only changed</span>
+  </label>`;
+
+function renderCard(s, imgPrefix = '') {
   const name = s.parts[s.parts.length - 1].replace(/\.png$/, '');
   // 'changed' requires both diff and ref — a diff without a ref is a stale artifact
   const changed = s.diff !== null && s.ref !== null;
@@ -111,8 +124,8 @@ function renderCard(s) {
   if (s.out && s.ref) {
     const compareView = `
       <div class="compare-imgs" data-compare>
-        <img class="img-ref" src="${esc(s.ref)}" alt="Reference">
-        <img class="img-out" src="${esc(s.out)}" alt="Output">
+        <img class="img-ref" src="${esc(imgPrefix + s.ref)}" alt="Reference">
+        <img class="img-out" src="${esc(imgPrefix + s.out)}" alt="Output">
         <div class="compare-line"></div>
         <span class="lbl-ref">Ref</span>
         <span class="lbl-out">Out</span>
@@ -121,12 +134,12 @@ function renderCard(s) {
       </div>`;
     const diffView = changed
       ? `<div class="view-diff" hidden>
-          <img class="img-diff" src="${esc(s.diff)}" alt="Diff">
+          <img class="img-diff" src="${esc(imgPrefix + s.diff)}" alt="Diff">
         </div>`
       : '';
     body = `<div class="view-compare">${compareView}</div>${diffView}`;
   } else if (s.out) {
-    body = `<div class="single-img"><img src="${esc(s.out)}" alt="Output"></div>`;
+    body = `<div class="single-img"><img src="${esc(imgPrefix + s.out)}" alt="Output"></div>`;
   } else {
     body = `<div class="missing-img">No output</div>`;
   }
@@ -142,39 +155,99 @@ function renderCard(s) {
 </div>`;
 }
 
-function renderGroup([key, snaps]) {
-  const changed = snaps.some(s => s.diff !== null && s.ref !== null);
-  const [suite, platform, test] = key.split('/');
-  const anchorId = esc(key.replace(/\//g, '--'));
-
-  return `<section class="group${changed ? ' group-changed' : ''}" id="${anchorId}">
-  <div class="group-header">
-    <h2 class="group-title">
-      <a href="#${anchorId}" class="anchor">#</a>
-      <span class="crumb">${esc(suite)}</span><span class="sep">/</span><span class="crumb">${esc(platform)}</span><span class="sep">/</span><span class="crumb crumb-test">${esc(test)}</span>
-    </h2>
-    <span class="badge ${changed ? 'badge-fail' : 'badge-pass'}">${changed ? 'CHANGED' : 'OK'}</span>
-  </div>
-  <div class="cards-grid">
-    ${snaps.map(renderCard).join('\n    ')}
-  </div>
-</section>`;
+function buildPage({ title, nav, filter, passCount, diffCount, totalCount, body }) {
+  return template
+    .replace('{{TITLE}}',       title)
+    .replace('{{NAV}}',         nav)
+    .replace('{{CSS}}',         css)
+    .replace('{{JS}}',          js)
+    .replace('{{FILTER}}',      filter)
+    .replace('{{PASS_COUNT}}',  String(passCount))
+    .replace('{{DIFF_COUNT}}',  String(diffCount))
+    .replace('{{TOTAL_COUNT}}', String(totalCount))
+    .replace('{{BODY}}',        body);
 }
 
-const css      = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.css'), 'utf8');
-const js       = fs.readFileSync(path.join(TEMPLATE_DIR, 'report.js'), 'utf8');
-const template = fs.readFileSync(path.join(TEMPLATE_DIR, 'template.html'), 'utf8');
+fs.mkdirSync(path.join(outputDir, 'suites'), { recursive: true });
 
-const html = template
-  .replace('{{CSS}}',         css)
-  .replace('{{JS}}',          js)
-  .replace('{{PASS_COUNT}}',  String(passCount))
-  .replace('{{DIFF_COUNT}}',  String(diffCount))
-  .replace('{{TOTAL_COUNT}}', String(snapshots.length))
-  .replace('{{BODY}}',        [...groups.entries()].map(renderGroup).join('\n'));
+// ── Per-suite pages ──
+for (const { key, snaps, changedCount } of sortedGroups) {
+  const slug = key.replace(/\//g, '--');
+  const [suite, platform, test] = key.split('/');
+  const imgPrefix = '../';
 
-fs.mkdirSync(outputDir, { recursive: true });
-const outPath = path.join(outputDir, 'report.html');
-fs.writeFileSync(outPath, html);
-const kb = Math.round(fs.statSync(outPath).size / 1024);
-console.log(`Report written to ${outPath} (${kb} KB, ${snapshots.length} snapshots, ${diffCount} changed)`);
+  const changedSnaps = snaps
+    .filter(s => s.diff !== null && s.ref !== null)
+    .sort((a, b) => (b.diffRatio ?? 0) - (a.diffRatio ?? 0));
+  const okSnaps = snaps
+    .filter(s => s.diff === null || s.ref === null)
+    .sort((a, b) => a.rel.localeCompare(b.rel));
+
+  let body = '';
+  if (changedSnaps.length > 0) {
+    body += `<section class="snap-section">
+  <h2 class="section-heading section-changed">Changed (${changedSnaps.length})</h2>
+  <div class="cards-grid">
+    ${changedSnaps.map(s => renderCard(s, imgPrefix)).join('\n    ')}
+  </div>
+</section>\n`;
+  }
+  if (okSnaps.length > 0) {
+    body += `<section class="snap-section snap-section-ok">
+  <h2 class="section-heading">OK (${okSnaps.length})</h2>
+  <div class="cards-grid">
+    ${okSnaps.map(s => renderCard(s, imgPrefix)).join('\n    ')}
+  </div>
+</section>`;
+  }
+
+  const totalCount = snaps.length;
+  const html = buildPage({
+    title: `${esc(suite)} / ${esc(platform)} / ${esc(test)}`,
+    nav: `<a href="../index.html" class="back-link">← All suites</a>`,
+    filter: filterToggle,
+    passCount: totalCount - changedCount,
+    diffCount: changedCount,
+    totalCount,
+    body,
+  });
+
+  fs.writeFileSync(path.join(outputDir, 'suites', `${slug}.html`), html);
+}
+
+// ── Index page ──
+const totalSnapshots = snapshots.length;
+const totalChanged   = snapshots.filter(s => s.diff !== null && s.ref !== null).length;
+const changedSuites  = sortedGroups.filter(g => g.changedCount > 0).length;
+
+const indexRows = sortedGroups.map(({ key, snaps, changedCount }) => {
+  const slug = key.replace(/\//g, '--');
+  const [suite, platform, test] = key.split('/');
+  const totalCount = snaps.length;
+  const changed = changedCount > 0;
+  const statsHtml = changed
+    ? `<span class="stat-changed">${changedCount} changed</span><span class="suite-total"> / ${totalCount} total</span>`
+    : `<span class="suite-total">${totalCount} total</span>`;
+  return `<a href="suites/${slug}.html" class="suite-row${changed ? ' suite-changed' : ''}">
+  <span class="suite-crumbs">
+    <span class="crumb">${esc(suite)}</span><span class="sep">/</span><span class="crumb">${esc(platform)}</span><span class="sep">/</span><span class="crumb crumb-test">${esc(test)}</span>
+  </span>
+  <span class="suite-stats">${statsHtml}</span>
+  <span class="badge ${changed ? 'badge-fail' : 'badge-pass'}">${changed ? 'CHANGED' : 'OK'}</span>
+</a>`;
+}).join('\n');
+
+const indexHtml = buildPage({
+  title: 'Snapshot Report',
+  nav: '',
+  filter: filterToggle,
+  // index summary counts suites, not individual snapshots
+  passCount: sortedGroups.length - changedSuites,
+  diffCount: changedSuites,
+  totalCount: sortedGroups.length,
+  body: `<div class="suite-list">\n${indexRows}\n</div>`,
+});
+
+fs.writeFileSync(path.join(outputDir, 'index.html'), indexHtml);
+
+console.log(`Report written to ${outputDir} (${sortedGroups.length} suites, ${changedSuites} changed, ${totalSnapshots} snapshots)`);

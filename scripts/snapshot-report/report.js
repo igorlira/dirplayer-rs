@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-  // Wire up compare sliders
+  // Wire up compare sliders (suite pages)
   document.querySelectorAll('.compare-imgs[data-compare]').forEach(imgs => {
     const range  = imgs.querySelector('.compare-range');
     const imgOut = imgs.querySelector('.img-out');
@@ -15,7 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
     update(range.value);
   });
 
-  // View mode tabs (Compare / Diff)
+  // View mode tabs (suite pages)
   document.querySelectorAll('.view-tabs').forEach(tabs => {
     tabs.addEventListener('click', e => {
       const btn = e.target.closest('.view-tab');
@@ -28,15 +28,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // "Show only changed" filter
+  // "Show only changed" filter — works on both index and suite pages
   const toggle = document.getElementById('diffs-only');
+  if (!toggle) return;
   toggle.addEventListener('change', () => {
-    document.querySelectorAll('.group').forEach(g => {
-      if (toggle.checked) {
-        g.classList.toggle('hide', !g.classList.contains('group-changed'));
-      } else {
-        g.classList.remove('hide');
-      }
+    // Suite pages: hide/show the OK section
+    document.querySelectorAll('.snap-section-ok').forEach(s => {
+      s.style.display = toggle.checked ? 'none' : '';
+    });
+    // Index pages: hide/show OK suite rows
+    document.querySelectorAll('.suite-row:not(.suite-changed)').forEach(r => {
+      r.style.display = toggle.checked ? 'none' : '';
     });
   });
 });

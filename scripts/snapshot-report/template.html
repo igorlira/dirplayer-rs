@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Snapshot Report</title>
+<title>{{TITLE}}</title>
 <style>{{CSS}}</style>
 </head>
 <body>
 <header class="page-header">
-  <h1>Snapshot Report</h1>
+  {{NAV}}
+  <h1>{{TITLE}}</h1>
   <div class="summary">
     <span class="stat pass">{{PASS_COUNT}} passed</span>
     <span class="dot">·</span>
@@ -16,10 +17,7 @@
     <span class="dot">·</span>
     <span class="stat total">{{TOTAL_COUNT}} total</span>
   </div>
-  <label class="filter-toggle">
-    <input type="checkbox" id="diffs-only">
-    <span>Show only changed</span>
-  </label>
+  {{FILTER}}
 </header>
 <main>
 {{BODY}}

@@ -280,5 +280,72 @@ main {
   font-style: italic;
 }
 
-/* ── Hidden groups when filter is active ── */
-.group.hide { display: none; }
+/* ── Back navigation ── */
+.back-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.back-link:hover { color: var(--text); }
+
+/* ── Index suite list ── */
+.suite-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.suite-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--text);
+  transition: border-color .15s, background .15s;
+}
+.suite-row:hover { border-color: var(--accent); background: rgba(88,166,255,.04); }
+.suite-row.suite-changed { border-left: 3px solid var(--red); }
+
+.suite-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+}
+
+.suite-stats {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.stat-changed { color: var(--red); font-weight: 600; }
+.suite-total { color: var(--muted); }
+
+/* ── Suite page sections ── */
+.snap-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.section-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-changed { color: var(--red); border-color: rgba(248,81,73,.3); }
