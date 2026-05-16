@@ -12,14 +12,17 @@
     #output { background: #222; border-radius: 4px; flex: 1; overflow-y: auto; margin: 0; padding: 4px 0; }
     #output .status-line { padding: 3px 8px; color: #aaa; white-space: pre-wrap; }
     #output details { border-top: 1px solid #2a2a2a; }
-    #output summary { padding: 3px 8px; cursor: pointer; user-select: none; list-style: none; outline: none; }
+    #output summary { padding: 3px 8px; cursor: pointer; user-select: none; list-style: none; outline: none; display: flex; align-items: center; gap: 6px; }
     #output summary::-webkit-details-marker { display: none; }
+    #output summary .summary-name { flex: 1; }
     #output summary.running { color: #888; }
     #output summary.pass { color: #4caf50; }
     #output summary.fail { color: #f44336; }
     #output .test-log { padding: 2px 8px 4px 20px; color: #666; }
     #output .test-log div { white-space: pre-wrap; line-height: 1.4; }
     #output .test-error { padding: 2px 8px 4px 20px; color: #c0392b; white-space: pre-wrap; }
+    #output .rerun-btn { padding: 0 4px; background: none; border: none; color: #888; cursor: pointer; flex-shrink: 0; font-size: 1.3em; line-height: 1; border-radius: 3px; }
+    #output .rerun-btn:hover { color: #eee; background: #333; }
   </style>
   <script>
     window.__dirplayerTestMode = true;
@@ -67,6 +70,7 @@
     };
     window.__testResults = null;
     window.__testEnv = $TEST_ENV_JSON;
+    window.__testDebug = $DEBUG_MODE;
 
     // Ruffle + DirPlayer Flash bridge — mirrors public/index.html setup.
     // dirplayer-rs ships a fork of Ruffle namespaced under
@@ -110,7 +114,10 @@
       details.open = true;
       const summary = document.createElement('summary');
       summary.className = 'running';
-      summary.textContent = '▶ ' + name;
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'summary-name';
+      nameSpan.textContent = '▶ ' + name;
+      summary.appendChild(nameSpan);
       const logDiv = document.createElement('div');
       logDiv.className = 'test-log';
       details.appendChild(summary);
@@ -118,12 +125,12 @@
       output.appendChild(details);
       output.scrollTop = output.scrollHeight;
       window.__currentTestLog = logDiv;
-      return { details, summary, logDiv };
+      return { details, summary, nameSpan, logDiv };
     }
 
     function endTest(group, name, pass, error) {
       window.__currentTestLog = null;
-      group.summary.textContent = (pass ? '✓ ' : '✗ ') + name;
+      group.nameSpan.textContent = (pass ? '✓ ' : '✗ ') + name;
       group.summary.className = pass ? 'pass' : 'fail';
       if (!pass) {
         const errEl = document.createElement('div');
@@ -133,8 +140,29 @@
       } else {
         group.details.open = false;
       }
+      if (window.__testDebug) {
+        const btn = document.createElement('button');
+        btn.className = 'rerun-btn';
+        btn.title = 're-run';
+        btn.textContent = '↺';
+        btn.onclick = (e) => { e.stopPropagation(); runTest(name); };
+        group.summary.appendChild(btn);
+      }
       output.scrollTop = output.scrollHeight;
       console.log((pass ? '✓ ' : '✗ ') + name + (error ? ': ' + error : ''));
+    }
+
+    async function runTest(name) {
+      const group = startTest(name);
+      try {
+        await wasm[name]();
+        endTest(group, name, true);
+      } catch (e) {
+        const panicMsg = window.__testPanic;
+        const error = panicMsg || e.message || String(e);
+        window.__testPanic = undefined;
+        endTest(group, name, false, error);
+      }
     }
 
     const results = { tests: [], passed: 0, failed: 0, done: false };

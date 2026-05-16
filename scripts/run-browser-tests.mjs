@@ -152,7 +152,8 @@ const template = fs.readFileSync(
 );
 const html = template
   .replaceAll("$WASM_JS_FILE", jsBasename)
-  .replaceAll("$TEST_ENV_JSON", testEnvJson);
+  .replaceAll("$TEST_ENV_JSON", testEnvJson)
+  .replaceAll("$DEBUG_MODE", keepOpen ? "true" : "false");
 fs.writeFileSync(path.join(RUNNER_DIR, "index.html"), html);
 
 // 7. Link the asset directory into the runner. Use a junction on Windows so
