@@ -180,6 +180,7 @@ console.log("Running Playwright tests...");
 const playwrightEnv = { ...process.env };
 if (updateSnapshots) playwrightEnv.SNAPSHOT_UPDATE = "1";
 if (keepOpen) playwrightEnv.E2E_KEEP_OPEN = "1";
+
 const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
   cwd: REPO_ROOT,
   stdio: "inherit",

@@ -240,19 +240,15 @@ impl StageSnapshot {
                 }
             }
 
-            // Save diff image if there are differences
-            if diff_pixels > 0 {
-                let diff_dir = base.join("diff").join(suite).join("native").join(test);
-                std::fs::create_dir_all(&diff_dir).unwrap();
-                let diff_path = diff_dir.join(&file_name);
+            let ratio = diff_pixels as f64 / pixel_count as f64;
+            let diff_path = base.join("diff").join(suite).join("native").join(test).join(&file_name);
+            if ratio > max_diff_ratio {
+                // Save diff image for failing snapshots only.
+                std::fs::create_dir_all(diff_path.parent().unwrap()).unwrap();
                 let diff_rgba: image::RgbaImage =
                     image::ImageBuffer::from_raw(self.width, self.height, diff_img)
                         .expect("Failed to create diff image");
                 diff_rgba.save(&diff_path).unwrap();
-            }
-
-            let ratio = diff_pixels as f64 / pixel_count as f64;
-            if ratio > max_diff_ratio {
                 return Err(format!(
                     "Snapshot '{}' differs from reference: {:.4}% pixels changed \
                      (max channel diff: {}, threshold: {:.4}%)\n  \
@@ -260,6 +256,10 @@ impl StageSnapshot {
                     name, ratio * 100.0, max_diff, max_diff_ratio * 100.0,
                     output_path.display(), reference_path.display(),
                 ));
+            }
+            // Snapshot passed — remove any stale diff so the report doesn't flag it as changed.
+            if diff_path.exists() {
+                std::fs::remove_file(&diff_path).ok();
             }
             return Ok(Some(ratio));
         }
