@@ -204,8 +204,14 @@ impl TestHarness for BrowserTestPlayer {
         // Yield to the browser — the real frame loop, command loop,
         // and event loop all run during this yield.
         Self::next_frame().await;
+        // Fail fast: surface any Lingo script errors before the next wait/step.
+        if let Some(err) = Self::take_script_error() {
+            crate::player::testing_shared::log_test_action(&format!("Script error: {}", err));
+            panic!("Script error: {}", err);
+        }
         reserve_player_ref(|player| player.is_playing)
     }
+
 
     // Override input methods to dispatch through the command channel
     // so they're processed by the command loop at the right time,
@@ -290,6 +296,15 @@ impl TestHarness for BrowserTestPlayer {
 }
 
 impl BrowserTestPlayer {
+    /// Remove and return the first pending Lingo script error, if any.
+    fn take_script_error() -> Option<String> {
+        let window = web_sys::window()?;
+        let val = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__scriptErrors")).ok()?;
+        let arr: js_sys::Array = wasm_bindgen::JsCast::dyn_into(val).ok()?;
+        if arr.length() == 0 { return None; }
+        arr.shift().as_string()
+    }
+
     /// Capture the current canvas contents as a base64 PNG snapshot.
     fn canvas_to_snapshot() -> SnapshotOutput {
         use crate::rendering::RENDERER_LOCK;
