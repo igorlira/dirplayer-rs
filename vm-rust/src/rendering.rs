@@ -1478,9 +1478,11 @@ fn render_filmloop_from_channel_data(
                 }
             }
             CastMemberType::Flash(_) => {
+                // Filmloop child Flash: per-sprite, same model as the
+                // outer Flash branch.
                 let flash_bitmap_ref = player
                     .flash_frame_buffers
-                    .get(&(sprite_member_ref.cast_lib, sprite_member_ref.cast_member))
+                    .get(&(channel_num as i16))
                     .copied();
 
                 if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
@@ -2890,10 +2892,12 @@ pub fn render_score_to_bitmap_with_offset(
                 );
             }
             CastMemberType::Flash(flash_member) => {
-                // Render Flash content from frame buffer provided by Ruffle via JS bridge
+                // Render Flash content from the per-sprite frame buffer.
+                // Each Flash sprite has its own Ruffle player so multiple
+                // sprites sharing one cast member can show different frames.
                 let flash_bitmap_ref = player
                     .flash_frame_buffers
-                    .get(&(member_ref.cast_lib, member_ref.cast_member))
+                    .get(&(channel_num as i16))
                     .copied();
 
                 if let Some(&bitmap_ref) = flash_bitmap_ref.as_ref().filter(|&&r| r != 0) {
@@ -2937,27 +2941,33 @@ pub fn render_score_to_bitmap_with_offset(
                         );
                     }
                 } else if flash_bitmap_ref.is_none() && has_swf_signature(&flash_member.data) {
-                    // First time seeing this Flash member - notify JS to create Ruffle instance
-                    let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
-                    let w = sprite.width.max(1) as u32;
-                    let h = sprite.height.max(1) as u32;
-                    debug!(
-                        "  Flash channel {}: requesting Ruffle instance for member {}:{} ({}x{}, {} bytes SWF)",
-                        channel_num, member_ref.cast_lib, member_ref.cast_member, w, h, flash_member.data.len()
-                    );
-                    JsApi::dispatch_flash_member_loaded(
-                        member_ref.cast_lib,
-                        member_ref.cast_member,
-                        &flash_member.data,
-                        w,
-                        h,
-                    );
-                    // Insert a sentinel so we don't re-dispatch every frame
-                    // (The real BitmapRef will be set when update_flash_frame is called from JS)
-                    player.flash_frame_buffers.insert(
-                        (member_ref.cast_lib, member_ref.cast_member),
-                        0, // sentinel value - INVALID_BITMAP_REF
-                    );
+                    // First time this sprite renders a Flash member — ask
+                    // JS to spin up a dedicated Ruffle instance for it.
+                    let dispatch_key = (channel_num as i16, member_ref.cast_lib, member_ref.cast_member);
+                    if !player.flash_sprite_loaded.contains(&dispatch_key) {
+                        let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
+                        let w = sprite.width.max(1) as u32;
+                        let h = sprite.height.max(1) as u32;
+                        debug!(
+                            "  Flash sprite#{}: requesting Ruffle instance for member {}:{} ({}x{}, {} bytes SWF)",
+                            channel_num, member_ref.cast_lib, member_ref.cast_member, w, h, flash_member.data.len()
+                        );
+                        let paused_at_start = flash_member
+                            .flash_info
+                            .as_ref()
+                            .map(|fi| fi.paused_at_start)
+                            .unwrap_or(false);
+                        JsApi::dispatch_flash_member_loaded(
+                            channel_num as i32,
+                            member_ref.cast_lib,
+                            member_ref.cast_member,
+                            &flash_member.data,
+                            w,
+                            h,
+                            paused_at_start,
+                        );
+                        player.flash_sprite_loaded.insert(dispatch_key);
+                    }
                 }
             }
             _ => {}

@@ -21,28 +21,38 @@ use super::script_instance::ScriptInstanceUtils;
 // src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
+    // All Lingo Flash bridge calls now take `sprite_num` because each Flash
+    // sprite has its own Ruffle instance (per-sprite refactor — multiple
+    // sprites sharing one cast member each get an independent player).
+    /// `frame_or_label` is the raw Lingo argument as a string. Director's
+    /// `sprite(N).gotoFrame(...)` accepts either a frame number (e.g. `3`)
+    /// or a label (e.g. `"warm0"`); the JS side parses and routes to
+    /// the appropriate Ruffle call. Always passing a string here lets us
+    /// preserve labels — `.int_value()` on the Rust side silently parses
+    /// non-numeric strings to `0`, and `GotoFrame(0, true)` is treated as
+    /// a stop, which froze mello's Fire/Marshmello SWFs.
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrame")]
-    fn ruffle_goto_frame(cast_lib: i32, cast_member: i32, frame: i32);
+    fn ruffle_goto_frame(sprite_num: i32, frame_or_label: &str);
     #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
-    fn ruffle_stop(cast_lib: i32, cast_member: i32);
+    fn ruffle_stop(sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
-    fn ruffle_play(cast_lib: i32, cast_member: i32);
+    fn ruffle_play(sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleRewind")]
-    fn ruffle_rewind(cast_lib: i32, cast_member: i32);
+    fn ruffle_rewind(sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
-    fn ruffle_call_frame(cast_lib: i32, cast_member: i32, frame: i32);
+    fn ruffle_call_frame(sprite_num: i32, frame: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
-    fn ruffle_get_variable(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_get_variable(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
-    fn ruffle_set_variable(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
-    fn ruffle_call_function(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_call_function(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(cast_lib: i32, cast_member: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
-    fn ruffle_get_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
+    fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
-    fn ruffle_set_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32, value: &str);
+    fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
 }
 
 pub struct SpriteDatumHandlers {}
@@ -117,8 +127,11 @@ impl SpriteDatumUtils {
 }
 
 impl SpriteDatumHandlers {
-    /// Resolve a sprite datum to (cast_lib, cast_member) for Flash bridge calls.
-    fn resolve_sprite_flash_member(datum: &DatumRef) -> Result<Option<(i32, i32)>, ScriptError> {
+    /// Resolve a sprite datum to (sprite_num, cast_lib, cast_member). The
+    /// sprite_num is the lookup key for the per-sprite Ruffle instance;
+    /// cast_lib/cast_member are still needed by callers that build
+    /// `FlashObjectRef`s. Returns None when the sprite has no member.
+    fn resolve_sprite_flash_member(datum: &DatumRef) -> Result<Option<(i32, i32, i32)>, ScriptError> {
         reserve_player_ref(|player| {
             let sprite_num = player.get_datum(datum).to_sprite_ref()?;
             let sprite = match player.movie.score.get_sprite(sprite_num) {
@@ -126,7 +139,11 @@ impl SpriteDatumHandlers {
                 None => return Ok(None),
             };
             match &sprite.member {
-                Some(member_ref) => Ok(Some((member_ref.cast_lib, member_ref.cast_member))),
+                Some(member_ref) => Ok(Some((
+                    sprite_num as i32,
+                    member_ref.cast_lib,
+                    member_ref.cast_member,
+                ))),
                 None => Ok(None),
             }
         })
@@ -548,45 +565,50 @@ impl SpriteDatumHandlers {
             }
             // Flash (SWF) sprite methods
             "gotoframe" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let frame = reserve_player_ref(|player| {
-                        if args.is_empty() { return Ok(1); }
-                        player.get_datum(&args[0]).int_value()
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    // Pass the raw arg as a string — Lingo callers use
+                    // either a numeric frame or a string label (e.g.
+                    // `sprite(N).gotoFrame("warm0")`). The JS bridge
+                    // parses the string and routes to GotoFrame(int) or
+                    // an AS1 `gotoAndStop(label)` call as appropriate.
+                    let frame_or_label = reserve_player_ref(|player| {
+                        if args.is_empty() { return Ok("1".to_string()); }
+                        player.get_datum(&args[0]).string_value()
                     })?;
-                    ruffle_goto_frame(cl, cm, frame);
+                    ruffle_goto_frame(sn, &frame_or_label);
                 }
                 Ok(DatumRef::Void)
             }
             "callframe" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let frame = reserve_player_ref(|player| {
                         if args.is_empty() { return Ok(1); }
                         player.get_datum(&args[0]).int_value()
                     })?;
-                    ruffle_call_frame(cl, cm, frame);
+                    ruffle_call_frame(sn, frame);
                 }
                 Ok(DatumRef::Void)
             }
             "stop" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    ruffle_stop(cl, cm);
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    ruffle_stop(sn);
                 }
                 Ok(DatumRef::Void)
             }
             "play" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    ruffle_play(cl, cm);
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    ruffle_play(sn);
                 }
                 Ok(DatumRef::Void)
             }
             "rewind" | "hold" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    ruffle_rewind(cl, cm);
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    ruffle_rewind(sn);
                 }
                 Ok(DatumRef::Void)
             }
             "getvariable" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let (path, return_as_object) = reserve_player_ref(|player| {
                         if args.is_empty() { return Ok((String::new(), false)); }
                         let p = player.get_datum(&args[0]).string_value()?;
@@ -606,7 +628,7 @@ impl SpriteDatumHandlers {
                         // if it returns a JS string, return as Datum::String so that
                         // stringp() works. If it returns an object or undefined, return
                         // a FlashObjectRef for setCallback/call usage.
-                        match ruffle_get_variable(cl, cm, &path) {
+                        match ruffle_get_variable(sn, &path) {
                             Ok(val) => {
                                 if val.is_string() {
                                     // Simple string variable - return as string
@@ -626,7 +648,7 @@ impl SpriteDatumHandlers {
                         });
                     }
 
-                    match ruffle_get_variable(cl, cm, &path) {
+                    match ruffle_get_variable(sn, &path) {
                         Ok(val) => {
                             if let Some(s) = val.as_string() {
                                 return reserve_player_mut(|player| {
@@ -640,21 +662,21 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "setvariable" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let path = reserve_player_ref(|player| {
                         player.get_datum(&args[0]).string_value()
                     })?;
                     let value = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Err(e) = ruffle_set_variable(cl, cm, &path, &value) {
+                    if let Err(e) = ruffle_set_variable(sn, &path, &value) {
                         warn!("sprite.setVariable error: {:?}", e);
                     }
                 }
                 Ok(DatumRef::Void)
             }
             "callfunction" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let path = reserve_player_ref(|player| {
                         player.get_datum(&args[0]).string_value()
                     })?;
@@ -665,7 +687,7 @@ impl SpriteDatumHandlers {
                     } else {
                         String::new()
                     };
-                    match ruffle_call_function(cl, cm, &path, &args_xml) {
+                    match ruffle_call_function(sn, &path, &args_xml) {
                         Ok(val) => {
                             if let Some(s) = val.as_string() {
                                 return reserve_player_mut(|player| {
@@ -679,10 +701,10 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "hittest" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let x = reserve_player_ref(|player| player.get_datum(&args[0]).int_value())?;
                     let y = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
-                    let result = ruffle_hit_test(cl, cm, x as f64, y as f64);
+                    let result = ruffle_hit_test(sn, x as f64, y as f64);
                     return reserve_player_mut(|player| {
                         Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
                     });
@@ -690,10 +712,10 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "getflashproperty" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let target = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
                     let prop_num = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
-                    match ruffle_get_flash_property(cl, cm, &target, prop_num) {
+                    match ruffle_get_flash_property(sn, &target, prop_num) {
                         Ok(val) => {
                             if let Some(s) = val.as_string() {
                                 return reserve_player_mut(|player| {
@@ -707,11 +729,11 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "setflashproperty" => {
-                if let Some((cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let target = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
                     let prop_num = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
                     let value = reserve_player_ref(|player| player.get_datum(&args[2]).string_value())?;
-                    ruffle_set_flash_property(cl, cm, &target, prop_num, &value);
+                    ruffle_set_flash_property(sn, &target, prop_num, &value);
                 }
                 Ok(DatumRef::Void)
             }

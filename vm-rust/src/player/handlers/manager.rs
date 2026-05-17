@@ -34,58 +34,63 @@ use crate::{
 // src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
-    /// Call into Ruffle's JS API to get a Flash variable
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
-    fn ruffle_get_variable(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_get_variable(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
 
-    /// Call into Ruffle's JS API to set a Flash variable
+    // Per-sprite Flash bridge — each Flash sprite has its own Ruffle
+    // instance keyed by sprite_num.
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
-    fn ruffle_set_variable(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
 
-    /// Call a Flash function via Ruffle's JS API
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
-    fn ruffle_call_function(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_call_function(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
 
-    /// Go to a specific frame on a Flash instance
+    /// Always pass a string here — JS-side parses int vs label.
+    /// Director's gotoFrame accepts both `gotoFrame(5)` (numeric) and
+    /// `gotoFrame("warm0")` (label); routing labels through `int_value()`
+    /// silently parses to 0 and breaks animation.
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrame")]
-    fn ruffle_goto_frame(cast_lib: i32, cast_member: i32, frame: i32);
+    fn ruffle_goto_frame(sprite_num: i32, frame_or_label: &str);
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
-    fn ruffle_stop(cast_lib: i32, cast_member: i32);
+    fn ruffle_stop(sprite_num: i32);
 
     #[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
-    fn ruffle_play(cast_lib: i32, cast_member: i32);
+    fn ruffle_play(sprite_num: i32);
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleRewind")]
-    fn ruffle_rewind(cast_lib: i32, cast_member: i32);
+    fn ruffle_rewind(sprite_num: i32);
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
-    fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
+    fn ruffle_is_playing(sprite_num: i32) -> bool;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFrameCount")]
-    fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
+    fn ruffle_get_frame_count(sprite_num: i32) -> i32;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
-    fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
+    fn ruffle_get_current_frame(sprite_num: i32) -> i32;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
-    fn ruffle_call_frame(cast_lib: i32, cast_member: i32, frame: i32);
+    fn ruffle_call_frame(sprite_num: i32, frame: i32);
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(cast_lib: i32, cast_member: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
-    fn ruffle_get_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
+    fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
-    fn ruffle_set_flash_property(cast_lib: i32, cast_member: i32, target: &str, prop_num: i32, value: &str);
+    fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
 }
 
 pub struct BuiltInHandlerManager {}
 
 impl BuiltInHandlerManager {
-    /// Resolve a sprite datum to (cast_lib, cast_member) for Flash bridge calls.
-    fn resolve_flash_member(datum_ref: &DatumRef) -> Result<Option<(i32, i32)>, ScriptError> {
+    /// Resolve a sprite/integer datum to its sprite number for Flash bridge
+    /// calls. Per-sprite Ruffle instances mean sprite_num is the lookup
+    /// key; cast_lib/cast_member are returned alongside for callers that
+    /// still need them (e.g. building FlashObjectRefs).
+    fn resolve_flash_member(datum_ref: &DatumRef) -> Result<Option<(i32, i32, i32)>, ScriptError> {
         reserve_player_ref(|player| {
             let datum = player.get_datum(datum_ref);
             let sprite_num = match datum {
@@ -98,8 +103,47 @@ impl BuiltInHandlerManager {
                 None => return Ok(None),
             };
             match &sprite.member {
-                Some(member_ref) => Ok(Some((member_ref.cast_lib as i32, member_ref.cast_member as i32))),
+                Some(member_ref) => Ok(Some((
+                    sprite_num as i32,
+                    member_ref.cast_lib as i32,
+                    member_ref.cast_member as i32,
+                ))),
                 None => Ok(None),
+            }
+        })
+    }
+
+    /// Like `resolve_flash_member`, but only returns Some when the
+    /// sprite's member is actually a Flash cast member. Used by the
+    /// `stop` / `play` / `rewind` Lingo built-ins so we route those to
+    /// the Ruffle bridge only for Flash sprites — `stop sound 1`,
+    /// `stop(member …)` etc. continue to fall through to the existing
+    /// SWA no-op (which is correct for those operands in the web port).
+    fn resolve_flash_sprite_strict(datum_ref: &DatumRef) -> Result<Option<i32>, ScriptError> {
+        use crate::player::cast_member::CastMemberType;
+        reserve_player_ref(|player| {
+            let datum = player.get_datum(datum_ref);
+            let sprite_num = match datum {
+                Datum::SpriteRef(n) => *n,
+                Datum::Int(n) => *n as i16,
+                _ => return Ok(None),
+            };
+            let sprite = match player.movie.score.get_sprite(sprite_num) {
+                Some(s) => s,
+                None => return Ok(None),
+            };
+            let member_ref = match &sprite.member {
+                Some(m) => m,
+                None => return Ok(None),
+            };
+            let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+                Some(m) => m,
+                None => return Ok(None),
+            };
+            if matches!(member.member_type, CastMemberType::Flash(_)) {
+                Ok(Some(sprite_num as i32))
+            } else {
+                Ok(None)
             }
         })
     }
@@ -903,8 +947,42 @@ impl BuiltInHandlerManager {
                     Ok(player.alloc_datum(Datum::Int(posn.max(top).min(bottom))))
                 })
             }
-            // stop/play/rewind/sound on a member or channel — no-op in web player
-            "stop" | "play" | "rewind" | "pause"  => Ok(DatumRef::Void),
+            // `stop` / `play` / `rewind` / `pause` are overloaded Lingo
+            // built-ins. Historically the web port stubbed them all to
+            // no-op because they targeted SWA sound channels (`stop sound 1`)
+            // which we don't implement. But Director also uses them on
+            // Flash sprites (`stop(sprite N)`, `play(sprite N)`,
+            // `rewind(sprite N)`) — storyscramble's BS38 calls
+            // `stop(sprite(me.spriteNum))` right after `gotoFrame(...,31)`
+            // to park the bubble. Route Flash-sprite operands to the
+            // Ruffle bridge; everything else (sound channels, members,
+            // bare integers that don't resolve to a Flash sprite) keeps
+            // the historical no-op behaviour.
+            "stop" => {
+                if args.len() >= 1 {
+                    if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        ruffle_stop(sn);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "play" => {
+                if args.len() >= 1 {
+                    if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        ruffle_play(sn);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "rewind" => {
+                if args.len() >= 1 {
+                    if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        ruffle_rewind(sn);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            "pause"  => Ok(DatumRef::Void),
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),
             "externalparamname" => MovieHandlers::external_param_name(args),
@@ -1001,8 +1079,8 @@ impl BuiltInHandlerManager {
                     let path = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        match ruffle_get_variable(cast_lib, cast_member, &path) {
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        match ruffle_get_variable(sn, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
                                     return reserve_player_mut(|player| {
@@ -1026,8 +1104,8 @@ impl BuiltInHandlerManager {
                     let value = reserve_player_ref(|player| {
                         player.get_datum(&args[2]).string_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        if let Err(e) = ruffle_set_variable(cast_lib, cast_member, &path, &value) {
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        if let Err(e) = ruffle_set_variable(sn, &path, &value) {
                             warn!("setVariable error: {:?}", e);
                         }
                     }
@@ -1035,14 +1113,14 @@ impl BuiltInHandlerManager {
                 Ok(DatumRef::Void)
             }
             "gotoframe" => {
-                // Flash (SWF) member interop — goToFrame(sprite, frame)
+                // Flash (SWF) member interop — goToFrame(sprite, frame_or_label)
                 if args.len() >= 2 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
-                    let frame = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).int_value()
+                    let frame_or_label = reserve_player_ref(|player| {
+                        player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        ruffle_goto_frame(cast_lib, cast_member, frame);
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        ruffle_goto_frame(sn, &frame_or_label);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1053,8 +1131,8 @@ impl BuiltInHandlerManager {
                     let frame = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).int_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        ruffle_call_frame(cast_lib, cast_member, frame);
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        ruffle_call_frame(sn, frame);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1068,8 +1146,8 @@ impl BuiltInHandlerManager {
                     let prop_num = reserve_player_ref(|player| {
                         player.get_datum(&args[2]).int_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        match ruffle_get_flash_property(cast_lib, cast_member, &target, prop_num) {
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        match ruffle_get_flash_property(sn, &target, prop_num) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
                                     return reserve_player_mut(|player| {
@@ -1095,8 +1173,8 @@ impl BuiltInHandlerManager {
                     let value = reserve_player_ref(|player| {
                         player.get_datum(&args[3]).string_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        ruffle_set_flash_property(cast_lib, cast_member, &target, prop_num, &value);
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        ruffle_set_flash_property(sn, &target, prop_num, &value);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1110,8 +1188,8 @@ impl BuiltInHandlerManager {
                     let y = reserve_player_ref(|player| {
                         player.get_datum(&args[2]).int_value()
                     })?;
-                    if let Some((cast_lib, cast_member)) = member_ref {
-                        let result = ruffle_hit_test(cast_lib, cast_member, x as f64, y as f64);
+                    if let Some((sn, _cl, _cm)) = member_ref {
+                        let result = ruffle_hit_test(sn, x as f64, y as f64);
                         return reserve_player_mut(|player| {
                             Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
                         });

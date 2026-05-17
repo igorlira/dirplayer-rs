@@ -18,15 +18,51 @@ use log::warn;
 // src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
+    // Per-sprite Flash bridge — see datum_handlers/sprite.rs for the full
+    // signature comment. FlashObjectRef-driven calls go through these
+    // externs after resolving the host sprite from the FlashObjectRef.
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
-    fn ruffle_get_variable_global(cast_lib: i32, cast_member: i32, path: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_get_variable_global(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
-    fn ruffle_set_variable_global(cast_lib: i32, cast_member: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_set_variable_global(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
-    fn ruffle_call_function_global(cast_lib: i32, cast_member: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+    fn ruffle_call_function_global(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
 
+    /// Forward a Director sprite mouse event into a Flash sprite's Ruffle
+    /// instance. Called from the mouseDown/mouseUp command handlers. The
+    /// SWF's own AS1 button handlers don't otherwise fire because Ruffle's
+    /// canvas is hidden offscreen and never receives real browser clicks.
+    /// `event_type` is "down", "up", or "move"; coordinates are sprite-local
+    /// (origin at the sprite's top-left in Director stage coords).
+    #[wasm_bindgen(js_name = "dirplayer_ruffleDispatchMouse", catch)]
+    pub fn ruffle_dispatch_mouse_event_global(
+        sprite_num: i32,
+        event_type: &str,
+        local_x: i32,
+        local_y: i32,
+    ) -> Result<JsValue, JsValue>;
+}
+
+/// Find the sprite number that currently displays the given Flash cast
+/// member. With per-sprite Ruffle instances we need a sprite-num key for
+/// the JS bridge; FlashObjectRef only carries cast_lib/cast_member, so we
+/// scan the score for the first sprite that references this member.
+/// Most movies have at most one sprite per Flash member; storyscramble's
+/// 3-tile case shares a member but those tiles don't use FlashObjectRef
+/// (they only set frame), so this lookup is fine for the existing surface.
+pub fn find_sprite_for_flash_member(cast_lib: i32, cast_member: i32) -> Option<i32> {
+    crate::player::reserve_player_ref(|player| {
+        for channel in &player.movie.score.channels {
+            if let Some(member_ref) = &channel.sprite.member {
+                if member_ref.cast_lib == cast_lib && member_ref.cast_member == cast_member {
+                    return Some(channel.number as i32);
+                }
+            }
+        }
+        None
+    })
 }
 
 // Global counter for dynamic Flash objects.
@@ -43,10 +79,12 @@ impl FlashObjectDatumHandlers {
 
             if let Datum::FlashObjectRef(flash_ref) = obj_datum {
                 let full_path = format!("{}.{}", flash_ref.path, prop_name);
-                let cl = flash_ref.cast_lib;
-                let cm = flash_ref.cast_member;
+                let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+                    Some(n) => n,
+                    None => return Ok(player.alloc_datum(Datum::Void)),
+                };
 
-                match ruffle_get_variable_global(cl, cm, &full_path) {
+                match ruffle_get_variable_global(sprite_num, &full_path) {
                     Ok(result) => {
                         if result.is_null() || result.is_undefined() {
                             Ok(player.alloc_datum(Datum::Void))
@@ -61,12 +99,12 @@ impl FlashObjectDatumHandlers {
                         } else if let Some(b) = result.as_bool() {
                             Ok(player.alloc_datum(Datum::Int(if b { 1 } else { 0 })))
                         } else {
-                            let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, cl, cm);
+                            let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, flash_ref.cast_lib, flash_ref.cast_member);
                             Ok(player.alloc_datum(Datum::FlashObjectRef(new_flash_ref)))
                         }
                     }
                     Err(_) => {
-                        let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, cl, cm);
+                        let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, flash_ref.cast_lib, flash_ref.cast_member);
                         Ok(player.alloc_datum(Datum::FlashObjectRef(new_flash_ref)))
                     }
                 }
@@ -101,7 +139,11 @@ impl FlashObjectDatumHandlers {
             }
             let args_str = format!("[{}]", js_args_parts.join(","));
 
-            match ruffle_call_function_global(flash_ref.cast_lib, flash_ref.cast_member, &method_path, &args_str) {
+            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+                Some(n) => n,
+                None => return Ok(player.alloc_datum(Datum::Void)),
+            };
+            match ruffle_call_function_global(sprite_num, &method_path, &args_str) {
                 Ok(result) => {
                     // Special handling for getGatewayConnection
                     if handler_name == "getGatewayConnection" {
@@ -145,7 +187,11 @@ impl FlashObjectDatumHandlers {
                 _ => "null".to_string(),
             };
 
-            match ruffle_set_variable_global(flash_ref.cast_lib, flash_ref.cast_member, &prop_path, &value_str) {
+            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+                Some(n) => n,
+                None => return Err(ScriptError::new(format!("No sprite for Flash member {}:{}", flash_ref.cast_lib, flash_ref.cast_member))),
+            };
+            match ruffle_set_variable_global(sprite_num, &prop_path, &value_str) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     warn!("Failed to set Flash property {}: {:?}", prop_path, e);

@@ -284,8 +284,18 @@ pub struct DirPlayer {
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
-    /// Flash frame buffers: maps (cast_lib, cast_member) to BitmapRef in bitmap_manager
-    pub flash_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
+    /// Per-sprite Flash frame buffers. One Ruffle instance per (sprite,
+    /// cast_member) gives each Flash sprite an independent playhead, which
+    /// is what Director semantics actually require (e.g. storyscramble's 3
+    /// story tiles share one Flash member but display different poster
+    /// frames simultaneously). Keyed by sprite number; the renderer reads
+    /// `flash_frame_buffers[channel_num]` when drawing a Flash sprite.
+    pub flash_frame_buffers: HashMap<i16, bitmap::manager::BitmapRef>,
+    /// Whether the lazy-load dispatch has fired for a given (sprite,
+    /// cast_lib, cast_member). Prevents the renderer from triggering
+    /// duplicate `createFlashInstance` calls every frame before the
+    /// instance's first pixels arrive.
+    pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
     /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
     pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
     pub in_enter_frame: bool,
@@ -480,6 +490,7 @@ impl DirPlayer {
             handler_stack_depth: 0,
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
+            flash_sprite_loaded: HashSet::new(),
             w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
             in_prepare_frame: false,
@@ -527,12 +538,14 @@ impl DirPlayer {
     }
 
     /// Pre-dispatch Flash members for all active sprites so they start loading
-    /// before Lingo scripts try to access them.
+    /// before Lingo scripts try to access them. Per-sprite: each sprite that
+    /// references a Flash member gets its own dedicated Ruffle instance.
     pub fn pre_dispatch_flash_members(&mut self) {
         for channel in &self.movie.score.channels {
+            let channel_num = channel.number as i16;
             if let Some(member_ref) = &channel.sprite.member {
-                let flash_key = (member_ref.cast_lib, member_ref.cast_member);
-                if self.flash_frame_buffers.contains_key(&flash_key) {
+                let dispatch_key = (channel_num, member_ref.cast_lib, member_ref.cast_member);
+                if self.flash_sprite_loaded.contains(&dispatch_key) {
                     continue;
                 }
                 if let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -541,19 +554,26 @@ impl DirPlayer {
                             let data = flash_member.data.clone();
                             let w = channel.sprite.width.max(1) as u32;
                             let h = channel.sprite.height.max(1) as u32;
+                            let paused_at_start = flash_member
+                                .flash_info
+                                .as_ref()
+                                .map(|fi| fi.paused_at_start)
+                                .unwrap_or(false);
                             debug!(
-                                "[Flash] Pre-dispatching {}:{} ({}x{}, {} bytes)",
-                                member_ref.cast_lib, member_ref.cast_member,
-                                w, h, data.len()
+                                "[Flash] Pre-dispatching sprite#{} {}:{} ({}x{}, {} bytes, pausedAtStart={})",
+                                channel_num, member_ref.cast_lib, member_ref.cast_member,
+                                w, h, data.len(), paused_at_start,
                             );
                             JsApi::dispatch_flash_member_loaded(
+                                channel_num as i32,
                                 member_ref.cast_lib,
                                 member_ref.cast_member,
                                 &data,
                                 w,
                                 h,
+                                paused_at_start,
                             );
-                            self.flash_frame_buffers.insert(flash_key, 0);
+                            self.flash_sprite_loaded.insert(dispatch_key);
                         }
                     }
                 }
@@ -2308,7 +2328,7 @@ impl DirPlayer {
         member_ref: DatumRef,
     ) -> Result<(), ScriptError> {
         let sound_channel = self.get_sound_channel(channel_num)?;
-        
+
         // Get the loop setting from the cast member
         let loop_count = {
             let member_datum = self.get_datum(&member_ref);
@@ -3687,7 +3707,10 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     reserve_player_mut(|player| {
         if !stayed_on_same_frame {
-            player.movie.frame_script_instance = None;
+            // begin_all_sprites manages frame_script_instance lifecycle: it preserves
+            // the cached instance while the playhead stays within the same script's
+            // span (so the script's properties survive across frames) and recreates
+            // it only when the active frame script changes or the span is exited.
             player.begin_all_sprites();
         }
 
@@ -3835,6 +3858,26 @@ pub async fn run_single_frame() -> (bool, bool) {
     (is_playing, is_script_paused)
 }
 
+/// Tick the global SoundManager by `delta` seconds — advances fades
+/// regardless of whether the frame loop is currently paused (e.g.
+/// blocked on a Flash/Ruffle load). Without this, a `sound fadeIn`
+/// started just before such a pause leaves the channel at gain=0 for
+/// the entire blocked period: the audio source plays silently into a
+/// zero-gain node and is gone by the time the frame loop resumes.
+fn tick_sound_manager(delta: f64) {
+    unsafe {
+        if let Some(player) = PLAYER_OPT.as_mut() {
+            // Aliasing the player via a raw pointer because
+            // SoundManager::update needs `&mut DirPlayer` for
+            // bookkeeping but lives inside the same player.
+            // SoundManager::update is `&self` and only touches the
+            // channels (Rc<RefCell<…>>), so this aliasing is sound.
+            let player_ptr = player as *mut DirPlayer;
+            let _ = player.sound_manager.update(delta, &mut *player_ptr);
+        }
+    }
+}
+
 pub async fn run_frame_loop() {
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
@@ -3882,6 +3925,12 @@ pub async fn run_frame_loop() {
             debug!("[Flash] Waiting for Ruffle instance to finish loading...");
             for _ in 0..150 {
                 timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                // Tick sound manager during the wait: a 1.6s applause
+                // with `sound fadeIn` started right before this pause
+                // would otherwise stay at gain=0 for its entire
+                // duration (frame loop is blocked, so the fade ramp
+                // never runs). 0.1s matches the wait granularity.
+                tick_sound_manager(0.1);
                 if !is_flash_loading().unwrap_or(false) {
                     break;
                 }
@@ -3898,12 +3947,27 @@ pub async fn run_frame_loop() {
             return;
         }
 
+        // Tick the sound manager so per-channel fade-in / fade-out
+        // progress. Without this, Lingo's `sound fadeIn` sets the
+        // channel volume to 0 to start the fade but the ramp never
+        // runs — the audio gets scheduled into a gain=0 node and plays
+        // silently (storyscramble's `playPayoff` applause uses fadeIn
+        // via the soundLoop script). Delta is the per-frame tempo
+        // interval in seconds; matches what the SoundChannel::update
+        // fade math expects.
+        {
+            let tempo = reserve_player_ref(|player| player.current_frame_tempo);
+            let delta = if tempo == 0 { 1.0 / 30.0 } else { 1.0 / tempo as f64 };
+            tick_sound_manager(delta);
+        }
+
         // Also check after frame execution: if scripts tried to access a Flash
         // instance that doesn't exist yet, wait for Ruffle to finish loading.
         if is_flash_loading().unwrap_or(false) {
             debug!("[Flash] Scripts accessed unready Flash instance, waiting...");
             for _ in 0..150 {
                 timeout(Duration::from_millis(100), future::pending::<()>()).await.unwrap_err();
+                tick_sound_manager(0.1);
                 if !is_flash_loading().unwrap_or(false) {
                     break;
                 }

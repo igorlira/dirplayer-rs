@@ -23,6 +23,14 @@ use crate::player::sprite::ColorRef;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextureCacheKey {
     pub member_ref: CastMemberRef,
+    /// Backing bitmap (BitmapRef.id, the slot in bitmap_manager). For most
+    /// members `member_ref` already pins one bitmap, but a single Flash
+    /// cast member can have N independent per-sprite bitmaps when several
+    /// sprites share it (storyscramble's 3 story tiles each get their own
+    /// `flash_frame_buffers[sprite]` even though they all reference cast
+    /// 2:1). Without this field the cache collapses them and renders the
+    /// first uploaded version for every sprite.
+    pub image_ref: u32,
     /// Ink mode - affects whether matte computation is applied (especially for 32-bit bitmaps)
     pub ink: i32,
     /// Colorize parameters (only used when has_fore_color or has_back_color is true)

@@ -250,8 +250,8 @@ extern "C" {
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object);
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
     pub fn onExternalEvent(event: &str);
-    pub fn onFlashMemberLoaded(cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32);
-    pub fn onFlashMemberUnloaded(cast_lib: i32, cast_member: i32);
+    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool);
+    pub fn onFlashMemberUnloaded(sprite_num: i32);
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
@@ -285,11 +285,11 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {
         onClearTimeouts();
     }
-    pub fn dispatch_flash_member_loaded(cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32) {
-        onFlashMemberLoaded(cast_lib, cast_member, swf_data, width, height);
+    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool) {
+        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start);
     }
-    pub fn dispatch_flash_member_unloaded(cast_lib: i32, cast_member: i32) {
-        onFlashMemberUnloaded(cast_lib, cast_member);
+    pub fn dispatch_flash_member_unloaded(sprite_num: i32) {
+        onFlashMemberUnloaded(sprite_num);
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         onStageSizeChanged(width, height, center);
@@ -1876,8 +1876,8 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
-    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: &[u8], _: u32, _: u32) {}
-    pub fn dispatch_flash_member_unloaded(_: i32, _: i32) {}
+    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool) {}
+    pub fn dispatch_flash_member_unloaded(_: i32) {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}

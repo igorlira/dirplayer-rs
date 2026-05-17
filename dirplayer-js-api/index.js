@@ -103,19 +103,19 @@ export function onExternalEvent(event) {
   }
 }
 
-export function onFlashMemberLoaded(castLib, castMember, swfData, width, height) {
+export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart) {
   if (vmCallbacks?.onFlashMemberLoaded) {
-    vmCallbacks.onFlashMemberLoaded(castLib, castMember, swfData, width, height);
+    vmCallbacks.onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart);
   } else {
-    console.log('Flash member loaded:', castLib, castMember, width, height, swfData.length, 'bytes');
+    console.log('Flash member loaded:', 'sprite#' + spriteNum, castLib, castMember, width, height, swfData.length, 'bytes', 'pausedAtStart=' + pausedAtStart);
   }
 }
 
-export function onFlashMemberUnloaded(castLib, castMember) {
+export function onFlashMemberUnloaded(spriteNum) {
   if (vmCallbacks?.onFlashMemberUnloaded) {
-    vmCallbacks.onFlashMemberUnloaded(castLib, castMember);
+    vmCallbacks.onFlashMemberUnloaded(spriteNum);
   } else {
-    console.log('Flash member unloaded:', castLib, castMember);
+    console.log('Flash member unloaded: sprite#' + spriteNum);
   }
 }
 

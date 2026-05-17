@@ -4,9 +4,9 @@
  * Manages Ruffle player instances for Flash cast members, reads rendered frames,
  * and sends pixel data to dirplayer's WASM rendering pipeline so Flash content
  * can be composited with Director sprites (Director sprites can layer on top).
- */
+ */ 
 
-import { update_flash_frame, trigger_lingo_callback_on_script } from 'vm-rust';
+import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event } from 'vm-rust';
 import {
   isBridgeRequired,
   waitForBridge,
@@ -17,7 +17,8 @@ import {
 } from './ruffleBridgeClient';
 
 interface FlashInstance {
-  castLib: number;
+  spriteNum: number;     // Director sprite number this instance belongs to
+  castLib: number;       // SWF source cast member (diagnostics + cleanup)
   castMember: number;
   rufflePlayer: any; // RufflePlayerElement (direct) or stub element (bridge mode)
   bridgeId: string | null; // Set when this instance is driven by the main-world bridge
@@ -26,9 +27,25 @@ interface FlashInstance {
   width: number;
   height: number;
   animFrameId: number | null;
+  /// Becomes true only after the SWF has loaded AND the 3s AS init wait
+  /// has elapsed AND the inheritance/queue replay has finished. Lingo
+  /// calls (goTo / play / stop / rewind) that arrive before this is
+  /// true are queued instead of going to the half-initialised player.
+  ready: boolean;
+  /// Mirrors the Director Flash member property of the same name.
+  /// When true we pass `autoplay: 'off'` to Ruffle's loadConfig (so
+  /// the SWF stays parked at frame 1 instead of running), AND the
+  /// queue flush re-fires any queued `play` op — because nothing is
+  /// playing automatically and Lingo's `play(sprite)` is required to
+  /// actually start the SWF. When false, autoplay covers it and the
+  /// queued `play` op is a redundant restart we skip.
+  pausedAtStart: boolean;
 }
 
-// Map of "castLib:castMember" -> FlashInstance
+// Per-sprite Flash instance map. Each Flash sprite gets its own Ruffle
+// player so multiple sprites that share a single Flash cast member can
+// display different frames simultaneously (e.g. storyscramble's 3 story
+// tiles all use cast 2:1 but show poster frames 2/4/6).
 const instances = new Map<string, FlashInstance>();
 
 // Track pending Flash instance creations so the WASM frame loop can wait for them
@@ -46,12 +63,9 @@ function getFetchRewriteRules(): Array<{pathPrefix: string, targetHost: string, 
   if (win.__dirplayerFlashConfig?.fetchRewriteRules) {
     return win.__dirplayerFlashConfig.fetchRewriteRules;
   }
-  // Local dev fallback — when running against the local dev proxy
-  // (`127.0.0.1:3456`), rewrite Flash AMF gateway requests so the
-  // SWF's relative `/sf/*` POST goes there instead of the dev server.
-  // Production deployments populate
-  // `window.__dirplayerFlashConfig.fetchRewriteRules` via the polyfill's
-  // `configureFlash()` API and never hit this fallback.
+  // Production: host page provides rewrite rules via
+  // `__dirplayerFlashConfig.fetchRewriteRules` (set by `configureFlash`).
+  // Without any, fetch goes direct to the original URL.
   return [];
 }
 
@@ -112,15 +126,132 @@ const origGetContext = HTMLCanvasElement.prototype.getContext;
 
 function getSocketProxyConfig(): Array<{host: string, port: number, proxyUrl: string}> {
   const win = window as any;
-  if (win.__dirplayerFlashConfig?.socketProxy) {
-    return win.__dirplayerFlashConfig.socketProxy;
-  }
-  // Local dev fallback
-  return [];
+  return (win.__dirplayerFlashConfig?.socketProxy as
+    | Array<{ host: string; port: number; proxyUrl: string }>
+    | undefined) ?? [];
 }
 
-function instanceKey(castLib: number, castMember: number): string {
-  return `${castLib}:${castMember}`;
+// Install the global socket-URL resolver immediately so the WASM-side
+// Multiuser Xtra (which calls `window.dirplayerResolveSocketUrl`) finds
+// it even when the host page doesn't call `configureFlashManager`.
+// Re-evaluates `getSocketProxyConfig` on every call so dev defaults +
+// runtime-supplied entries both stay live.
+(window as any).dirplayerResolveSocketUrl = (host: string, port: number): string => {
+  const proxies = getSocketProxyConfig();
+  for (const entry of proxies) {
+    if (entry.host.toLowerCase() === host.toLowerCase() && entry.port === port) {
+      return entry.proxyUrl;
+    }
+  }
+  return "";
+};
+
+// Each Flash sprite has its own Ruffle instance — keyed by the Director
+// sprite number. Sprite numbers are unique within a movie so castLib /
+// castMember don't need to be part of the key.
+function instanceKey(spriteNum: number): string {
+  return `${spriteNum}`;
+}
+
+/**
+ * Forward a Director sprite mouse event into a Ruffle player so the SWF's
+ * own AS1 button handlers (`on (press)` / `on (release)`) actually run.
+ *
+ * Ruffle's canvas lives in a hidden container at `left: -9999px`, so real
+ * browser clicks never reach it — meaning AS1 button handlers (which fire
+ * on pointer events the Flash player receives) never run. Director still
+ * sees the click on its stage and resolves the Flash sprite; we then
+ * synthesise PointerEvents on the Ruffle canvas so the SWF processes the
+ * click as if it had been delivered natively.
+ *
+ * Coordinates are sprite-local (origin at the sprite's top-left in stage
+ * coords). They're rebased to canvas client coords here so Ruffle's input
+ * code computes the correct Flash-stage position.
+ */
+function dispatchMouseEvent(
+  spriteNum: number,
+  type: 'down' | 'up' | 'move',
+  localX: number,
+  localY: number,
+): boolean {
+  const inst = instances.get(instanceKey(spriteNum));
+  if (!inst) {
+    console.warn(`[Flash mouse] no instance for sprite#${spriteNum}; known=`,
+      Array.from(instances.keys()));
+    return false;
+  }
+
+  let canvasX = localX;
+  let canvasY = localY;
+  if (inst.canvas) {
+    const rect = inst.canvas.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      canvasX = (localX / rect.width) * inst.canvas.width;
+      canvasY = (localY / rect.height) * inst.canvas.height;
+    }
+  }
+
+  const player = inst.rufflePlayer as
+    | { dirplayer_dispatchPointer?: (t: string, x: number, y: number) => boolean }
+    | undefined;
+  if (typeof player?.dirplayer_dispatchPointer !== 'function') {
+    console.warn(`[Flash mouse] sprite#${spriteNum} player has no dirplayer_dispatchPointer; ` +
+      `bridgeId=${inst.bridgeId}, player keys=`, player ? Object.keys(player as object) : 'no player');
+    return false;
+  }
+  return !!player.dirplayer_dispatchPointer(type, canvasX, canvasY);
+}
+
+/**
+ * Forward a Flash `event: …` URL body into Director's event chain.
+ *
+ * Director's Flash Asset Xtra intercepts `getURL("event: …")` (e.g. the
+ * storyscramble bubble's `getURL("event: send #done", "")` at frame 11
+ * and frame 21) and routes the body into the host movie's event chain.
+ * Returns true if the body was understood and dispatched.
+ *
+ * Also exposed as `window.dirplayer_dispatchFlashEvent` so the chain can
+ * be hand-fired from DevTools while debugging.
+ */
+export function dispatchFlashEvent(castLib: number, castMember: number, body: string): boolean {
+  try {
+    return dispatch_flash_event(castLib, castMember, body);
+  } catch (e) {
+    console.warn('[Flash] dispatchFlashEvent error:', e);
+    return false;
+  }
+}
+
+/**
+ * Register an open-URL handler on a Ruffle player so `getURL("event: …")`
+ * is routed into Director instead of being denied. Requires the dirplayer
+ * Ruffle fork's `dirplayer_addOpenUrlHandler` patch; until it lands the
+ * call is a no-op and navigations stay denied via `openUrlMode: 'deny'`.
+ */
+function registerEventUrlHandler(player: any, castLib: number, castMember: number): void {
+  if (typeof player?.dirplayer_addOpenUrlHandler !== 'function') {
+    console.warn(
+      `[Flash] ${castLib}:${castMember}: dirplayer_addOpenUrlHandler missing on Ruffle player — ` +
+      `event:URLs from the SWF will be denied. ` +
+      `Use window.dirplayer_dispatchFlashEvent(${castLib}, ${castMember}, "send #done") to fire dispatch manually.`
+    );
+    return;
+  }
+  player.dirplayer_addOpenUrlHandler((url: string, _target: string): boolean => {
+    if (typeof url !== 'string' || !url.startsWith('event:')) {
+      return false; // not ours — let Ruffle's openUrlMode decide
+    }
+    const body = url.slice('event:'.length).trim();
+    const handled = dispatchFlashEvent(castLib, castMember, body);
+    if (!handled) {
+      console.warn(
+        `[Flash] ${castLib}:${castMember}: unrecognised event URL body: ${JSON.stringify(body)}`
+      );
+    }
+    // Always swallow the navigation: even an unrecognised event:URL must
+    // not open a popup. Director silently ignores malformed event: bodies.
+    return true;
+  });
 }
 
 /**
@@ -149,7 +280,7 @@ async function loadRuffle(): Promise<any> {
       return ruffle;
     }
 
-    throw new Error('dirplayer Ruffle fork not found. Ensure ruffle.js is loaded via a script tag.');
+    throw new Error('dirplayer Ruffle fork not found. Ensure dirplayer_ruffle.js is loaded via a script tag.');
   })();
 
   return rufflePromise;
@@ -171,17 +302,20 @@ function isFlashDisabled(): boolean {
 }
 
 /**
- * Create a Ruffle player instance for a Flash cast member.
- * The player renders to a hidden container; frames are read back and sent to WASM.
+ * Create a Ruffle player instance for a specific Flash sprite.
+ * Each sprite gets its own player so multiple sprites that share a single
+ * Flash cast member can display different frames simultaneously.
  */
 export async function createFlashInstance(
+  spriteNum: number,
   castLib: number,
   castMember: number,
   swfData: Uint8Array,
   width: number,
   height: number,
+  pausedAtStart: boolean = false,
 ): Promise<void> {
-  const key = instanceKey(castLib, castMember);
+  const key = instanceKey(spriteNum);
 
   // Skip when Flash is explicitly disabled by the host. The Lingo
   // bridge functions all early-return on missing instance, so the
@@ -194,8 +328,57 @@ export async function createFlashInstance(
     return;
   }
 
-  // Destroy existing instance if any
-  destroyFlashInstance(castLib, castMember);
+  // Capture the about-to-die instance's current frame BEFORE destroy so
+  // we can carry it across a member change. storyscramble does
+  // `gotoFrame(sprite 2, 31)` in BS38 while sprite 2 holds member 1:31;
+  // when the scene change swaps sprite 2 to member 1:45 (bubble) we
+  // destroy the old instance and have no record of frame 31. Stash it
+  // here keyed by sprite number, then check below after sibling
+  // inheritance. Mimics Director's per-sprite frame property which
+  // survives member swaps.
+  const priorIntendedFrame: number | null = (() => {
+    const prior = instances.get(key);
+    if (!prior) return null;
+    try {
+      const f = parseInt(prior.rufflePlayer.GetVariable?.('/:_currentframe') || '0', 10);
+      return f >= 1 ? f : null;
+    } catch { return null; }
+  })();
+
+  // Destroy existing instance for this sprite if any.
+  destroyFlashInstance(spriteNum);
+
+  // Playhead inheritance — preserve Director's "Flash member state is
+  // shared across sprites using that member" semantic the old cast-keyed
+  // architecture used to give us for free. With per-sprite instances,
+  // sprite 2 in storyscramble's main scene would spin up a fresh Ruffle
+  // player and autoplay the bubble SWF (1:45) from frame 1→11, hiding
+  // the frame-21 state sprite 17 already advanced it to. Scan live
+  // siblings here for the same member and capture their current frame;
+  // we'll seed the new instance to that frame in the finally block
+  // below, after the SWF has loaded and AS initialisation finishes.
+  let inheritedFrame: number | null = null;
+  const siblings = Array.from(instances.values());
+  for (const sibling of siblings) {
+    if (sibling.castLib === castLib && sibling.castMember === castMember) {
+      try {
+        const cur = parseInt(
+          sibling.rufflePlayer.GetVariable?.('/:_currentframe') || '0', 10
+        );
+        if (cur >= 1) {
+          inheritedFrame = cur;
+          break;
+        }
+      } catch { /* getVariable failed (bridge mode etc.) — fall through to autoplay */ }
+    }
+  }
+
+  // Per-sprite intent wins over sibling inheritance: if BS38 set this
+  // sprite to frame N before the member changed, the new member should
+  // also land at frame N (Director's per-sprite frame attribute).
+  if (priorIntendedFrame !== null) {
+    inheritedFrame = priorIntendedFrame;
+  }
 
   flashLoadingCount++;
   console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
@@ -243,6 +426,7 @@ export async function createFlashInstance(
   }
 
   const instance: FlashInstance = {
+    spriteNum,
     castLib,
     castMember,
     rufflePlayer: player,
@@ -252,6 +436,8 @@ export async function createFlashInstance(
     width,
     height,
     animFrameId: null,
+    ready: false,
+    pausedAtStart,
   };
 
   instances.set(key, instance);
@@ -291,10 +477,28 @@ export async function createFlashInstance(
     data: actualSwfData,
     allowScriptAccess: true,
     openUrlMode: 'deny',
+    // Always autoplay. Tried gating this on `pausedAtStart` (so the
+    // SWF would load paused at frame 1 like Director's docs suggest),
+    // but Ruffle's `autoplay: 'off'` leaves the player in a preroll
+    // state where `_currentframe` reads 0 and `GotoFrame(N, …)` has
+    // no effect until something kicks the SWF — which broke tile
+    // poster-frame pinning AND the bubble's frame-31 seed. The
+    // microtask pin in `applyGotoAndPin` already keeps tiles from
+    // cycling visibly, so we don't need to suppress autoplay to fix
+    // that. We still track `pausedAtStart` on the instance for the
+    // queue-flush `play` heuristic below.
     autoplay: 'on',
     unmuteOverlay: 'hidden',
     logLevel: 'info',
     splashScreen: false,
+    // Transparent stage so SWFs that layer over other Director sprites
+    // (mello's fire/marshmello/stick) composite correctly. The downside:
+    // SWFs that bake their stage color in (e.g. storyscramble's chat
+    // bubble's white interior) lose that fill — Director would normally
+    // overlay member.bgColor + handle ink modes (especially ink 36
+    // "Background Transparent") to manage transparency. Our renderer
+    // takes over those responsibilities on the dirplayer side; this
+    // wmode just makes the Ruffle canvas itself transparent-where-empty.
     wmode: 'transparent',
     renderer: 'canvas',  // Force Canvas2D so we can read pixels back
     socketProxy: getSocketProxyConfig(),
@@ -307,6 +511,35 @@ export async function createFlashInstance(
     const ruffleInstance = player.ruffle();
     await ruffleInstance.load(loadConfig);
   }
+
+  // Honour Director's `pausedAtStart` Flash member property.
+  // Ruffle's own `autoplay: 'off'` leaves the SWF in a preroll state
+  // where `_currentframe=0` and `GotoFrame` is a no-op, so we keep
+  // autoplay on for SWF initialisation — then immediately pin the
+  // MovieClip at frame 1 (rendered + stopped) so it doesn't visibly
+  // cycle during the 3-second AS-init wait below. Subsequent Lingo
+  // `mySprite.play()` (via playFlash) unsticks it normally.
+  if (pausedAtStart) {
+    try {
+      // Two-step pin: gotoAndPlay so Ruffle paints frame 1, wait one
+      // browser RAF so the paint lands on the canvas, then gotoAndStop
+      // to halt the MovieClip. Mirrors applyGotoAndPin's strategy
+      // (Ruffle skips paint for already-stopped MovieClips).
+      player.GotoFrame(1, false);
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      player.GotoFrame(1, true);
+    } catch (e) {
+      console.warn(`[Flash] Instance ${key} pausedAtStart pin failed:`, e);
+    }
+  }
+
+  // Director's Flash Asset Xtra intercepts `getURL("event: …")` and routes
+  // the body into the host movie's event chain (e.g. `event: send #done`
+  // fires the `done` handler). Register the handler speculatively — when
+  // the Ruffle-fork patch is present, navigations whose URL starts with
+  // `event:` get routed into dispatch_flash_event and the real open is
+  // suppressed. Otherwise it's a safe no-op.
+  registerEventUrlHandler(player, castLib, castMember);
 
   // Find the internal canvas element that Ruffle renders to
   await new Promise<void>((resolve) => {
@@ -335,6 +568,40 @@ export async function createFlashInstance(
     flashLoadingCount--;
     flashAccessBeforeReady = false;
     console.log(`[Flash] Instance ${key} fully ready (pending: ${flashLoadingCount})`);
+
+    // Seed the new instance with the frame captured from a sibling
+    // sprite using the same member (see scan above). Bubbles in
+    // storyscramble's main scene rely on this — sprite 2 picks up
+    // sprite 17's frame-21 state instead of autoplaying back to 11.
+    //
+    // By the time this runs (3s after instance creation), the SWF has
+    // already autoplayed 1→11 and AS `stop()` has parked the MovieClip.
+    // A bare `GotoFrame(N, false)` against an AS-stopped MovieClip
+    // doesn't reliably seek — we have to mirror the playFlash
+    // workaround: call `play()` first to flip the player-level paused
+    // flag, THEN `GotoFrame(N, false)` to hit MovieClip's goto_frame
+    // (which seeks AND clears the stopped flag). Frame N's own AS
+    // `stop()` then re-parks the playhead at N.
+    const live = instances.get(key);
+    // Mark ready BEFORE the seed and queue replay so the internal
+    // `live.rufflePlayer.GotoFrame(...)` calls aren't seen as targeting
+    // a not-yet-ready instance (they're the seed itself). After this
+    // point any Lingo goTo/play/stop calls bypass the queue.
+    if (live) live.ready = true;
+    if (inheritedFrame !== null && live) {
+      try {
+        live.rufflePlayer.play();
+        live.rufflePlayer.GotoFrame(inheritedFrame, false);
+      } catch (e) {
+        console.warn(`[Flash] inherit seed failed for ${key}:`, e);
+      }
+    }
+
+    // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
+    // `stop(sprite)` Lingo calls that arrived before this instance was
+    // created. Runs AFTER the inheritance seed so an explicit
+    // `gotoFrame(31)` from BS38 wins over an inherited frame 21.
+    flushPendingGoto(spriteNum);
   }
 }
 
@@ -362,7 +629,7 @@ function startFrameCapture(key: string): void {
         if (offCtx) {
           offCtx.drawImage(canvas, 0, 0);
           const imageData = offCtx.getImageData(0, 0, width, height);
-          update_flash_frame(inst.castLib, inst.castMember, width, height, new Uint8Array(imageData.data.buffer));
+          update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
         }
       }
     } catch (e) {
@@ -378,8 +645,8 @@ function startFrameCapture(key: string): void {
 /**
  * Destroy a Flash instance and clean up resources.
  */
-export function destroyFlashInstance(castLib: number, castMember: number): void {
-  const key = instanceKey(castLib, castMember);
+export function destroyFlashInstance(spriteNum: number): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return;
 
@@ -412,14 +679,34 @@ function translateLevel0(path: string): string {
   if (path.startsWith('_level0')) {
     return '_root' + path.substring('_level0'.length);
   }
+  // Director's getVariable/setVariable/callFunction accept bare names
+  // and resolve them as `_root.<name>`. Ruffle's GetVariable is strict
+  // — a bare path returns Void. Rewrite bare names (no path
+  // separator, no leading `_root`/`_level0`/`this`/`super`) into the
+  // `/:<name>` form Ruffle handles, so e.g. JunkbotUndercover's
+  // `getVariable(sprite(15), "sceneNumber")` actually reads the SWF's
+  // `_root.sceneNumber`.
+  const isBareName = !/[\/:.]/.test(path) && !/^_?(root|level\d+|this|super|parent)\b/i.test(path);
+  if (isBareName && path.length > 0) {
+    return '/:' + path;
+  }
   return path;
 }
 
-function getVariable(castLib: number, castMember: number, path: string): string | null {
-  const key = instanceKey(castLib, castMember);
+// Bridge mode (extension content scripts) can't make synchronous calls
+// across the world boundary, so the Lingo Flash getter/setter handlers
+// below can't reach the main-world Ruffle player. In bridge mode each
+// `instance.rufflePlayer` is a plain DOM element (no `GetVariable` /
+// `SetVariable` / etc.); calls fall into the existing try/catch and
+// safely return defaults. SWF playback (the path that goes through
+// `createFlashInstance` / `bridgeCallMethod`) still works; only
+// Lingo-driven Flash interactivity is degraded.
+
+function getVariable(spriteNum: number, path: string): string | null {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) {
-    console.warn(`ruffleGetVariable: no instance for ${key}`);
+    console.warn(`ruffleGetVariable: no instance for sprite#${spriteNum}`);
     flashAccessBeforeReady = true;
     return null;
   }
@@ -436,11 +723,11 @@ function getVariable(castLib: number, castMember: number, path: string): string 
  * Set a Flash variable on a Ruffle instance.
  * Called from WASM via window.dirplayer_ruffleSetVariable.
  */
-function setVariable(castLib: number, castMember: number, path: string, value: string): boolean {
-  const key = instanceKey(castLib, castMember);
+function setVariable(spriteNum: number, path: string, value: string): boolean {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) {
-    console.warn(`ruffleSetVariable: no instance for ${key}`);
+    console.warn(`ruffleSetVariable: no instance for sprite#${spriteNum}`);
     return false;
   }
 
@@ -453,22 +740,270 @@ function setVariable(castLib: number, castMember: number, path: string, value: s
 }
 
 /**
- * Go to a specific frame on a Ruffle instance.
- * Called from WASM via window.dirplayer_ruffleGoToFrame.
- * frame is 1-based (Director convention).
+ * Pre-instance method-call queue.
+ *
+ * A sprite's `beginSprite` script can call `gotoFrame(sprite, N)`,
+ * `play(sprite)`, `stop(sprite)` etc. BEFORE the renderer triggers
+ * the lazy Flash member load — so the very first calls would otherwise
+ * no-op (no instance to act on). storyscramble hits this on sprite 2's
+ * BehaviorScript 38, whose beginSprite runs `gotoFrame(31); stop()`
+ * to park the help-bubble at the "Read the words…" frame; without
+ * queueing, those calls vanish and the bubble sits at frame 11.
+ *
+ * We queue them in order and replay against the live instance once
+ * `createFlashInstance` has loaded the SWF and finished AS init
+ * (after the inheritance seed — so explicit `gotoFrame(N)` from
+ * beginSprite wins over an inherited sibling frame).
  */
-function goToFrame(castLib: number, castMember: number, frame: number): void {
-  const key = instanceKey(castLib, castMember);
-  const instance = instances.get(key);
-  if (!instance) {
-    console.warn(`ruffleGoToFrame: no instance for ${key}`);
-    return;
-  }
+type PendingOp =
+  | { kind: 'goto'; frame: number }
+  | { kind: 'gotoLabel'; label: string }
+  | { kind: 'play' }
+  | { kind: 'stop' }
+  | { kind: 'rewind' };
+const pendingOps = new Map<number, PendingOp[]>();
 
+/**
+ * Pending goto-and-pin target per sprite. Director's `the frame of
+ * sprite N = X` is implicitly gotoAndStop, but Ruffle's `GotoFrame(X,
+ * true)` (goto+stop) skips paint when the MovieClip is stopped — so the
+ * canvas stays blank. Work around it in two steps:
+ *   1. `GotoFrame(X, false)` (goto+play) — forces a paint of frame X
+ *   2. On the next browser RAF, `GotoFrame(X, true)` — stops the
+ *      MovieClip after the paint has landed
+ *
+ * The map exists so a subsequent `play(sprite N)` (BS69's
+ * `mySprite.frame=N; mySprite.play()` shrink pattern) can cancel the
+ * deferred stop before it fires — otherwise the shrink animation gets
+ * pinned at its first frame and never advances to frame 21.
+ */
+const pinTarget = new Map<number, number>();
+
+/**
+ * Numeric seek that LEAVES THE PLAYHEAD RUNNING — matches Director's
+ * `sprite(N).gotoFrame(frame)` method semantic (the Flash Asset Xtra's
+ * `gotoFrame` calls `gotoAndPlay`, not `gotoAndStop`). Used by
+ * `sprite.gotoFrame(N)` Lingo method calls; the SWF continues playing
+ * from frame N afterwards. Required for mello's Fire/Marshmello where
+ * each label points to an animated frame range that must keep playing.
+ */
+function applyGotoPlay(instance: FlashInstance, frame: number): void {
   try {
     instance.rufflePlayer.GotoFrame(frame, false);
   } catch (e) {
-    console.warn(`ruffleGoToFrame error:`, e);
+    console.warn(`[Flash gotoPlay] error:`, e);
+  }
+  // Cancel any pending pin from a previous gotoAndStop on this sprite —
+  // play-mode wins over a stale pin target.
+  pinTarget.delete(instance.spriteNum);
+}
+
+/**
+ * Label variant of applyGotoPlay. Ruffle's `GotoFrame(n, …)` only takes
+ * numeric frame indices; label resolution lives in AS1, so we call
+ * `_root.gotoAndPlay(label)` via CallFunction.
+ */
+function applyGotoLabelPlay(instance: FlashInstance, label: string): void {
+  const player = instance.rufflePlayer as unknown as {
+    CallFunction?: (path: string, args: unknown[]) => unknown;
+  };
+  if (typeof player.CallFunction !== 'function') {
+    console.warn(`[Flash gotoLabelPlay] sprite#${instance.spriteNum} player has no CallFunction`);
+    return;
+  }
+  try {
+    player.CallFunction('_root.gotoAndPlay', [label]);
+  } catch (e) {
+    console.warn(`[Flash gotoLabelPlay] error:`, e);
+  }
+}
+
+/**
+ * Numeric seek that STOPS at the target frame (gotoAndStop semantic).
+ * Director's `sprite.frame = N` property setter uses this — required for
+ * storyscramble's tiles which must pin at a poster frame (2/4/6) and not
+ * advance through the SWF's other frames. Uses a microtask-pin to avoid
+ * a render race against Ruffle's RAF; see schedulePin for the rationale.
+ */
+function applyGotoAndPin(instance: FlashInstance, frame: number): void {
+  try {
+    // Goto+play first forces Ruffle to render frame N synchronously
+    // (Ruffle skips paint for already-stopped MovieClips, so a bare
+    // gotoAndStop wouldn't show frame N until something else triggered
+    // a repaint).
+    instance.rufflePlayer.GotoFrame(frame, false);
+  } catch (e) {
+    console.warn(`[Flash goto] play-step error:`, e);
+    return;
+  }
+  pinTarget.set(instance.spriteNum, frame);
+  schedulePin(instance, frame);
+}
+
+/**
+ * Label variant of applyGotoAndPin — gotoAndPlay followed by stop via
+ * AS1 CallFunction.
+ */
+function applyGotoLabelAndPin(instance: FlashInstance, label: string): void {
+  const player = instance.rufflePlayer as unknown as {
+    CallFunction?: (path: string, args: unknown[]) => unknown;
+  };
+  if (typeof player.CallFunction !== 'function') {
+    console.warn(`[Flash gotoLabel] sprite#${instance.spriteNum} player has no CallFunction`);
+    return;
+  }
+  try {
+    player.CallFunction('_root.gotoAndPlay', [label]);
+  } catch (e) {
+    console.warn(`[Flash gotoLabel] play-step error:`, e);
+    return;
+  }
+  queueMicrotask(() => {
+    try {
+      player.CallFunction!('_root.stop', []);
+    } catch (e) {
+      console.warn(`[Flash gotoLabel] pin-step error:`, e);
+    }
+  });
+}
+
+/**
+ * Shared microtask-pin used by the numeric goto path.
+ */
+function schedulePin(instance: FlashInstance, frame: number): void {
+  // Pin via microtask, NOT requestAnimationFrame: browser RAFs fire in
+  // registration order, and Ruffle's render-loop RAF (registered first
+  // on player init) runs before ours. If Ruffle's per-frame
+  // accumulator has crossed the SWF tick interval by then, it advances
+  // the MovieClip from N to N+1, paints N+1, captureFrame snapshots
+  // N+1, and *then* our pin runs — too late to prevent the wrong
+  // frame being displayed (and Ruffle won't repaint after the stop
+  // because it skips paint on stopped MovieClips). A microtask runs
+  // after the current synchronous Lingo dispatch but BEFORE the next
+  // browser frame, so Ruffle gets no chance to tick in between. The
+  // tile poster-frame race during rapid hover (`mySprite.frame =
+  // tileFrame ± 1`) goes away.
+  queueMicrotask(() => {
+    // Only pin if no one (play/stop/rewind, or a later goto to a
+    // different frame) cleared / overwrote our target in the meantime.
+    if (pinTarget.get(instance.spriteNum) !== frame) return;
+    pinTarget.delete(instance.spriteNum);
+    try {
+      instance.rufflePlayer.GotoFrame(frame, true);
+    } catch (e) {
+      console.warn(`[Flash goto] pin-step error:`, e);
+    }
+  });
+}
+
+function queueOp(spriteNum: number, op: PendingOp): void {
+  const list = pendingOps.get(spriteNum) ?? [];
+  list.push(op);
+  pendingOps.set(spriteNum, list);
+}
+
+function flushPendingGoto(spriteNum: number): void {
+  const ops = pendingOps.get(spriteNum);
+  if (!ops || ops.length === 0) return;
+  pendingOps.delete(spriteNum);
+  const instance = instances.get(instanceKey(spriteNum));
+  if (!instance) return;
+  for (const op of ops) {
+    try {
+      switch (op.kind) {
+        case 'goto':
+          applyGotoAndPin(instance, op.frame);
+          break;
+        case 'gotoLabel':
+          applyGotoLabelAndPin(instance, op.label);
+          break;
+        case 'play':
+          // Queued `play` ops fire only on instances we just created —
+          // at which point autoplay has already started the SWF. Re-
+          // firing play() / GotoFrame(_currentframe, false) here is
+          // redundant AND visually disruptive: it seeks back to the
+          // queued goto target and makes the bubble grow animation
+          // restart from frame 1 after autoplay already played it.
+          //
+          // All we need to do is cancel any pending pin from a queued
+          // goto earlier in the same queue so the deferred stop
+          // doesn't undo the implicit play.
+          pinTarget.delete(spriteNum);
+          break;
+        case 'stop':
+          pinTarget.delete(spriteNum);
+          instance.rufflePlayer.pause();
+          break;
+        case 'rewind':
+          pinTarget.delete(spriteNum);
+          instance.rufflePlayer.GotoFrame(1, true);
+          break;
+      }
+    } catch (e) {
+      console.warn(`[Flash flush] sprite#${spriteNum} op ${op.kind} error:`, e);
+    }
+  }
+}
+
+/**
+ * `sprite(N).gotoFrame(frameOrLabel)` method call — seek and KEEP
+ * PLAYING (Director's gotoFrame is gotoAndPlay-semantic). Called from
+ * WASM via window.dirplayer_ruffleGoToFrame.
+ *
+ * The numeric-detection regex requires the entire trimmed string to be
+ * an optional sign plus digits — odd labels that happen to start with a
+ * digit (`"3frame"`) stay on the label path instead of getting
+ * parseInt'd to `3`.
+ *
+ * For the `sprite.frame = N` property setter (gotoAndStop semantic) use
+ * goToFrameAndStop below.
+ */
+function goToFrame(spriteNum: number, frameOrLabel: string): void {
+  const key = instanceKey(spriteNum);
+  const instance = instances.get(key);
+  const trimmed = frameOrLabel.trim();
+  const isNumeric = /^-?\d+$/.test(trimmed);
+
+  if (!instance || !instance.ready) {
+    if (isNumeric) {
+      queueOp(spriteNum, { kind: 'goto', frame: parseInt(trimmed, 10) });
+    } else {
+      queueOp(spriteNum, { kind: 'gotoLabel', label: frameOrLabel });
+    }
+    return;
+  }
+  if (isNumeric) {
+    applyGotoPlay(instance, parseInt(trimmed, 10));
+  } else {
+    applyGotoLabelPlay(instance, frameOrLabel);
+  }
+}
+
+/**
+ * `the frame of sprite N = X` property setter — seek and STOP (Director's
+ * frame setter is gotoAndStop-semantic). Called from WASM via
+ * window.dirplayer_ruffleGoToFrameAndStop. Used for poster-frame Flash
+ * sprites like storyscramble's tiles where the playhead must not advance
+ * past the chosen frame.
+ */
+function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
+  const key = instanceKey(spriteNum);
+  const instance = instances.get(key);
+  const trimmed = frameOrLabel.trim();
+  const isNumeric = /^-?\d+$/.test(trimmed);
+
+  if (!instance || !instance.ready) {
+    if (isNumeric) {
+      queueOp(spriteNum, { kind: 'goto', frame: parseInt(trimmed, 10) });
+    } else {
+      queueOp(spriteNum, { kind: 'gotoLabel', label: frameOrLabel });
+    }
+    return;
+  }
+  if (isNumeric) {
+    applyGotoAndPin(instance, parseInt(trimmed, 10));
+  } else {
+    applyGotoLabelAndPin(instance, frameOrLabel);
   }
 }
 
@@ -476,11 +1011,11 @@ function goToFrame(castLib: number, castMember: number, frame: number): void {
  * Call a Flash function on a Ruffle instance.
  * Called from WASM via window.dirplayer_ruffleCallFunction.
  */
-function callFunction(castLib: number, castMember: number, path: string, argsXml: string): string | null {
-  const key = instanceKey(castLib, castMember);
+function callFunction(spriteNum: number, path: string, argsXml: string): string | null {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) {
-    console.warn(`ruffleCallFunction: no instance for ${key}`);
+    console.warn(`ruffleCallFunction: no instance for sprite#${spriteNum}`);
     flashAccessBeforeReady = true;
     return null;
   }
@@ -503,10 +1038,14 @@ function callFunction(castLib: number, castMember: number, path: string, argsXml
 /**
  * Stop playback of a Ruffle instance (stays on current frame).
  */
-function stopFlash(castLib: number, castMember: number): void {
-  const key = instanceKey(castLib, castMember);
+function stopFlash(spriteNum: number): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) return;
+  if (!instance || !instance.ready) {
+    queueOp(spriteNum, { kind: 'stop' });
+    return;
+  }
+  pinTarget.delete(spriteNum);
   try {
     instance.rufflePlayer.pause();
   } catch (e) {
@@ -516,13 +1055,32 @@ function stopFlash(castLib: number, castMember: number): void {
 
 /**
  * Start/resume playback of a Ruffle instance.
+ *
+ * `mySprite.play()` must resume the SWF even after AS has called `stop()`
+ * inside the movie (e.g. storyscramble's bubble at frame 11). Ruffle's
+ * `Player::play()` only flips the player-level paused flag and doesn't
+ * clear the MovieClip's own stopped state set by AS; the playhead stays
+ * frozen and frame-21's `getURL("event: send #done")` never fires.
+ * Routing through `GotoFrame(currentFrame, false)` hits MovieClip's
+ * `goto_frame`, which both re-seats the playhead and clears that flag.
  */
-function playFlash(castLib: number, castMember: number): void {
-  const key = instanceKey(castLib, castMember);
+function playFlash(spriteNum: number): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) return;
+  if (!instance || !instance.ready) {
+    queueOp(spriteNum, { kind: 'play' });
+    return;
+  }
+  // Cancel any in-flight pin from a `mySprite.frame = N` call earlier
+  // in this same Lingo dispatch — otherwise the scheduled RAF stop
+  // would undo our play() a frame later (BS69 shrink animation).
+  pinTarget.delete(spriteNum);
   try {
     instance.rufflePlayer.play();
+    const cur = parseInt(
+      instance.rufflePlayer.GetVariable?.('/:_currentframe') || '1', 10
+    ) || 1;
+    instance.rufflePlayer.GotoFrame(cur, false);
   } catch (e) {
     console.warn(`rufflePlay error:`, e);
   }
@@ -531,10 +1089,14 @@ function playFlash(castLib: number, castMember: number): void {
 /**
  * Rewind a Ruffle instance to frame 1 and stop.
  */
-function rewindFlash(castLib: number, castMember: number): void {
-  const key = instanceKey(castLib, castMember);
+function rewindFlash(spriteNum: number): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) return;
+  if (!instance || !instance.ready) {
+    queueOp(spriteNum, { kind: 'rewind' });
+    return;
+  }
+  pinTarget.delete(spriteNum);
   try {
     instance.rufflePlayer.GotoFrame(1, true);
   } catch (e) {
@@ -545,8 +1107,8 @@ function rewindFlash(castLib: number, castMember: number): void {
 /**
  * Check if a Ruffle instance is currently playing.
  */
-function isPlaying(castLib: number, castMember: number): boolean {
-  const key = instanceKey(castLib, castMember);
+function isPlaying(spriteNum: number): boolean {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return false;
   try {
@@ -559,8 +1121,8 @@ function isPlaying(castLib: number, castMember: number): boolean {
 /**
  * Get the total frame count of a Ruffle instance.
  */
-function getFrameCount(castLib: number, castMember: number): number {
-  const key = instanceKey(castLib, castMember);
+function getFrameCount(spriteNum: number): number {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return 0;
   try {
@@ -574,8 +1136,8 @@ function getFrameCount(castLib: number, castMember: number): number {
 /**
  * Get the current frame of a Ruffle instance (1-based).
  */
-function getCurrentFrame(castLib: number, castMember: number): number {
-  const key = instanceKey(castLib, castMember);
+function getCurrentFrame(spriteNum: number): number {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return 0;
   try {
@@ -590,8 +1152,8 @@ function getCurrentFrame(castLib: number, castMember: number): number {
  * In Director, callFrame() executes the frame's scripts.
  * We implement this as goToFrame + immediate return (best effort).
  */
-function callFrame(castLib: number, castMember: number, frame: number): void {
-  const key = instanceKey(castLib, castMember);
+function callFrame(spriteNum: number, frame: number): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return;
   try {
@@ -606,29 +1168,22 @@ function callFrame(castLib: number, castMember: number, frame: number): void {
 /**
  * Find a frame label and return its frame number (1-based), or -1 if not found.
  */
-function findLabel(castLib: number, castMember: number, label: string): number {
-  const key = instanceKey(castLib, castMember);
+function findLabel(spriteNum: number, _label: string): number {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return -1;
-  try {
-    // Use TellTarget + GetVariable to find label frame
-    // Flash's /:_framesloaded and label lookup via GetVariable
-    const result = instance.rufflePlayer.GetVariable("/:_currentframe");
-    // Try navigating to the label using SetVariable approach
-    // Unfortunately there's no direct label lookup in Flash Player API
-    // Best effort: use CallFunction if the SWF has a findLabel method
-    return -1;
-  } catch (e) {
-    return -1;
-  }
+  // No direct label lookup in the legacy Flash Player JS API; if the SWF
+  // exposes a `findLabel` AS function we could call it, otherwise return
+  // -1 and let the script fall through.
+  return -1;
 }
 
 /**
  * Perform a hit test on a Ruffle instance.
  * Returns true if the point (in Flash coordinates) hits content.
  */
-function hitTest(castLib: number, castMember: number, x: number, y: number): boolean {
-  const key = instanceKey(castLib, castMember);
+function hitTest(spriteNum: number, x: number, y: number): boolean {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return false;
   try {
@@ -644,8 +1199,8 @@ function hitTest(castLib: number, castMember: number, x: number, y: number): boo
  * Get a Flash property by property number (matching Director's getFlashProperty).
  * Property numbers follow the original Flash Player property indices.
  */
-function getFlashProperty(castLib: number, castMember: number, target: string, propNum: number): string | null {
-  const key = instanceKey(castLib, castMember);
+function getFlashProperty(spriteNum: number, target: string, propNum: number): string | null {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return null;
 
@@ -673,8 +1228,8 @@ function getFlashProperty(castLib: number, castMember: number, target: string, p
 /**
  * Set a Flash property by property number.
  */
-function setFlashProperty(castLib: number, castMember: number, target: string, propNum: number, value: string): void {
-  const key = instanceKey(castLib, castMember);
+function setFlashProperty(spriteNum: number, target: string, propNum: number, value: string): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return;
 
@@ -699,8 +1254,8 @@ function setFlashProperty(castLib: number, castMember: number, target: string, p
  * Execute a tellTarget command on a Ruffle instance.
  * In Flash, tellTarget changes the target timeline for subsequent actions.
  */
-function tellTarget(castLib: number, castMember: number, target: string, action: string): void {
-  const key = instanceKey(castLib, castMember);
+function tellTarget(spriteNum: number, target: string, action: string): void {
+  const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return;
   try {
@@ -785,6 +1340,7 @@ export function initFlashBridge(): void {
   win.dirplayer_ruffleSetVariable = setVariable;
   win.dirplayer_ruffleCallFunction = callFunction;
   win.dirplayer_ruffleGoToFrame = goToFrame;
+  win.dirplayer_ruffleGoToFrameAndStop = goToFrameAndStop;
   win.dirplayer_ruffleStop = stopFlash;
   win.dirplayer_rufflePlay = playFlash;
   win.dirplayer_ruffleRewind = rewindFlash;
@@ -827,6 +1383,19 @@ export function initFlashBridge(): void {
   // Also returns true if scripts tried to access a Flash instance that doesn't exist yet
   // (the rendering loop will dispatch it shortly).
   win.dirplayer_isFlashLoading = () => flashLoadingCount > 0 || flashAccessBeforeReady;
+
+  // Hand-fired test entry for Flash `event: …` dispatch — lets you prove
+  // the WASM dispatch chain end-to-end from DevTools without waiting for
+  // a real SWF `getURL("event: …")` call. Example:
+  //   dirplayer_dispatchFlashEvent(1, 45, "send #done")
+  win.dirplayer_dispatchFlashEvent = dispatchFlashEvent;
+
+  // Mouse forwarding: dirplayer's WASM-side mouseDown/mouseUp handlers
+  // call this when the click lands on a Flash sprite, so the SWF's own
+  // AS1 button handlers actually fire (Ruffle's canvas is hidden
+  // offscreen and never receives real browser clicks). See
+  // dispatchMouseEvent above.
+  win.dirplayer_ruffleDispatchMouse = dispatchMouseEvent;
 
   // Ensure dirplayer_RufflePlayer config is set up before any instances are
   // created. Skip when the host disabled Flash — they may already have stock
@@ -889,16 +1458,8 @@ export function configureFlashManager(partial: Partial<FlashManagerConfig>): voi
   const win = window as any;
   const existing = win.__dirplayerFlashConfig || {};
   win.__dirplayerFlashConfig = { ...existing, ...partial };
-
-  // Set up the global socket URL resolver for the Multiuser Xtra (WASM side)
-  if (partial.socketProxy && partial.socketProxy.length > 0) {
-    win.dirplayerResolveSocketUrl = (host: string, port: number): string => {
-      for (const entry of partial.socketProxy!) {
-        if (entry.host === host && entry.port === port) {
-          return entry.proxyUrl;
-        }
-      }
-      return '';
-    };
-  }
+  // Note: `dirplayerResolveSocketUrl` is installed unconditionally near
+  // the top of this file and reads from `getSocketProxyConfig()` on every
+  // call, so it picks up `partial.socketProxy` automatically without
+  // needing to be re-bound here.
 }

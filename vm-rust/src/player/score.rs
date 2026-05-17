@@ -50,12 +50,21 @@ use super::{
 // src/services/flashPlayerManager.ts::initFlashBridge.
 #[wasm_bindgen]
 extern "C" {
+    // All sprite-method Flash bridge calls now key by sprite_num — each
+    // Flash sprite has its own dedicated Ruffle instance.
     #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
-    fn ruffle_is_playing(cast_lib: i32, cast_member: i32) -> bool;
+    fn ruffle_is_playing(sprite_num: i32) -> bool;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFrameCount")]
-    fn ruffle_get_frame_count(cast_lib: i32, cast_member: i32) -> i32;
+    fn ruffle_get_frame_count(sprite_num: i32) -> i32;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
-    fn ruffle_get_current_frame(cast_lib: i32, cast_member: i32) -> i32;
+    fn ruffle_get_current_frame(sprite_num: i32) -> i32;
+    /// `sprite.frame = N` semantic: seek + STOP (pin at the frame).
+    /// This is the gotoAndStop path used for poster-frame Flash sprites
+    /// like storyscramble's tiles. For `sprite(N).gotoFrame(...)` (seek +
+    /// keep playing — required by mello's Fire/Marshmello which play
+    /// looping animations under each label) use `dirplayer_ruffleGoToFrame`.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop")]
+    fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str);
 }
 
 #[derive(Clone, Debug)]
@@ -1821,12 +1830,32 @@ impl Score {
             }
         }
 
-        // Always ensure frame script instance exists for current frame
-        // This handles looping - frame scripts need to be recreated each time we enter the frame
+        // Frame script lifecycle: keep the instance alive across frames within the same
+        // span (so script properties like markList persist), discard it when the script
+        // changes or when we leave the span.
         // Frame scripts need instances so that `me` resolves to ScriptInstanceRef (not ScriptRef)
         // in their handlers — e.g., `me.spriteNum` in beginSprite/enterFrame handlers.
+        let new_script_member = self.get_script_in_frame(frame_num).map(|b| CastMemberRef {
+            cast_lib: b.cast_lib as i32,
+            cast_member: b.cast_member as i32,
+        });
+
+        // Discard the cached instance if the script has changed or no longer applies.
+        // Without this, the previous-span's instance would linger when entering a new
+        // span, and `the frame` inside a different script's beginSprite would see stale state.
+        let should_discard = reserve_player_ref(|player| {
+            player.movie.frame_script_instance.is_some()
+                && player.movie.frame_script_member != new_script_member
+        });
+        if should_discard {
+            reserve_player_mut(|player| {
+                player.movie.frame_script_instance = None;
+                player.movie.frame_script_member = None;
+            });
+        }
+
         if let Some(behavior_ref) = self.get_script_in_frame(frame_num) {
-            // Check if we need to create/recreate the frame script instance
+            // Only create when no instance is cached (covers initial entry and post-discard).
             let needs_creation = reserve_player_ref(|player| {
                 player.movie.frame_script_instance.is_none()
             });
@@ -3213,24 +3242,25 @@ pub fn sprite_get_prop(
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
-        // Flash (SWF) sprite properties
+        // Flash (SWF) sprite properties — keyed by sprite_num because
+        // each Flash sprite has its own dedicated Ruffle instance.
         "playing" => {
-            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
-                Ok(datum_bool(ruffle_is_playing(member_ref.cast_lib, member_ref.cast_member)))
+            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+                Ok(datum_bool(ruffle_is_playing(sprite_id as i32)))
             } else {
                 Ok(datum_bool(false))
             }
         }
         "frameCount" => {
-            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
-                Ok(Datum::Int(ruffle_get_frame_count(member_ref.cast_lib, member_ref.cast_member)))
+            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+                Ok(Datum::Int(ruffle_get_frame_count(sprite_id as i32)))
             } else {
                 Ok(Datum::Int(0))
             }
         }
         "currentFrame" | "frame" => {
-            if let Some(member_ref) = sprite.and_then(|s| s.member.as_ref()) {
-                Ok(Datum::Int(ruffle_get_current_frame(member_ref.cast_lib, member_ref.cast_member)))
+            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+                Ok(Datum::Int(ruffle_get_current_frame(sprite_id as i32)))
             } else {
                 Ok(Datum::Int(0))
             }
@@ -3684,6 +3714,28 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
 
     reserve_player_mut(|player| { player.stage_dirty = true; });
     let result = match prop_name {
+        // Flash (SWF) sprite frame setter — `mySprite.frame = N` on a Flash
+        // member must navigate that sprite's embedded Ruffle player, not be
+        // treated as a behaviour-property assignment. Each Flash sprite has
+        // its own Ruffle instance keyed by sprite_num, so multiple sprites
+        // sharing a single Flash cast member can independently pin to
+        // different frames (storyscramble's 3 story tiles use cast 2:1 but
+        // display poster frames 2/4/6 simultaneously).
+        "frame" | "currentFrame" => {
+            let frame_or_label = value.string_value()?;
+            let has_member = reserve_player_ref(|player| {
+                player
+                    .movie
+                    .score
+                    .get_sprite(sprite_id)
+                    .and_then(|s| s.member.as_ref().map(|_| ()))
+                    .is_some()
+            });
+            if has_member {
+                ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
+            }
+            Ok(())
+        }
         "visible" | "visibility" => borrow_sprite_mut(
             sprite_id,
             |_| {},
