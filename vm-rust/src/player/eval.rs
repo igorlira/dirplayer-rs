@@ -71,6 +71,18 @@ pub enum LingoExpr {
     ThePropOf(Box<LingoExpr>, String), // "the X of Y" constructs
     ChunkExpr(String, Box<LingoExpr>, Option<Box<LingoExpr>>, Box<LingoExpr>),
     DeleteChunk(Box<LingoExpr>), // delete <chunk_expr>
+    /// `if EXPR then COMMAND` inline form (no `else`, no `end if`). Used
+    /// by Director's text-eval contexts like `keyUpScript`, where the
+    /// assigned source is typically a single line: `if the key = "d"
+    /// then sendAllSprites(#toggleDebug)`. Multi-line `if … end if`
+    /// blocks live in the compiled bytecode path and aren't parsed by
+    /// the AST evaluator.
+    IfThen(Box<LingoExpr>, Box<LingoExpr>),
+    /// `pass` keyword — Lingo's "don't consume this event, let it
+    /// propagate". In a script-text context (where no event-dispatch
+    /// chain is being walked) it's effectively a no-op; we evaluate to
+    /// Void.
+    Pass,
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -443,6 +455,18 @@ fn get_eval_top_level_prop(
 ) -> Result<DatumRef, ScriptError> {
     if prop_name.starts_with("the ") {
         let actual_prop = &prop_name[4..];
+        // `the paramCount` reads from the current handler's scope, not the
+        // movie. Bytecode handles it via the_built_in; route AST eval too so
+        // the message window and `do` strings can read it.
+        if actual_prop.eq_ignore_ascii_case("paramCount") {
+            if player.scope_count > 0 && (player.scope_count as usize) <= player.scopes.len() {
+                let scope_idx = (player.scope_count - 1) as usize;
+                if let Some(scope) = player.scopes.get(scope_idx) {
+                    return Ok(player.alloc_datum(Datum::Int(scope.args.len() as i32)));
+                }
+            }
+            return Ok(player.alloc_datum(Datum::Int(0)));
+        }
         let result = player.get_movie_prop(actual_prop)?;
         return Ok(result);
     }
@@ -853,6 +877,30 @@ pub fn parse_lingo_rule_runtime(
             }
             Ok(LingoExpr::HandlerCall("go".to_owned(), args))
         }
+        Rule::if_inline => {
+            // `if EXPR then COMMAND` — children are the keyword nodes
+            // (if_kw, then_kw) interleaved with the condition expression
+            // and the body command. The keyword nodes carry no data
+            // beyond their text, so skip them and pick up the two
+            // non-keyword children.
+            let mut content = pair.into_inner().filter(|p| !matches!(p.as_rule(), Rule::if_kw | Rule::then_kw));
+            let cond_pair = content
+                .next()
+                .ok_or_else(|| ScriptError::new("if_inline: missing condition".to_string()))?;
+            let body_pair = content
+                .next()
+                .ok_or_else(|| ScriptError::new("if_inline: missing then-body".to_string()))?;
+            let cond = parse_lingo_rule_runtime(cond_pair, pratt)?;
+            let mut body = parse_lingo_rule_runtime(body_pair, pratt)?;
+            // Same identifier→handler-call promotion the top-level
+            // command path does — a bare identifier in command context
+            // is a no-arg handler invocation.
+            if let LingoExpr::Identifier(name) = body {
+                body = LingoExpr::HandlerCall(name, vec![]);
+            }
+            Ok(LingoExpr::IfThen(Box::new(cond), Box::new(body)))
+        }
+        Rule::pass_stmt => Ok(LingoExpr::Pass),
         Rule::handler_call | Rule::command_inline => {
             let mut inner = pair.into_inner();
             let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
@@ -1125,6 +1173,18 @@ pub fn parse_lingo_rule_runtime(
             let full_text = pair.as_str();
             // Return an identifier that will be resolved at runtime
             Ok(LingoExpr::Identifier(full_text.to_string()))
+        }
+        Rule::the_chunk_count => {
+            // `the number of <chunk_kind> in/of <expr>` — Director's legacy
+            // chunk-count form. Translates to the compound property
+            // "number of <kind>" on the target expr; the runtime get_obj_prop
+            // path on String resolves it to chunk count.
+            let mut inner = pair.into_inner();
+            let kind_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk kind after 'the number of'".to_string()))?;
+            let kind = kind_pair.as_str().to_ascii_lowercase();
+            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target after 'in'/'of'".to_string()))?;
+            let target_expr = parse_lingo_expr_runtime(target_pair.into_inner(), pratt)?;
+            Ok(LingoExpr::ThePropOf(Box::new(target_expr), format!("number of {}", kind)))
         }
         Rule::the_prop_of => {
             let mut inner = pair.into_inner();
@@ -2030,18 +2090,34 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 let left_datum = player.get_datum(&left);
                 let right_datum = player.get_datum(&right);
                 let is_eq = crate::player::compare::datum_equals(
-                    left_datum, 
-                    right_datum, 
+                    left_datum,
+                    right_datum,
                     &player.allocator
                 )?;
                 let is_gt = crate::player::compare::datum_greater_than(
-                    left_datum, 
+                    left_datum,
                     right_datum,
                     &player.allocator
                 )?;
                 Ok(player.alloc_datum(Datum::Int(if is_eq || is_gt { 1 } else { 0 })))
             })
         },
+        LingoExpr::IfThen(cond, body) => {
+            let cond_ref = Box::pin(eval_lingo_expr_ast_runtime(cond)).await?;
+            let cond_true = reserve_player_mut(|player| {
+                player.get_datum(&cond_ref).bool_value()
+            })?;
+            if cond_true {
+                Box::pin(eval_lingo_expr_ast_runtime(body)).await
+            } else {
+                Ok(DatumRef::Void)
+            }
+        }
+        LingoExpr::Pass => {
+            // `pass` in a text-eval context has no handler chain to
+            // forward to — treat as a successful no-op.
+            Ok(DatumRef::Void)
+        }
     }
 }
 
@@ -2123,8 +2199,30 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
 }
 
 pub async fn eval_lingo_command(expr: String) -> Result<DatumRef, ScriptError> {
-    let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, expr)?;
-    eval_lingo_expr_ast_runtime(&ast).await
+    // Director's runtime text-eval contexts (keyUpScript, mouseUpScript,
+    // timeoutScript, `do "…"`) often contain MULTIPLE statements separated
+    // by CR/LF. The grammar's `command_eval_expr` is `SOI ~ command ~ EOI`
+    // — a single statement — so we split first and evaluate each line as
+    // its own command. Empty lines and `--` comments are skipped.
+    // Returns the result of the LAST executed statement (matches Director
+    // `do` semantics).
+    //
+    // For a single-line input this is a fast path: one alloc + one parse.
+    let lines: Vec<&str> = expr
+        .split(|c| c == '\r' || c == '\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.starts_with("--"))
+        .collect();
+    if lines.len() <= 1 {
+        let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, expr)?;
+        return eval_lingo_expr_ast_runtime(&ast).await;
+    }
+    let mut last = DatumRef::Void;
+    for line in lines {
+        let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line.to_string())?;
+        last = eval_lingo_expr_ast_runtime(&ast).await?;
+    }
+    Ok(last)
 }
 
 // Helper functions for testing config parsing without requiring player instance

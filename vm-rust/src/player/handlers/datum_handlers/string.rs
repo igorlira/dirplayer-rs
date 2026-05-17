@@ -102,6 +102,22 @@ impl StringDatumUtils {
                     Ok(Datum::Int(frame_num))
                 })
             }
+            // Director's `the number of <chunk> in <str>` form lands here as
+            // a compound property name "number of lines/words/items/chars".
+            // Returns the chunk count.
+            "number of chars" | "number of characters" => {
+                Ok(Datum::Int(value.chars().count() as i32))
+            }
+            "number of lines" => {
+                Ok(Datum::Int(string_get_lines(value).len() as i32))
+            }
+            "number of words" => {
+                Ok(Datum::Int(string_get_words(value).len() as i32))
+            }
+            "number of items" => {
+                let delim = reserve_player_ref(|player| Ok(player.movie.item_delimiter))?;
+                Ok(Datum::Int(string_get_items(value, delim).len() as i32))
+            }
             _ => Err(ScriptError::new(format!(
                 "Invalid string built-in property {prop_name}"
             ))),
