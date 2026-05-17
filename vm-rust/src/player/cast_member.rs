@@ -2577,15 +2577,44 @@ impl CastMember {
     }
 
     fn make_swf_member(number: u32, chunk: &CastMemberChunk, data: Vec<u8>) -> CastMember {
-        let flash_info = chunk.specific_data.flash_info().cloned();
+        // For native Flash members the FlashInfo was parsed during chunk
+        // ingest (cast_member.rs:140 `MemberType::Flash` branch). For
+        // OLE-wrapped SWFs that path never fires — the chunk comes in
+        // as `MemberType::Ole` and `specific_data` is `None`. The OLE
+        // wrapper, however, still contains a "flash" / "FLSH" payload
+        // in `specific_data_raw` that FlashInfo::from can parse. Try it
+        // here so properties like `pausedAtStart`, `directToStage`,
+        // `scaleMode` etc. are populated for OLE-wrapped Flash too.
+        let flash_info = chunk
+            .specific_data
+            .flash_info()
+            .cloned()
+            .or_else(|| crate::director::enums::FlashInfo::from(&chunk.specific_data_raw));
+        // Director's `centerRegPoint=true` semantically means "draw the SWF
+        // centered on the sprite's loc". The renderer computes
+        // `screen_pos = sprite.loc - member.reg_point`, so to get a centered
+        // draw we set reg_point to (W/2, H/2) — i.e. the same outcome
+        // `sprite.loc_h - W/2` would give in a screen-position formulation,
+        // just expressed at member-construction time.
+        //
+        // Prefer the actual SWF header dimensions over FlashInfo's
+        // cached `reg_point` field: FlashInfo's value can be stale /
+        // wrong (the old code halved it, getting quarter-size offsets),
+        // while parse_swf_dimensions reads straight from the SWF's
+        // FrameSize record so it always matches what Ruffle renders.
         let reg_point = if let Some(ref info) = flash_info {
             if info.center_reg_point {
-                (info.reg_point.0 as i16, info.reg_point.1 as i16)
+                if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
+                    ((w / 2) as i16, (h / 2) as i16)
+                } else {
+                    (info.reg_point.0 as i16, info.reg_point.1 as i16)
+                }
             } else {
                 (info.origin_h as i16, info.origin_v as i16)
             }
         } else {
-            // OLE-wrapped SWF: default to center registration from SWF dimensions
+            // OLE-wrapped SWF without a parseable FlashInfo header:
+            // default to center registration from SWF dimensions
             if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
                 ((w / 2) as i16, (h / 2) as i16)
             } else {
@@ -3799,18 +3828,31 @@ impl CastMember {
                 if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager) {
                     return cm;
                 }
-                // Fallback: use first child bytes if available
+                // Fallback: use first child bytes if available. Hoist the
+                // bytes lookup BEFORE reg_point so the centered branch can
+                // read true SWF dimensions for centering (see the OLE
+                // make_swf_member site for the same rationale —
+                // FlashInfo.reg_point can be stale; parse_swf_dimensions
+                // reads the SWF FrameSize header directly).
                 let flash_info = chunk.specific_data.flash_info().cloned();
+                let bytes_opt = Self::get_first_child_bytes(member_def);
                 let reg_point = if let Some(ref info) = flash_info {
                     if info.center_reg_point {
-                        (info.reg_point.0 as i16, info.reg_point.1 as i16)
+                        if let Some((w, h)) = bytes_opt
+                            .as_deref()
+                            .and_then(Self::parse_swf_dimensions)
+                        {
+                            ((w / 2) as i16, (h / 2) as i16)
+                        } else {
+                            (info.reg_point.0 as i16, info.reg_point.1 as i16)
+                        }
                     } else {
                         (info.origin_h as i16, info.origin_v as i16)
                     }
                 } else {
                     (0, 0)
                 };
-                if let Some(bytes) = Self::get_first_child_bytes(member_def) {
+                if let Some(bytes) = bytes_opt {
                     CastMemberType::Flash(FlashMember { data: bytes, reg_point, flash_info })
                 } else {
                     warn!("Flash cast member has no data chunk or it is invalid.");

@@ -1158,17 +1158,26 @@ impl FlashInfo {
         // Header: u32 string_len + "flash" + u32 data_len + "FLSH" + u32 data_len2 + u32 count
         let str_len = reader.read_u32().unwrap_or(0) as usize;
         if str_len == 0 || bytes.len() < 4 + str_len + 16 {
+            debug!(
+                "[FlashInfo::from] bail: str_len={} too small or bytes.len()={} < {}",
+                str_len, bytes.len(), 4 + str_len + 16
+            );
             return None;
         }
         let name_bytes = reader.read_bytes(str_len).ok()?;
         let name = String::from_utf8_lossy(name_bytes).to_string();
         if name != "flash" {
+            debug!("[FlashInfo::from] bail: name={:?} != \"flash\"", name);
             return None;
         }
 
         let _data_len = reader.read_u32().unwrap_or(0);
         let fourcc = reader.read_bytes(4).ok()?;
         if fourcc != b"FLSH" {
+            debug!(
+                "[FlashInfo::from] bail: fourcc={:?} != \"FLSH\"",
+                String::from_utf8_lossy(fourcc)
+            );
             return None;
         }
         let _data_len2 = reader.read_u32().unwrap_or(0);
@@ -1189,6 +1198,11 @@ impl FlashInfo {
         let sound_enabled = u32s[15] != 0;
         let paused_at_start = u32s[16] != 0;
         let loop_enabled = u32s[17] != 0;
+        debug!(
+            "[FlashInfo] direct_to_stage={} image={} sound={} paused_at_start={} loop={} (raw u32s[14..18]={:?})",
+            direct_to_stage, image_enabled, sound_enabled, paused_at_start, loop_enabled,
+            &u32s[14..18]
+        );
         // u32s[18], u32s[19] unknown
         let scale_mode = match u32s[20] {
             1 => FlashScaleMode::NoScale,
