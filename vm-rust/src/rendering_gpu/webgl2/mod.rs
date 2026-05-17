@@ -1091,7 +1091,7 @@ impl WebGL2Renderer {
     /// Render a single sprite
     fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
         // Get sprite and member info
-        let (member_ref, mut sprite_rect, ink, blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera, w3d_extra_cams) = {
+        let (member_ref, mut sprite_rect, ink, mut blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera, w3d_extra_cams) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
@@ -1144,9 +1144,33 @@ impl WebGL2Renderer {
             }
         }
 
+        // Sprite-level `blend` on Flash members is ignored by Shockwave
+        // regardless of directToStage — Director's D8-era Flash sprite
+        // compositor doesn't apply the sprite blend value (verified
+        // against the storyscramble tile sprite: score had blend=50,
+        // Director rendered at full opacity, directToStage=false).
+        // Force blend=100 for any Flash member so we match Shockwave;
+        // without this the tile sprite shows up washed-out / gray.
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
+            if matches!(member.member_type, CastMemberType::Flash(_)) {
+                blend = 100;
+            }
+        }
+
         // Determine what kind of texture we need based on member type
         enum TextureSource {
-            Bitmap { image_ref: u32 },
+            /// `is_flash` distinguishes a captureFrame bitmap from Ruffle
+            /// (true) from a plain authored Director bitmap (false). Flash
+            /// bitmaps have their transparency already encoded in the alpha
+            /// channel via wmode='transparent', so ink modes that color-key
+            /// against sprite.bg_color must NOT also strip matching pixels
+            /// (that erases SWF artwork whose fill happens to equal the
+            /// sprite's bg). Plain bitmaps with use_alpha=true (e.g. PNGs
+            /// imported as 32-bit) still need the color-key path for ink 36
+            /// to actually do its "background transparent" job — Habbo v1's
+            /// 32-bit init bitmap with ink 36 + bg palette-index-0 relies
+            /// on it to strip black corners.
+            Bitmap { image_ref: u32, is_flash: bool },
             SolidColor { r: u8, g: u8, b: u8 },
             RenderedText {
                 cache_key: RenderedTextCacheKey,
@@ -1242,15 +1266,19 @@ impl WebGL2Renderer {
         // filmloop's sprite-dim rect, meaning the score dimensions are intentional.
         let mut filmloop_sprite_dims_match = false;
 
-        // Handle Flash member dispatch before the texture_source borrow block
+        // Handle Flash member dispatch before the texture_source borrow block.
+        // We dispatch per (sprite, cast_lib, cast_member) so multiple sprites
+        // sharing one Flash cast member each get their own Ruffle player
+        // instance — required so e.g. storyscramble's 3 story tiles can pin
+        // to different poster frames of the same SWF simultaneously.
         {
-            let flash_key = (member_ref.cast_lib, member_ref.cast_member);
-            if !player.flash_frame_buffers.contains_key(&flash_key) {
+            let dispatch_key = (channel_num, member_ref.cast_lib, member_ref.cast_member);
+            if !player.flash_sprite_loaded.contains(&dispatch_key) {
                 if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
                         debug!(
-                            "Flash dispatch check {}:{} data_len={} first_bytes={:?}",
-                            member_ref.cast_lib, member_ref.cast_member,
+                            "Flash dispatch check sprite#{} {}:{} data_len={} first_bytes={:?}",
+                            channel_num, member_ref.cast_lib, member_ref.cast_member,
                             flash_member.data.len(),
                             &flash_member.data[..3.min(flash_member.data.len())]
                         );
@@ -1258,14 +1286,21 @@ impl WebGL2Renderer {
                             let data = flash_member.data.clone();
                             let w = sprite_width.max(1) as u32;
                             let h = sprite_height.max(1) as u32;
+                            let paused_at_start = flash_member
+                                .flash_info
+                                .as_ref()
+                                .map(|fi| fi.paused_at_start)
+                                .unwrap_or(false);
                             JsApi::dispatch_flash_member_loaded(
+                                channel_num as i32,
                                 member_ref.cast_lib,
                                 member_ref.cast_member,
                                 &data,
                                 w,
                                 h,
+                                paused_at_start,
                             );
-                            player.flash_frame_buffers.insert(flash_key, 0);
+                            player.flash_sprite_loaded.insert(dispatch_key);
                         }
                     }
                 }
@@ -1430,7 +1465,7 @@ impl WebGL2Renderer {
 
             match &member.member_type {
                 CastMemberType::Bitmap(bitmap_member) => {
-                    TextureSource::Bitmap { image_ref: bitmap_member.image_ref }
+                    TextureSource::Bitmap { image_ref: bitmap_member.image_ref, is_flash: false }
                 }
                 CastMemberType::Shape(shape_member) => {
                     // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
@@ -2292,12 +2327,15 @@ impl WebGL2Renderer {
                     }
                 }
                 CastMemberType::Flash(_) => {
-                    let key = (member_ref.cast_lib, member_ref.cast_member);
-                    match player.flash_frame_buffers.get(&key).copied() {
+                    // Each sprite has its own Ruffle player instance (lazy-
+                    // created above on first render), so the per-sprite
+                    // bitmap is the only source we read here.
+                    let bitmap_ref_opt = player.flash_frame_buffers.get(&channel_num).copied();
+                    match bitmap_ref_opt {
                         Some(bitmap_ref) if bitmap_ref != 0 => {
-                            TextureSource::Bitmap { image_ref: bitmap_ref }
+                            TextureSource::Bitmap { image_ref: bitmap_ref, is_flash: true }
                         }
-                        _ => return, // Not ready yet; dispatch handled below
+                        _ => return, // Instance not ready yet; first frame hasn't arrived.
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
@@ -2424,7 +2462,7 @@ impl WebGL2Renderer {
 
         // Get bitmap info for palette reference, bit depth, and use_alpha (only used for bitmap sprites)
         let (bitmap_palette_ref, bitmap_bit_depth, bitmap_use_alpha) = match &texture_source {
-            TextureSource::Bitmap { image_ref } => {
+            TextureSource::Bitmap { image_ref, .. } => {
                 match player.bitmap_manager.get_bitmap(*image_ref) {
                     Some(bitmap) => {
                         (bitmap.palette_ref.clone(), bitmap.original_bit_depth, bitmap.use_alpha)
@@ -2565,7 +2603,7 @@ impl WebGL2Renderer {
         let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
         let tex = match texture_source {
-            TextureSource::Bitmap { image_ref } => {
+            TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
                 let sprite_bg_for_matte = if ink == 7 || ink == 8 || ink == 9 || ink == 36 || ink == 37 || ink == 39 || ink == 40 || ink == 41 {
                     Some(bg_color_rgb)
@@ -2573,7 +2611,7 @@ impl WebGL2Renderer {
                     None
                 };
 
-                match self.get_or_create_texture(player, &member_ref, image_ref, ink, colorize_params, sprite_bg_for_matte) {
+                match self.get_or_create_texture(player, &member_ref, image_ref, ink, colorize_params, sprite_bg_for_matte, is_flash) {
                     Some((tex, _w, _h)) => tex,
                     None => return,
                 }
@@ -2708,6 +2746,11 @@ impl WebGL2Renderer {
 
                 let cache_key = TextureCacheKey {
                     member_ref: member_ref.clone(),
+                    // Filmloops don't share a per-sprite bitmap pool like
+                    // Flash members do — one filmloop member renders the
+                    // same offscreen for every sprite that draws it, so 0
+                    // works as a sentinel here.
+                    image_ref: 0,
                     ink: ink as i32,
                     colorize: None,
                     sprite_bg_color: None,
@@ -3440,6 +3483,13 @@ impl WebGL2Renderer {
     /// Colorize parameters: (has_fore, has_back, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b)
     /// sprite_bg_color: The sprite's bgColor, used for ink 8 matte computation on indexed bitmaps
     /// mask_bitmap: For ink 9 (Mask), the next cast member's bitmap used as grayscale alpha mask
+    /// is_flash_bitmap: True when this bitmap is a Ruffle captureFrame buffer
+    /// (sourced from a Flash sprite via wmode='transparent'). Such bitmaps
+    /// have their transparency authoritatively encoded in the alpha channel;
+    /// secondary ink-36-style color-keying against sprite.bg_color would
+    /// destructively strip artwork whose fill happens to equal the bg.
+    /// Plain authored 32-bit bitmaps with embedded alpha (PNG imports) still
+    /// need the color-key to make ink 36 actually do its job.
     fn bitmap_to_rgba(
         bitmap: &Bitmap,
         palettes: &crate::player::bitmap::palette_map::PaletteMap,
@@ -3447,6 +3497,7 @@ impl WebGL2Renderer {
         colorize: Option<(bool, bool, u8, u8, u8, u8, u8, u8)>,
         sprite_bg_color: Option<(u8, u8, u8)>,
         mask_bitmap: Option<&Bitmap>,
+        is_flash_bitmap: bool,
     ) -> Vec<u8> {
         let width = bitmap.width as usize;
         let height = bitmap.height as usize;
@@ -3784,18 +3835,30 @@ impl WebGL2Renderer {
                     // For ink 0 (Copy) without matte: always fully opaque
                     255
                 } else if use_embedded_alpha {
-                    // 32-bit with use_alpha (non-ink-0): use embedded alpha directly, ignore any matte
+                    // 32-bit with use_alpha (non-ink-0): use embedded alpha
+                    // directly, ignore any matte.
                     let index = (y * width + x) * 4;
                     let embedded_a = if index + 3 < bitmap.data.len() {
                         bitmap.data[index + 3]
                     } else {
                         255
                     };
-                    // For ink 36 (BgTransparent): also color-key bgColor pixels
-                    if ink == 36 {
+                    // Ink 36 (Background Transparent) ALSO color-keys
+                    // against sprite.bg_color — BUT only for plain
+                    // authored bitmaps. Flash captureFrame bitmaps
+                    // (`is_flash_bitmap=true`) have their transparency
+                    // already encoded by Ruffle's wmode='transparent'
+                    // treatment, so layering a second key would
+                    // destructively strip SWF artwork whose fill happens
+                    // to equal sprite.bg_color (storyscramble's chat
+                    // bubble: white-filled bubble + sprite bg=white →
+                    // entire bubble erased). Plain 32-bit-with-alpha
+                    // members (Habbo v1's `init` member is one) still
+                    // need the key so ink 36 can actually do its job.
+                    if ink == 36 && !is_flash_bitmap {
                         if let Some(bg) = sprite_bg_color {
                             if (r, g, b) == bg {
-                                0 // bgColor pixel → transparent
+                                0
                             } else {
                                 embedded_a
                             }
@@ -4225,6 +4288,7 @@ impl WebGL2Renderer {
         ink: i32,
         colorize: Option<(bool, bool, u8, u8, u8, u8, u8, u8)>,
         sprite_bg_color: Option<(u8, u8, u8)>,
+        is_flash_bitmap: bool,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         // For inks that need matte, ensure create_matte is called first
         // This matches Canvas2D behavior in rendering.rs
@@ -4281,6 +4345,7 @@ impl WebGL2Renderer {
         };
         let cache_key = TextureCacheKey {
             member_ref: member_ref.clone(),
+            image_ref,
             ink,
             colorize,
             sprite_bg_color: cache_key_bg_color,
@@ -4320,7 +4385,7 @@ impl WebGL2Renderer {
             None
         };
 
-        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref());
+        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), is_flash_bitmap);
 
         // Validate data size
         let expected_size = (width * height * 4) as usize;
