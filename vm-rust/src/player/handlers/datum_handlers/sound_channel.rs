@@ -1050,11 +1050,28 @@ impl SoundManager {
         self.channels.get(channel).cloned()
     }
 
-    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
+    pub fn update(&self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
+        // Takes `&self` (not `&mut self`) so callers can hand in
+        // `player.sound_manager` without double-borrowing the player
+        // — the channels live inside Rc<RefCell<…>> and provide their
+        // own interior mutability, so we don't actually need to mutate
+        // the SoundManager itself here.
+        //
+        // Fast-path: skip the borrow_mut + dispatch loop entirely when
+        // there's nothing to update. This is called once per frame from
+        // the global frame loop, so the steady state (no playing
+        // sounds, no fades) shouldn't pay for an N-channel iteration
+        // every frame. The per-channel `update` is itself an early-
+        // return when idle, but the borrow_mut on Rc<RefCell<…>> still
+        // costs a refcell counter touch per call.
+        let any_active = self.channels.iter().any(|c| {
+            let ch = c.borrow();
+            ch.is_fading || ch.status == SoundStatus::Playing
+        });
+        if !any_active {
+            return Ok(());
+        }
         for channel in &self.channels {
-            // debug: log that update tick is processing this channel
-            debug!("[CH{}] update tick", channel.borrow().channel_num);
-
             channel.borrow_mut().update(delta_time, player)?;
         }
         Ok(())
@@ -1433,26 +1450,34 @@ impl SoundChannel {
     async fn play_current_segment_async(channel_rc: Rc<RefCell<Self>>) {
         use web_sys::console;
 
-        // quick checks and gather data while holding short borrow
-        let (member_ref, audio_context, channel_num, is_decoding) = {
-            let ch = channel_rc.borrow();
-            let idx = match ch.current_segment_index {
-                Some(i) => i,
-                None => {
-                    warn!("⚠️ No current segment to play");
-                    return;
-                }
-            };
+        // `current_segment_index` may have been reset to `None` between
+        // `handle_play`'s spawn and this task actually running.
+        // Canonical trigger: JunkbotUndercover's intro — `handle_play`
+        // sets index=Some(0) + status=Playing + spawns; before the
+        // spawn runs, `SndCheckPlaylist`'s per-frame `SndLinearQueue`
+        // sees `playlist[1..].count < 1` (single-entry playlist) and
+        // calls `setPlayList([:])` then `setPlayList([new entries])`.
+        // The second call sees `status==Playing` and clears the
+        // segment index — leaving playlist_segments populated but
+        // index=None. Falling back to segment 0 keeps playback alive
+        // in that race; otherwise we silently bail and `status` stays
+        // Playing forever with no actual audio.
+        let (member_ref, channel_num, is_decoding) = {
+            let mut ch = channel_rc.borrow_mut();
+            if ch.current_segment_index.is_none() && !ch.playlist_segments.is_empty() {
+                ch.current_segment_index = Some(0);
+            }
+            let idx = ch.current_segment_index.unwrap_or(0);
             let seg = match ch.playlist_segments.get(idx) {
                 Some(s) => s.clone(),
                 None => {
-                    warn!("⚠️ Invalid segment index");
+                    warn!("⚠️ Invalid segment index {} (segments={})",
+                          idx, ch.playlist_segments.len());
                     return;
                 }
             };
             (
                 seg.member_ref.clone(),
-                ch.audio_context.clone().expect("Audio context not initialized"),
                 ch.channel_num,
                 ch.is_decoding.clone(),
             )
@@ -1945,19 +1970,39 @@ impl SoundChannel {
 
                 drop(ch);
 
-                // Set up ended callback
+                // Set up ended callback. Generation guard: when a previous
+                // source was explicitly stopped via `stop_with_when(0.0)`
+                // (from `play_file`'s reentrant `stop_playback_nodes()`
+                // call), its `ended` event fires asynchronously and can
+                // land AFTER a NEW source has already been wired up on
+                // this channel. Without this guard the stale closure
+                // would null the new source's state and trigger an
+                // erroneous `start_next_segment` mid-playback —
+                // exactly the JunkbotUndercover playlist-advancement
+                // bug (every "real" segment end was followed by a
+                // stale-callback segment skip).
                 let self_rc_clone2 = self_rc_clone.clone();
+                let ended_generation = my_generation;
                 let closure = Closure::<dyn FnMut()>::new(move || {
+                    let current_gen = {
+                        let ch = self_rc_clone2.borrow();
+                        *ch.decode_generation.borrow()
+                    };
+                    if current_gen != ended_generation {
+                        debug!("⏭️ Channel {} stale ended (gen {} != {})",
+                            channel_num, ended_generation, current_gen);
+                        return;
+                    }
                     debug!("🔚 Channel {} sound ended", channel_num);
 
                     let mut ch = self_rc_clone2.borrow_mut();
-                    
+
                     // Only proceed if we were actually playing (not stopped early)
                     if ch.status != SoundStatus::Playing {
                         warn!("⚠️ Channel {} was already stopped, ignoring ended event", channel_num);
                         return;
                     }
-                    
+
                     ch.status = SoundStatus::Idle;
                     ch.source_node = None;
                     ch.start_next_segment();
@@ -2273,18 +2318,35 @@ impl SoundChannel {
             source.set_loop(false);
         }
 
+        // Generation guard — see the PCM-resample path for full rationale.
+        // tl;dr: `stop_playback_nodes()` triggers an async `ended` event
+        // on the source it stops, and that event can land after a new
+        // source has been wired up on the same channel. Without this
+        // check the stale callback would null `source_node` and fire
+        // an erroneous `start_next_segment` mid-playback (the
+        // JunkbotUndercover playlist-advancement bug).
+        let ended_generation = my_generation;
         let closure = Closure::<dyn FnMut()>::new(move || {
+            let current_gen = {
+                let ch = self_rc_clone.borrow();
+                *ch.decode_generation.borrow()
+            };
+            if current_gen != ended_generation {
+                debug!("⏭️ Channel {} stale MP3 ended (gen {} != {})",
+                    channel_num, ended_generation, current_gen);
+                return;
+            }
             debug!("🔚 Channel {} MP3 ended", channel_num);
-            
+
             let mut ch = self_rc_clone.borrow_mut();
             debug!("Setting status from {:?} to Idle", ch.status);
-            
+
             // Only proceed if we were actually playing (not stopped early)
             if ch.status != SoundStatus::Playing {
                 warn!("⚠️ Channel {} was already stopped, ignoring ended event", channel_num);
                 return;
             }
-            
+
             ch.status = SoundStatus::Idle;
             ch.source_node = None;  // Clear the source node
             ch.start_next_segment();
@@ -3665,16 +3727,18 @@ impl SoundChannel {
 
         self.elapsed_time += delta_time;
 
-        // Safety net: if elapsed time exceeds the sound duration, force status
-        // to Idle. The onended callback should handle this, but it can fire late
-        // due to async decode/resampling overhead.
-        if self.sample_rate > 0 && self.sample_count > 0 && self.loop_count != 0 {
-            let duration_secs = self.sample_count as f64 / self.sample_rate as f64;
-            if self.elapsed_time > duration_secs + 0.1 {
-                self.status = SoundStatus::Idle;
-                self.source_node = None;
-            }
-        }
+        // Note: previously had a "safety net" here that forced status to
+        // Idle when `elapsed_time > sample_count/sample_rate + 0.1s`.
+        // That heuristic used Director's authored duration (from the cast
+        // member header) which can be *shorter* than the actual Web Audio
+        // buffer length — MP3 decode produces extra samples vs the
+        // ADPCM-authored sample_count, for instance (JunkbotUndercover's
+        // mi_l1: authored 2.001s, decoded 2.376s). The safety net would
+        // fire mid-playback, set status=Idle, and the real `ended`
+        // event then bailed on the `status != Playing` check — breaking
+        // playlist advancement after the first segment ended naturally.
+        // Trust the `ended` event; `stop_playback_nodes` handles
+        // explicit interruption.
 
         Ok(())
     }
@@ -3684,7 +3748,18 @@ impl SoundChannel {
         // Set status to Idle FIRST, before stopping the source
         // This prevents the onended callback from calling start_next_segment
         self.status = SoundStatus::Idle;
-        
+
+        // Bump the generation BEFORE we trigger source.stop_with_when —
+        // the resulting `ended` event will fire async, and by then a
+        // new source may already be wired up. The ended closure compares
+        // its captured `ended_generation` against the current
+        // `decode_generation`; a mismatch means stale-callback → ignore.
+        // Without this, an explicit stop on channel 1 (e.g. play_file's
+        // pre-emption when looping a playlist) would later null the
+        // new segment's source_node and trigger an erroneous
+        // start_next_segment, advancing the playlist by an extra step.
+        *self.decode_generation.borrow_mut() += 1;
+
         if let Some(source) = self.source_node.take() {
             debug!("🛑 Stopping channel {}", self.channel_num);
             let _ = source.stop_with_when(0.0);
@@ -3699,7 +3774,7 @@ impl SoundChannel {
         self.source_node = None;
         self.gain_node = None;
         self.pan_node = None;
-        
+
         // Cancel any in-progress async decode by clearing the flag
         *self.is_decoding.borrow_mut() = false;
     }
