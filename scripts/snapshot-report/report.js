@@ -2,12 +2,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Wire up compare sliders (suite pages)
   document.querySelectorAll('.compare-imgs[data-compare]').forEach(imgs => {
     const range  = imgs.querySelector('.compare-range');
-    const imgOut = imgs.querySelector('.img-out');
+    const imgRef = imgs.querySelector('.img-ref');
     const line   = imgs.querySelector('.compare-line');
 
     function update(v) {
       const pct = Number(v);
-      imgOut.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+      imgRef.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
       line.style.left = `${pct}%`;
     }
 
