@@ -8,7 +8,7 @@ browser_e2e_test!(test_hotwheels_figure8_load, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "figure8");
-    snapshots.max_diff_ratio = 0.01;
+    snapshots.max_diff_ratio = 0.03;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;

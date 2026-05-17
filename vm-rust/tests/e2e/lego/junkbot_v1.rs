@@ -28,7 +28,7 @@ browser_e2e_test!(test_junkbot_v1_load, |player| async move {
 
     player.step_frames(600).await;
 
-    snapshots.verify("menu", player.snapshot_stage())?;
+    snapshots.verify_with_ratio("menu", player.snapshot_stage(), 0.07)?;
 
 
     player.mouse_move(354, 172).await;

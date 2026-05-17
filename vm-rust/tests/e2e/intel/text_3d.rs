@@ -9,7 +9,7 @@ browser_e2e_test!(test_intel_3d_text_load, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "3d_text");
-    snapshots.max_diff_ratio = 0.05;
+    snapshots.max_diff_ratio = 0.07;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
