@@ -191,6 +191,13 @@ impl Movie {
             "mouseDown" => {
                 Ok(datum_bool(self.mouse_down))
             },
+            // `the mouseUp` is the inverse of `the mouseDown` — true while
+            // the mouse button is in the up (released) state. Director uses
+            // this in per-frame polling like storyscramble's Draggable
+            // behavior (`if the mouseUp then …`) to detect button release.
+            "mouseUp" => {
+                Ok(datum_bool(!self.mouse_down))
+            },
             "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
             "rollOver" => {
@@ -251,13 +258,21 @@ impl Movie {
                 })
             },
             "labelList" => {
-                let s = self
-                    .score
-                    .frame_labels
-                    .iter()
-                    .map(|fl| fl.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\r");
+                // Director's `the labelList` ends each label (including the
+                // last) with a `\r`, so `the number of lines in the labelList`
+                // returns label_count + 1 — script idioms like
+                //   numMarkers = the number of lines in the labelList
+                //   repeat with i = 1 to numMarkers
+                //     L = (the labelList).line[i]
+                //     ...
+                // expect the trailing empty line to be present (the last
+                // iteration sees L = "") so downstream lists end with the
+                // same shape they would in Director.
+                let mut s = String::new();
+                for fl in &self.score.frame_labels {
+                    s.push_str(&fl.label);
+                    s.push('\r');
+                }
                 Ok(Datum::String(s))
             },
             "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
