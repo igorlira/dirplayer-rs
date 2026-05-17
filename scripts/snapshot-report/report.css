@@ -202,14 +202,14 @@ main {
   line-height: 0;
 }
 
-.img-ref {
+.img-out {
   display: block;
   width: 100%;
   max-height: 380px;
   object-fit: contain;
 }
 
-.img-out {
+.img-ref {
   position: absolute;
   inset: 0;
   width: 100%;
