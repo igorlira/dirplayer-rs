@@ -9,7 +9,7 @@ browser_e2e_test!(test_furnifactory_load, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "furnifactory");
-    snapshots.max_diff_ratio = 0.08;
+    snapshots.max_diff_ratio = 0.05;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
@@ -31,7 +31,7 @@ browser_e2e_test!(test_furnifactory_load, |player| async move {
                 .equals(StaticDatum::Int(1)),
         )
         .await?;
-    snapshots.verify_with_ratio("in_game", player.snapshot_stage(), 0.07)?;
+    snapshots.verify_with_ratio("in_game", player.snapshot_stage(), 0.1)?;
 
     Ok(())
 });

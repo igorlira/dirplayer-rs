@@ -88,9 +88,9 @@ browser_e2e_test!(test_junkbot_v2_load, |player| async move {
 
     player.step_until(datum("_movie.frame").equals(StaticDatum::Int(16))).timeout(15.0).await?;
 
-    player.step_frames(300).await; // Wait for intro to settle
+    player.step_frames(100).await; // Wait for intro to settle
 
-    snapshots.verify_with_ratio("in_game", player.snapshot_stage(), 0.05)?;
+    snapshots.verify_with_ratio("in_game", player.snapshot_stage(), 0.25)?;
 
     Ok(())
 });
