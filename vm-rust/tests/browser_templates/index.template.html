@@ -36,10 +36,10 @@
     };
     window.__pendingSnapshots = 0;
     window.__snapshotErrors = [];
-    window.__saveSnapshot = function(suite, name, base64png, maxDiffRatio) {
+    window.__saveSnapshot = function(suite, name, base64png, maxDiffRatio, pixelTolerance) {
       if (window.__playwrightSaveSnapshot) {
         window.__pendingSnapshots++;
-        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0).then(function(result) {
+        window.__playwrightSaveSnapshot(suite, name, base64png, maxDiffRatio || 0, pixelTolerance || 0).then(function(result) {
           window.__pendingSnapshots--;
           if (!result) return;
           if (result.ok) {

@@ -25,7 +25,8 @@ interface TestResults {
 function compareSnapshots(
   actualPath: string,
   referencePath: string,
-  diffPath: string | null
+  diffPath: string | null,
+  pixelTolerance: number = 0
 ): { diffRatio: number; diffPixels: number; totalPixels: number } {
   const actual = PNG.sync.read(fs.readFileSync(actualPath));
   const reference = PNG.sync.read(fs.readFileSync(referencePath));
@@ -48,7 +49,7 @@ function compareSnapshots(
     const dg = Math.abs(actual.data[off + 1] - reference.data[off + 1]);
     const db = Math.abs(actual.data[off + 2] - reference.data[off + 2]);
     const da = Math.abs(actual.data[off + 3] - reference.data[off + 3]);
-    const changed = Math.max(dr, dg, db, da) > 0;
+    const changed = Math.max(dr, dg, db, da) > pixelTolerance;
     if (changed) diffPixels++;
 
     if (diffImg) {
@@ -82,7 +83,8 @@ function processSnapshot(
   suitePath: string,
   name: string,
   base64data: string,
-  maxDiffRatio: number
+  maxDiffRatio: number,
+  pixelTolerance: number = 0
 ): string {
   const slashIdx = suitePath.indexOf("/");
   const suite = slashIdx >= 0 ? suitePath.substring(0, slashIdx) : suitePath;
@@ -115,7 +117,7 @@ function processSnapshot(
 
   const diffDir = path.join(SNAPSHOTS_BASE, "diff", suite, "browser", testName);
   const diffPath = path.join(diffDir, fileName);
-  const diff = compareSnapshots(outputPath, referencePath, diffPath);
+  const diff = compareSnapshots(outputPath, referencePath, diffPath, pixelTolerance);
   if (diff.diffRatio > maxDiffRatio) {
     throw new Error(
       `Snapshot '${suite}/browser/${testName}/${name}' differs from reference: ` +
@@ -134,9 +136,9 @@ test("browser e2e tests", async ({ page }) => {
   // Expose snapshot handler so snapshots are saved as they're taken
   await page.exposeFunction(
     "__playwrightSaveSnapshot",
-    async (suite: string, name: string, data: string, maxDiffRatio: number) => {
+    async (suite: string, name: string, data: string, maxDiffRatio: number, pixelTolerance: number = 0) => {
       try {
-        const status = processSnapshot(suite, name, data, maxDiffRatio);
+        const status = processSnapshot(suite, name, data, maxDiffRatio, pixelTolerance);
         return { ok: true, status };
       } catch (err: any) {
         const msg = err?.message ?? String(err);

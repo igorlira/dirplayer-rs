@@ -173,7 +173,7 @@ impl StageSnapshot {
     /// Returns `Ok(Some(ratio))` when a comparison was made and passed,
     /// `Ok(None)` when there is no reference or the reference was updated,
     /// and `Err` when the diff exceeds the threshold.
-    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64) -> Result<Option<f64>, String> {
+    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64, pixel_tolerance: u8) -> Result<Option<f64>, String> {
         let (suite, test) = snapshot_path.split_once('/')
             .unwrap_or((snapshot_path, "default"));
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -223,7 +223,7 @@ impl StageSnapshot {
                 let db = (self.data[off+2] as i16 - reference_raw[off+2] as i16).unsigned_abs() as u8;
                 let da = (self.data[off+3] as i16 - reference_raw[off+3] as i16).unsigned_abs() as u8;
                 let ch_max = dr.max(dg).max(db).max(da);
-                if ch_max > 0 {
+                if ch_max > pixel_tolerance {
                     diff_pixels += 1;
                     max_diff = max_diff.max(ch_max);
                     // Red highlight for changed pixels
