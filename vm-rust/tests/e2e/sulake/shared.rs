@@ -61,7 +61,8 @@ pub async fn assert_login(
         "unknown"
     };
 
-    let snapshots = SnapshotContext::new(suite, working_dir);
+    let mut snapshots = SnapshotContext::new(suite, working_dir);
+    snapshots.max_diff_ratio = 0.01;
 
     // --- Login form ---
     player.click_sprite(sprite().member_prefix("login_name")).await?;

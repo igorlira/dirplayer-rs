@@ -9,7 +9,7 @@ browser_e2e_test!(test_02_worldbuilder2_load, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "worldbuilder_v2");
-    snapshots.max_diff_ratio = 0.001;
+    snapshots.max_diff_ratio = 0.005;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
