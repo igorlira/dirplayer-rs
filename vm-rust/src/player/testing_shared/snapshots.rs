@@ -59,6 +59,11 @@ pub struct SnapshotContext {
     pub suite: String,
     pub test: String,
     pub max_diff_ratio: f64,
+    /// Per-pixel tolerance: a pixel is only counted as "changed" when the
+    /// maximum absolute difference across all channels exceeds this value.
+    /// Use this to absorb minor GPU/browser color-rounding differences (e.g.
+    /// set to 4 to tolerate ±4 per channel without masking real regressions).
+    pub pixel_tolerance: u8,
 }
 
 impl SnapshotContext {
@@ -67,6 +72,7 @@ impl SnapshotContext {
             suite: suite.to_string(),
             test: test.to_string(),
             max_diff_ratio: 0.006,
+            pixel_tolerance: 4,
         }
     }
 
@@ -83,13 +89,13 @@ impl SnapshotContext {
 
         // Browser: emit to the JS collector; logging happens async via __saveSnapshot callback.
         #[cfg(target_arch = "wasm32")]
-        emit_snapshot(&snapshot_path, name, &output, max_diff_ratio);
+        emit_snapshot(&snapshot_path, name, &output, max_diff_ratio, self.pixel_tolerance);
 
         // Native: compare synchronously and log the result in one line.
         #[cfg(not(target_arch = "wasm32"))]
         {
             match crate::player::testing::StageSnapshot::from_output(output)
-                .assert_snapshot(&snapshot_path, name, max_diff_ratio)
+                .assert_snapshot(&snapshot_path, name, max_diff_ratio, self.pixel_tolerance)
             {
                 Ok(Some(ratio)) => super::log_test_action(&format!(
                     "Snapshot: {} — {:.3}% diff", name, ratio * 100.0
@@ -107,7 +113,7 @@ impl SnapshotContext {
 
 /// Emit a snapshot result. On browser, sends to the JS snapshot collector.
 /// On native, this is a no-op (native tests handle snapshots via StageSnapshot).
-pub fn emit_snapshot(suite: &str, name: &str, output: &SnapshotOutput, max_diff_ratio: f64) {
+pub fn emit_snapshot(suite: &str, name: &str, output: &SnapshotOutput, max_diff_ratio: f64, pixel_tolerance: u8) {
     #[cfg(target_arch = "wasm32")]
     {
         if let SnapshotOutput::Base64Png(base64) = output {
@@ -120,9 +126,10 @@ pub fn emit_snapshot(suite: &str, name: &str, output: &SnapshotOutput, max_diff_
             args.push(&wasm_bindgen::JsValue::from_str(name));
             args.push(&wasm_bindgen::JsValue::from_str(base64));
             args.push(&wasm_bindgen::JsValue::from_f64(max_diff_ratio));
+            args.push(&wasm_bindgen::JsValue::from_f64(pixel_tolerance as f64));
             save_fn.apply(&wasm_bindgen::JsValue::NULL, &args).unwrap();
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    { let _ = (suite, name, output, max_diff_ratio); }
+    { let _ = (suite, name, output, max_diff_ratio, pixel_tolerance); }
 }
