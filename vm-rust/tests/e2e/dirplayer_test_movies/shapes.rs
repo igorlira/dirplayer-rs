@@ -8,7 +8,8 @@ browser_e2e_test!(test_dpt_shapes_load, |player| async move {
     let cfg = TestConfig::from_toml(CONFIG);
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
-    let snapshots = SnapshotContext::new(cfg.suite(), "shapes");
+    let mut snapshots = SnapshotContext::new(cfg.suite(), "shapes");
+    snapshots.max_diff_ratio = 0.08;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;

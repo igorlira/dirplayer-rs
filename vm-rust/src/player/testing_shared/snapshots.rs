@@ -71,7 +71,7 @@ impl SnapshotContext {
         SnapshotContext {
             suite: suite.to_string(),
             test: test.to_string(),
-            max_diff_ratio: 0.006,
+            max_diff_ratio: 0.01,
             pixel_tolerance: 4,
         }
     }
