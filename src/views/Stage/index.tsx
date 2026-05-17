@@ -37,6 +37,19 @@ import styles from "./styles.module.css";
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
 
+// Snap the CSS scale so that (cssScale × devicePixelRatio) is an integer,
+// guaranteeing one physical-pixel-wide columns/rows per canvas pixel.
+// At 125% Windows DPI (DPR=1.25), scale=1.0 would give 1.25 physical pixels
+// per source pixel, causing pixel-walking. Snapping to round(1.25)/1.25=0.8
+// gives 1:1 physical pixel mapping instead.
+// Only applied when upscaling (physicalScale >= 1); downscaling is left alone.
+function getEffectiveScale(scale: number): number {
+  const dpr = (typeof window !== "undefined" ? window.devicePixelRatio : null) ?? 1;
+  const physicalScale = scale * dpr;
+  if (physicalScale < 1) return scale;
+  return Math.round(physicalScale) / dpr;
+}
+
 function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
   return (
     <div>
@@ -175,7 +188,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   const scaleRef = useRef(scale);
   const panRef = useRef(pan);
   const panModeRef = useRef(panMode);
-  useEffect(() => { scaleRef.current = scale; }, [scale]);
+  const effectiveScaleRef = useRef(getEffectiveScale(scale));
+  useEffect(() => {
+    scaleRef.current = scale;
+    effectiveScaleRef.current = getEffectiveScale(scale);
+  }, [scale]);
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { panModeRef.current = panMode; }, [panMode]);
 
@@ -254,9 +271,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     if (!outerWidth || !outerHeight) return;
     if (!userHasPannedRef.current) {
       if (stageWidth && stageHeight) {
+        const es = getEffectiveScale(scaleRef.current);
         setPan({
-          x: (outerWidth - stageWidth) / 2,
-          y: (outerHeight - stageHeight) / 2,
+          x: (outerWidth - stageWidth * es) / 2,
+          y: (outerHeight - stageHeight * es) / 2,
         });
       }
       return;
@@ -285,10 +303,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       if (e.ctrlKey) {
         const factor = Math.pow(0.99, e.deltaY);
         const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scaleRef.current * factor));
-        const anchorX = (cx - panRef.current.x) / scaleRef.current;
-        const anchorY = (cy - panRef.current.y) / scaleRef.current;
+        const anchorX = (cx - panRef.current.x) / effectiveScaleRef.current;
+        const anchorY = (cy - panRef.current.y) / effectiveScaleRef.current;
+        const newEffectiveScale = getEffectiveScale(newScale);
         setScale(newScale);
-        setPan({ x: cx - anchorX * newScale, y: cy - anchorY * newScale });
+        setPan({ x: cx - anchorX * newEffectiveScale, y: cy - anchorY * newEffectiveScale });
       } else {
         setPan(prev => ({ x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
       }
@@ -407,8 +426,8 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
 
   function outerToCanvas(p: Pt): Pt {
     return {
-      x: (p.x - panRef.current.x) / scaleRef.current,
-      y: (p.y - panRef.current.y) / scaleRef.current,
+      x: (p.x - panRef.current.x) / effectiveScaleRef.current,
+      y: (p.y - panRef.current.y) / effectiveScaleRef.current,
     };
   }
 
@@ -533,8 +552,8 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         initialDist: dist || 1,
         initialScale: scaleRef.current,
         initialAnchor: {
-          x: (centroid.x - panRef.current.x) / scaleRef.current,
-          y: (centroid.y - panRef.current.y) / scaleRef.current,
+          x: (centroid.x - panRef.current.x) / effectiveScaleRef.current,
+          y: (centroid.y - panRef.current.y) / effectiveScaleRef.current,
         },
       };
       suppressCanvasUntilReleaseRef.current = true;
@@ -578,10 +597,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       const g = gestureRef.current;
       let newScale = g.initialScale * (dist / g.initialDist);
       newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+      const newEffectiveScale = getEffectiveScale(newScale);
       setScale(newScale);
       setPan({
-        x: centroid.x - g.initialAnchor.x * newScale,
-        y: centroid.y - g.initialAnchor.y * newScale,
+        x: centroid.x - g.initialAnchor.x * newEffectiveScale,
+        y: centroid.y - g.initialAnchor.y * newEffectiveScale,
       });
       return;
     }
@@ -672,20 +692,21 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
 
   // Show minimap only when stage extends beyond the viewport — keeps it out
   // of the way for movies that fit comfortably on screen.
+  // Snap the rendered scale to an integer physical-pixel multiple so canvas
+  // pixels map to square physical pixels. At 125% Windows DPI (DPR=1.25),
+  // scale=1.0 → 1.25 physical pixels per source pixel (non-integer, pixel-
+  // walking). effectiveScale snaps to round(1.25)/1.25=0.8 → 1:1 physical.
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const effectiveScale = getEffectiveScale(scale);
   const stageFitsInViewport =
     stageWidth && stageHeight && outerWidth && outerHeight &&
     pan.x >= 0 && pan.y >= 0 &&
-    pan.x + stageWidth * scale <= outerWidth &&
-    pan.y + stageHeight * scale <= outerHeight;
+    pan.x + stageWidth * effectiveScale <= outerWidth &&
+    pan.y + stageHeight * effectiveScale <= outerHeight;
   const showMinimap = !stageFitsInViewport && !!stageWidth && !!stageHeight && !!outerWidth && !!outerHeight;
 
-  // Snap the rendered translate to integer device pixels. ResizeObserver gives
-  // fractional CSS dimensions on high-DPI displays, so the centered pan ends
-  // up sub-pixel — the compositor then bilinear-filters the canvas during
-  // the DPR scale-up, defeating image-rendering:pixelated and blurring pixel
-  // art. The interaction math keeps using the unsnapped pan so gestures stay
-  // continuous; only the visual transform is snapped.
-  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  // Snap the rendered translate to integer device pixels so sub-pixel pan
+  // offsets don't cause the compositor to bilinear-filter the canvas.
   const tx = Math.round(pan.x * dpr) / dpr;
   const ty = Math.round(pan.y * dpr) / dpr;
 
@@ -715,7 +736,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       <div
         className={styles.stageWrapper}
         style={{
-          transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
+          transform: `translate(${tx}px, ${ty}px) scale(${effectiveScale})`,
           cursor: pickingMode ? "crosshair" : isMiddlePanning ? "grabbing" : panMode ? "grab" : textCursor ? "text" : undefined,
         }}
       >
@@ -747,7 +768,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             stageHeight={stageHeight}
             viewportWidth={outerWidth}
             viewportHeight={outerHeight}
-            scale={scale}
+            scale={effectiveScale}
             pan={pan}
             onPanChange={p => { markUserPanned(); setPan(p); }}
           />
