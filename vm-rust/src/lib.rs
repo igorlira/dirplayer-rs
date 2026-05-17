@@ -927,10 +927,14 @@ pub fn provide_net_task_error(task_id: u32) {
     });
 }
 
-/// Receive a rendered Flash frame from JavaScript (Ruffle) and store it as a bitmap.
-/// This allows Flash content to be composited into the Director stage rendering pipeline.
+/// Receive a rendered Flash frame from JavaScript (Ruffle) and store it as a
+/// per-sprite bitmap. Each Flash sprite has its own Ruffle player instance
+/// (so multiple sprites that share a single Flash cast member can display
+/// different frames at the same time — e.g. storyscramble's 3 story tiles
+/// pinned to poster frames 2/4/6 of one shared SWF). The renderer reads
+/// `flash_frame_buffers[sprite_num]` directly.
 #[wasm_bindgen]
-pub fn update_flash_frame(cast_lib: i32, cast_member: i32, width: u32, height: u32, rgba_data: &[u8]) {
+pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &[u8]) {
     use player::bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette};
 
     let expected_len = (width * height * 4) as usize;
@@ -955,18 +959,11 @@ pub fn update_flash_frame(cast_lib: i32, cast_member: i32, width: u32, height: u
 
     unsafe {
         if let Some(player) = PLAYER_OPT.as_mut() {
-            let key = (cast_lib, cast_member);
+            let key = sprite_num as i16;
             if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
-                if existing_ref == 0 {
-                    // Sentinel value — first real frame, allocate new bitmap
-                    let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
-                    player.flash_frame_buffers.insert(key, bitmap_ref);
-                } else {
-                    // Replace existing bitmap to reuse the BitmapRef
-                    player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
-                }
+                // Replace existing bitmap to reuse the BitmapRef.
+                player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
             } else {
-                // No entry at all — allocate a new bitmap
                 let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
                 player.flash_frame_buffers.insert(key, bitmap_ref);
             }
@@ -1122,6 +1119,67 @@ pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler
         handler_name,
         args: arg_refs,
     })
+}
+
+/// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
+///
+/// Called from the JS Flash bridge whenever a SWF tries to navigate to a
+/// `event:`-scheme URL — Director's Flash Asset Xtra convention for sending a
+/// Lingo message back to the host movie.
+///
+/// The body is whitespace-tokenised: the first token is the handler name,
+/// the rest are arguments (symbols if they start with `#`, integers if
+/// numeric, otherwise plain strings). So `send #done` invokes `on send`
+/// with `#done` as its first arg — `send` is not a keyword, it's just the
+/// most common handler name games define for routing to sendSprite /
+/// sendAllSprites (e.g. storyscramble's BehaviorScript 24).
+///
+/// `cast_lib` / `cast_member` identify the Flash member that fired the
+/// navigation, so a future revision can target the host sprite first; for now
+/// the dispatch is global via `player_invoke_global_event`.
+///
+/// Returns true when the body was understood and queued, false when the form
+/// is unrecognised (caller may then fall through to a real navigation).
+#[wasm_bindgen]
+pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bool {
+    use director::lingo::datum::Datum;
+
+    let trimmed = body.trim();
+    let mut tokens = trimmed.split_whitespace();
+    let Some(handler_token) = tokens.next() else {
+        warn!("[dispatch_flash_event] empty event body: {:?}", body);
+        return false;
+    };
+    // The handler token MAY have a leading `#` in Director's UI conventions
+    // (e.g. `event: #done`), but the canonical `event: send …` form uses a
+    // bare identifier. Strip the prefix in either case so handler lookup
+    // matches the script-side spelling.
+    let handler_name = handler_token.trim_start_matches('#').to_string();
+
+    let mut arg_refs: Vec<player::datum_ref::DatumRef> = Vec::new();
+    for tok in tokens {
+        // Token typing matches what Director's interpreter would produce
+        // when re-tokenising the event body before invoking the handler:
+        // - leading `#` → Symbol
+        // - parses as i32 → Int
+        // - otherwise → String (downstream handlers can `value()` / `integer()`)
+        let datum = if let Some(sym) = tok.strip_prefix('#') {
+            Datum::Symbol(sym.to_string())
+        } else if let Ok(n) = tok.parse::<i32>() {
+            Datum::Int(n)
+        } else {
+            Datum::String(tok.to_string())
+        };
+        arg_refs.push(player::player_alloc_datum(datum));
+    }
+
+    player_dispatch(PlayerVMCommand::DispatchFlashEvent {
+        cast_lib,
+        cast_member,
+        handler_name,
+        args: arg_refs,
+    });
+    true
 }
 
 #[wasm_bindgen]

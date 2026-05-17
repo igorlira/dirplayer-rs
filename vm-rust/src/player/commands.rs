@@ -69,6 +69,16 @@ pub enum PlayerVMCommand {
         prop_name: String,
         value: DatumRef,
     },
+    /// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
+    /// Mirrors the Flash Asset Xtra: `send <handler> [args...]` becomes a global
+    /// event invocation that walks active sprite behaviors → frame script → movie
+    /// scripts, so any `on <handler>` in scope picks it up.
+    DispatchFlashEvent {
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args: Vec<DatumRef>,
+    },
 }
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
@@ -102,6 +112,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         }
         PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, .. } => {
             format!("SetLingoScriptProperty(cast_lib: {}, cast_member: {}, prop: {})", cast_lib, cast_member, prop_name)
+        }
+        PlayerVMCommand::DispatchFlashEvent { cast_lib, cast_member, handler_name, .. } => {
+            format!("DispatchFlashEvent(cast_lib: {}, cast_member: {}, handler: {})", cast_lib, cast_member, handler_name)
         }
     }
 }
@@ -435,7 +448,109 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 } else {
                     player.mouse_down_sprite = -1;
                 }
+                debug!(
+                    "[mouseDown] mouse_down_sprite={} (scripted lookup at {},{})",
+                    player.mouse_down_sprite, x, y
+                );
             });
+
+            // If the click landed on a Flash sprite, forward the press into
+            // the SWF so its own AS1 `on (press)` / button handlers run.
+            // Director normally delivers these by passing the event straight
+            // through to the embedded Flash player; in our setup Ruffle's
+            // canvas is offscreen so the click never reaches it organically.
+            // Use unscripted lookup here — Flash members don't always carry
+            // a Director-side behaviour, but their internal buttons still
+            // need the event.
+            let (flash_forward, debug_info) = reserve_player_ref(|player| {
+                let any_sprite = get_sprite_at(player, x, y, false);
+                if any_sprite.is_none() {
+                    return (None, format!("no sprite at ({},{})", x, y));
+                }
+                let any_sprite = any_sprite.unwrap();
+                let sprite = match player.movie.score.get_sprite(any_sprite as i16) {
+                    Some(s) => s,
+                    None => return (None, format!("sprite#{} not found", any_sprite)),
+                };
+                let member_ref = match sprite.member.as_ref() {
+                    Some(m) => m,
+                    None => return (None, format!("sprite#{} has no member", any_sprite)),
+                };
+                let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+                    Some(m) => m,
+                    None => return (None, format!("member {:?} not resolvable", member_ref)),
+                };
+                let type_str = member.member_type.type_string();
+                if !matches!(member.member_type, CastMemberType::Flash(_)) {
+                    return (None, format!("sprite#{} member type='{}' (not Flash)", any_sprite, type_str));
+                }
+                let rect = super::score::get_concrete_sprite_rect(player, sprite);
+                (
+                    Some((any_sprite as i32, x - rect.left, y - rect.top)),
+                    format!("Flash sprite#{} member={}:{} rect=({},{})-({},{})",
+                        any_sprite, member_ref.cast_lib, member_ref.cast_member,
+                        rect.left, rect.top, rect.right, rect.bottom),
+                )
+            });
+            debug!("[Flash mouseDown] click@({},{}) → {}", x, y, debug_info);
+
+            // Diagnostic: dump the script names attached to the clicked sprite
+            // so we can see what behaviours (if any) have a chance to handle
+            // mouseUp. If the list is empty / has no on mouseUp, clicking is a
+            // no-op regardless of Flash forwarding.
+            let sprite_scripts_dump = reserve_player_ref(|player| {
+                let any_sprite = match get_sprite_at(player, x, y, false) {
+                    Some(s) => s,
+                    None => return "none".to_string(),
+                };
+                let sprite = match player.movie.score.get_sprite(any_sprite as i16) {
+                    Some(s) => s,
+                    None => return format!("sprite#{} missing", any_sprite),
+                };
+                let names: Vec<String> = sprite
+                    .script_instance_list
+                    .iter()
+                    .map(|inst_ref| {
+                        let inst = player.allocator.get_script_instance(inst_ref);
+                        let script = player.movie.cast_manager.get_script_by_ref(&inst.script);
+                        let script_name = script.map(|s| s.name.clone()).unwrap_or_else(|| "?".to_string());
+                        let handlers = script
+                            .map(|s| {
+                                s.handlers
+                                    .iter()
+                                    .map(|(name, _def)| name.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .unwrap_or_default();
+                        format!("{}({}/{}: handlers=[{}])",
+                            script_name,
+                            inst.script.cast_lib, inst.script.cast_member,
+                            handlers)
+                    })
+                    .collect();
+                if names.is_empty() {
+                    format!("sprite#{} has 0 behaviours", any_sprite)
+                } else {
+                    format!("sprite#{} behaviours: {}", any_sprite, names.join(" | "))
+                }
+            });
+            debug!("[click sprite scripts] {}", sprite_scripts_dump);
+            if let Some((sn, lx, ly)) = flash_forward {
+                // AVM1 button hit-testing reads the stage-mouse position
+                // that's last updated by MouseMove. A real browser always
+                // emits pointermove before pointerdown, so the position is
+                // current. Our injected MouseDown alone leaves the stage
+                // mouse at its previous location (often 0,0 if no organic
+                // input ever reached the SWF), and Ruffle's button test
+                // misses the click. Send a MouseMove first to seed it.
+                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
+                    sn, "move", lx, ly,
+                );
+                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
+                    sn, "down", lx, ly,
+                );
+            }
 
             // Temporarily clear ALL is_yield_safe() flags so that updateStage()
             // called from within mouseDown handlers will render (but not yield).
@@ -664,9 +779,39 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 saved
             });
 
+            // Mirror the mouseDown forwarding: if the cursor is currently
+            // over a Flash sprite, hand the release into Ruffle so the SWF's
+            // own AS1 button handlers (`on (release)`) can fire. Uses the
+            // current cursor position — AS1 buttons need press+release on the
+            // same Flash member to register a click, so resolving by cursor
+            // position handles the common click-and-release-in-place case.
+            // (releaseOutside semantics for drag-off-the-button can be added
+            // later by tracking the press sprite separately.)
+            let flash_forward_up = reserve_player_ref(|player| {
+                let any_sprite = get_sprite_at(player, x, y, false)?;
+                let sprite = player.movie.score.get_sprite(any_sprite as i16)?;
+                let member_ref = sprite.member.as_ref()?;
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+                if !matches!(member.member_type, CastMemberType::Flash(_)) {
+                    return None;
+                }
+                let rect = super::score::get_concrete_sprite_rect(player, sprite);
+                Some((any_sprite as i32, x - rect.left, y - rect.top))
+            });
+            if let Some((sn, lx, ly)) = flash_forward_up {
+                // Same MouseMove-before-MouseUp seeding as the down handler.
+                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
+                    sn, "move", lx, ly,
+                );
+                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
+                    sn, "up", lx, ly,
+                );
+            }
+
             // Dispatch to the sprite that originally received mouseDown,
             // or fall through to frame/movie scripts if no sprite was involved.
             let dispatched_to_sprite = if let Some((_, _, sprite_num)) = result.as_ref() {
+                debug!("[mouseUp] dispatching to sprite#{} (event={})", sprite_num, event_name);
                 if *sprite_num > 0 {
                     player_dispatch_event_to_sprite_targeted(
                         &event_name.to_string(),
@@ -678,6 +823,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     false
                 }
             } else {
+                debug!("[mouseUp] no sprite to dispatch to (result was None)");
                 false
             };
 
@@ -818,32 +964,54 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
                 let hovered_sprite = player.hovered_sprite;
                 let sprite_num = get_sprite_at(player, x, y, false);
-                if let Some(sprite_num) = sprite_num {
-                    player.hovered_sprite = Some(sprite_num as i16);
-                }
+                // Always update hovered_sprite — set to Some(N) when the
+                // cursor is over a sprite, clear to None when it's not.
+                // Without the None case, a tile we hovered last would
+                // stay marked as hovered forever and never receive its
+                // mouseLeave event (storyscramble's BS65 #highlight
+                // would then be permanently stuck on the last tile that
+                // got the cursor — visible as a "perma highlight" gray
+                // mask on whichever tile the cursor exited from when
+                // moving off all tiles).
+                player.hovered_sprite = sprite_num.map(|n| n as i16);
                 (sprite_num, hovered_sprite)
             });
-            if let Some(sprite_num) = sprite_num {
-                let hovered_sprite = hovered_sprite.unwrap_or(-1);
-                if hovered_sprite != sprite_num as i16 {
-                    if hovered_sprite != -1 {
+            let prev_hover = hovered_sprite.unwrap_or(-1);
+            match sprite_num {
+                Some(sprite_num) => {
+                    if prev_hover != sprite_num as i16 {
+                        if prev_hover != -1 {
+                            player_dispatch_event_to_sprite(
+                                &"mouseLeave".to_string(),
+                                &vec![],
+                                prev_hover as u16,
+                            )
+                        }
+                        player_dispatch_event_to_sprite(
+                            &"mouseEnter".to_string(),
+                            &vec![],
+                            sprite_num as u16,
+                        );
+                    } else {
+                        player_dispatch_event_to_sprite(
+                            &"mouseWithin".to_string(),
+                            &vec![],
+                            sprite_num as u16,
+                        );
+                    }
+                }
+                None => {
+                    // Cursor moved off all sprites. Fire mouseLeave on
+                    // whatever sprite we were previously hovering so
+                    // behaviours can react (BS65 unHighlight, custom
+                    // tooltip teardown, etc.).
+                    if prev_hover != -1 {
                         player_dispatch_event_to_sprite(
                             &"mouseLeave".to_string(),
                             &vec![],
-                            hovered_sprite as u16,
+                            prev_hover as u16,
                         )
                     }
-                    player_dispatch_event_to_sprite(
-                        &"mouseEnter".to_string(),
-                        &vec![],
-                        sprite_num as u16,
-                    );
-                } else {
-                    player_dispatch_event_to_sprite(
-                        &"mouseWithin".to_string(),
-                        &vec![],
-                        sprite_num as u16,
-                    );
                 }
             }
         }
@@ -1020,6 +1188,54 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     let _ = script_set_prop(player, &instance_ref, &prop_name, &value, false);
                 }
             });
+        }
+        PlayerVMCommand::DispatchFlashEvent { cast_lib, cast_member, handler_name, args } => {
+            // Director's Flash Asset Xtra targets the SPRITE that owns the
+            // Flash member — semantically `sendSprite(flashSpriteNum, …)`,
+            // NOT a global broadcast. Going global made `on send` fire once
+            // per sprite that defined it (e.g. storyscramble's
+            // BehaviorScript 24 attached to multiple sprites).
+            //
+            // Resolve the host sprite by member match. In typical Director
+            // movies there's one sprite per Flash member at any frame; if
+            // multiple sprites share the same member we dispatch to each
+            // (each behaves independently, mirroring the Xtra's behaviour
+            // when the same SWF is on stage twice).
+            let sprite_nums: Vec<u16> = reserve_player_ref(|player| {
+                player
+                    .movie
+                    .score
+                    .channels
+                    .iter()
+                    .filter_map(|channel| {
+                        let m = channel.sprite.member.as_ref()?;
+                        if m.cast_lib == cast_lib && m.cast_member == cast_member {
+                            Some(channel.number as u16)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            });
+
+            if sprite_nums.is_empty() {
+                // Member exists but isn't on stage right now — fall back to
+                // the global path so movie / frame scripts still get a chance
+                // (matches Director's behaviour of dispatching even when the
+                // Flash sprite has just been removed from the score).
+                use super::events::player_invoke_global_event;
+                let _ = player_invoke_global_event(&handler_name, &args).await;
+            } else {
+                use super::events::player_dispatch_event_to_sprite_targeted;
+                for sprite_num in sprite_nums {
+                    player_dispatch_event_to_sprite_targeted(
+                        &handler_name,
+                        &args,
+                        sprite_num,
+                    )
+                    .await;
+                }
+            }
         }
     }
     Ok(DatumRef::Void)

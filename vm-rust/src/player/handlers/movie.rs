@@ -258,7 +258,10 @@ impl MovieHandlers {
                     }
 
                     player.advance_frame();
-                    player.movie.frame_script_instance = None;
+                    // begin_all_sprites manages frame_script_instance lifecycle —
+                    // it preserves the cached instance while the playhead stays within
+                    // the same frame script's span and recreates it only when the active
+                    // script changes or the span is exited.
                     player.begin_all_sprites();
 
                     // Apply tweening after sprites are initialized
