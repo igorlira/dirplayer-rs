@@ -71,6 +71,7 @@ impl BitmapMemberHandlers {
             )),
             "useAlpha" => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
             "trimWhiteSpace" => Ok(Datum::Int(if bitmap_member.info.trim_white_space { 1 } else { 0 })),
+            "centerRegPoint" => Ok(Datum::Int(if bitmap_member.info.center_reg_point { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
                 prop
@@ -306,6 +307,54 @@ impl BitmapMemberHandlers {
                     }
                     Ok(())
                 })
+            }
+            "centerRegPoint" => {
+                let center = value.to_bool()?;
+                borrow_member_mut(
+                    member_ref,
+                    |_| {},
+                    |cast_member, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                        bitmap_member.info.center_reg_point = center;
+                        // Director snaps regPoint to bitmap center when the
+                        // flag is turned on — the renderer also recomputes
+                        // when reading the flag, but external readers of
+                        // `regPoint` (Lingo getters, cached layout) expect
+                        // the centered value once the flag flips.
+                        if center {
+                            // Need bitmap dimensions: defer to next reserve_player_mut.
+                        }
+                        Ok(())
+                    },
+                )?;
+                if center {
+                    reserve_player_mut(|player| {
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(member_ref)
+                            .unwrap();
+                        let bitmap_member = member.member_type.as_bitmap().unwrap();
+                        let bitmap_ref = bitmap_member.image_ref;
+                        let (w, h) = if let Some(bm) = player.bitmap_manager.get_bitmap(bitmap_ref) {
+                            (bm.width as i32, bm.height as i32)
+                        } else {
+                            (0, 0)
+                        };
+                        let reg_x = w / 2;
+                        let reg_y = h / 2;
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(member_ref)
+                            .unwrap();
+                        let bm = member.member_type.as_bitmap_mut().unwrap();
+                        bm.reg_point = (reg_x as i16, reg_y as i16);
+                        member.reg_point = (reg_x, reg_y);
+                        Ok(())
+                    })?;
+                }
+                Ok(())
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for bitmap",
