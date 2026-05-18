@@ -18,6 +18,7 @@ use crate::{
     },
     js_api::JsApi,
     player::{
+        bitmap::bitmap::{resolve_color_ref, Bitmap},
         cast_lib::CastMemberRef,
         cast_member::{BitmapMember, CastMember, CastMemberType, CastMemberTypeId, TextMember},
         handlers::types::TypeUtils,
@@ -437,7 +438,21 @@ impl CastMemberRefHandlers {
     ) -> Result<Datum, ScriptError> {
         match prop {
             "name" => Ok(Datum::String("".to_string())),
-            "number" => Ok(Datum::Int(-1)),
+            // Director: `.number` returns 0 for the empty/NULL member ref
+            // (i.e. `sprite(N).member.number` when sprite N has no member),
+            // and the negative slot for `member(-1)`-style invalid refs.
+            // Scripts use `sprite(chan).member.number = 0` as the
+            // empty-channel exit test in tile-composition loops; returning
+            // -1 unconditionally made that test never fire and dragged the
+            // loop through unrelated UI sprites further down the score
+            // (verified in Trick or Treat Beat's `buildTileAnims`).
+            "number" => Ok(Datum::Int(
+                if member_ref.cast_lib == 0 && member_ref.cast_member == 0 {
+                    0
+                } else {
+                    member_ref.cast_member.min(-1)
+                },
+            )),
             "type" => Ok(Datum::String("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
             "memberNum" => Ok(Datum::Int(-1)),
@@ -598,6 +613,127 @@ impl CastMemberRefHandlers {
                         "pattern" => Ok(Datum::Int(info.pattern as i32)),
                         "foreColor" => Ok(Datum::Int(info.fore_color as i32)),
                         "backColor" => Ok(Datum::Int(info.back_color as i32)),
+                        "image" => {
+                            // Director rasterizes shape members on demand for
+                            // `the image of member`. Snapshot the small
+                            // ShapeInfo so we can release the cast_manager
+                            // borrow before mutating bitmap_manager below.
+                            let info_owned = info.clone();
+                            let width = info_owned.width().max(1) as u16;
+                            let height = info_owned.height().max(1) as u16;
+                            let palettes_rc = player.movie.cast_manager.palettes();
+                            let palettes: &_ = &*palettes_rc;
+                            let frame_palette = player
+                                .movie
+                                .score
+                                .get_frame_palette(player.movie.current_frame);
+                            let fg_rgb = resolve_color_ref(
+                                palettes,
+                                &ColorRef::PaletteIndex(info_owned.fore_color),
+                                &frame_palette,
+                                8,
+                            );
+                            let bg_rgb = resolve_color_ref(
+                                palettes,
+                                &ColorRef::PaletteIndex(info_owned.back_color),
+                                &frame_palette,
+                                8,
+                            );
+
+                            let mut bitmap =
+                                Bitmap::new(width, height, 32, 32, 8, frame_palette.clone());
+                            let w = width as i32;
+                            let h = height as i32;
+                            bitmap.fill_rect(0, 0, w, h, bg_rgb, palettes, 1.0);
+
+                            let filled = info_owned.fill_type != 0;
+                            // Same 1-based thickness convention as the on-stage
+                            // renderer: filled shapes draw their outline at the
+                            // raw thickness; outlined shapes subtract 1 so 1 ==
+                            // hairline/invisible.
+                            let thickness = if filled {
+                                info_owned.line_thickness as i32
+                            } else {
+                                (info_owned.line_thickness as i32) - 1
+                            };
+
+                            match info_owned.shape_type {
+                                ShapeType::Rect => {
+                                    if filled {
+                                        bitmap.fill_rect(0, 0, w, h, fg_rgb, palettes, 1.0);
+                                    }
+                                    if thickness > 0 {
+                                        for t in 0..thickness {
+                                            bitmap.stroke_rect(
+                                                t,
+                                                t,
+                                                w - t,
+                                                h - t,
+                                                fg_rgb,
+                                                palettes,
+                                                1.0,
+                                            );
+                                        }
+                                    }
+                                }
+                                ShapeType::OvalRect => {
+                                    let radius = 12;
+                                    if filled {
+                                        bitmap.fill_round_rect(
+                                            0, 0, w, h, radius, fg_rgb, palettes, 1.0,
+                                        );
+                                    }
+                                    if thickness > 0 {
+                                        bitmap.stroke_round_rect(
+                                            0, 0, w, h, radius, fg_rgb, palettes, 1.0, thickness,
+                                        );
+                                    }
+                                }
+                                ShapeType::Oval => {
+                                    if filled {
+                                        bitmap.fill_ellipse(0, 0, w, h, fg_rgb, palettes, 1.0);
+                                    }
+                                    if thickness > 0 {
+                                        bitmap.stroke_ellipse(
+                                            0, 0, w, h, fg_rgb, palettes, 1.0, thickness,
+                                        );
+                                    }
+                                }
+                                ShapeType::Line => {
+                                    let t = (info_owned.line_thickness as i32).max(1);
+                                    if info_owned.line_direction == 6 {
+                                        bitmap.draw_line_thick(
+                                            0,
+                                            h - 1,
+                                            w - 1,
+                                            0,
+                                            fg_rgb,
+                                            palettes,
+                                            1.0,
+                                            t,
+                                        );
+                                    } else {
+                                        bitmap.draw_line_thick(
+                                            0,
+                                            0,
+                                            w - 1,
+                                            h - 1,
+                                            fg_rgb,
+                                            palettes,
+                                            1.0,
+                                            t,
+                                        );
+                                    }
+                                }
+                                ShapeType::Unknown => {
+                                    bitmap.fill_rect(0, 0, w, h, fg_rgb, palettes, 1.0);
+                                }
+                            }
+
+                            let bitmap_ref =
+                                player.bitmap_manager.add_ephemeral_bitmap(bitmap);
+                            Ok(Datum::BitmapRef(bitmap_ref))
+                        }
                         _ => Err(ScriptError::new(format!(
                             "Shape members don't support property {}", prop
                         ))),
