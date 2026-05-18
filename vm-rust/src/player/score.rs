@@ -2473,7 +2473,26 @@ impl Score {
     }
 
     pub fn get_sprite_mut(&mut self, number: i16) -> &mut Sprite {
-        let channel = &mut self.channels[number as usize];
+        // Out-of-range writes silently land on channel 0 instead of panicking
+        // on a negative-i16-cast-to-usize index. The cleaner fix is to make
+        // every call-site bounds-check explicitly, but there are 30+ callers
+        // and a panic at this level was bringing the whole VM down on
+        // legitimate Lingo patterns like `sprite(N).prop = X` where N came
+        // from a list-lookup that can return -1/0. Lingo entry points
+        // (`sprite_set_prop` / `sprite_get_prop`) guard separately and
+        // short-circuit before reaching here, so this branch is just a
+        // last-line safety net.
+        let idx = if number < 0 || number as usize >= self.channels.len() {
+            log::warn!(
+                "get_sprite_mut: out-of-range sprite number {} (channels.len()={}), clamping to 0",
+                number,
+                self.channels.len()
+            );
+            0
+        } else {
+            number as usize
+        };
+        let channel = &mut self.channels[idx];
         return &mut channel.sprite;
     }
 
@@ -3009,8 +3028,24 @@ pub fn sprite_get_prop(
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
             Ok(Datum::Point([x as f64, y as f64], 0))
         },
-        "width" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.width) as i32)),
-        "height" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.height) as i32)),
+        // Director: `sprite.width` / `sprite.height` return the *displayed*
+        // dimensions (= sprite.rect width/height), not the raw score-channel
+        // values. For an unscaled bitmap sprite they match bitmap-native dims;
+        // for a stretched sprite they match the score-authored width. The
+        // heuristics live in `get_concrete_sprite_rect`, which the rect-based
+        // getters (left/top/right/bottom/rect) already use. Without this,
+        // scripts that compute layer offsets via
+        // `destRect = rect(L, T, L + sprite(chan).width, ...)` read the
+        // cell-size 48 instead of the overlay's 29×29 and stretch the
+        // composite — verified in Trick or Treat Beat's `buildTileAnims`.
+        "width" => {
+            let rect = get_sprite_rect_in_context(player, sprite_id);
+            Ok(Datum::Int((rect.2 - rect.0) as i32))
+        }
+        "height" => {
+            let rect = get_sprite_rect_in_context(player, sprite_id);
+            Ok(Datum::Int((rect.3 - rect.1) as i32))
+        }
         "blend" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
         "ink" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.ink) as i32)),
         "left" => {
@@ -3628,6 +3663,21 @@ fn sprite_set_prop_is_noop(
 }
 
 pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
+    // Director silently ignores property writes to invalid sprite refs. A
+    // script doing `sprite(N).prop = X` where N came from a list-lookup
+    // returning -1 (not-found sentinel) is legitimate Lingo — verified in
+    // Trick or Treat Beat where the panic surfaced via a behavior script.
+    // Also bounds-check the upper end against `channels.len()` to keep the
+    // unsigned-cast indexing in `get_sprite_mut` safe.
+    if sprite_id < 0 {
+        return Ok(());
+    }
+    let in_range = reserve_player_ref(|player| {
+        (sprite_id as usize) < player.movie.score.channels.len()
+    });
+    if !in_range {
+        return Ok(());
+    }
     if sprite_set_prop_is_noop(sprite_id, prop_name, &value)? {
         return Ok(());
     }
