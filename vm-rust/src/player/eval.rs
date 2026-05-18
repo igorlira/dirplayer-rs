@@ -527,10 +527,19 @@ fn get_eval_top_level_prop(
     if let Some(global_ref) = player.globals.get(prop_name) {
         Ok(global_ref.clone())
     } else {
-        // Try to get as a top-level prop, but if it fails, return an error about undefined variable
         match GetSetUtils::get_top_level_prop(player, prop_name) {
             Ok(result) => Ok(player.alloc_datum(result)),
-            Err(_) => Err(ScriptError::new(format!("Undefined variable: {}", prop_name)))
+            Err(_) => {
+                // Classic Director resolves unknown identifiers to VOID, so
+                // patterns like `do("foo(" & #none & ")")` reach the handler as
+                // `foo(VOID)`. Preserve the diagnostic error only when the user
+                // is poking around in the debugger.
+                if player.current_breakpoint.is_some() {
+                    Err(ScriptError::new(format!("Undefined variable: {}", prop_name)))
+                } else {
+                    Ok(DatumRef::Void)
+                }
+            }
         }
     }
 }
