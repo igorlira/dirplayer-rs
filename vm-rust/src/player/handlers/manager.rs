@@ -145,8 +145,11 @@ impl BuiltInHandlerManager {
     }
 
     fn get_pos_global(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // getPos(list, value) - find position of value in list
-        use crate::player::compare::datum_equals;
+        // getPos(list, value) - find position of value in list.
+        // Uses the looser membership equality so Symbol/String pairs with
+        // matching text match each other, mirroring Director — verified with
+        // `put getPos([#foo, #bar], "foo")` returning 1 in Director 11.5.
+        use crate::player::compare::datum_equals_member;
         reserve_player_mut(|player| {
             let list_datum = player.get_datum(&args[0]);
             let search_ref = &args[1];
@@ -156,7 +159,7 @@ impl BuiltInHandlerManager {
                     for (i, item_ref) in items.iter().enumerate() {
                         let item = player.get_datum(item_ref);
                         let search = player.get_datum(search_ref);
-                        if datum_equals(item, search, &player.allocator)? {
+                        if datum_equals_member(item, search, &player.allocator)? {
                             return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
                         }
                     }
@@ -167,7 +170,7 @@ impl BuiltInHandlerManager {
                     for (i, (_, val_ref)) in pairs.iter().enumerate() {
                         let val = player.get_datum(val_ref);
                         let search = player.get_datum(search_ref);
-                        if datum_equals(val, search, &player.allocator)? {
+                        if datum_equals_member(val, search, &player.allocator)? {
                             return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
                         }
                     }
@@ -1242,6 +1245,20 @@ impl BuiltInHandlerManager {
                     Datum::Vector(v) => Ok(player.alloc_datum(Datum::Vector(*v))),
                     Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::Transform3d(*t))),
                     Datum::CastMember(r) => Ok(player.alloc_datum(Datum::CastMember(r.clone()))),
+                    Datum::BitmapRef(bitmap_ref) => {
+                        // `duplicate(image)` returns an independent copy of the
+                        // bitmap; the result is an ephemeral so it's freed when
+                        // the caller's DatumRef drops.
+                        let new_bitmap = player
+                            .bitmap_manager
+                            .get_bitmap(*bitmap_ref)
+                            .ok_or_else(|| ScriptError::new(
+                                "duplicate(): source bitmap not found".to_string(),
+                            ))?
+                            .clone();
+                        let new_ref = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
+                        Ok(player.alloc_datum(Datum::BitmapRef(new_ref)))
+                    }
                     _ => Err(ScriptError::new(format!("duplicate() not implemented for type {}", player.get_datum(item).type_str()))),
                 })
             }
