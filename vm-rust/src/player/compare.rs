@@ -327,6 +327,33 @@ pub fn datum_equals(
     }
 }
 
+/// List-membership equality (`getPos`, `getOne`, `findPos`).
+///
+/// Director's `=` operator is strict — `#foo = "foo"` returns FALSE — but the
+/// list-membership lookup family matches by text content across the
+/// Symbol/String boundary. Verified with `put getPos([#foo, #bar], "foo")`
+/// returning 1 in Director 11.5. Scripts in the wild (e.g. Trick or Treat
+/// Beat's `getPos(gSingleTileObjNames, member.name)`) rely on this looser
+/// rule even though general `=` would not match.
+pub fn datum_equals_member(
+    left: &Datum,
+    right: &Datum,
+    allocator: &DatumAllocator,
+) -> Result<bool, ScriptError> {
+    use Datum::*;
+    let symbol_string_match = match (left, right) {
+        (Symbol(sym), other @ (String(_) | StringChunk(..)))
+        | (other @ (String(_) | StringChunk(..)), Symbol(sym)) => {
+            Some(sym.eq_ignore_ascii_case(&other.string_value_cow()?))
+        }
+        _ => None,
+    };
+    if let Some(matched) = symbol_string_match {
+        return Ok(matched);
+    }
+    datum_equals(left, right, allocator)
+}
+
 #[allow(dead_code)]
 pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
     match (left, right) {
