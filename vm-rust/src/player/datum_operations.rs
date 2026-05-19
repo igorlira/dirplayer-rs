@@ -117,6 +117,37 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x + y);
             Ok(Datum::Rect(vals, flags))
         }
+        // Director: `rect + N` adds N to each side of the rect.
+        (Datum::Rect(a, af), Datum::Int(b)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *b as f64, false, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        (Datum::Rect(a, af), Datum::Float(b)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *b, true, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        (Datum::Int(a), Datum::Rect(b, bf)) => {
+            let (vals, flags) = inline_scalar_4(*b, *bf, *a as f64, false, |x, y| y + x);
+            Ok(Datum::Rect(vals, flags))
+        }
+        (Datum::Float(a), Datum::Rect(b, bf)) => {
+            let (vals, flags) = inline_scalar_4(*b, *bf, *a, true, |x, y| y + x);
+            Ok(Datum::Rect(vals, flags))
+        }
+        // Director: `rect + point` offsets the rect by the point
+        // (adds x to left+right, y to top+bottom).
+        (Datum::Rect(a, af), Datum::Point(p, pf)) => {
+            let bv = [p[0], p[1], p[0], p[1]];
+            let bf = ((pf & 0b01) * 0b0101) | ((pf & 0b10) * 0b0101);
+            let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        (Datum::Point(p, pf), Datum::Rect(b, bf)) => {
+            let av = [p[0], p[1], p[0], p[1]];
+            let af = ((pf & 0b01) * 0b0101) | ((pf & 0b10) * 0b0101);
+            let (vals, flags) = inline_binop_4(av, af, *b, *bf, |x, y| x + y);
+            Ok(Datum::Rect(vals, flags))
+        }
         // Vector combinations
         (Datum::Vector(a), Datum::Vector(b)) => {
             Ok(Datum::Vector([a[0] + b[0], a[1] + b[1], a[2] + b[2]]))
@@ -301,6 +332,22 @@ pub fn subtract_datums(
         }
         (Datum::Rect(a, af), Datum::List(_, ref_list, _)) => {
             let (bv, bf) = list_to_rect_vals(player, ref_list)?;
+            let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x - y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        // Director: `rect - N` subtracts N from each side of the rect.
+        (Datum::Rect(a, af), Datum::Int(b)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *b as f64, false, |x, y| x - y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        (Datum::Rect(a, af), Datum::Float(b)) => {
+            let (vals, flags) = inline_scalar_4(*a, *af, *b, true, |x, y| x - y);
+            Ok(Datum::Rect(vals, flags))
+        }
+        // Director: `rect - point` offsets the rect by the negative point.
+        (Datum::Rect(a, af), Datum::Point(p, pf)) => {
+            let bv = [p[0], p[1], p[0], p[1]];
+            let bf = ((pf & 0b01) * 0b0101) | ((pf & 0b10) * 0b0101);
             let (vals, flags) = inline_binop_4(*a, *af, bv, bf, |x, y| x - y);
             Ok(Datum::Rect(vals, flags))
         }

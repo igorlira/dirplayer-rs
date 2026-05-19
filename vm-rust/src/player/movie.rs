@@ -172,6 +172,22 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             },
+            "lastKey" => {
+                // `the lastKey` returns ticks (1/60 s) since the last key event.
+                // Before any key is pressed, fall back to ticks since movie start
+                // (matches Director's monotonic behaviour for these accessors).
+                reserve_player_ref(|player| {
+                    let reference = player
+                        .keyboard_manager
+                        .last_key_time
+                        .unwrap_or(player.start_time);
+                    let elapsed = chrono::Local::now()
+                        .signed_duration_since(reference)
+                        .num_milliseconds();
+                    let ticks = (elapsed * 60) / 1000;
+                    Ok(Datum::Int(ticks as i32))
+                })
+            },
             "mouseDown" => {
                 Ok(datum_bool(self.mouse_down))
             },
