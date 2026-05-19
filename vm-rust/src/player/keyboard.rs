@@ -9,12 +9,17 @@ pub struct KeyboardKey {
 
 pub struct KeyboardManager {
     pub down_keys: Vec<KeyboardKey>,
+    /// Timestamp of the most recent `key_down`; `None` if no key has been
+    /// pressed since the movie started. Used by `the lastKey` to compute
+    /// ticks since the last key event.
+    pub last_key_time: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl KeyboardManager {
     pub fn new() -> Self {
         Self {
             down_keys: Vec::new(),
+            last_key_time: None,
         }
     }
 
@@ -22,6 +27,7 @@ impl KeyboardManager {
         let code_mapped = keyboard_map::get_keyboard_key_map_js_to_sw().get(&code);
         debug!("Key down: {} {} (mapped to: {:?})", key, code, code_mapped);
         let mapped_code = *code_mapped.unwrap_or(&code);
+        self.last_key_time = Some(chrono::Local::now());
 
         // Map JS key names to Director key values
         let mapped_key = match key.as_str() {
