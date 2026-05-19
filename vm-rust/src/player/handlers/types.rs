@@ -949,6 +949,9 @@ impl TypeHandlers {
                             )),
                         };
                     }
+                    DatumType::ColorRef => {
+                        // Director tolerates rgb(...) as a 4th arg silently; treat as no-op.
+                    }
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Invalid 4th argument type for image(): {}, expected int or palette",
