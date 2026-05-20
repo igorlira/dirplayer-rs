@@ -39,6 +39,8 @@ impl TestPlayer {
                 Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
             crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
+            crate::player::xtra::curl::CURL_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::curl::CurlXtraManager::new());
             PLAYER_OPT = Some(DirPlayer::new(tx.clone()));
         }
 

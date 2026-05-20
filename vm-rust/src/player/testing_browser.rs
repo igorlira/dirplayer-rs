@@ -104,6 +104,8 @@ impl BrowserTestPlayer {
                 Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
             crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
+            crate::player::xtra::curl::CURL_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::curl::CurlXtraManager::new());
             // Spawn fresh command and event loops for the new channels
             async_std::task::spawn_local(async move {
                 crate::player::commands::run_command_loop(rx).await;
