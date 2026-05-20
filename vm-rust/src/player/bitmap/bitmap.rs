@@ -151,13 +151,18 @@ impl Bitmap {
         alpha_depth: u8,
         palette_ref: PaletteRef,
     ) -> Self {
-        let bytes_per_pixel = bit_depth as usize / 8;
         let initial_color = match bit_depth {
             16 | 32 => 255,
             _ => 0,
         };
 
-        let data = vec![initial_color; width as usize * height as usize * bytes_per_pixel];
+        // `bit_depth as usize / 8` truncates to 0 for sub-byte depths
+        // (1, 2, 4), leaving `data` empty even though set_pixel does packed
+        // bit/nibble arithmetic on it. Compute bytes from total bits so
+        // sub-byte bitmaps get a properly sized buffer.
+        let total_bits = width as usize * height as usize * bit_depth as usize;
+        let total_bytes = (total_bits + 7) / 8;
+        let data = vec![initial_color; total_bytes];
 
         // For 32-bit images, always create a matte OR handle alpha in the data
         let matte = if alpha_depth > 0 || bit_depth == 32 {
