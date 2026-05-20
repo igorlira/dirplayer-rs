@@ -127,6 +127,11 @@ features = [
   'MessageChannel',
   'MessagePort',
   'Storage',
+  'Navigator',
+  'Screen',
+  'Performance',
+  'Clipboard',
+  'FormData',
 ]
 
 [dependencies.flate2]

@@ -87,6 +87,8 @@ use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
+use xtra::bobba::{BobbaXtraManager, BOBBA_XTRA_MANAGER_OPT};
+use xtra::curl::{CurlXtraManager, CURL_XTRA_MANAGER_OPT};
 use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
@@ -2647,9 +2649,14 @@ pub async fn player_call_global_handler(
             args,
         ))
         .await;
-    } else {
-        return BuiltInHandlerManager::call_handler(handler_name, args);
     }
+    // Xtra static async handlers (e.g. Curl's exec/execAsync). These would
+    // otherwise be eaten by BuiltInHandlerManager::call_handler and reported
+    // as "No built-in handler".
+    if xtra::manager::has_xtra_static_async_handler(handler_name) {
+        return xtra::manager::call_xtra_static_async_handler(handler_name, args).await;
+    }
+    BuiltInHandlerManager::call_handler(handler_name, args)
 }
 
 #[inline(always)]
@@ -4113,6 +4120,8 @@ pub fn init_player() {
         FILEIO_XTRA_MANAGER_OPT = Some(FileIoXtraManager::new());
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
+        BOBBA_XTRA_MANAGER_OPT = Some(BobbaXtraManager::new());
+        CURL_XTRA_MANAGER_OPT = Some(CurlXtraManager::new());
     }
 
     unsafe {

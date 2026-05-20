@@ -1756,6 +1756,12 @@ impl BuiltInHandlerManager {
                         return res;
                     }
                 }
+                // Static-only Xtras (OpenURL, SysMenu, BudAPI, Curl statics).
+                if let Some(res) =
+                    crate::player::xtra::manager::try_call_xtra_static_handler(name, args)
+                {
+                    return res;
+                }
                 let formatted_args = reserve_player_ref(|player| {
                     let mut s = String::new();
                     for arg in args {
