@@ -1,0 +1,14 @@
+[movie]
+path = "dcr_sulake/habbo_v31/habbo.dcr"
+
+[test]
+suite = "sulake"
+
+[external_params]
+sw1 = "connection.info.host=${HABBO_V31_INFO_HOST:127.0.0.1}"
+sw2 = "connection.info.port=${HABBO_V31_INFO_PORT:3091}"
+sw3 = "use.sso.ticket=1;sso.ticket=${HABBO_V31_SSO_TICKET}"
+sw4 = "external.texts.txt=/assets/dcr_sulake/habbo_v31/gamedata/external_texts.txt?"
+sw5 = "external.variables.txt=/assets/dcr_sulake/habbo_v31/gamedata/external_variables.txt?"
+multiuser_websocket_ssl = "${HABBO_V31_WS_SSL}"
+multiuser_websocket_path = "${HABBO_V31_WS_PATH}"

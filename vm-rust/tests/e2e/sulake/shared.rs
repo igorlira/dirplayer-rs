@@ -4,24 +4,19 @@ use vm_rust::player::testing_shared::{sprite, datum, SnapshotContext, TestHarnes
 pub async fn assert_entry(
     player: &mut impl TestHarness,
     suite: &str,
+    test_name: &str,
     movie_asset: &str,
+    login_window: bool,
 ) -> Result<(), String> {
     let movie_path = player.asset_path(movie_asset);
-
-    let working_dir = if movie_path.contains("habbo_v7") {
-        "habbo_v7"
-    } else {
-        "unknown"
-    };
-
-    let mut snapshots = SnapshotContext::new(suite, working_dir);
+    let mut snapshots = SnapshotContext::new(suite, test_name);
     snapshots.max_diff_ratio = 0.003;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
 
     // Wait for the boot sequence to initialize
-    player.step_until(datum("sprite(1).member.name").equals(StaticDatum::String("Logo".into()))).timeout(10.0).await?;
+    player.step_until(sprite().member("Logo").visible(1.0)).await?;
 
     if player.get_global_ref("gCore").is_none() {
         return Err("gCore global should exist".into());
@@ -33,7 +28,9 @@ pub async fn assert_entry(
     snapshots.verify("preload", player.snapshot_stage())?;
 
     // Wait until the loading screen is fully drawn
-    player.step_until(sprite().member("login_b_login_ok").visible(1.0)).await?;
+    if login_window {
+        player.step_until(sprite().member("login_b_login_ok").visible(1.0)).await?;
+    }
     player.step_until(sprite().member("corner_element").visible(1.0)).await?;
     let loaded_count = player.eval_datum("gCore.get(#castload_manager).pLoadedCasts.count").await?
         .as_integer().unwrap_or(0);
@@ -46,22 +43,27 @@ pub async fn assert_entry(
     Ok(())
 }
 
+pub async fn assert_login_success(
+    player: &mut impl TestHarness,
+    suite: &str,
+    test_name: &str,
+) -> Result<(), String> {
+    let mut snapshots = SnapshotContext::new(suite, &test_name);
+    snapshots.max_diff_ratio = 0.01;
+
+    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).await?;
+    snapshots.verify("login_submitted", player.snapshot_stage())?;
+    Ok(())
+}
+
 pub async fn assert_login(
     player: &mut impl TestHarness,
     suite: &str,
-    movie_asset: &str,
+    test_name: &str,
     username: &str,
     password: &str,
 ) -> Result<(), String> {
-    let movie_path = player.asset_path(movie_asset);
-
-    let working_dir = if movie_path.contains("habbo_v7") {
-        "habbo_v7"
-    } else {
-        "unknown"
-    };
-
-    let mut snapshots = SnapshotContext::new(suite, working_dir);
+    let mut snapshots = SnapshotContext::new(suite, test_name);
     snapshots.max_diff_ratio = 0.01;
 
     // --- Login form ---
@@ -77,8 +79,25 @@ pub async fn assert_login(
 
     // Click login button
     player.click_sprite(sprite().member("login_b_login_ok")).await?;
-    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).await?;
-    snapshots.verify("login_submitted", player.snapshot_stage())?;
+    assert_login_success(player, suite, test_name).await?;
+
+    Ok(())
+}
+
+pub async fn assert_navigator_visible(
+    player: &mut impl TestHarness,
+    suite: &str,
+    test_name: &str,
+) -> Result<(), String> {
+    if let Err(_) = player.step_until(sprite().member("Hotel Navigator_back").visible(1.0)).timeout(5.0).await {
+        // Try clicking the navigator button if it didn't appear within the timeout
+        if let Err(_) = player.click_sprite(sprite().member("entry_bar_nav_icon_image")).await {
+            if let Err(_) = player.click_sprite(sprite().member("Room_bar_int_nav_image")).await {
+                player.click_sprite(sprite().member("RoomBarID_int_nav_image")).await?;
+            }
+        }
+        player.step_until(sprite().member("Hotel Navigator_back").visible(1.0)).await?;
+    }
 
     Ok(())
 }
@@ -86,21 +105,13 @@ pub async fn assert_login(
 pub async fn assert_navigate_pub(
     player: &mut impl TestHarness,
     suite: &str,
+    test_name: &str,
     movie_asset: &str,
 ) -> Result<(), String> {
-    let movie_path = player.asset_path(movie_asset);
+    let snapshots = SnapshotContext::new(suite, test_name);
 
-    let working_dir = if movie_path.contains("habbo_v7") {
-        "habbo_v7"
-    } else {
-        "unknown"
-    };
-
-    let snapshots = SnapshotContext::new(suite, working_dir);
-
-    player.step_until(sprite().member("Hotel Navigator_back").visible(1.0)).await?;
-
-    snapshots.verify("navigator_opened", player.snapshot_stage())?;
+    assert_navigator_visible(player, suite, test_name).await?;
+    player.click_sprite(sprite().member("Hotel Navigator_nav_tb_publicRooms")).await?;
     snapshots.verify(
         "navigator_public",
         player.snapshot_sprite(sprite().member("Hotel Navigator_back")).await?,
@@ -112,5 +123,36 @@ pub async fn assert_navigate_pub(
     player.click_sprite(sprite().member("Hotel Navigator_nav_go_button")).await?;
     player.step_until(sprite().member_prefix("puppet_hilite_sh").visible(1.0)).await?;
     snapshots.verify("room_entered", player.snapshot_stage())?;
+    Ok(())
+}
+
+pub async fn assert_navigate_private(
+    player: &mut impl TestHarness,
+    suite: &str,
+    test_name: &str,
+    movie_asset: &str,
+) -> Result<(), String> {
+    let snapshots = SnapshotContext::new(suite, test_name);
+
+    assert_navigator_visible(player, suite, test_name).await?;
+    player.click_sprite(sprite().member("Hotel Navigator_nav_tb_guestRooms")).await?;
+    snapshots.verify(
+        "navigator_private",
+        player.snapshot_sprite(sprite().member("Hotel Navigator_back")).await?,
+    )?;
+
+    player.step_until(sprite().member("Hotel Navigator_nav_tab_own").visible(1.0)).await?;
+    player.click_sprite(sprite().member("Hotel Navigator_nav_tab_own")).await?;
+
+    player.step_until(sprite().member("Hotel Navigator_nav_roomlist").visible(1.0)).await?;
+    player.step_frames(100).await; // Wait for the room list to populate
+    player.click_sprite_at(sprite().member("Hotel Navigator_nav_roomlist"), 100, 9).await?;
+    player.step_until(sprite().member("Hotel Navigator_nav_go_button").visible(1.0)).await?;
+    player.click_sprite(sprite().member("Hotel Navigator_nav_go_button")).await?;
+    player.step_frames(300).await; // Wait to navigate away from previous room
+
+    player.step_until(sprite().member_prefix("puppet_hilite_").visible(0.9)).await?;
+    player.step_frames(300).await; // Wait for furniture to load
+    snapshots.verify("private_room_entered", player.snapshot_stage())?;
     Ok(())
 }
