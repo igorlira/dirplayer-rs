@@ -312,7 +312,13 @@ impl MultiuserXtraManager {
 
                 let socket_clone = socket.clone();
                 let ws_url_clone = ws_url.clone();
+                // Snapshot the player generation at connection time. All four
+                // callbacks check this before touching global state so that
+                // forgotten (leaked) closures from a previous test cannot fire
+                // on the new test's manager/player after a reset.
+                let conn_generation = unsafe { crate::player::PLAYER_GENERATION };
                 let onmessage_callback = Closure::<dyn FnMut(_)>::new(move |e: MessageEvent| {
+                    if unsafe { crate::player::PLAYER_GENERATION } != conn_generation { return; }
                     // Handle both ArrayBuffer and String messages
                     let data = e.data();
                     let message_bytes = if let Ok(array_buffer) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
@@ -363,6 +369,7 @@ impl MultiuserXtraManager {
                 });
 
                 let onerror_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
+                    if unsafe { crate::player::PLAYER_GENERATION } != conn_generation { return; }
                     // Note: WebSocket error events typically don't provide detailed error info.
                     // The ErrorEvent's message/filename/etc. fields are often undefined for WebSocket errors.
                     // We just log a generic error message.
@@ -383,6 +390,7 @@ impl MultiuserXtraManager {
                 });
 
                 let onclose_callback = Closure::<dyn FnMut(_)>::new(move |e: CloseEvent| {
+                    if unsafe { crate::player::PLAYER_GENERATION } != conn_generation { return; }
                     multiuser_log!("Multiuser: WebSocket closed - code: {}, reason: '{}', wasClean: {}",
                         e.code(), e.reason(), e.was_clean());
 
@@ -401,6 +409,7 @@ impl MultiuserXtraManager {
                 });
 
                 let onopen_callback = Closure::<dyn FnMut(_)>::new(move |_e: Event| {
+                    if unsafe { crate::player::PLAYER_GENERATION } != conn_generation { return; }
                     multiuser_log!("Multiuser: WebSocket connected to {}", ws_url_clone);
                     let multiusr_manager =
                         unsafe { MULTIUSER_XTRA_MANAGER_OPT.as_mut() };
