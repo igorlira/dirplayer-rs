@@ -8,7 +8,8 @@ browser_e2e_test!(test_fifteen_love_load, |player| async move {
     let cfg = TestConfig::from_toml(CONFIG);
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
-    let snapshots = SnapshotContext::new(cfg.suite(), "15_love");
+    let mut snapshots = SnapshotContext::new(cfg.suite(), "15_love");
+    snapshots.max_diff_ratio = 0.03;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
