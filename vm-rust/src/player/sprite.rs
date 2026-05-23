@@ -92,8 +92,6 @@ pub struct Sprite {
     pub has_blend_mod: bool,
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
-    pub has_flip_h: bool,
-    pub has_flip_v: bool,
     pub bitmap_size_owned_by_sprite: bool,
     // Base (score-defined) values
     pub base_loc_h: i32,
@@ -182,8 +180,6 @@ impl Sprite {
             has_blend_mod: false,
             has_size_tweened: false,
             has_size_changed: false,
-            has_flip_h: false,
-            has_flip_v: false,
             bitmap_size_owned_by_sprite: false,
             base_loc_h: 0,
             base_loc_v: 0,
@@ -201,15 +197,8 @@ impl Sprite {
 
     pub fn reset_for_member_change(&mut self) {
         self.skew = 0.0;
-        // Lido Diving's Jumping Pelle sets `pSpr.flipH = 1` BEFORE assigning
-        // `pSpr.member`; Director keeps explicit flip writes across member
-        // swaps, so only score-default flips fall back to false here.
-        if !self.has_flip_h {
-            self.flip_h = false;
-        }
-        if !self.has_flip_v {
-            self.flip_v = false;
-        }
+        self.flip_h = false;
+        self.flip_v = false;
         self.rotation = 0.0;
         // Only reset fore/bg color when they weren't explicitly set by Lingo.
         // Coke Studios' backpack does
@@ -262,8 +251,6 @@ impl Sprite {
         self.has_visible_mod = false;
         self.has_size_tweened = false;
         self.has_size_changed = false;
-        self.has_flip_h = false;
-        self.has_flip_v = false;
         self.bitmap_size_owned_by_sprite = false;
     }
 }

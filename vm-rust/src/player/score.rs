@@ -3805,7 +3805,6 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 } else {
                     sprite.flip_h = false;
                 }
-                sprite.has_flip_h = true;
                 Ok(())
             },
         ),
@@ -3818,7 +3817,6 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 } else {
                     sprite.flip_v = false;
                 }
-                sprite.has_flip_v = true;
                 Ok(())
             },
         ),
