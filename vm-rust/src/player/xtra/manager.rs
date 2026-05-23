@@ -5,7 +5,7 @@ use crate::{
 
 use super::bobba::{borrow_bobba_manager_mut, BobbaXtraManager};
 use super::budapi::BudApiXtra;
-use super::curl::CurlXtra;
+use super::curl::{CurlXtra, CurlXtraManager};
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
 use super::openurl::OpenUrlXtra;
@@ -96,6 +96,9 @@ pub fn call_xtra_instance_handler(
         "bobbaxtra" => {
             return BobbaXtraManager::call_instance_handler(handler_name, instance_id, args)
         }
+        "curl" => {
+            return CurlXtraManager::call_instance_handler(handler_name, instance_id, args)
+        }
         _ => Err(ScriptError::new(format!(
             "No handler {} found for xtra {} instance #{}",
             handler_name, xtra_name, instance_id
@@ -143,6 +146,14 @@ pub async fn call_xtra_instance_async_handler(
             )
             .await
         }
+        "curl" => {
+            return CurlXtraManager::call_instance_async_handler(
+                handler_name,
+                instance_id,
+                args,
+            )
+            .await
+        }
         _ => Err(ScriptError::new(format!(
             "No async handler {} found for xtra {} instance #{}",
             handler_name, xtra_name, instance_id
@@ -161,6 +172,7 @@ pub fn has_xtra_instance_async_handler(
         "xmlparser" => XmlParserXtraManager::has_instance_async_handler(handler_name),
         "fileio" => FileIoXtraManager::has_instance_async_handler(handler_name),
         "bobbaxtra" => BobbaXtraManager::has_instance_async_handler(handler_name),
+        "curl" => CurlXtraManager::has_instance_async_handler(handler_name),
         _ => false,
     }
 }
