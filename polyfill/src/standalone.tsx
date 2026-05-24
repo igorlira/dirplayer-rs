@@ -1,6 +1,6 @@
 import { initPolyfill } from './core';
 import { getEmbeddedWasmUrl, getEmbeddedFontUrl } from './embedded-loader';
-import { setXtraHostBase } from 'dirplayer-js-api';
+import { loadDefaultXtraRegistry, setXtraHostBase } from 'dirplayer-js-api';
 
 declare const DIRPLAYER_VERSION: string;
 
@@ -101,9 +101,19 @@ function init() {
   // Registry / loadExternalXtra URLs prefixed with "~/" then resolve to
   // <polyfill-script-base>/... so hosts can serve xtras alongside the
   // polyfill bundle without colocating them with .dcr movie files.
+  //
+  // The convention fallback (`~/<snake>.wasm`) and the default registry
+  // file (`~/xtra-registry.json`) both resolve through this same base —
+  // each polyfill deployment ships its own xtras + registry alongside
+  // the bundle JS.
   const polyfillBase = getPolyfillBaseUrl();
   if (polyfillBase) {
     setXtraHostBase(polyfillBase);
+    // Fire-and-forget: the registry merges in as soon as the JSON
+    // arrives; movies started after that pick up the entries. The
+    // alternative (awaiting here) would delay polyfill init for one
+    // round-trip on every page load, even when there are no xtras.
+    loadDefaultXtraRegistry();
   }
 
   const disableFlash = polyfillScript?.hasAttribute('data-disable-flash') ?? false;

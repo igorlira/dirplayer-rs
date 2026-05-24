@@ -122,6 +122,19 @@ export function setXtraRegistry(map: Record<string, string> | null): void;
 export function getXtraRegistry(): Record<string, string>;
 
 /**
+ * Fetch `~/xtra-registry.json` (resolved through `setXtraHostBase`) and
+ * merge its entries into the registry. Each host bootstrap calls this
+ * after setting its own host base so each environment ships its own
+ * defaults — dev: public/, polyfill: alongside bundle, extension:
+ * xtras/, Electron: app resources.
+ *
+ * Missing or malformed file is non-fatal (returns null); the
+ * snake_case convention fallback (`~/<name>.wasm`) still works in
+ * that case.
+ */
+export function loadDefaultXtraRegistry(): Promise<Record<string, string> | null>;
+
+/**
  * Resolve the currently-loaded movie's XTRl declarations against the
  * registry and load any matched plugins not already loaded. Call this
  * AFTER `load_movie_file` (which parses the XTRl) and BEFORE `play()`
@@ -174,3 +187,18 @@ export function createExternalXtraInstance(
 export function destroyExternalXtraInstance(xtraName: string, instanceId: number): void;
 
 export function externalXtraHasStaticHandler(xtraName: string, handler: string): number;
+
+/**
+ * Called BY vm-rust when Lingo hits `new(xtra "X")` for a name that
+ * isn't yet registered. Resolves `name` through the registry (set via
+ * `setXtraRegistry`), fetches + instantiates the wasm, then signals
+ * back into vm-rust via the wasm-bindgen export
+ * `complete_external_xtra_load(name, success)` so the parked bytecode
+ * dispatcher can resume and retry the lookup.
+ *
+ * Hosts don't normally call this — vm-rust drives it. Exported as part
+ * of the `vmCallbacks` surface so a host can override the default
+ * registry-driven implementation if it needs custom semantics (e.g. a
+ * user-confirmation prompt before loading).
+ */
+export function onRequestXtraLoad(name: string): void;

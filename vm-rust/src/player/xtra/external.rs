@@ -24,6 +24,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures::channel::oneshot;
+
 use crate::director::lingo::datum::{Datum, XtraInstanceId, datum_bool};
 use crate::player::{DatumRef, ScriptError, reserve_player_mut};
 
@@ -98,6 +100,88 @@ pub fn registered_names() -> Vec<String> {
     registry().iter().cloned().collect()
 }
 
+// ── Pending on-demand loads ──────────────────────────────────────────────
+//
+// When Lingo executes `new(xtra "X")` and X isn't registered, vm-rust asks
+// JS to resolve the name through the registry and load the .wasm. The
+// bytecode dispatch awaits a oneshot signal here; JS calls
+// `complete_external_xtra_load(name, success)` (exported in `lib.rs`) when
+// the load finishes, which fires every receiver waiting on that name.
+//
+// Multiple concurrent requests for the same name share one fetch — only
+// the first requester triggers the JS callback; subsequent ones just
+// append a receiver to the queue.
+
+#[derive(Default)]
+struct PendingLoad {
+    /// One receiver per concurrent requester. When the load finishes
+    /// `complete_load` drains the vec and signals each with the result.
+    waiters: Vec<oneshot::Sender<bool>>,
+}
+
+static mut PENDING_LOADS: Option<HashMap<String, PendingLoad>> = None;
+
+fn pending_loads() -> &'static mut HashMap<String, PendingLoad> {
+    unsafe {
+        let ptr = &raw mut PENDING_LOADS;
+        (*ptr).get_or_insert_with(HashMap::new)
+    }
+}
+
+/// Ask the host to resolve `name` against its registry and load the
+/// plugin. Returns `true` if the load succeeded (the caller can retry
+/// `is_registered` and expect success); `false` if no registry entry
+/// matched or the load itself failed. Resolves immediately if the name
+/// is already registered, so callers can use this as a "ensure loaded"
+/// check without a separate fast-path branch.
+pub async fn request_xtra_load(name: &str) -> bool {
+    let key = name.to_lowercase();
+    if is_registered(&key) {
+        return true;
+    }
+    let (tx, rx) = oneshot::channel::<bool>();
+    let need_to_request = {
+        let map = pending_loads();
+        let entry = map.entry(key.clone()).or_default();
+        let was_empty = entry.waiters.is_empty();
+        entry.waiters.push(tx);
+        was_empty
+    };
+    if need_to_request {
+        // Fire-and-forget. JS will call complete_load with the result.
+        js_bridge::onRequestXtraLoad(&key);
+    }
+    rx.await.unwrap_or(false)
+}
+
+/// JS calls this (via the `complete_external_xtra_load` wasm-bindgen
+/// export in `lib.rs`) once an on-demand load finishes. Drains the
+/// waiters for `name` and signals each with `success`.
+pub fn complete_load(name: &str, success: bool) {
+    let key = name.to_lowercase();
+    let entry = pending_loads().remove(&key);
+    if let Some(entry) = entry {
+        for tx in entry.waiters {
+            let _ = tx.send(success);
+        }
+    }
+}
+
+/// Cancel every outstanding on-demand load. Called from `DirPlayer::reset`
+/// so leftover futures from a previous movie don't leak across loads.
+/// Signals every waiter with `false`, which makes their `request_xtra_load`
+/// await resolve to "not loaded" — the in-flight bytecode handler then
+/// surfaces the normal "Xtra X not found" error.
+pub fn cancel_all_pending_loads() {
+    let map = pending_loads();
+    let drained: Vec<(String, PendingLoad)> = map.drain().collect();
+    for (_name, entry) in drained {
+        for tx in entry.waiters {
+            let _ = tx.send(false);
+        }
+    }
+}
+
 // ── JS bridge (declared in `dirplayer-js-api`) ───────────────────────────
 
 #[cfg(target_arch = "wasm32")]
@@ -144,6 +228,14 @@ mod js_bridge {
         /// init-script in polyfill, etc.).
         #[wasm_bindgen(catch)]
         pub async fn loadExternalXtra(url: &str) -> Result<JsValue, JsValue>;
+
+        /// Tell JS to resolve `name` against the registry and load the
+        /// plugin asynchronously. JS calls back via the wasm-bindgen
+        /// export `complete_external_xtra_load(name, success)` (see
+        /// `lib.rs`) when the load finishes — there is no return value
+        /// here; this function is fire-and-forget. Fired by
+        /// `request_xtra_load` when an unknown xtra is hit by Lingo.
+        pub fn onRequestXtraLoad(name: &str);
     }
 }
 
@@ -160,6 +252,7 @@ mod js_bridge {
     pub fn createExternalXtraInstance(_: &str, _: &[u8]) -> Option<Vec<u8>> { None }
     pub fn destroyExternalXtraInstance(_: &str, _: u32) {}
     pub fn externalXtraHasStaticHandler(_: &str, _: &str) -> u32 { 0 }
+    pub fn onRequestXtraLoad(_: &str) {}
 }
 
 // ── Lingo-side dispatch (called from manager.rs) ─────────────────────────
@@ -349,12 +442,7 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
                     None => return wire::encode_error("random_fill: no crypto in window"),
                 }
             }
-            // Use String as a compact byte container in the postcard payload
-            // (avoids per-element overhead of postcard's list encoding).
-            // The plugin-side wrapper turns this back into Vec<u8>.
-            wire::encode_return(&XDatum::String(unsafe {
-                String::from_utf8_unchecked(buf)
-            }))
+            wire::encode_return(&XDatum::ByteArray(buf))
         }
         HostOp::StorageGet => {
             let key = match args.first() {
@@ -460,6 +548,16 @@ fn xdatum_to_host_datum(d: &XDatum) -> Datum {
         // Director booleans are Int(0)/Int(1). Use the helper so a future
         // change to the bool representation only touches one place.
         XDatum::Bool(b) => datum_bool(*b),
+        // Byte payloads round-trip into Director as a Latin-1 string
+        // (byte b → char b). This matches how multiuser/fileio surface
+        // binary data to Lingo: the high-bit-set chars stay distinct,
+        // and `string_value()` on the host still yields the original
+        // bytes via `c as u8`. Plugins that round-trip raw bytes hand
+        // them back to other plugins through `host_env::call_xtra_handler`
+        // using ByteArray directly.
+        XDatum::ByteArray(b) => {
+            Datum::String(b.iter().map(|&byte| byte as char).collect())
+        }
         _ => Datum::Void,
     }
 }

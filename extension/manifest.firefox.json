@@ -31,7 +31,7 @@
   "host_permissions": ["<all_urls>"],
   "permissions": [],
   "web_accessible_resources": [{
-    "resources": ["vm-rust/pkg/*", "charmap-system.png"],
+    "resources": ["vm-rust/pkg/*", "charmap-system.png", "xtra-registry.json", "*.wasm"],
     "matches": ["<all_urls>"]
   }]
 }

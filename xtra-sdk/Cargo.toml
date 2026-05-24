@@ -24,3 +24,10 @@ crate-type = ["rlib"]
 # considered part of the SDK's contract.
 postcard = { version = "1.0", features = ["alloc"], default-features = false }
 serde = { version = "1.0", features = ["derive", "alloc"], default-features = false }
+# Forces `Vec<u8>` fields to use serde's `serialize_bytes` / `deserialize_bytes`
+# path instead of the per-element seq path. Postcard implements bytes as a
+# length-prefixed raw-byte run (no UTF-8 validation), which is what we need
+# for `Datum::ByteArray` to carry arbitrary binary payloads — random_fill
+# output, crypto buffers, etc. The default Vec<u8> serde path goes through
+# `serialize_seq` and adds per-element overhead.
+serde_bytes = { version = "0.11", default-features = false, features = ["alloc"] }

@@ -36,6 +36,16 @@ pub enum Datum {
     /// An opaque reference to an instance of another xtra:
     /// `(xtra_name, instance_id)`.
     XtraRef(String, InstanceId),
+    /// Arbitrary binary payload — host-generated random bytes, crypto
+    /// keys, compressed buffers, anything that isn't valid UTF-8.
+    ///
+    /// `String` can't carry non-UTF-8 bytes through the postcard wire
+    /// (its deserializer validates UTF-8), so this variant is the
+    /// correct choice for any handler that round-trips raw bytes. The
+    /// `serde_bytes` attribute forces serde's `serialize_bytes` path,
+    /// which postcard encodes as length + raw byte run (no per-element
+    /// overhead, no validation).
+    ByteArray(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 impl Datum {
