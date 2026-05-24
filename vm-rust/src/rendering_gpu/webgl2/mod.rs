@@ -103,6 +103,7 @@ pub struct WebGL2Renderer {
     trails_size: (u32, u32),
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
+    native_cursor_cache: crate::cursor::NativeCursorCache,
 }
 
 impl WebGL2Renderer {
@@ -179,6 +180,7 @@ impl WebGL2Renderer {
             trails_texture: None,
             trails_size: (0, 0),
             scene3d: scene3d::Scene3dRenderer::new(),
+            native_cursor_cache: None,
         })
     }
 
@@ -466,8 +468,8 @@ impl WebGL2Renderer {
             self.destroy_trails_fbo();
         }
 
-        // Draw custom cursor sprite
-        self.draw_cursor(player);
+        // Update native CSS cursor (no per-frame draw needed)
+        self.update_native_cursor(player);
 
         #[cfg(feature = "alloc-debug-overlay")]
         self.draw_debug_text_overlay(player);
@@ -550,163 +552,8 @@ impl WebGL2Renderer {
         bitmap
     }
 
-    /// Draw the custom cursor sprite at the mouse position.
-    /// Mirrors the logic from `draw_cursor` in rendering.rs.
-    fn draw_cursor(&mut self, player: &mut DirPlayer) {
-        // Determine which cursor to use: hovered sprite's cursor or global cursor
-        let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
-        let cursor_ref = if let Some(hovered_sprite) = hovered_sprite {
-            let sprite = player.movie.score.get_sprite(hovered_sprite as i16);
-            sprite.and_then(|s| s.cursor_ref.clone())
-        } else {
-            None
-        };
-        let cursor_ref = cursor_ref.as_ref().unwrap_or(&player.cursor);
-        let cursor_list = match cursor_ref {
-            CursorRef::Member(ids) => Some(ids),
-            _ => None,
-        };
-
-        let cursor_bitmap_member = cursor_list
-            .and_then(|ids| ids.first().map(|x| *x))
-            .and_then(|id| player.movie.cast_manager.find_member_by_slot_number(id as u32))
-            .and_then(|m| m.member_type.as_bitmap().cloned());
-
-        let cursor_mask_member = cursor_list
-            .and_then(|ids| ids.get(1).map(|x| *x))
-            .and_then(|id| player.movie.cast_manager.find_member_by_slot_number(id as u32))
-            .and_then(|m| m.member_type.as_bitmap().cloned());
-
-        // No custom cursor → clear the canvas's `cursor` property so the
-        // stageWrapper's CSS cursor (set by JS in onPointerMove) governs.
-        // Without this, draw_cursor sets the canvas cursor every frame and
-        // overrides any parent style — losing the I-beam during a text
-        // drag, etc.
-        let cursor_bitmap_member = match cursor_bitmap_member {
-            Some(m) => m,
-            None => {
-                let _ = self.canvas.style().remove_property("cursor");
-                return;
-            }
-        };
-
-        let cursor_bitmap = match player.bitmap_manager.get_bitmap(cursor_bitmap_member.image_ref) {
-            Some(b) => b,
-            None => {
-                let _ = self.canvas.style().remove_property("cursor");
-                return;
-            }
-        };
-
-        // Build RGBA data with mask applied to alpha
-        let palettes = player.movie.cast_manager.palettes();
-        let w = cursor_bitmap.width as u32;
-        let h = cursor_bitmap.height as u32;
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
-
-        // Convert cursor bitmap to RGBA
-        for y in 0..h {
-            for x in 0..w {
-                let (r, g, b) = cursor_bitmap.get_pixel_color(&palettes, x as u16, y as u16);
-                let idx = ((y * w + x) * 4) as usize;
-                rgba[idx] = r;
-                rgba[idx + 1] = g;
-                rgba[idx + 2] = b;
-                rgba[idx + 3] = 255;
-            }
-        }
-
-        // Apply mask if available
-        if let Some(mask_member) = cursor_mask_member {
-            if let Some(mask_bitmap) = player.bitmap_manager.get_bitmap(mask_member.image_ref) {
-                for y in 0..h.min(mask_bitmap.height as u32) {
-                    for x in 0..w.min(mask_bitmap.width as u32) {
-                        let (mr, mg, mb) = mask_bitmap.get_pixel_color(&palettes, x as u16, y as u16);
-                        let idx = ((y * w + x) * 4) as usize;
-                        // White mask pixels = transparent, black = opaque
-                        if mr > 127 && mg > 127 && mb > 127 {
-                            rgba[idx + 3] = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Upload as texture
-        let texture = match self.context.create_texture() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        if self.context.upload_texture_rgba(&texture, w, h, &rgba).is_err() {
-            return;
-        }
-
-        // Draw at mouse position, offset by reg_point
-        let dest_x = player.mouse_loc.0 - cursor_bitmap_member.reg_point.0 as i32;
-        let dest_y = player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32;
-
-        // Use matte ink for cursor (alpha-based transparency)
-        let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Matte);
-        let program = match self.shader_manager.get_program(effective_ink) {
-            Some(p) => p,
-            None => return,
-        };
-
-        let gl = self.context.gl();
-        self.context.set_blend_alpha();
-
-        // Set projection matrix (required after shader program switch)
-        if let Some(ref loc) = program.u_projection {
-            gl.uniform_matrix4fv_with_f32_array(Some(loc), false, &self.projection_matrix);
-        }
-
-        // Bind texture
-        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
-        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
-        if let Some(ref loc) = program.u_texture {
-            gl.uniform1i(Some(loc), 0);
-        }
-
-        // Set sprite rect
-        if let Some(ref loc) = program.u_sprite_rect {
-            gl.uniform4f(Some(loc), dest_x as f32, dest_y as f32, w as f32, h as f32);
-        }
-
-        // Set texture rect (full texture)
-        if let Some(ref loc) = program.u_tex_rect {
-            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
-        }
-
-        // No flip, rotation, or skew for cursor
-        if let Some(ref loc) = program.u_flip {
-            gl.uniform2f(Some(loc), 0.0, 0.0);
-        }
-        if let Some(ref loc) = program.u_skew_flip {
-            gl.uniform1f(Some(loc), 0.0);
-        }
-        if let Some(ref loc) = program.u_skew {
-            gl.uniform1f(Some(loc), 0.0);
-        }
-        if let Some(ref loc) = program.u_rotation {
-            gl.uniform1f(Some(loc), 0.0);
-        }
-        if let Some(ref loc) = program.u_rotation_center {
-            gl.uniform2f(Some(loc), dest_x as f32, dest_y as f32);
-        }
-
-        // Full opacity
-        if let Some(ref loc) = program.u_blend {
-            gl.uniform1f(Some(loc), 1.0);
-        }
-
-        // Draw
-        self.quad.draw(gl);
-
-        // Cleanup
-        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-
-        // Hide native system cursor since we're drawing a custom one
-        let _ = self.canvas.style().set_property("cursor", "none");
+    fn update_native_cursor(&mut self, player: &mut DirPlayer) {
+        crate::cursor::update_native_cursor(player, &self.canvas, &mut self.native_cursor_cache);
     }
 
     /// Get stage background color as normalized floats

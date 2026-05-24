@@ -1,4 +1,5 @@
 #![allow(static_mut_ref)]
+pub mod cursor;
 pub mod io;
 pub mod js_api;
 pub mod player;

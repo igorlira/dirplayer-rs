@@ -187,6 +187,7 @@ pub struct PlayerCanvasRenderer {
     pub preview_font_size: Option<u16>,
     pub debug_selected_channel_num: Option<i16>,
     pub bitmap: Bitmap,
+    native_cursor_cache: crate::cursor::NativeCursorCache,
 }
 
 pub(crate) fn get_or_load_font(
@@ -302,7 +303,6 @@ pub fn render_stage_to_bitmap(
     bitmap: &mut Bitmap,
     debug_sprite_num: Option<i16>,
 ) {
-    let palettes = player.movie.cast_manager.palettes();
     render_score_to_bitmap(
         player,
         &ScoreRef::Stage,
@@ -310,7 +310,6 @@ pub fn render_stage_to_bitmap(
         debug_sprite_num,
         IntRect::from_size(0, 0, player.movie.rect.width(), player.movie.rect.height()),
     );
-    draw_cursor(player, bitmap, &palettes);
 }
 
 /// Render a preview bitmap for a cast member. Returns `None` if the member type
@@ -3093,92 +3092,6 @@ pub fn render_score_to_bitmap_with_offset(
     }
 }
 
-fn draw_cursor(player: &mut DirPlayer, bitmap: &mut Bitmap, palettes: &PaletteMap) {
-    let hovered_sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
-    let cursor_ref = if let Some(hovered_sprite) = hovered_sprite {
-        let hovered_sprite = player
-            .movie
-            .score
-            .get_sprite(hovered_sprite as i16)
-            .unwrap();
-        hovered_sprite.cursor_ref.as_ref()
-    } else {
-        None
-    };
-    let cursor_ref = cursor_ref.or(Some(&player.cursor));
-    let cursor_list = cursor_ref.and_then(|x| match x {
-        CursorRef::Member(x) => Some(x),
-        _ => None,
-    });
-    let cursor_bitmap_member = cursor_list
-        .and_then(|x| x.first().map(|x| *x)) // TODO: what to do with other values? maybe animate?
-        .and_then(|x| {
-            player
-                .movie
-                .cast_manager
-                .find_member_by_slot_number(x as u32)
-        })
-        .and_then(|x| x.member_type.as_bitmap());
-
-    let cursor_bitmap_ref = cursor_bitmap_member.and_then(|x| Some(x.image_ref));
-
-    let cursor_mask_bitmap_ref = cursor_list
-        .and_then(|x| x.get(1).map(|x| *x)) // TODO: what to do with other values? maybe animate?
-        .and_then(|x| {
-            player
-                .movie
-                .cast_manager
-                .find_member_by_slot_number(x as u32)
-        })
-        .and_then(|x| x.member_type.as_bitmap())
-        .and_then(|x| Some(x.image_ref));
-
-    if let Some(cursor_bitmap_ref) = cursor_bitmap_ref {
-        let cursor_bitmap = player.bitmap_manager.get_bitmap(cursor_bitmap_ref).unwrap();
-        let mask = if let Some(cursor_mask_bitmap_ref) = cursor_mask_bitmap_ref {
-            let cursor_mask_bitmap = player
-                .bitmap_manager
-                .get_bitmap(cursor_mask_bitmap_ref)
-                .unwrap();
-            let mask = cursor_mask_bitmap.to_mask();
-            Some(mask)
-        } else {
-            None
-        };
-        let cursor_bitmap_member = cursor_bitmap_member.unwrap();
-        bitmap.copy_pixels_with_params(
-            &palettes,
-            cursor_bitmap,
-            IntRect::from_size(
-                player.mouse_loc.0 - cursor_bitmap_member.reg_point.0 as i32,
-                player.mouse_loc.1 - cursor_bitmap_member.reg_point.1 as i32,
-                cursor_bitmap.width as i32,
-                cursor_bitmap.height as i32,
-            ),
-            IntRect::from_size(
-                0,
-                0,
-                cursor_bitmap.width as i32,
-                cursor_bitmap.height as i32,
-            ),
-            &CopyPixelsParams { mask_offset: (0, 0),
-                blend: 100,
-                ink: 0,
-                bg_color: bitmap.get_bg_color_ref(),
-                color: bitmap.get_fg_color_ref(),
-                mask_image: mask.as_ref(),
-                is_text_rendering: false,
-                rotation: 0.0,
-                skew: 0.0,
-                sprite: None,
-                original_dst_rect: None,
-                bg_color_explicit: false,
-                fore_color_explicit: false,
-                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
-            },
-        );
-    }
-}
 
 impl PlayerCanvasRenderer {
     #[allow(dead_code)]
@@ -3343,6 +3256,8 @@ impl PlayerCanvasRenderer {
             }
             _ => {}
         }
+
+        crate::cursor::update_native_cursor(player, &self.canvas, &mut self.native_cursor_cache);
     }
 
     pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
@@ -3684,6 +3599,7 @@ pub(crate) fn create_canvas2d_renderer(
             0,
             PaletteRef::BuiltIn(get_system_default_palette()),
         ),
+        native_cursor_cache: None,
     }
 }
 
