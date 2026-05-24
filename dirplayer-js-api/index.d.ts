@@ -122,6 +122,17 @@ export function setXtraRegistry(map: Record<string, string> | null): void;
 export function getXtraRegistry(): Record<string, string>;
 
 /**
+ * Hand the bridge the vm-rust module reference. Required for hosts
+ * running in pure-ESM contexts WITHOUT CommonJS resolution (the
+ * browser e2e test harness uses an importmap). Webpack/Vite hosts
+ * (dev, polyfill, extension, Electron) don't need to call this — the
+ * lazy `require('vm-rust')` fallback resolves it.
+ *
+ * Call once after `await init()` from the vm-rust module.
+ */
+export function setVmModule(mod: unknown): void;
+
+/**
  * Fetch a registry JSON file and merge its entries into the registry.
  * Each host bootstrap calls this after setting its own host base so
  * each environment ships its own defaults — dev: public/, polyfill:
