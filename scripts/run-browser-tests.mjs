@@ -125,6 +125,18 @@ fs.copyFileSync(
   path.join(RUNNER_DIR, "dirplayer-js-api.js"),
 );
 
+// 6.1. Also copy the REAL dirplayer-js-api bridge alongside the stub so
+// the stub can re-export plugin-loading functions from it. The stub
+// keeps no-op UI callbacks (onMovieLoaded etc.) but delegates xtra
+// dispatch (loadExternalXtra, createExternalXtraInstance, etc.) to the
+// production implementation — so tests that load SDK plugins exercise
+// the real wire path end-to-end. `setVmModule(wasm)` in the HTML
+// template glues vm-rust resolution to the bridge.
+fs.copyFileSync(
+  path.join(REPO_ROOT, "dirplayer-js-api", "index.js"),
+  path.join(RUNNER_DIR, "dirplayer-js-api-real.js"),
+);
+
 // 6a. Bundle flashPlayerManager.ts for Ruffle integration.
 //     The `vm-rust` import is externalized and resolved through the
 //     importmap to the test's wasm-bindgen module.

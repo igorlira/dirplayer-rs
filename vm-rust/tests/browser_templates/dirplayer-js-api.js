@@ -82,3 +82,35 @@ export function onFlashMemberUnloaded(castLib, castMember) {
   flashManager().then(m => m.destroyFlashInstance?.(castLib, castMember));
 }
 export function onStageSizeChanged() {}
+
+// External Xtra plugin bridge — delegated to the real implementation.
+//
+// `dirplayer-js-api-real.js` is a copy of `dirplayer-js-api/index.js`
+// dropped here by `run-browser-tests.mjs`. We re-export its xtra-
+// loading functions so e2e tests can actually exercise the SDK end to
+// end (`new(xtra "BobbaXtra")`, registry resolution, on-demand loads).
+// The HTML template calls `setVmModule(wasm)` after init so the real
+// bridge can route plugin host calls back into the test wasm.
+//
+// Note: we forward only the xtra-bridge surface here, not the UI
+// callbacks (`onMovieLoaded`, etc.). The real index.js's UI callbacks
+// delegate to `vmCallbacks` which the test harness never registers —
+// so they'd throw NPEs. Test mode keeps its own no-op UI stubs above.
+export {
+  dispatchExternalXtraStaticHandler,
+  dispatchExternalXtraInstanceHandler,
+  createExternalXtraInstance,
+  destroyExternalXtraInstance,
+  externalXtraHasStaticHandler,
+  loadExternalXtra,
+  loadExternalXtras,
+  getExternalXtrasReady,
+  onRequestXtraLoad,
+  setXtraRegistry,
+  getXtraRegistry,
+  setXtraMovieBase,
+  setXtraHostBase,
+  setVmModule,
+  loadDefaultXtraRegistry,
+  resolveAndLoadMovieXtras,
+} from './dirplayer-js-api-real.js';

@@ -195,6 +195,14 @@
       await init();
       // Wire up timeout triggering now that wasm exports are available
       window.__wasm_trigger_timeout = wasm.trigger_timeout;
+      // Tell the real dirplayer-js-api bridge which wasm module to call
+      // back into. The bridge's webpack-style `require('vm-rust')` path
+      // can't resolve here (we're pure ESM + importmap), so the bridge
+      // would throw on the first plugin operation without this. After
+      // this call, `loadExternalXtra(url)`, `new(xtra "...")` on-demand
+      // loads, registry resolution, etc. all work normally in tests.
+      const api = await import('./dirplayer-js-api.js');
+      api.setVmModule(wasm);
       statusLine('Module loaded. Running tests...');
 
       const testFns = Object.keys(wasm)

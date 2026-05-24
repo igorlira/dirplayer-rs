@@ -452,13 +452,32 @@ function _readPackedAndDealloc(plugin, packed) {
   return out;
 }
 
+/// Explicitly hand the bridge the vm-rust module reference. Hosts that
+/// load this bridge through a bundler with CommonJS interop (webpack /
+/// Vite — dev, polyfill, extension, Electron) don't need to call this;
+/// the lazy `require('vm-rust')` fallback below picks it up. Hosts that
+/// run in pure-ESM contexts WITHOUT CommonJS resolution (the browser
+/// e2e test harness uses an importmap) MUST call this once at boot
+/// after `await init()` so plugin dispatch and on-demand loading can
+/// route back into vm-rust.
+export function setVmModule(mod) {
+  _vmModule = mod;
+}
+
 function _getVmModule() {
   if (_vmModule) return _vmModule;
-  // Lazy require so the bridge doesn't pull in vm-rust just for being
-  // imported. Each host should already have vm-rust loaded by the time
-  // the first plugin dispatch fires.
-  _vmModule = require('vm-rust');
-  return _vmModule;
+  // Bundler fallback. webpack/Vite rewrite this to their own resolver;
+  // in environments without one (raw importmap, deno, etc.) `require`
+  // is undefined and the call below throws — the caller should have
+  // wired the module via `setVmModule(...)` at host bootstrap instead.
+  if (typeof require === 'function') {
+    _vmModule = require('vm-rust');
+    return _vmModule;
+  }
+  throw new Error(
+    'dirplayer-js-api: vm-rust module not wired. Call setVmModule(wasm) ' +
+    'after awaiting the vm-rust init() promise before any plugin operation.'
+  );
 }
 
 // Tracks the in-flight load of every URL ever passed to loadExternalXtra,
