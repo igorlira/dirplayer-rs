@@ -30,6 +30,14 @@ yarn-error.log*
 .DS_Store
 public/dcr*
 public/ruffle*
+# External xtra wasms produced by `npm run build-xtras` (sourced from
+# the submodules under `xtras/` + the in-tree `xtras/example-xtra`).
+# Built artifacts; the source lives in the submodule repos.
+public/*.wasm
+# Submodule build outputs (cargo target dirs) — kept out so they don't
+# pollute the host repo's status / a `git clean` of the host can't wipe
+# in-progress compiles inside a submodule.
+xtras/*/target/
 .vscode
 
 /dist-extension
