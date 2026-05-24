@@ -216,23 +216,28 @@ function _conventionUrl(name) {
   return `~/${n}.wasm`;
 }
 
-/// Fetch `~/xtra-registry.json` from the host base and merge its entries
-/// into the registry. Every host bootstrap calls this after setting its
-/// own `setXtraHostBase(...)` so each environment ships its own default
-/// registry (dev: public/, polyfill: alongside bundle, extension: xtras/,
-/// electron: app resources). Missing or malformed file is non-fatal —
+/// Fetch a registry JSON file and merge its entries into the registry.
+/// Each host bootstrap calls this after setting its own
+/// `setXtraHostBase(...)`. Missing or malformed file is non-fatal —
 /// the convention fallback (`~/<snake>.wasm`) still works.
+///
+/// `path` defaults to `~/xtra-registry.json` (host-base relative).
+/// Pass another path (any form `_resolveXtraUrl` understands —
+/// `~/...`, `/...`, `https://...`, bare movie-relative) to point
+/// elsewhere. Each host has its own override hook layered on top:
+///   - polyfill: `data-xtra-registry-url` script attribute
+///   - dev/electron/extension: pass programmatically if needed
 ///
 /// Returns a Promise that resolves to the parsed map (or null on miss),
 /// so hosts can await this before issuing the first movie load.
-export async function loadDefaultXtraRegistry() {
+export async function loadDefaultXtraRegistry(path = '~/xtra-registry.json') {
   let url;
   try {
-    url = _resolveXtraUrl('~/xtra-registry.json');
+    url = _resolveXtraUrl(path);
   } catch (e) {
-    // No host base set — caller forgot setXtraHostBase. Bail quietly;
-    // convention fallback will also be unavailable.
-    console.warn('[dirplayer] loadDefaultXtraRegistry: no host base set, skipping');
+    // No host base set when the path needs one (e.g. "~/..."). Bail
+    // quietly; convention fallback will also be unavailable.
+    console.warn(`[dirplayer] loadDefaultXtraRegistry: cannot resolve ${path}, skipping`);
     return null;
   }
   try {

@@ -97,23 +97,38 @@ function loadRuffle(): Promise<void> {
 }
 
 function init() {
-  // Tell the xtra plugin loader where THIS polyfill JS was loaded from.
-  // Registry / loadExternalXtra URLs prefixed with "~/" then resolve to
-  // <polyfill-script-base>/... so hosts can serve xtras alongside the
-  // polyfill bundle without colocating them with .dcr movie files.
+  // Tell the xtra plugin loader where xtras live for THIS deployment.
   //
-  // The convention fallback (`~/<snake>.wasm`) and the default registry
-  // file (`~/xtra-registry.json`) both resolve through this same base —
-  // each polyfill deployment ships its own xtras + registry alongside
-  // the bundle JS.
+  // Resolution order:
+  //   1. `data-xtra-host-base="..."` attribute on the polyfill <script>
+  //      tag. Lets embedders point at a CDN / sibling path / different
+  //      origin without touching JS. Both absolute URLs and paths
+  //      resolved against the embedding page work. Trailing slash is
+  //      not required — the resolver absolutifies via `new URL()`.
+  //   2. The polyfill script's own base URL (where dirplayer-polyfill.js
+  //      was loaded from). The common case: ship xtras + registry next
+  //      to the bundle.
+  //
+  // Registry / loadExternalXtra URLs prefixed with "~/" then resolve to
+  // <host-base>/... — `~/foo.wasm` and the default `~/xtra-registry.json`
+  // both route through this same base.
+  const customHostBase = polyfillScript?.getAttribute('data-xtra-host-base');
   const polyfillBase = getPolyfillBaseUrl();
-  if (polyfillBase) {
-    setXtraHostBase(polyfillBase);
+  const xtraHostBase = customHostBase || polyfillBase;
+  if (xtraHostBase) {
+    setXtraHostBase(xtraHostBase);
+    // Optional override for the registry JSON path. Defaults to
+    // ~/xtra-registry.json (i.e. <host-base>/xtra-registry.json) when
+    // the attribute is absent. The override accepts any form
+    // _resolveXtraUrl understands — `~/foo.json`, `/foo.json`, or a
+    // full absolute URL — so a deployment can pin the registry at a
+    // different path / CDN than the wasms themselves.
+    const customRegistryUrl = polyfillScript?.getAttribute('data-xtra-registry-url');
     // Fire-and-forget: the registry merges in as soon as the JSON
     // arrives; movies started after that pick up the entries. The
     // alternative (awaiting here) would delay polyfill init for one
     // round-trip on every page load, even when there are no xtras.
-    loadDefaultXtraRegistry();
+    loadDefaultXtraRegistry(customRegistryUrl || undefined);
   }
 
   const disableFlash = polyfillScript?.hasAttribute('data-disable-flash') ?? false;
