@@ -1,4 +1,13 @@
-import { ICastMemberRef, JsBridgeBreakpoint, OnScriptErrorData, registerVmCallbacks } from "dirplayer-js-api";
+import {
+  ICastMemberRef,
+  JsBridgeBreakpoint,
+  OnScriptErrorData,
+  loadExternalXtra,
+  registerVmCallbacks,
+  resolveAndLoadMovieXtras,
+  setXtraRegistry,
+  getXtraRegistry,
+} from "dirplayer-js-api";
 import { createFlashInstance, destroyFlashInstance, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
@@ -23,6 +32,21 @@ export function initVmCallbacks() {
   (window as any).exportW3dObj = exportW3dObj;
   (window as any).exportW3dRaw = exportW3dRaw;
   (window as any).listW3dMembers = listW3dMembers;
+
+  // Expose external xtra loader + registry API so hosts (or devtools)
+  // can drive plugin loading interactively. The dev-environment
+  // auto-load that runs at boot lives in VMProvider (after `await init`);
+  // these exposures are for ad-hoc testing.
+  //
+  //   await loadExternalXtra('/example_xtra.wasm')
+  //   setXtraRegistry({ BobbaXtra: '~/bobba.wasm' })
+  //   await resolveAndLoadMovieXtras()
+  //   getXtraRegistry()
+  const w = window as any;
+  w.loadExternalXtra = loadExternalXtra;
+  w.setXtraRegistry = setXtraRegistry;
+  w.getXtraRegistry = getXtraRegistry;
+  w.resolveAndLoadMovieXtras = resolveAndLoadMovieXtras;
 
   // Expose trace log download on window
   (window as any).downloadTraceLog = () => {

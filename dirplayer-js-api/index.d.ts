@@ -59,3 +59,118 @@ type TVmCallbacks = {
 declare let vmCallbacks: TVmCallbacks | undefined;
 
 export function registerVmCallbacks(callbacks: TVmCallbacks);
+
+/**
+ * Promise that resolves the next time vm-rust fires onMovieLoaded.
+ * Use after `load_movie_file(...)` to wait for the actual movie to
+ * finish loading (vm-rust's `load_movie_file` returns immediately
+ * after dispatching a command, NOT after the load completes).
+ */
+export function whenMovieLoaded(): Promise<any>;
+
+// ── External Xtra plugin loader + JS↔WASM bridge ─────────────────────
+
+/**
+ * Fetch a plugin .wasm from `url`, instantiate it, and register the
+ * xtra under its `__xtra_name()` so vm-rust will route Lingo calls
+ * (e.g. `new(xtra "...")`, `the xtraList`) to it.
+ *
+ * Available in all four host environments (dev, polyfill, extension,
+ * Electron). Each host calls this with its own URL list at startup.
+ *
+ * URL resolution:
+ *   - "http(s)://..." (or any scheme) → used as-is
+ *   - "/anything"     → resolved against document.baseURI
+ *   - "anything"      → resolved against the current movie base
+ *                       (set via setXtraMovieBase)
+ */
+export function loadExternalXtra(url: string): Promise<string>;
+
+/**
+ * Set the base URL used for movie-relative xtra resolution (the
+ * "bare filename" case in loadExternalXtra). Hosts call this from
+ * their movie-load path BEFORE any per-movie plugin load so a
+ * `xtra("foo").wasm` request resolves to `<movieBase>/foo.wasm`.
+ *
+ * Pass `null` or empty to clear (e.g. on movie unload).
+ */
+export function setXtraMovieBase(base: string | null | undefined): void;
+
+/**
+ * Set the base URL used by the `~/...` prefix in xtra URLs. Useful
+ * in the polyfill / extension cases where the host JS lives at a
+ * known CDN or extension location and the registry wants to point
+ * at xtras served alongside the host JS — not co-located with .dcr
+ * movie files. Polyfill `standalone.tsx` calls this at init with
+ * its own script base URL.
+ */
+export function setXtraHostBase(base: string | null | undefined): void;
+
+/**
+ * Register or merge a name→URL map for movie-driven xtra resolution.
+ * Keys are normalized (lowercased, ".x32" stripped); values follow
+ * the same URL resolver rules as loadExternalXtra. Repeated calls
+ * merge; pass `null` to clear.
+ *
+ * Hosts set this at boot from their config source (dev: localStorage
+ * `dirplayer_xtra_registry`; polyfill: init-script attribute;
+ * extension: chrome.storage; Electron: app config).
+ */
+export function setXtraRegistry(map: Record<string, string> | null): void;
+
+/** Read-only snapshot of the current registry (normalized keys). */
+export function getXtraRegistry(): Record<string, string>;
+
+/**
+ * Resolve the currently-loaded movie's XTRl declarations against the
+ * registry and load any matched plugins not already loaded. Call this
+ * AFTER `load_movie_file` (which parses the XTRl) and BEFORE `play()`
+ * so Lingo sees its xtras registered.
+ */
+export function resolveAndLoadMovieXtras(): Promise<{
+  loaded: string[];
+  skipped: string[];
+  failed: { name: string; url: string; error: string }[];
+  missing: { filename: string; displayName: string }[];
+}>;
+
+/**
+ * Load several plugin URLs in parallel. Each host calls this at boot
+ * with whatever URL list its environment provides (dev: localStorage
+ * key `dirplayer_external_xtras`; polyfill: init-script attribute;
+ * extension: chrome.storage; Electron: app config).
+ */
+export function loadExternalXtras(urls: string[]): Promise<string[]>;
+
+/**
+ * Resolves once every load initiated so far has finished (success or
+ * failure). Movie-loading code should await this before evaluating
+ * Lingo that may reference an externally-loaded xtra.
+ */
+export function getExternalXtrasReady(): Promise<void>;
+
+// The four functions below are called by vm-rust via wasm-bindgen
+// externs declared in `vm-rust/src/player/xtra/external.rs`. Host
+// code typically does not call them directly.
+
+export function dispatchExternalXtraStaticHandler(
+  xtraName: string,
+  handler: string,
+  args: Uint8Array,
+): Uint8Array | undefined;
+
+export function dispatchExternalXtraInstanceHandler(
+  xtraName: string,
+  instanceId: number,
+  handler: string,
+  args: Uint8Array,
+): Uint8Array | undefined;
+
+export function createExternalXtraInstance(
+  xtraName: string,
+  args: Uint8Array,
+): Uint8Array | undefined;
+
+export function destroyExternalXtraInstance(xtraName: string, instanceId: number): void;
+
+export function externalXtraHasStaticHandler(xtraName: string, handler: string): number;

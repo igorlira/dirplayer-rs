@@ -1,5 +1,6 @@
 import { initPolyfill } from './core';
 import { getEmbeddedWasmUrl, getEmbeddedFontUrl } from './embedded-loader';
+import { setXtraHostBase } from 'dirplayer-js-api';
 
 declare const DIRPLAYER_VERSION: string;
 
@@ -96,6 +97,15 @@ function loadRuffle(): Promise<void> {
 }
 
 function init() {
+  // Tell the xtra plugin loader where THIS polyfill JS was loaded from.
+  // Registry / loadExternalXtra URLs prefixed with "~/" then resolve to
+  // <polyfill-script-base>/... so hosts can serve xtras alongside the
+  // polyfill bundle without colocating them with .dcr movie files.
+  const polyfillBase = getPolyfillBaseUrl();
+  if (polyfillBase) {
+    setXtraHostBase(polyfillBase);
+  }
+
   const disableFlash = polyfillScript?.hasAttribute('data-disable-flash') ?? false;
   if (disableFlash) {
     const win = window as any;

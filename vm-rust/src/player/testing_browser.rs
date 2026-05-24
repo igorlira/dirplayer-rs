@@ -161,6 +161,14 @@ impl BrowserTestPlayer {
             crate::rendering::player_create_canvas().unwrap();
         });
     }
+
+    /// Fetch and register an external Xtra plugin .wasm. Call this from a
+    /// test BEFORE `load_movie` so plugin-using Lingo (`new(xtra "...")`,
+    /// `the xtraList`, instance handlers) finds the xtra registered.
+    /// Returns the registered xtra name.
+    pub async fn load_external_xtra(&self, url: &str) -> Result<String, String> {
+        crate::player::xtra::external::load_for_test(url).await
+    }
 }
 
 impl TestHarness for BrowserTestPlayer {

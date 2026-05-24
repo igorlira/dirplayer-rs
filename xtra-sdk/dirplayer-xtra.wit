@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Canonical interface contract for external dirplayer-rs Xtras.
+//
+// This file is the source of truth for the host↔plugin protocol. The Rust
+// SDK in this crate provides bindings that match it. Plugin authors writing
+// in other languages should generate bindings from this file.
+//
+// Today, plugins are built as raw `cdylib` WASM modules with a hand-rolled
+// canonical-ABI-compatible export shape (see `lib.rs` for the C-ABI). When
+// browser Component Model runtimes become available the SDK will switch to
+// `wit-bindgen`-generated bindings against this same file — the WIT contract
+// is forward-compatible.
+
+package dirplayer:xtra@0.1.0;
+
+interface types {
+    /// Universal Director value type passed between host and plugins.
+    /// String and symbol payloads are Unicode strings; the host converts
+    /// Director's Latin-1 encoding to/from UTF-8 at the boundary
+    /// (Latin-1 codepoints map 1:1 to Unicode, so the conversion is lossless).
+    variant datum {
+        void,
+        int(s32),
+        float(f64),
+        string(string),
+        bool(bool),
+        symbol(string),
+        list(list<datum>),
+        prop-list(list<tuple<datum, datum>>),
+        point(tuple<f64, f64>),          // locH, locV
+        rect(tuple<f64, f64, f64, f64>), // left, top, right, bottom
+        /// An opaque reference to an instance of another xtra.
+        xtra-ref(tuple<string, instance-id>), // (xtra-name, instance-id)
+    }
+
+    type instance-id = u32;
+}
+
+/// Capabilities the host makes available to every plugin.
+interface host-env {
+    use types.{datum, instance-id};
+
+    log: func(msg: string);
+    random-fill: func(len: u32) -> result<list<u8>, string>;
+    storage-get: func(key: string) -> option<string>;
+    storage-set: func(key: string, val: string) -> result<_, string>;
+
+    create-xtra-instance: func(
+        xtra-name: string,
+        args: list<datum>,
+    ) -> result<instance-id, string>;
+
+    call-xtra-handler: func(
+        xtra-name: string,
+        instance-id: instance-id,
+        handler: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+
+    destroy-xtra-instance: func(xtra-name: string, instance-id: instance-id);
+}
+
+/// Interface every xtra plugin component must implement.
+interface xtra-plugin {
+    use types.{datum, instance-id};
+
+    xtra-name: func() -> string;
+
+    create-instance: func(args: list<datum>) -> result<instance-id, string>;
+
+    destroy-instance: func(id: instance-id);
+
+    call-handler: func(
+        id: instance-id,
+        name: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+
+    has-async-handler: func(name: string) -> bool;
+
+    has-static-handler: func(name: string) -> bool;
+
+    call-static-handler: func(
+        name: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+}
+
+world xtra {
+    import host-env;
+    export xtra-plugin;
+}

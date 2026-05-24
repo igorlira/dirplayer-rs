@@ -8,7 +8,7 @@ import {
 import init, { add_breakpoint, set_system_font_path, set_pfr_font_enabled } from "vm-rust";
 import * as wasm from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
-import { JsBridgeBreakpoint } from "dirplayer-js-api";
+import { JsBridgeBreakpoint, loadExternalXtras, setXtraRegistry } from "dirplayer-js-api";
 import { getFullPathFromOrigin } from "../utils/path";
 import { initAudioContext, initAudioBackend } from "../audio/audioInit";
 import { useDispatch } from "react-redux";
@@ -72,6 +72,47 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
         // helpers (e.g. `__vm.player_print_filmloop_sprites(2, 145)`) can
         // be called straight from the browser console.
         (window as any).__vm = wasm;
+
+        // Auto-load external xtras configured for the dev environment.
+        // Two localStorage keys, complementary:
+        //   - dirplayer_external_xtras  : JSON URL array (eager load)
+        //   - dirplayer_xtra_registry   : JSON name→URL map (lazy; the
+        //                                 movie's XTRl declares what's
+        //                                 needed and resolveAndLoadMovieXtras
+        //                                 fetches matched entries at load
+        //                                 time)
+        // Polyfill / extension / Electron each call loadExternalXtras
+        // and/or setXtraRegistry from their own bootstrap.
+        try {
+          const raw = localStorage.getItem("dirplayer_external_xtras");
+          if (raw) {
+            const urls = JSON.parse(raw) as string[];
+            if (Array.isArray(urls) && urls.length > 0) {
+              loadExternalXtras(urls)
+                .then((names) =>
+                  console.log("[dirplayer] external xtras loaded:", names.join(", ")))
+                .catch((e) =>
+                  console.error("[dirplayer] external xtra load failed:", e));
+            }
+          }
+        } catch (e) {
+          console.warn("[dirplayer] could not parse dirplayer_external_xtras:", e);
+        }
+        try {
+          const rawRegistry = localStorage.getItem("dirplayer_xtra_registry");
+          if (rawRegistry) {
+            const map = JSON.parse(rawRegistry) as Record<string, string>;
+            if (map && typeof map === "object") {
+              setXtraRegistry(map);
+              const keys = Object.keys(map);
+              if (keys.length > 0) {
+                console.log("[dirplayer] xtra registry primed:", keys.join(", "));
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("[dirplayer] could not parse dirplayer_xtra_registry:", e);
+        }
 
         // Step 3: Set system font
         const fontPath = systemFontPath || getFullPathFromOrigin("charmap-system.png");

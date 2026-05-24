@@ -23,6 +23,7 @@ pub mod sound;
 pub mod text;
 pub mod thum;
 pub mod xmedia;
+pub mod xtra_list;
 pub mod w3d;
 pub mod xmedia_styled_text;
 
@@ -42,7 +43,7 @@ use self::{
     lctx::ScriptContextChunk, palette::PaletteChunk, score::ScoreChunk, script::ScriptChunk,
     script_names::ScriptNamesChunk, text::TextChunk,
 };
-use self::{cast_info::CastInfoChunk, effect::EffectChunk, thum::ThumChunk, xmedia::XMediaChunk};
+use self::{cast_info::CastInfoChunk, effect::EffectChunk, thum::ThumChunk, xmedia::XMediaChunk, xtra_list::XtraListChunk};
 use super::{
     guid::MoaID,
     rifx::RIFXReaderContext,
@@ -80,6 +81,7 @@ pub enum Chunk {
     CstInfo(CastInfoChunk),
     Effect(EffectChunk),
     Thum(ThumChunk),
+    XtraList(XtraListChunk),
     Raw(Vec<u8>),
 }
 
@@ -267,6 +269,7 @@ pub fn make_chunk(
         }
         "FXmp" => return Ok(Chunk::Effect(EffectChunk::from_reader(&mut chunk_reader)?)),
         "Thum" => return Ok(Chunk::Thum(ThumChunk::from_reader(&mut chunk_reader)?)),
+        "XTRl" => return Ok(Chunk::XtraList(XtraListChunk::from_reader(&mut chunk_reader)?)),
         "CLUT" => Ok(Chunk::Palette(palette::PaletteChunk::from_reader(
             &mut chunk_reader,
             version,

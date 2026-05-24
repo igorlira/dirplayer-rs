@@ -18,6 +18,11 @@ alloc-debug-overlay = []
 [dependencies]
 wasm-bindgen = "=0.2.108"
 
+# SDK for external Xtras. vm-rust uses it to decode the wire format that
+# plugin .wasm modules exchange with the host. Plugins depend on the same
+# crate; the path link makes them version-locked together in this repo.
+xtra-sdk = { path = "../xtra-sdk" }
+
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
@@ -76,6 +81,7 @@ features = [
   'MouseEvent',
   'Node',
   'Window',
+  'Crypto',
   'Location',
   'console',
   'Headers',

@@ -2407,6 +2407,7 @@ impl CastMember {
             Chunk::CstInfo(_) => "Cinf",
             Chunk::Effect(_) => "FXmp",
             Chunk::Thum(_) => "Thum",
+            Chunk::XtraList(_) => "XTRl",
             Chunk::Raw(_) => "Raw",
         }
     }
