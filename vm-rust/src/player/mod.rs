@@ -87,6 +87,7 @@ use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
+use xtra::external::{init_external_xtra_registry, register_external_xtra, JsExternalXtra};
 use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
@@ -4080,6 +4081,13 @@ pub fn player_semaphone() -> &'static Mutex<()> {
     MAP.get_or_init(|| Mutex::new(()))
 }
 
+/// Called from JS after a plugin WASM module has been loaded and stored in the
+/// JS-side plugin registry.  Creates a `JsExternalXtra` wrapper that delegates
+/// all subsequent calls back through the JS bridge.
+pub fn register_js_external_xtra(name: &str) {
+    register_external_xtra(Box::new(JsExternalXtra::new(name.to_string())));
+}
+
 pub fn init_player() {
     console_log::init_with_level(log::Level::Error).unwrap_or(());
     let (tx, rx) = channel::unbounded();
@@ -4091,6 +4099,7 @@ pub fn init_player() {
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
     }
+    init_external_xtra_registry();
 
     unsafe {
         PLAYER_OPT = Some(DirPlayer::new(tx));

@@ -1,0 +1,15 @@
+[package]
+name = "echo-xtra"
+version = "0.1.0"
+edition = "2021"
+description = "Example dirplayer external Xtra plugin for validation and testing"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dirplayer-xtra = { path = "../dirplayer-xtra" }
+
+# Build for WASM:  cargo build --target wasm32-unknown-unknown
+# The resulting .wasm file in target/wasm32-unknown-unknown/debug/ or release/
+# can be loaded by dirplayer via loadExternalXtraFromUrl / loadExternalXtraFromBytes.

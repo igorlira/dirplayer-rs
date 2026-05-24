@@ -59,3 +59,31 @@ type TVmCallbacks = {
 declare let vmCallbacks: TVmCallbacks | undefined;
 
 export function registerVmCallbacks(callbacks: TVmCallbacks);
+
+// ── External Xtra Plugin System ───────────────────────────────────────────────
+
+/**
+ * Fetch, instantiate, and register a WASM xtra plugin from a URL.
+ * After resolution, call `register_external_xtra_plugin(name)` on the Rust
+ * WASM side to wire up Lingo dispatch.
+ */
+export function loadExternalXtraFromUrl(url: string): Promise<string>;
+
+/**
+ * Instantiate an external xtra plugin from raw WASM bytes.
+ * Returns the xtra name (lowercase).
+ */
+export function loadExternalXtraFromBytes(bytes: ArrayBuffer): Promise<string>;
+
+/** Returns true if a plugin with this name has been loaded. */
+export function isExternalXtraLoaded(name: string): boolean;
+
+/** Returns a JSON array string of loaded xtra names. */
+export function getLoadedExternalXtraNames(): string;
+
+export function externalXtraCreateInstance(name: string, argsJson: string): string;
+export function externalXtraDestroyInstance(name: string, id: number): void;
+export function externalXtraCallHandler(name: string, id: number, handlerName: string, argsJson: string): string;
+export function externalXtraHasAsyncHandler(name: string, handlerName: string): boolean;
+export function externalXtraHasStaticHandler(name: string, handlerName: string): boolean;
+export function externalXtraCallStaticHandler(name: string, handlerName: string, argsJson: string): string;

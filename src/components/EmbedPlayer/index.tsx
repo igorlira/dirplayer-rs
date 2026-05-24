@@ -7,17 +7,20 @@ import { initAudioBackend } from '../../audio/audioInit';
 import Stage from '../../views/Stage';
 import ShadowPortal from '../ShadowPortal';
 import ErrorOverlay from '../ErrorOverlay';
+import { loadXtraPlugins } from '../../vm/xtraLoader';
 
 type EmbedPlayerProps = {
   width: string
   height: string
   src: string
   externalParams?: Record<string, string>
+  /** URLs of external xtra plugin .wasm files to load before the movie starts. */
+  xtraPlugins?: string[]
   requireClickToPlay?: boolean
   enableGestures?: boolean
 };
 
-export default function EmbedPlayer({width, height, src, externalParams, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
+export default function EmbedPlayer({width, height, src, externalParams, xtraPlugins, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
@@ -32,6 +35,9 @@ export default function EmbedPlayer({width, height, src, externalParams, require
       const fullPath = getFullPathFromOrigin(src);
       set_base_path(getBasePath(fullPath));
       set_external_params(externalParams || {});
+      if (xtraPlugins && xtraPlugins.length > 0) {
+        await loadXtraPlugins(xtraPlugins);
+      }
       await load_movie_file(fullPath, true);
     }
     if (isVmReady && userClicked) {

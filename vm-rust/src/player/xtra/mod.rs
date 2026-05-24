@@ -1,3 +1,4 @@
+pub mod external;
 pub mod fileio;
 pub mod manager;
 pub mod multiuser;

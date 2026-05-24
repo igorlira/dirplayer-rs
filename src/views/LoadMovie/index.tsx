@@ -9,6 +9,7 @@ import { APP_TITLE } from '../../constants';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { movieUnloaded } from '../../store/vmSlice';
+import { loadXtraPlugins } from '../../vm/xtraLoader';
 
 type ExternalParam = { key: string; value: string };
 
@@ -76,6 +77,7 @@ export default function LoadMovie() {
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
   const [externalParams, setExternalParams] = useState<ExternalParam[]>(() => getEnvExternalParams());
   const [fakeMoviePath, setFakeMoviePath] = useState<string>('');
+  const [xtraPluginUrls, setXtraPluginUrls] = useState<string>('');
   const [recentMovies, setRecentMovies] = useState<RecentMovie[]>(() => loadRecentMovies());
   const [paramsExpanded, setParamsExpanded] = useState(() => getEnvExternalParams().length > 0);
   const isInElectron = isElectron();
@@ -102,13 +104,17 @@ export default function LoadMovie() {
       set_external_params(paramsArrayToRecord(params ?? externalParams));
       set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
       document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
+      const pluginUrls = xtraPluginUrls.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+      if (pluginUrls.length > 0) {
+        await loadXtraPlugins(pluginUrls);
+      }
       await load_movie_file(fullPath, autoPlay);
     } catch (e) {
       console.error('Failed to load movie', e);
     } finally {
       setIsLoading(false);
     }
-  }, [autoPlay, dispatch, externalParams, fakeMoviePath]);
+  }, [autoPlay, dispatch, externalParams, fakeMoviePath, xtraPluginUrls]);
 
   const onLoadClick = useCallback(async () => {
     if (!movieUrl.trim()) { setHasError(true); return; }
@@ -262,6 +268,20 @@ export default function LoadMovie() {
               >
                 + Add parameter
               </button>
+              <div className={styles.fieldContainer} style={{ marginTop: '12px' }}>
+                <label className={styles.label} htmlFor="xtraPlugins">
+                  External Xtra Plugins (URLs, space or comma separated)
+                </label>
+                <input
+                  id="xtraPlugins"
+                  type="text"
+                  className={styles.input}
+                  placeholder="https://example.com/my-xtra.wasm"
+                  value={xtraPluginUrls}
+                  onChange={e => setXtraPluginUrls(e.currentTarget.value)}
+                  disabled={isLoading}
+                />
+              </div>
             </div>
           )}
         </div>

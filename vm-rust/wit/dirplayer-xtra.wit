@@ -1,0 +1,108 @@
+package dirplayer:xtra@0.1.0;
+
+interface types {
+    /// Universal Director value type passed between host and plugins.
+    /// String and symbol payloads are Unicode strings; the host converts
+    /// Director's Latin-1 encoding to/from UTF-8 at the boundary
+    /// (Latin-1 codepoints map 1:1 to Unicode, so the conversion is lossless).
+    variant datum {
+        void,
+        int(s32),
+        float(f64),
+        string(string),
+        bool(bool),
+        symbol(string),
+        list(list<datum>),
+        prop-list(list<tuple<datum, datum>>),
+        point(tuple<f64, f64>),           // locH, locV
+        rect(tuple<f64, f64, f64, f64>),  // left, top, right, bottom
+        /// An opaque reference to an instance of another xtra.
+        /// Use with call-xtra-handler / destroy-xtra-instance for dynamic
+        /// dispatch, or pass to a statically-imported xtra interface.
+        xtra-ref(tuple<string, instance-id>), // (xtra-name, instance-id)
+    }
+
+    type instance-id = u32;
+}
+
+/// Capabilities the host makes available to every plugin.
+interface host-env {
+    use types.{datum, instance-id};
+
+    /// Write a debug-level log line.
+    log: func(msg: string);
+
+    /// Fill a buffer with cryptographically random bytes.
+    random-fill: func(len: u32) -> result<list<u8>, string>;
+
+    /// Read a value from persistent storage (localStorage).
+    storage-get: func(key: string) -> option<string>;
+
+    /// Write a value to persistent storage (localStorage).
+    storage-set: func(key: string, val: string) -> result<_, string>;
+
+    // ── Dynamic xtra-to-xtra calls ───────────────────────────────────────
+    // Use these when the target xtra's WIT interface is not known at compile
+    // time. For statically-typed inter-xtra calls, import the target's WIT
+    // interface directly (see inter-xtra interface sharing).
+
+    /// Create an instance of another loaded xtra.
+    create-xtra-instance: func(
+        xtra-name: string,
+        args: list<datum>,
+    ) -> result<instance-id, string>;
+
+    /// Call a synchronous handler on an instance of another loaded xtra.
+    /// The handler name is pre-lowercased by the host before dispatch.
+    call-xtra-handler: func(
+        xtra-name: string,
+        instance-id: instance-id,
+        handler: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+
+    /// Destroy an instance belonging to another loaded xtra.
+    destroy-xtra-instance: func(xtra-name: string, instance-id: instance-id);
+}
+
+/// Interface every xtra plugin component must implement.
+interface xtra-plugin {
+    use types.{datum, instance-id};
+
+    /// Returns the xtra name as registered in Director (case-insensitive).
+    xtra-name: func() -> string;
+
+    /// Create a new instance, optionally passing constructor arguments.
+    create-instance: func(args: list<datum>) -> result<instance-id, string>;
+
+    /// Destroy an instance and release its resources.
+    destroy-instance: func(id: instance-id);
+
+    /// Invoke a synchronous handler on an instance.
+    /// The handler name is pre-lowercased by the host before dispatch.
+    call-handler: func(
+        id: instance-id,
+        name: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+
+    /// Returns true if the named handler must be dispatched asynchronously.
+    has-async-handler: func(name: string) -> bool;
+
+    /// Returns true if the named handler is static (no instance required).
+    has-static-handler: func(name: string) -> bool;
+
+    /// Invoke a static (class-level) handler — no instance required.
+    /// The handler name is pre-lowercased by the host before dispatch.
+    call-static-handler: func(
+        name: string,
+        args: list<datum>,
+    ) -> result<datum, string>;
+}
+
+/// Base world invariant: every plugin component must satisfy this minimum.
+/// Plugins may extend it with additional imports and exports.
+world xtra {
+    import host-env;
+    export xtra-plugin;
+}

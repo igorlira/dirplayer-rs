@@ -24,7 +24,7 @@ use player::{
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
     eval::eval_lingo_command,
-    init_player, reserve_player_mut, reserve_player_ref,
+    init_player, register_js_external_xtra, reserve_player_mut, reserve_player_ref,
     score::get_sprite_at,
     PLAYER_OPT,
 };
@@ -48,6 +48,14 @@ pub fn set_external_params(params: js_sys::Object) {
     }
 
     player_dispatch(PlayerVMCommand::SetExternalParams(external_params));
+}
+
+/// Called from JS after a plugin WASM module has been loaded and stored in the
+/// JS-side registry.  Registers a `JsExternalXtra` wrapper for `name` so that
+/// Lingo calls to this xtra are dispatched through the JS bridge.
+#[wasm_bindgen]
+pub fn register_external_xtra_plugin(name: &str) {
+    register_js_external_xtra(name);
 }
 
 #[wasm_bindgen]

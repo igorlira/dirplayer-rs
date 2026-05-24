@@ -1,0 +1,18 @@
+[package]
+name = "dirplayer-xtra"
+version = "0.1.0"
+edition = "2021"
+description = "SDK for writing external dirplayer Xtra plugins"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+dirplayer-xtra-macros = { path = "../dirplayer-xtra-macros" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+# Disable std for WASM modules that cannot use it; plugins typically keep std.
+default = ["std"]
+std = []

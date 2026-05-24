@@ -63,6 +63,15 @@ function checkDirEmbed(element: HTMLEmbedElement): boolean {
 }
 
 const DATA_PARAM_PREFIX = 'data-sw-';
+const DATA_XTRA_PLUGINS_ATTR = 'data-xtra-plugins';
+
+/** Parse a space-or-comma-separated list of xtra plugin URLs from the element. */
+function parseXtraPlugins(element: HTMLElement): string[] | undefined {
+  const raw = element.getAttribute(DATA_XTRA_PLUGINS_ATTR);
+  if (!raw) return undefined;
+  const urls = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  return urls.length > 0 ? urls : undefined;
+}
 
 function parseDataExternalParams(element: HTMLElement): Record<string, string> {
   const params: Record<string, string> = {};
@@ -131,6 +140,7 @@ function renderPlayer(
   height: string,
   src: string,
   externalParams: Record<string, string>,
+  xtraPlugins?: string[],
   enableGestures?: boolean
 ) {
   const root = ReactDOM.createRoot(mount);
@@ -143,6 +153,7 @@ function renderPlayer(
             height={height}
             src={src}
             externalParams={externalParams}
+            xtraPlugins={xtraPlugins}
             requireClickToPlay={config.requireClickToPlay}
             enableGestures={enableGestures}
           />
@@ -194,6 +205,8 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
     || undefined;
 
   let size = resolveReplacementSize(element);
+  const xtraPlugins = parseXtraPlugins(element)
+    ?? (element.parentElement ? parseXtraPlugins(element.parentElement) : undefined);
   const newElement = document.createElement('div');
   if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
     // If the EMBED is inside an OBJECT, replace the OBJECT instead
@@ -203,7 +216,7 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   } else {
     element.replaceWith(newElement);
   }
-  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, xtraPlugins, enableGestures);
 }
 
 function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Record<string, string | null>) {
@@ -220,9 +233,10 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
     || getCaseInsensitiveValue(params, 'enableGestures') === 'true'
     || undefined;
 
+  const xtraPlugins = parseXtraPlugins(element);
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
-  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, xtraPlugins, enableGestures);
 }
 
 function extractNoscriptElements() {
