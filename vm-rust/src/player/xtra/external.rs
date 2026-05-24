@@ -412,10 +412,7 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
     match op {
         HostOp::Log => {
             if let Some(XDatum::String(msg)) = args.first() {
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!("[xtra] {}", msg).into());
-                #[cfg(not(target_arch = "wasm32"))]
-                eprintln!("[xtra] {}", msg);
+                log::debug!("[xtra] {}", msg);
             }
             Vec::new() // void sentinel
         }
