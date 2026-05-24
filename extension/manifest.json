@@ -35,7 +35,9 @@
       "dirplayer-shockwave-polyfill.js",
       "dirplayer-ruffle-bridge-host.js",
       "dirplayer-pre-init.js",
-      "ruffle/*"
+      "ruffle/*",
+      "xtra-registry.json",
+      "*.wasm"
     ],
     "matches": ["<all_urls>"]
   }]

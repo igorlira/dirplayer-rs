@@ -52,9 +52,8 @@ enum HostOp {
     /// Args: `[Datum::String(msg)]`. Returns void.
     Log = 1,
 
-    /// Args: `[Datum::Int(len)]`. Returns `Datum::String` whose bytes
-    /// (raw `as_bytes`) are the random output. (String, not list-of-u8,
-    /// to avoid postcard's per-element overhead on lists.)
+    /// Args: `[Datum::Int(len)]`. Returns `Datum::ByteArray(bytes)`
+    /// containing `len` cryptographically-secure random bytes.
     RandomFill = 2,
 
     /// Args: `[Datum::String(key)]`. Returns `Datum::String(value)` or
@@ -121,11 +120,9 @@ pub fn log(msg: &str) {
 /// Fill a buffer with cryptographically-secure random bytes.
 pub fn random_fill(len: usize) -> Result<Vec<u8>, String> {
     match invoke_for_datum(HostOp::RandomFill, &[Datum::Int(len as i32)])? {
-        // We use Datum::String as a byte container to keep the postcard
-        // payload compact (avoids per-element list overhead).
-        Datum::String(s) => Ok(s.into_bytes()),
+        Datum::ByteArray(b) => Ok(b),
         other => Err(alloc::format!(
-            "random_fill: expected String byte payload, got {:?}",
+            "random_fill: expected ByteArray payload, got {:?}",
             other
         )),
     }

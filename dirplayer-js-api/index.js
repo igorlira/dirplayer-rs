@@ -182,6 +182,79 @@ function _normalizeXtraKey(name) {
   return s;
 }
 
+/// Derive a "by convention" URL for an xtra name. Used as the last-resort
+/// fallback when the registry (JSON file + localStorage override) has no
+/// entry for `name`. Strategy: strip the extension, split camelCase into
+/// snake_case, and serve `~/<snake_case>.wasm` — `~/` resolves through
+/// `setXtraHostBase` so each host environment finds the wasm in its own
+/// "xtras live here" directory:
+///
+///   "BobbaXtra"     → "~/bobba_xtra.wasm"
+///   "BobbaXtra.x32" → "~/bobba_xtra.wasm"
+///   "OpenURL"       → "~/open_url.wasm"      (initialism collapse)
+///   "Multiusr"      → "~/multiusr.wasm"      (no internal upper)
+///
+/// Host bases:
+///   - dev:       document.baseURI (set by VMProvider)
+///   - polyfill:  <polyfill-script-base>     (set by standalone.tsx)
+///   - extension: chrome-extension://<id>/xtras/  (set by content-script.tsx)
+///   - electron:  document.baseURI (same as dev — Electron uses VMProvider)
+///
+/// Hosts that ship xtras under non-conventional filenames pin them
+/// explicitly in xtra-registry.json. This fallback covers the common
+/// case of "I dropped foo_xtra.wasm in the host's xtras dir and want
+/// it to just work."
+function _conventionUrl(name) {
+  if (typeof name !== 'string' || !name) return null;
+  let n = name.replace(/\.(?:x32|x16|xtr|wasm)$/i, '');
+  n = n
+    // Insert _ between a lowercase/digit and an uppercase (BobbaXtra → Bobba_Xtra).
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    // Insert _ inside a run of uppercase followed by a lowercase (HTMLParser → HTML_Parser).
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .toLowerCase();
+  return `~/${n}.wasm`;
+}
+
+/// Fetch `~/xtra-registry.json` from the host base and merge its entries
+/// into the registry. Every host bootstrap calls this after setting its
+/// own `setXtraHostBase(...)` so each environment ships its own default
+/// registry (dev: public/, polyfill: alongside bundle, extension: xtras/,
+/// electron: app resources). Missing or malformed file is non-fatal —
+/// the convention fallback (`~/<snake>.wasm`) still works.
+///
+/// Returns a Promise that resolves to the parsed map (or null on miss),
+/// so hosts can await this before issuing the first movie load.
+export async function loadDefaultXtraRegistry() {
+  let url;
+  try {
+    url = _resolveXtraUrl('~/xtra-registry.json');
+  } catch (e) {
+    // No host base set — caller forgot setXtraHostBase. Bail quietly;
+    // convention fallback will also be unavailable.
+    console.warn('[dirplayer] loadDefaultXtraRegistry: no host base set, skipping');
+    return null;
+  }
+  try {
+    const resp = await fetch(url, { cache: 'no-cache' });
+    if (!resp.ok) {
+      // 404 is fine — the file is optional.
+      return null;
+    }
+    const map = await resp.json();
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
+    setXtraRegistry(map);
+    const keys = Object.keys(map);
+    if (keys.length > 0) {
+      console.log(`[dirplayer] xtra registry primed from ${url}: ${keys.join(', ')}`);
+    }
+    return map;
+  } catch (e) {
+    console.warn(`[dirplayer] could not load ${url}:`, e);
+    return null;
+  }
+}
+
 /// Set or merge the name→URL registry used to resolve a movie's XTRl
 /// declarations. Each host (dev / polyfill / extension / Electron)
 /// calls this at boot with whatever its config tells it. Repeated
@@ -226,10 +299,15 @@ export async function resolveAndLoadMovieXtras() {
       skipped.push(display || filename);
       continue;
     }
-    // Try display-name key first, then filename stem.
+    // Try display-name key first, then filename stem, then a
+    // convention-derived URL (BobbaXtra → /bobba_xtra.wasm). The
+    // convention path may 404 — that surfaces as a `failed[]` entry,
+    // not `missing[]`, so the host can tell "filename missing from
+    // registry" apart from "the .wasm wasn't there".
     const url =
       _xtraRegistry.get(key) ||
-      _xtraRegistry.get(_normalizeXtraKey(filename));
+      _xtraRegistry.get(_normalizeXtraKey(filename)) ||
+      _conventionUrl(display || filename);
     if (!url) {
       missing.push({ filename, displayName: display });
       continue;
@@ -498,4 +576,70 @@ export function externalXtraHasStaticHandler(xtraName, handler) {
   const has = plugin.exports.__xtra_has_static_handler(handlerPtr, handlerBytes.length);
   plugin.exports.__plugin_dealloc(handlerPtr, handlerBytes.length);
   return has;
+}
+
+// ── On-demand load callback (called by vm-rust on unknown xtra) ───────
+//
+// vm-rust fires `onRequestXtraLoad(name)` from `request_xtra_load` when
+// Lingo executes `new(xtra "name")` for a name that isn't registered.
+// We resolve the name through the registry, load the .wasm if matched,
+// then call `complete_external_xtra_load(name, success)` back into
+// vm-rust so the parked bytecode handler can resume.
+//
+// One name → at most one in-flight load. Repeat triggers (e.g. multiple
+// concurrent waiters from inside vm-rust) are coalesced on the Rust side
+// already (only the first call into here fires for a given name), but
+// we still guard against a second call from a different source firing
+// while a load is in flight.
+const _onDemandInFlight = new Set();
+
+export function onRequestXtraLoad(name) {
+  const key = (name || '').toLowerCase();
+  if (!key) {
+    _completeOnDemandLoad(name, false);
+    return;
+  }
+  if (_plugins.has(key)) {
+    // Already loaded — signal success immediately. (Shouldn't normally
+    // happen, but vm-rust's request_xtra_load fast-paths registered
+    // names; this is the defence-in-depth catch.)
+    _completeOnDemandLoad(name, true);
+    return;
+  }
+  if (_onDemandInFlight.has(key)) {
+    // Another caller already started this load. The completion handler
+    // there will signal all waiters when it finishes.
+    return;
+  }
+  // Resolution order: explicit registry pin first; then the snake_case
+  // convention (BobbaXtra → /bobba_xtra.wasm). This lets a clean profile
+  // pick up wasms dropped in public/ without any localStorage seeding.
+  const url =
+    _xtraRegistry.get(_normalizeXtraKey(key)) ||
+    _conventionUrl(name);
+  if (!url) {
+    console.warn(`[dirplayer] onRequestXtraLoad: no registry entry or convention URL for '${name}'`);
+    _completeOnDemandLoad(name, false);
+    return;
+  }
+  _onDemandInFlight.add(key);
+  loadExternalXtra(url)
+    .then((loadedName) => {
+      _onDemandInFlight.delete(key);
+      console.log(`[dirplayer] on-demand loaded '${loadedName}' from ${url}`);
+      _completeOnDemandLoad(name, true);
+    })
+    .catch((err) => {
+      _onDemandInFlight.delete(key);
+      console.error(`[dirplayer] on-demand load failed for '${name}' (${url}):`, err);
+      _completeOnDemandLoad(name, false);
+    });
+}
+
+function _completeOnDemandLoad(name, success) {
+  try {
+    _getVmModule().complete_external_xtra_load(name, success);
+  } catch (e) {
+    console.error('[dirplayer] complete_external_xtra_load threw:', e);
+  }
 }

@@ -1,5 +1,5 @@
 import { initPolyfill, PolyfillConfig } from '../../polyfill/src/core';
-import { setXtraHostBase } from 'dirplayer-js-api';
+import { loadDefaultXtraRegistry, setXtraHostBase } from 'dirplayer-js-api';
 // Note: the Shockwave plugin polyfill (MAIN world) and the Ruffle fork
 // bundle (ISOLATED world, same as us) are registered by the service
 // worker via chrome.scripting.registerContentScripts at document_start
@@ -27,11 +27,20 @@ const config: PolyfillConfig = {
 };
 
 // Tell the xtra plugin loader where the extension's resources live.
-// Registry entries prefixed with "~/" then resolve to
-// chrome-extension://<id>/xtras/... so the extension can ship its own
-// xtras under web_accessible_resources without requiring an end-user
-// to point the registry at a remote URL.
-setXtraHostBase(chrome.runtime.getURL('xtras/'));
+// Registry entries prefixed with "~/" then resolve against the
+// extension's root URL — so the same `~/bobba_xtra.wasm` entry in
+// xtra-registry.json works for dev (resolves against document.baseURI)
+// and the extension (resolves against chrome-extension://<id>/).
+//
+// We keep the wasms + xtra-registry.json at the extension root rather
+// than under xtras/ so vite's default publicDir copy from public/
+// lands them at the right path with no build-config gymnastics — and
+// the dev / extension / electron file layouts stay identical.
+setXtraHostBase(chrome.runtime.getURL(''));
+// Fire-and-forget: kicks off the JSON fetch in parallel with polyfill
+// init. Movies that load after the JSON arrives pick up its entries;
+// the convention fallback covers anything not pinned in the JSON.
+loadDefaultXtraRegistry();
 
 // Initialize the polyfill with extension version for priority negotiation
 const version = chrome.runtime.getManifest().version;

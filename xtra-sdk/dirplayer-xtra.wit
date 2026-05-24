@@ -32,6 +32,12 @@ interface types {
         rect(tuple<f64, f64, f64, f64>), // left, top, right, bottom
         /// An opaque reference to an instance of another xtra.
         xtra-ref(tuple<string, instance-id>), // (xtra-name, instance-id)
+        /// Arbitrary binary payload. Used for handlers that round-trip
+        /// non-UTF-8 bytes (random output, crypto keys, compressed
+        /// buffers) — `string` cannot carry invalid UTF-8 through the
+        /// wire format. Appended to the variant after `xtra-ref` so the
+        /// existing variant discriminator values stay stable.
+        byte-array(list<u8>),
     }
 
     type instance-id = u32;

@@ -14,7 +14,7 @@ use crate::{
         geometry::IntRect,
         reserve_player_mut, reserve_player_ref,
         sprite::{ColorRef, CursorRef},
-        xtra::manager::{create_xtra_instance, is_xtra_registered},
+        xtra::manager::{create_xtra_instance_async, is_xtra_registered},
         DatumRef, DirPlayer, MathObject, ScriptError, XmlDocument,
     },
 };
@@ -803,7 +803,7 @@ impl TypeHandlers {
                         .unwrap()
                         .to_owned()
                 });
-                let result_id = create_xtra_instance(&xtra_name, args)?;
+                let result_id = create_xtra_instance_async(&xtra_name, args).await?;
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::XtraInstance(xtra_name, result_id)))
                 })
@@ -1154,18 +1154,22 @@ impl TypeHandlers {
     }
 
     pub fn xtra(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // `xtra("name")` returns a factory reference; the real
+        // registration check happens at `new(xtra "name")` time, so an
+        // unknown name doesn't error here. That keeps the door open for
+        // on-demand loading (`create_xtra_instance_async`) which would
+        // otherwise be short-circuited by this validator. Lingo movies
+        // that mis-spell an xtra name surface the error from `new()`
+        // instead, with a clearer "Xtra X not found" message.
         reserve_player_mut(|player| {
             let xtra_name = player.get_datum(&args[0]).string_value()?;
-            if is_xtra_registered(&xtra_name) {
-                debug!("Xtra '{}' registered OK", xtra_name);
-                Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
-            } else {
-                debug!("Xtra '{}' NOT registered", xtra_name);
-                Err(ScriptError::new(format!(
-                    "Xtra {} is not registered",
+            if !is_xtra_registered(&xtra_name) {
+                debug!(
+                    "Xtra '{}' not yet registered — deferring lookup to new() / on-demand load",
                     xtra_name
-                )))
+                );
             }
+            Ok(player.alloc_datum(Datum::Xtra(xtra_name)))
         })
     }
 

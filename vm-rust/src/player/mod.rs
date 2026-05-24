@@ -1014,6 +1014,14 @@ impl DirPlayer {
     pub fn reset(&mut self) {
         self.stop();
 
+        // Cancel any outstanding on-demand xtra loads so leftover oneshot
+        // receivers don't leak across movies. Each waiter sees `false`
+        // (matches the "load failed" path) and the in-flight bytecode
+        // handler that triggered the load surfaces the normal "not
+        // found" ScriptError instead of hanging forever.
+        debug!("Cancelling pending external-xtra loads");
+        crate::player::xtra::external::cancel_all_pending_loads();
+
         // Clear all references before resetting the allocator
         // This ensures all DatumRef and ScriptInstanceRef objects are dropped properly
         debug!("Clearing scopes");

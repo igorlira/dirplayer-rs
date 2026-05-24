@@ -265,6 +265,20 @@ pub fn external_xtra_host_dispatch(op_id: u32, args: &[u8]) -> Vec<u8> {
     crate::player::xtra::external::host_call_dispatch(op_id, args)
 }
 
+/// Signal completion of an on-demand xtra load. Called by JS after it
+/// resolves `name` through the registry and either successfully loads
+/// the plugin (`success = true`) or fails / can't find a matching URL
+/// (`success = false`). Wakes every Lingo handler that's awaiting
+/// `request_xtra_load(name)`; the bytecode dispatcher then retries the
+/// lookup with the now-registered xtra.
+///
+/// Idempotent; calling with an unknown name or after the waiters have
+/// already been drained is a no-op.
+#[wasm_bindgen]
+pub fn complete_external_xtra_load(name: &str, success: bool) {
+    crate::player::xtra::external::complete_load(name, success);
+}
+
 /// Returns the currently-loaded movie's declared xtra dependencies
 /// (parsed from its XTRl chunk). Each entry is a `js_sys::Object` with
 /// `filename` (always present) and `displayName` (may be empty if the

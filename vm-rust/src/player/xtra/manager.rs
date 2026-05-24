@@ -203,3 +203,38 @@ pub fn create_xtra_instance(
         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
     }
 }
+
+/// Async variant of [`create_xtra_instance`] that triggers on-demand
+/// loading of unknown external xtras. Called from the Lingo `new(xtra "X")`
+/// dispatch (`TypeHandlers::new` → `DatumType::Xtra` arm).
+///
+/// Flow:
+/// 1. Try the sync path. If the xtra is already registered (built-in or
+///    previously-loaded external), this returns immediately — no async
+///    overhead in the hot path.
+/// 2. On miss, await `external::request_xtra_load(name)` which asks JS
+///    to resolve the name through the registry and load the .wasm.
+/// 3. If JS reports success, retry the sync path — the plugin is now
+///    registered. If JS reports failure, surface the normal "not found"
+///    error.
+///
+/// Concurrent `new(xtra "X")` calls for the same X share the same JS
+/// fetch (see `external::request_xtra_load`).
+pub async fn create_xtra_instance_async(
+    xtra_name: &str,
+    args: &Vec<DatumRef>,
+) -> Result<XtraInstanceId, ScriptError> {
+    match create_xtra_instance(xtra_name, args) {
+        Ok(id) => Ok(id),
+        Err(_) => {
+            if external::request_xtra_load(xtra_name).await {
+                // Plugin loaded; retry. The retry path goes through the
+                // external dispatcher and will succeed (or surface a real
+                // create-instance error from the plugin itself).
+                create_xtra_instance(xtra_name, args)
+            } else {
+                Err(ScriptError::new(format!("Xtra {} not found", xtra_name)))
+            }
+        }
+    }
+}
