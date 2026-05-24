@@ -311,6 +311,12 @@ jobs:
         working-directory: ./vm-rust
         run: npm run build-ruffle && npm run copy-ruffle
 
+      - name: Build xtras (bobba-xtra, example-xtra, …)
+        # The xtra registry resolves to wasms under public/ — built fresh
+        # here from xtras/<name>/ so browser-side `new(xtra "…")` calls
+        # have something to load.
+        run: npm run build-xtras
+
       - name: Build and run browser e2e tests
         id: browser_tests
         continue-on-error: true

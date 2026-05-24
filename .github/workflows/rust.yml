@@ -14,15 +14,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Pull in xtras/* (bobba-xtra etc.) so the xtra-build sanity
+        # step has source to compile. `recursive` covers any future
+        # nested submodules an xtra might carry.
+        submodules: recursive
     - name: Install `wasm-pack`
       working-directory: ./vm-rust
       run: cargo install wasm-pack
+    - name: Install wasm32 target (for xtras)
+      run: rustup target add wasm32-unknown-unknown
     - name: Fetch
       working-directory: ./vm-rust
       run: cargo fetch
     - name: Test (Verbose)
       working-directory: ./vm-rust
       run: cargo test --verbose -- --skip e2e
-    - name: Build
+    - name: Build vm-rust
       working-directory: ./vm-rust
       run: wasm-pack build --target web
+    - name: Build xtras
+      # Sanity-build every xtra under xtras/ so a breaking change in
+      # the SDK shape surfaces here rather than at deploy time. The
+      # script copies output to public/ but rust.yml uploads nothing,
+      # so the resulting wasms exist only for the duration of the run.
+      run: node ./scripts/build-xtras.mjs
