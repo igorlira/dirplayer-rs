@@ -304,15 +304,21 @@ export async function resolveAndLoadMovieXtras() {
       skipped.push(display || filename);
       continue;
     }
-    // Try display-name key first, then filename stem, then a
-    // convention-derived URL (BobbaXtra → /bobba_xtra.wasm). The
-    // convention path may 404 — that surfaces as a `failed[]` entry,
-    // not `missing[]`, so the host can tell "filename missing from
-    // registry" apart from "the .wasm wasn't there".
+    // Try display-name key first, then filename stem. Convention
+    // fallback (`~/<snake>.wasm`) is intentionally NOT consulted here:
+    // an average movie's XTRl declares Director's built-in xtras
+    // (Multiusr, Font Xtra, Shockwave 3D Asset, INETURL, ...) which
+    // the host handles natively. Speculatively fetching every one of
+    // those as a wasm would 404 the lot and dump 10+ failures into the
+    // console on every movie load.
+    //
+    // Convention fallback DOES fire from `onRequestXtraLoad` — that
+    // path runs only when Lingo *explicitly* references an unknown
+    // xtra by name, so a 404 there is a genuine "movie expected a
+    // plugin we don't have" signal worth surfacing.
     const url =
       _xtraRegistry.get(key) ||
-      _xtraRegistry.get(_normalizeXtraKey(filename)) ||
-      _conventionUrl(display || filename);
+      _xtraRegistry.get(_normalizeXtraKey(filename));
     if (!url) {
       missing.push({ filename, displayName: display });
       continue;
@@ -332,8 +338,20 @@ export async function resolveAndLoadMovieXtras() {
       failed.push({ name: toLoad[i].name, url: toLoad[i].url, error: String(r.reason) });
     }
   }
-  if (missing.length || failed.length) {
-    console.warn('[dirplayer] resolveAndLoadMovieXtras:', { loaded, skipped, failed, missing });
+  // `failed` = real load error (registry hit a URL, fetch/instantiate
+  // blew up). Worth a console.warn.
+  //
+  // `missing` = XTRl declared an xtra with no registry match. For most
+  // movies this is normal — the XTRl lists Director's built-in xtras
+  // (Multiusr, Font Xtra, Shockwave 3D Asset, INETURL, ...) which the
+  // host handles natively without a wasm plugin. Surfacing those as a
+  // yellow warning every movie load is just noise; demote to debug so
+  // it shows under DevTools' "Verbose" level when triaging a movie
+  // that actually needs a plugin loaded.
+  if (failed.length) {
+    console.warn('[dirplayer] resolveAndLoadMovieXtras: failed to load xtras', { loaded, failed, missing });
+  } else if (missing.length) {
+    console.debug('[dirplayer] resolveAndLoadMovieXtras:', { loaded, skipped, missing });
   }
   return { skipped, loaded, failed, missing };
 }

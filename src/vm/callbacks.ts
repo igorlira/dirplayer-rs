@@ -34,19 +34,22 @@ export function initVmCallbacks() {
   (window as any).listW3dMembers = listW3dMembers;
 
   // Expose external xtra loader + registry API so hosts (or devtools)
-  // can drive plugin loading interactively. The dev-environment
-  // auto-load that runs at boot lives in VMProvider (after `await init`);
-  // these exposures are for ad-hoc testing.
+  // can drive plugin loading interactively. Namespaced with `dirplayer_`
+  // so DevTools autocomplete groups them together and they don't
+  // collide with anything a host page or extension might already put on
+  // window. The dev-environment auto-load that runs at boot lives in
+  // VMProvider (after `await init`); these exposures are for ad-hoc
+  // testing.
   //
-  //   await loadExternalXtra('/example_xtra.wasm')
-  //   setXtraRegistry({ BobbaXtra: '~/bobba.wasm' })
-  //   await resolveAndLoadMovieXtras()
-  //   getXtraRegistry()
+  //   await dirplayer_loadExternalXtra('/example_xtra.wasm')
+  //   dirplayer_setXtraRegistry({ BobbaXtra: '~/bobba.wasm' })
+  //   await dirplayer_resolveAndLoadMovieXtras()
+  //   dirplayer_getXtraRegistry()
   const w = window as any;
-  w.loadExternalXtra = loadExternalXtra;
-  w.setXtraRegistry = setXtraRegistry;
-  w.getXtraRegistry = getXtraRegistry;
-  w.resolveAndLoadMovieXtras = resolveAndLoadMovieXtras;
+  w.dirplayer_loadExternalXtra = loadExternalXtra;
+  w.dirplayer_setXtraRegistry = setXtraRegistry;
+  w.dirplayer_getXtraRegistry = getXtraRegistry;
+  w.dirplayer_resolveAndLoadMovieXtras = resolveAndLoadMovieXtras;
 
   // Expose trace log download on window
   (window as any).downloadTraceLog = () => {
