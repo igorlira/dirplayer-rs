@@ -122,17 +122,24 @@ export function setXtraRegistry(map: Record<string, string> | null): void;
 export function getXtraRegistry(): Record<string, string>;
 
 /**
- * Fetch `~/xtra-registry.json` (resolved through `setXtraHostBase`) and
- * merge its entries into the registry. Each host bootstrap calls this
- * after setting its own host base so each environment ships its own
- * defaults — dev: public/, polyfill: alongside bundle, extension:
- * xtras/, Electron: app resources.
+ * Fetch a registry JSON file and merge its entries into the registry.
+ * Each host bootstrap calls this after setting its own host base so
+ * each environment ships its own defaults — dev: public/, polyfill:
+ * alongside bundle, extension: extension root, Electron: app
+ * resources.
+ *
+ * `path` defaults to `~/xtra-registry.json` (resolved through
+ * `setXtraHostBase`). Any form `_resolveXtraUrl` understands works —
+ * `~/foo.json` (host-base relative), `/foo.json` (origin root),
+ * `https://...` (absolute). Hosts that need to point elsewhere pass
+ * the override explicitly (e.g. polyfill reads
+ * `data-xtra-registry-url` from its <script> tag).
  *
  * Missing or malformed file is non-fatal (returns null); the
  * snake_case convention fallback (`~/<name>.wasm`) still works in
  * that case.
  */
-export function loadDefaultXtraRegistry(): Promise<Record<string, string> | null>;
+export function loadDefaultXtraRegistry(path?: string): Promise<Record<string, string> | null>;
 
 /**
  * Resolve the currently-loaded movie's XTRl declarations against the
