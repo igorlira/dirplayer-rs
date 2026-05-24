@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RootState } from '../../store';
 import { useSelector } from 'react-redux'
 import { load_movie_file, play, set_base_path, set_external_params } from 'vm-rust';
+import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { getFullPathFromOrigin, getBasePath } from '../../utils/path';
 import { initAudioBackend } from '../../audio/audioInit';
 import Stage from '../../views/Stage';
@@ -30,9 +31,22 @@ export default function EmbedPlayer({width, height, src, externalParams, require
   useEffect(() => {
     async function loadMovie() {
       const fullPath = getFullPathFromOrigin(src);
-      set_base_path(getBasePath(fullPath));
+      const moviePath = getBasePath(fullPath);
+      set_base_path(moviePath);
+      // Bare xtra filenames resolve against this movie's directory.
+      setXtraMovieBase(moviePath);
       set_external_params(externalParams || {});
-      await load_movie_file(fullPath, true);
+      // Boot-time eager xtras must be loaded first.
+      await getExternalXtrasReady();
+      // Always load with autoplay=false so the XTRl chunk is parsed
+      // BEFORE Lingo runs; resolve through the registry, then play().
+      // load_movie_file is fire-and-forget — wait on onMovieLoaded
+      // before trying to read the parsed XTRl.
+      const movieLoadedPromise = whenMovieLoaded();
+      await load_movie_file(fullPath, false);
+      await movieLoadedPromise;
+      await resolveAndLoadMovieXtras();
+      play();
     }
     if (isVmReady && userClicked) {
       loadMovie().catch(e => console.error('Failed to load movie', e))

@@ -241,6 +241,74 @@ pub fn trigger_timeout(name: &str) {
     player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
 }
 
+// ── External Xtra plugin host surface ───────────────────────────────────
+//
+// JS calls these after fetching and instantiating a plugin .wasm. The
+// loader and bridge live in `dirplayer-js-api`; the four host
+// environments (dev / polyfill / extension / Electron) share them.
+
+/// Register an externally-loaded plugin under its xtra name. Subsequent
+/// Lingo dispatches (`new(xtra "name")`, `the xtraList`, etc.) will route
+/// to the external plugin via the JS bridge. Case-insensitive.
+#[wasm_bindgen]
+pub fn register_external_xtra(name: &str) {
+    crate::player::xtra::external::register(name);
+}
+
+/// Single-entry dispatcher for every `dx_host_call` a plugin makes. The
+/// JS-side plugin import for `dirplayer_xtra_host::dx_host_call` reads
+/// the args from plugin memory, passes them here, and writes the
+/// returned bytes back into plugin memory. Returning an empty `Vec` is
+/// the "void" sentinel for fire-and-forget ops like `log`.
+#[wasm_bindgen]
+pub fn external_xtra_host_dispatch(op_id: u32, args: &[u8]) -> Vec<u8> {
+    crate::player::xtra::external::host_call_dispatch(op_id, args)
+}
+
+/// Returns the currently-loaded movie's declared xtra dependencies
+/// (parsed from its XTRl chunk). Each entry is a `js_sys::Object` with
+/// `filename` (always present) and `displayName` (may be empty if the
+/// movie's entry only had a filename).
+///
+/// JS-side hosts call this right after `load_movie_file` to resolve
+/// each declared xtra against the host's name->URL registry, fetching
+/// any plugins that aren't loaded yet.
+///
+/// Returns an empty array if no movie is loaded or the movie has no
+/// XTRl chunk (older Director versions, lightweight movies).
+#[wasm_bindgen]
+pub fn movie_required_xtras() -> js_sys::Array {
+    use crate::player::PLAYER_OPT;
+    let result = js_sys::Array::new();
+    unsafe {
+        if let Some(player) = PLAYER_OPT.as_ref() {
+            if let Some(file) = player.movie.file.as_ref() {
+                if let Some(xtra_list) = file.xtra_list.as_ref() {
+                    for decl in &xtra_list.entries {
+                        let obj = js_sys::Object::new();
+                        let _ = js_sys::Reflect::set(
+                            &obj,
+                            &"filename".into(),
+                            &decl.filename.as_str().into(),
+                        );
+                        let _ = js_sys::Reflect::set(
+                            &obj,
+                            &"displayName".into(),
+                            &decl
+                                .display_name
+                                .as_deref()
+                                .unwrap_or("")
+                                .into(),
+                        );
+                        result.push(&obj);
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 #[wasm_bindgen]
 pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {

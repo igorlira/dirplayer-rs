@@ -5,6 +5,7 @@ use crate::{
 
 use super::budapi::BudApiXtra;
 use super::curl::{CurlXtra, CurlXtraManager};
+use super::external;
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
 use super::openurl::OpenUrlXtra;
@@ -13,6 +14,11 @@ use super::xmlparser::{borrow_xmlparser_manager_mut, XmlParserXtraManager};
 
 pub fn is_xtra_registered(name: &str) -> bool {
     let name_lower = name.to_lowercase();
+    // External plugin xtras win over built-ins (per the spec). This is
+    // how a user-loaded plugin can shadow a stale built-in.
+    if external::is_registered(&name_lower) {
+        return true;
+    }
     return name == "Multiuser"
         || name_lower == "xmlparser"
         || name_lower == "fileio"
@@ -22,16 +28,21 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "budapi";
 }
 
-pub fn get_registered_xtra_names() -> Vec<&'static str> {
-    vec![
-        "Multiusr",
-        "XmlParser",
-        "FileIO",
-        "Curl",
-        "OpenURL",
-        "SysMenu",
-        "BudAPI",
-    ]
+pub fn get_registered_xtra_names() -> Vec<String> {
+    let mut names: Vec<String> = vec![
+        "Multiusr".to_string(),
+        "XmlParser".to_string(),
+        "FileIO".to_string(),
+        "Curl".to_string(),
+        "OpenURL".to_string(),
+        "SysMenu".to_string(),
+        "BudAPI".to_string(),
+    ];
+    // Append any externally loaded xtras. Names are stored lowercased in
+    // the external registry; we surface them as-is — Director treats
+    // `the xtraList` entries case-insensitively at lookup time anyway.
+    names.extend(external::registered_names());
+    names
 }
 
 /// Dispatch for static (`*`-prefixed) Xtra functions — global handlers that
@@ -79,6 +90,10 @@ pub fn call_xtra_instance_handler(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
+    // External plugins first — they shadow built-ins when registered.
+    if let Some(result) = external::call_instance_handler(xtra_name, instance_id, handler_name, args) {
+        return result;
+    }
     let xtra_name_lower = xtra_name.to_lowercase();
     match xtra_name_lower.as_str() {
         "multiuser" => {
@@ -152,6 +167,11 @@ pub fn has_xtra_instance_async_handler(
     handler_name: &str,
     _instance_id: XtraInstanceId,
 ) -> bool {
+    // External plugins don't support async handlers in v1 — fall through
+    // to built-ins so a same-named built-in still works.
+    if external::is_registered(xtra_name) {
+        return false;
+    }
     let xtra_name_lower = xtra_name.to_lowercase();
     match xtra_name_lower.as_str() {
         "multiuser" => MultiuserXtraManager::has_instance_async_handler(handler_name),
@@ -166,6 +186,10 @@ pub fn create_xtra_instance(
     xtra_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<XtraInstanceId, ScriptError> {
+    // External plugins first.
+    if let Some(result) = external::create_instance(xtra_name, args) {
+        return result;
+    }
     let xtra_name_lower = xtra_name.to_lowercase();
     match xtra_name_lower.as_str() {
         "multiuser" => Ok(borrow_multiuser_manager_mut(|x| x.create_instance(args))),

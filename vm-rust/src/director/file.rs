@@ -55,6 +55,7 @@ pub struct DirectorFile {
     pub cast_info: Option<CastInfoChunk>,
     pub effect: Option<EffectChunk>,
     pub thum: Option<ThumChunk>,
+    pub xtra_list: Option<crate::director::chunks::xtra_list::XtraListChunk>,
     pub key_table: Option<KeyTableChunk>,
     pub chunk_container: ChunkContainer,
     pub font_table: HashMap<u16, String>,
@@ -145,6 +146,12 @@ impl DirectorFile {
 
         let thum = get_thum_chunk(reader, &mut chunk_container, &mut rifx);
 
+        // XTRl carries the movie's xtra dependencies. Optional — many
+        // legacy movies don't have one; older Director versions never
+        // wrote it. When present, the host's plugin loader uses this
+        // list to resolve xtra names against its name->URL registry.
+        let xtra_list = get_xtra_list_chunk(reader, &mut chunk_container, &mut rifx);
+
         return Ok(DirectorFile {
             base_path,
             file_name,
@@ -162,6 +169,7 @@ impl DirectorFile {
             cast_info,
             effect,
             thum,
+            xtra_list,
             key_table: Some(key_table),
             chunk_container,
             font_table,
@@ -548,6 +556,21 @@ pub fn get_thum_chunk(
         return Some(chunk_data);
     } else {
         panic!("Not a Thum chunk");
+    }
+}
+
+pub fn get_xtra_list_chunk(
+    reader: &mut BinaryReader,
+    chunk_container: &mut ChunkContainer,
+    rifx: &mut RIFXReaderContext,
+) -> Option<crate::director::chunks::xtra_list::XtraListChunk> {
+    let chunk = get_first_chunk(reader, chunk_container, rifx, FOURCC("XTRl"));
+    if chunk.is_none() {
+        return None;
+    } else if let Chunk::XtraList(chunk_data) = chunk.unwrap() {
+        return Some(chunk_data);
+    } else {
+        panic!("Not an XTRl chunk");
     }
 }
 

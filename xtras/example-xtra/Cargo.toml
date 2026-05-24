@@ -1,0 +1,25 @@
+[package]
+name = "example-xtra"
+version = "0.1.0"
+edition = "2024"
+description = "Reference plugin showing how to author a dirplayer-rs Xtra against the xtra-sdk"
+license = "GPL-3.0-only"
+publish = false
+
+# `cdylib` produces the .wasm the host loads dynamically. `rlib` lets the
+# crate be cargo-tested natively if needed.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xtra-sdk = { path = "../../xtra-sdk" }
+
+# Aggressive size shrinking for release builds. The plugin is a leaf
+# wasm module loaded over the wire — every kB matters. Plugin authors
+# can copy these settings (or override to opt out of opt-level "z").
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

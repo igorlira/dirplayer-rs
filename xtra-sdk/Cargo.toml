@@ -1,0 +1,26 @@
+[package]
+name = "xtra-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for authoring external Director Xtras as dynamically loaded WASM plugins for dirplayer-rs"
+license = "GPL-3.0-only"
+repository = "https://github.com/igorlira/dirplayer-rs"
+
+# Plugin authors depend on this crate to write Xtras. The host (vm-rust) also
+# depends on it to decode the wire format. The crate is dual-purpose: it must
+# build for both `wasm32-unknown-unknown` (plugin side) and whatever target
+# the host runs (vm-rust also targets wasm32 today). All deps below are
+# `no_std`-friendly or explicitly wasm-compatible.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Compact, serde-derived binary wire format used to encode `Datum` values
+# across the host↔plugin boundary. Postcard is small, fast, and well-suited
+# to wasm32 — under 10 KB added to release builds. If non-Rust plugin
+# authoring becomes a requirement, swap for CBOR or a hand-rolled tagged
+# format; the wire format is documented in `dirplayer-xtra.wit` and is
+# considered part of the SDK's contract.
+postcard = { version = "1.0", features = ["alloc"], default-features = false }
+serde = { version = "1.0", features = ["derive", "alloc"], default-features = false }

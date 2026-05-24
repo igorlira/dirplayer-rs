@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import styles from './styles.module.css';
-import { load_movie_file, set_base_path, set_external_params, set_movie_path_override } from 'vm-rust';
+import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override } from 'vm-rust';
+import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
 import { getBasePath, getFullPathFromOrigin } from '../../utils/path';
@@ -20,7 +21,7 @@ type RecentMovie = {
 };
 
 const RECENT_MOVIES_KEY = 'recentMovies';
-const MAX_RECENT_MOVIES = 50;
+const MAX_RECENT_MOVIES = 100;
 const ENV_PARAM_PREFIX = 'REACT_APP_MOVIE_PARAM_';
 
 function getEnvExternalParams(): ExternalParam[] {
@@ -98,11 +99,29 @@ export default function LoadMovie() {
       setIsLoading(true);
       setHasError(false);
       dispatch(movieUnloaded());
-      set_base_path(getBasePath(fullPath));
+      const moviePath = getBasePath(fullPath);
+      set_base_path(moviePath);
+      // Make bare xtra filenames (e.g. localStorage entry "foo.wasm")
+      // resolve against this movie's directory.
+      setXtraMovieBase(moviePath);
       set_external_params(paramsArrayToRecord(params ?? externalParams));
       set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
       document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
-      await load_movie_file(fullPath, autoPlay);
+      // Wait for any in-flight boot-time external xtra loads (the
+      // localStorage URL list) before touching anything xtra-related.
+      await getExternalXtrasReady();
+      // Always load with autoplay=false so the metadata (incl. the
+      // movie's XTRl xtra-dependency list) is parsed BEFORE any Lingo
+      // runs. vm-rust's load_movie_file is fire-and-forget (dispatches
+      // a command and returns immediately), so we have to await the
+      // onMovieLoaded callback via whenMovieLoaded() before the XTRl
+      // is actually populated — otherwise resolveAndLoadMovieXtras
+      // sees an empty required-xtras list.
+      const movieLoadedPromise = whenMovieLoaded();
+      await load_movie_file(fullPath, false);
+      await movieLoadedPromise;
+      await resolveAndLoadMovieXtras();
+      if (autoPlay) play();
     } catch (e) {
       console.error('Failed to load movie', e);
     } finally {
