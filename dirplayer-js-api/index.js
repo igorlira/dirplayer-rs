@@ -382,6 +382,17 @@ export function setXtraHostBase(base) {
   _xtraHostBase = base || null;
 }
 
+/// Current host base (or `null` if none set). Used by host bootstraps
+/// that may run nested — e.g. the polyfill's `standalone.tsx` configures
+/// the host base, then mounts the React app whose `VMProvider` would
+/// otherwise unconditionally call `setXtraHostBase(document.baseURI)`
+/// and clobber the polyfill's setting. VMProvider checks this getter
+/// first and skips its own setup when an outer host already configured
+/// things.
+export function getXtraHostBase() {
+  return _xtraHostBase;
+}
+
 function _resolveXtraUrl(url) {
   // Already an absolute URL (any scheme)? Use as-is.
   try {
