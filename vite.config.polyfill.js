@@ -57,6 +57,14 @@ export default defineConfig({
   build: {
     outDir: "dist-polyfill",
     emptyOutDir: true,
+    // ES2020 → required for BigInt literals (`32n`, `0n`) which
+    // dirplayer-js-api uses to pack u64 ptr+len values from the xtra
+    // wasm boundary. Vite's default lib target downgrades to
+    // safari13/firefox78/chrome87 which drops BigInt support and
+    // breaks the polyfill build. The browsers we care about all
+    // support BigInt natively (chrome67+, firefox68+, safari14+,
+    // edge79+) so bumping the floor doesn't lose meaningful reach.
+    target: "es2020",
     // Inline all assets up to 10 KB so the polyfill bundle is self-contained
     // (publicDir is disabled for the polyfill build, so external URLs won't resolve)
     assetsInlineLimit: 10240,
