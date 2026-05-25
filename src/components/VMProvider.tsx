@@ -10,8 +10,10 @@ import * as wasm from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import {
   JsBridgeBreakpoint,
+  getXtraHostBase,
   loadDefaultXtraRegistry,
   loadExternalXtras,
+  setVmModule,
   setXtraHostBase,
   setXtraRegistry,
 } from "dirplayer-js-api";
@@ -74,6 +76,15 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
           await init({});
         }
         console.log("VM initialized");
+        // Hand the wasm module to the xtra bridge. The bridge's lazy
+        // `require('vm-rust')` fallback only works under bundlers
+        // that emit CommonJS interop at runtime (Create React App's
+        // webpack does); the polyfill IIFE bundle and the extension
+        // content script have no `require` at runtime and would
+        // otherwise throw "vm-rust module not wired" on the first
+        // plugin op (load_movie's resolveAndLoadMovieXtras, etc.).
+        // Calling setVmModule explicitly works under every host.
+        setVmModule(wasm);
         // Dev convenience: expose the wasm module on `window.__vm` so debug
         // helpers (e.g. `__vm.player_print_filmloop_sprites(2, 145)`) can
         // be called straight from the browser console.
@@ -105,9 +116,15 @@ export default function VMProvider({ children, systemFontPath, wasmUrl }: VMProv
         // The polyfill and extension hosts run the SAME registry merge
         // logic (via `loadDefaultXtraRegistry`) but with their own host
         // base — see polyfill/src/standalone.tsx and extension/src/
-        // content-script.tsx.
-        setXtraHostBase(document.baseURI);
-        await loadDefaultXtraRegistry();
+        // content-script.tsx. Those hosts call setXtraHostBase BEFORE
+        // mounting the React app, so by the time VMProvider runs the
+        // base is already set. Skip our own setup in that case so we
+        // don't clobber their values (e.g. point ~/xtra-registry.json
+        // at the wrong origin and trigger CORS errors).
+        if (!getXtraHostBase()) {
+          setXtraHostBase(document.baseURI);
+          await loadDefaultXtraRegistry();
+        }
         try {
           const raw = localStorage.getItem("dirplayer_external_xtras");
           if (raw) {
