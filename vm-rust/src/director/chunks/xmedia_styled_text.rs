@@ -1,5 +1,4 @@
 use log::debug;
-use crate::io::encoding::win1252_byte_to_char;
 use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle, TextAlignment};
 
 impl XmedStyledText {
@@ -809,18 +808,21 @@ fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
     }
 
     // Extract text, preserving all characters including \r, \n, \t.
-    // Director text members store bytes as Windows-1252. The earlier
-    // Mac-Roman decoder mapped 0xE4 to U+2021 (‡) instead of U+00E4 (ä),
-    // breaking umlauts, ß, ø, ñ, and Spanish accents in Windows-authored
-    // movies (i.e. virtually all live test corpora).
-    let mut text = String::new();
-    for i in text_start..text_end {
-        let ch = win1252_byte_to_char(data[i]);
-        if ch == '\0' {
-            break; // Stop at first null byte (padding)
-        }
-        text.push(ch);
-    }
+    //
+    // Encoding: D6-D9 movies store text bytes as Windows-1252; D10+
+    // (Unicode-aware authoring) stores them as UTF-8. Fugue No.4 (D11.5)
+    // has e.g. "Tradução" as `m c3 a7 c3 a3 o` and "©" as `c2 a9`.
+    // Decoding either as plain Win-1252 mangles UTF-8 sequences into
+    // "Â©" / "TraduÃ§Ã£o" mojibake.
+    //
+    // Strategy: trim at the first 0x00 padding byte, then run
+    // `decode_text_auto` — strict UTF-8 first, falling back to Win-1252
+    // only when the bytes don't form a valid UTF-8 sequence. Win-1252
+    // input almost never coincidentally satisfies UTF-8's continuation-
+    // byte constraints, so older movies keep decoding correctly.
+    let raw = &data[text_start..text_end];
+    let body_end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let text = crate::io::encoding::decode_text_auto(&raw[..body_end]);
 
     debug!("    Section 3: {} chars", text.len());
 
