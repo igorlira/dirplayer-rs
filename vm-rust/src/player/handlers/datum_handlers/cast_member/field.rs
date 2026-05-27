@@ -4,7 +4,7 @@ use itertools::Itertools;
 use crate::{
     director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
     player::{
-        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{measure_text, measure_text_wrapped}, handlers::datum_handlers::{
+        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{get_text_index_at_pos, measure_text, measure_text_wrapped, DrawTextParams}, handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
         }
     },
@@ -89,6 +89,115 @@ impl FieldMemberHandlers {
                 member.set_text_preserving_caret(new_contents.trim_end_matches('\0').to_string());
                 Ok(DatumRef::Void)
             }
+            "locToCharPos" => {
+                // `member(N).locToCharPos(point(x, y))` — returns the 1-based
+                // char index under the local (member-relative) coordinate.
+                // Mirrors the text-member implementation in cast_member/text.rs.
+                //
+                // Must honor scroll_top + word_wrap: Narrative_Buttons#upCount
+                // / downCount rely on the index returned by
+                // `locToCharPos(point(1, 1))` *changing* as scrollTop is bumped
+                // each iteration. If the index stays constant the inner
+                // `repeat while (x = z) and (scrollTop > 0)` loop never
+                // terminates and the movie hard-stucks. Without word-wrap,
+                // a paged narrative member only has \r\n line breaks so the
+                // visible page boundary is determined purely by wrapping.
+                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let x = pt_vals[0] as i32;
+                let y = pt_vals[1] as i32;
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .unwrap();
+                let field = member.member_type.as_field().unwrap();
+                let text_clone = field.text.clone();
+                let line_spacing = field.fixed_line_space;
+                let top_spacing = field.top_spacing;
+                let scroll_top = field.scroll_top as i32;
+                let wrap_width = field.width as i16;
+                let word_wrap = field.word_wrap;
+                let field_font_name = field.font.clone();
+                let field_font_size = field.font_size;
+                // Drop the immutable borrow on `member` (held implicitly
+                // via `field`) before we mutably borrow font_manager.
+                drop(field);
+                drop(member);
+                // Use the field's actual font (matching the renderer's
+                // atlas) instead of the system font. Hit-testing against
+                // system Arial widths while the renderer drew with PFR
+                // Arial widths caused clicks to map to the wrong
+                // underlined run (Fugue No.4: clicking visual "Christ's
+                // passion" returned a char position in "the sign of the
+                // cross").
+                let field_font = player.font_manager.get_font_with_cast_and_bitmap(
+                    &field_font_name,
+                    &player.movie.cast_manager,
+                    &mut player.bitmap_manager,
+                    if field_font_size > 0 { Some(field_font_size) } else { None },
+                    None,
+                );
+                let font_arc = field_font.or_else(|| player.font_manager.get_system_font());
+                let font_rc = match font_arc {
+                    Some(f) => f,
+                    None => return Ok(player.alloc_datum(Datum::Int(0))),
+                };
+                let min_space_adv = {
+                    let sz = font_rc.font_size.max(font_rc.char_height) as i32;
+                    let v = ((sz as f32) * 0.30).round() as i16;
+                    if v > 0 { Some(v) } else { None }
+                };
+                let params = DrawTextParams {
+                    font: &font_rc,
+                    line_height: None,
+                    line_spacing,
+                    top_spacing,
+                    char_spacing: 0,
+                    member_width: if word_wrap && wrap_width > 0 { Some(wrap_width) } else { None },
+                    // Match the renderer's space clamp so locToCharPos
+                    // returns positions consistent with the drawn layout.
+                    min_space_advance: min_space_adv,
+                    // TODO: build run-aware per-char advances here too
+                    // (mirror compute_mouse_char). Without it, scripts
+                    // calling `member.locToCharPos(point(x,y))` on a
+                    // mixed-font field get the same wrap-drift bug that
+                    // `the mouseChar` had before its per-run fix.
+                    per_char_advances: None,
+                };
+                let index = get_text_index_at_pos(&text_clone, &params, x, y + scroll_top);
+                Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
+            }
+            // `member.scrollByLine(amount)` — Director 11.5 Scripting
+            // Dictionary p.618: "scrolls the specified field or text cast
+            // member up or down by a specified number of lines. When amount
+            // is positive, the field scrolls down. When amount is negative,
+            // the field scrolls up." Fugue No.4's `fixSplitLines` passes
+            // fractional amounts (±0.1) for sub-line nudges to align the
+            // scroll position to a clean line boundary.
+            "scrollByLine" => {
+                let amount = player.get_datum(&args[0]).to_float()?;
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let line_h = {
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
+                    let field = member.member_type.as_field().unwrap();
+                    if field.fixed_line_space > 0 {
+                        field.fixed_line_space as f64
+                    } else if field.font_size > 0 {
+                        field.font_size as f64
+                    } else {
+                        12.0
+                    }
+                };
+                let delta_px = (amount * line_h).round() as i32;
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(field) = member.member_type.as_field_mut() {
+                        let new_st = (field.scroll_top as i32 + delta_px).max(0) as u16;
+                        field.scroll_top = new_st;
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for field member type"
             ))),
@@ -144,36 +253,67 @@ impl FieldMemberHandlers {
                 let word_datums: VecDeque<_> = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
                 Ok(Datum::List(DatumType::List, word_datums, false))
             }
+            // `member.char` / `member.item` — sibling of `member.line` /
+            // `member.word`: returns the full list of chunks so the script
+            // can index it. Narrative_Buttons#upCount uses
+            // `member(nar).char[y..y+8]` to extract a sliding 8-char window;
+            // without this, the get_prop call errors out and the button
+            // scroll logic never runs. (Director 11.5 Scripting Dictionary
+            // chunk-of-member entry.)
+            "char" => {
+                let chars: Vec<String> = field.text.chars().map(|c| c.to_string()).collect();
+                let char_datums: VecDeque<_> = chars.into_iter()
+                    .map(Datum::String)
+                    .map(|d| player.alloc_datum(d))
+                    .collect();
+                Ok(Datum::List(DatumType::List, char_datums, false))
+            }
+            "item" => {
+                let delim = player.movie.item_delimiter;
+                let items: Vec<String> = field.text.split(delim).map(|s| s.to_string()).collect();
+                let item_datums: VecDeque<_> = items.into_iter()
+                    .map(Datum::String)
+                    .map(|d| player.alloc_datum(d))
+                    .collect();
+                Ok(Datum::List(DatumType::List, item_datums, false))
+            }
             "pageHeight" => {
-                // pageHeight = total height of the text content (including word wrap)
-                let text_clone = field.text.clone();
-                let font_name = field.font.clone();
-                let font_size = Some(field.font_size);
-                let fixed_line_space = field.fixed_line_space;
-                let top_spacing = field.top_spacing;
-                let word_wrap = field.word_wrap;
-                let field_width = field.width;
-
-                let font = if !font_name.is_empty() {
-                    player.font_manager.get_font_with_cast_and_bitmap(
-                        &font_name,
-                        &player.movie.cast_manager,
-                        &mut player.bitmap_manager,
-                        font_size,
-                        None,
-                    )
-                } else {
-                    None
-                };
-                let font = font.or_else(|| player.font_manager.get_system_font())
-                    .ok_or_else(|| ScriptError::new("System font not available".to_string()))?;
-
-                let (_, measured_h) = if word_wrap && field_width > 0 {
-                    measure_text_wrapped(&text_clone, &font, field_width, true, fixed_line_space, top_spacing, 0, 0)
-                } else {
-                    measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
-                };
-                Ok(Datum::Int(measured_h as i32))
+                // Director 11.5 Scripting Dictionary p.1077: "returns the
+                // height, in pixels, of the area of the field cast member
+                // that is visible on the Stage." For paged/scrollable
+                // field members (like Fugue No.4's Narrative — authored as
+                // a 250×9442 scroll container so the entire 26k-char body
+                // lives inside one member), the visible viewport is set
+                // by the SPRITE that hosts the member, not by the
+                // member's own rect or text_height. Look up the first
+                // sprite on the current frame whose member matches and
+                // use its height. Fall back to field.height / rect-derived
+                // height if no sprite is using the member.
+                let field_height = field.height as i32;
+                let rect_h = (field.rect_bottom as i32 - field.rect_top as i32).max(0);
+                let cm_ref = cast_member_ref.clone();
+                let frame = player.movie.current_frame;
+                let sprite_h: Option<i32> = player.movie.score
+                    .get_sorted_channels(frame)
+                    .iter()
+                    .find_map(|ch| {
+                        if ch.sprite.member.as_ref() == Some(&cm_ref) {
+                            Some((ch.sprite.height as i32).max(0))
+                        } else {
+                            None
+                        }
+                    });
+                // The text area inside the sprite excludes the field's
+                // border and margin (Director's box chrome). For Fugue
+                // No.4 Narrative (border=1, margin=5) that's 12px of
+                // chrome — without subtracting it, each PageNext
+                // over-scrolls by ~1 line. Match Director's reported
+                // pageHeight which is the *text* area, not the sprite rect.
+                let chrome = 2 * (field.border as i32) + 2 * (field.margin as i32);
+                let raw = sprite_h
+                    .filter(|h| *h > 0)
+                    .unwrap_or(field_height.max(rect_h));
+                Ok(Datum::Int((raw - chrome).max(1)))
             }
             "foreColor" => {
                 match &field.fore_color {
@@ -360,6 +500,22 @@ impl FieldMemberHandlers {
                 let lo = field.sel_start.min(field.sel_end).clamp(0, len);
                 let hi = field.sel_start.max(field.sel_end).clamp(0, len);
                 Ok(Datum::String(field.text[lo as usize..hi as usize].to_string()))
+            }
+            // `the selection of member` — Director 11.5 Scripting
+            // Dictionary p.1187: "returns the offsets of the start and
+            // end of the selection ... a linear list with two integers
+            // (selectionStart, selectionEnd)." Fugue No.4's
+            // Cues#AdvanceScroll reads `member(nar).selection`
+            // immediately after `hilite member(nar).line[o].char[1..x]`
+            // to get the char offsets of the hilited range, then uses
+            // `charPosToLoc` to translate to screen y for scrolling.
+            "selection" => {
+                let lo = field.sel_start.min(field.sel_end);
+                let hi = field.sel_start.max(field.sel_end);
+                let mut items = std::collections::VecDeque::new();
+                items.push_back(player.alloc_datum(Datum::Int(lo)));
+                items.push_back(player.alloc_datum(Datum::Int(hi)));
+                Ok(Datum::List(DatumType::List, items, false))
             }
             // Text rendering config
             "kerning" => Ok(datum_bool(field.kerning)),
@@ -590,7 +746,16 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.int_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().scroll_top = value? as u16;
+                    // Clamp negative values to 0 — `scrollTop` is a non-
+                    // negative pixel offset (Director 11.5 Scripting
+                    // Dictionary p.1158). Without the clamp, the bounceUp
+                    // animation in Narrative_Buttons (which decrements
+                    // scrollTop by 1 each step from the top of the field)
+                    // wraps -1 into u16::MAX, producing a single-frame
+                    // white-flash as the text scrolls off-bitmap.
+                    let new_val = value?.max(0) as u16;
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.scroll_top = new_val;
                     Ok(())
                 },
             ),

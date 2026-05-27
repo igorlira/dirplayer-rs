@@ -97,7 +97,7 @@ impl StringChunkUtils {
                     .text
                     .clone(),
             };
-            Self::string_by_setting_chunk(&original_str, &chunk_expr, &new_string)
+            Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
         Ok(())
@@ -204,26 +204,6 @@ impl StringChunkUtils {
                 new_chunks.drain(start..end);
                 Ok(new_chunks.join("\r\n"))
             },
-        }
-    }
-
-    pub fn string_by_setting_chunk(
-        string: &str,
-        chunk_expr: &StringChunkExpr,
-        replace_with: &str,
-    ) -> Result<String, ScriptError> {
-        match chunk_expr.chunk_type {
-            StringChunkType::Char => {
-                let mut new_string = string.to_owned();
-                let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), string.chars().count());
-                let (byte_start, byte_end) = char_range_to_byte_range(string, start, end);
-                new_string.replace_range(byte_start..byte_end, replace_with);
-                Ok(new_string)
-            }
-            _ => Err(ScriptError::new(
-                "Only char chunk type is supported for string by setting chunk".to_string(),
-            )),
         }
     }
 
@@ -402,7 +382,6 @@ impl StringChunkUtils {
         chunk_expr: &StringChunkExpr,
         replace_with: &str,
     ) -> Result<String, ScriptError> {
-        // Similar to string_by_setting_chunk but supports all chunk types
         match chunk_expr.chunk_type {
             StringChunkType::Char => {
                 let mut new_string = string.to_owned();
@@ -1031,6 +1010,35 @@ impl StringChunkHandlers {
         })
     }
 
+    /// `hilite fieldChunkExpression` / `chunk.hilite()` — Director command
+    /// that selects (highlights) the chunk's character range inside the
+    /// originating field/text member. Maps to setting the member's
+    /// sel_start / sel_end so the renderer can paint the selection band.
+    /// Director 11.5 Scripting Dictionary p.411: "highlights (selects) in
+    /// the field sprite the specified chunk".
+    fn hilite(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if let Some((member_ref, start, end)) =
+                StringChunkHandlers::walk_chunk_to_member_range(player, datum)
+            {
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    match &mut member.member_type {
+                        CastMemberType::Field(f) => {
+                            f.sel_start = start as i32;
+                            f.sel_end = end as i32;
+                        }
+                        CastMemberType::Text(t) => {
+                            t.sel_start = start as i32;
+                            t.sel_end = end as i32;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn call(
         datum: &DatumRef,
         handler_name: &str,
@@ -1038,10 +1046,56 @@ impl StringChunkHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "count" => Self::count(datum, args),
-            "getProp" => Self::get_prop(datum, args),
+            // Chunk-typed nested access (`member.line[o].char[1..x]`) is
+            // ALWAYS routed through get_prop_ref so the returned datum is
+            // a StringChunk — chained property reads like
+            // `member.line[o].char[1..x].font` can then walk the chunk
+            // chain back to the source member's styled spans. If we used
+            // get_prop here it would resolve to a plain String, and the
+            // `.font` access then errors with "Invalid string built-in
+            // property font" (Fugue No.4 Cues#AdvanceScroll trips this).
+            "getProp" => {
+                let prop_name = reserve_player_mut(|player| {
+                    Ok::<String, ScriptError>(
+                        player.get_datum(&args[0]).string_value().unwrap_or_default()
+                    )
+                })?;
+                let is_chunk_typed = matches!(
+                    prop_name.to_ascii_lowercase().as_str(),
+                    "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
+                );
+                if is_chunk_typed {
+                    Self::get_prop_ref(datum, args)
+                } else {
+                    Self::get_prop(datum, args)
+                }
+            }
             "getPropRef" => Self::get_prop_ref(datum, args),
             "delete" => Self::delete(datum, args),
             "setContents" => Self::set_contents(datum, args),
+            "hilite" => Self::hilite(datum, args),
+            // `chunk[N]` — index access. Director treats this as the Nth
+            // character of the chunk's text (1-based). Movies that wrap a
+            // field lookup in `value(...)` and then `[1]` to grab the
+            // first element fall through here when our chain-preserving
+            // chunk machinery returns a StringChunk where the script
+            // expected a String.
+            "getAt" => {
+                if args.is_empty() {
+                    return Err(ScriptError::new("getAt requires 1 argument".to_string()));
+                }
+                let idx_ref = args[0].clone();
+                let datum = datum.clone();
+                reserve_player_mut(|player| {
+                    let s = player.get_datum(&datum).string_value()?;
+                    let idx = player.get_datum(&idx_ref).int_value()?;
+                    if idx < 1 {
+                        return Ok(player.alloc_datum(Datum::String(String::new())));
+                    }
+                    let ch = s.chars().nth((idx - 1) as usize).map(|c| c.to_string());
+                    Ok(player.alloc_datum(Datum::String(ch.unwrap_or_default())))
+                })
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for string chunk datum"
             ))),

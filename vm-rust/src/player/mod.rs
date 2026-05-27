@@ -1830,6 +1830,10 @@ impl DirPlayer {
             },
             "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
+            "mouseChar" => {
+                let val = compute_mouse_char(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            },
             "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
             "rollover" => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
@@ -2125,6 +2129,25 @@ impl DirPlayer {
             "mouseLoc" => {
                 Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             }
+            "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
+            // `_mouse.clickLoc` — point where the user last clicked,
+            // captured at mouseDown (distinct from mouseLoc which tracks
+            // current cursor position). Fugue No.4's Narrative_Float
+            // mouseWithin reads `getAt(_mouse.clickLoc, 2)`.
+            "clickLoc" => Ok(self.alloc_datum(Datum::Point(
+                [self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0,
+            ))),
+            "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
+            "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
+            "mouseChar" => {
+                let val = compute_mouse_char(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            }
+            "mouseDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
+            "mouseUp" => Ok(self.alloc_datum(datum_bool(!self.movie.mouse_down))),
+            "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
+            "rightMouseDown" => Ok(self.alloc_datum(datum_bool(self.movie.right_mouse_down))),
+            "rightMouseUp" => Ok(self.alloc_datum(datum_bool(!self.movie.right_mouse_down))),
             _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
         }
     }
@@ -3912,6 +3935,305 @@ pub async fn run_single_frame() -> (bool, bool) {
     });
 
     (is_playing, is_script_paused)
+}
+
+/// Compute Lingo's `the mouseChar` / `_mouse.mouseChar` — the 1-based
+/// character index in the field/text member currently under the mouse
+/// pointer. Returns -1 if the pointer is not over a field/text sprite
+/// or is in the "gutter" outside the text content. Matches Director
+/// 11.5 Scripting Dictionary entry for `mouseChar`.
+///
+/// Used by Fugue No.4's Narrative member script:
+///   if the textStyle of char the mouseChar of member nar = "underline"
+/// to detect clicks on inline underlined links.
+fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
+    let (mx, my) = player.mouse_loc;
+    let sprite_num = match score::get_sprite_at(player, mx, my, false) {
+        Some(n) => n,
+        None => return -1,
+    };
+    let sprite = match player.movie.score.get_sprite(sprite_num as i16) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let member_ref = match sprite.member.as_ref() {
+        Some(r) => r,
+        None => return -1,
+    };
+    let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+        Some(m) => m,
+        None => return -1,
+    };
+    // Pull the wrap width + scroll_top so wrapped/paged fields (Fugue No.4
+    // Narrative scrolls in chunks via PageNext/PagePrior to a scroll_top
+    // pixel offset) map clicks back to the right character index.
+    // Also pull the font name + size so we hit-test using the SAME atlas
+    // the renderer drew with — using `get_system_font()` here used to
+    // mean clicks were resolved against system Arial widths while the
+    // renderer drew with the field's PFR Arial. The two layouts diverged
+    // by enough to land Fugue No.4 clicks on the wrong underlined run.
+    let (text, line_spacing, top_spacing, wrap_width, scroll_top, word_wrap, font_name, font_size, formatting_runs) =
+        match &member.member_type {
+            CastMemberType::Field(f) => (
+                f.text.clone(), f.fixed_line_space, f.top_spacing,
+                f.width as i32, f.scroll_top as i32, f.word_wrap,
+                f.font.clone(), f.font_size,
+                f.formatting_runs.clone(),
+            ),
+            CastMemberType::Text(t) => (
+                t.text.clone(), t.fixed_line_space, t.top_spacing,
+                t.width as i32,
+                t.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0),
+                t.word_wrap,
+                t.font.clone(), t.font_size,
+                Vec::new(),
+            ),
+            _ => return -1,
+        };
+    // Pull the cast lib's font_table snapshot before dropping the member
+    // borrow — needed to resolve each formatting_run.font_id to a name
+    // (Arial / Arial Bold / Arial Italic) for per-run advance lookups.
+    let field_font_table: std::collections::HashMap<u16, String> = player
+        .movie
+        .cast_manager
+        .get_cast(member_ref.cast_lib as u32)
+        .map(|cl| cl.font_table.clone())
+        .unwrap_or_default();
+    // Explicitly release the immutable borrow on `player.movie` (held
+    // through `member`) before we touch `player.font_manager` /
+    // `player.bitmap_manager` mutably below.
+    drop(member);
+    let rect = score::get_sprite_rect_in_context(player, sprite_num as i16);
+    let local_x = mx - rect.0 as i32;
+    let local_y = my - rect.1 as i32;
+    if local_x < 0 || local_y < 0
+        || local_x >= (rect.2 - rect.0) as i32
+        || local_y >= (rect.3 - rect.1) as i32
+    {
+        return -1;
+    }
+    // Shift the y-coord into the FULL text coordinate space (member-local
+    // top of all text, not just the visible page). Without this, paged
+    // fields return char indices from the first page even when the user
+    // is looking at page 3+.
+    let text_y = local_y + scroll_top;
+    // Resolve the field's actual font via font_manager. The member borrow
+    // was dropped above (we cloned everything into owned locals), so the
+    // mutable borrow on font_manager + bitmap_manager is safe. Fall back
+    // to the system font only when the named font isn't available.
+    let font_arc = player.font_manager.get_font_with_cast_and_bitmap(
+        &font_name,
+        &player.movie.cast_manager,
+        &mut player.bitmap_manager,
+        if font_size > 0 { Some(font_size) } else { None },
+        None,
+    );
+    let font_rc = match font_arc.or_else(|| player.font_manager.get_system_font()) {
+        Some(f) => f,
+        None => return -1,
+    };
+    let font: crate::player::font::BitmapFont = (*font_rc).clone();
+    let min_space_adv = {
+        let sz = font.font_size.max(font.char_height) as i32;
+        let v = ((sz as f32) * 0.30).round() as i16;
+        if v > 0 { Some(v) } else { None }
+    };
+
+    // Build per-character advances using the same per-run atlas the
+    // renderer draws with. Without this, a field that mixes Arial body
+    // text and Arial Bold underlined chunks (Fugue No.4 Narrative) would
+    // have hit-test wrap with regular Arial widths everywhere while the
+    // renderer wraps with Bold widths for the underlined runs. The
+    // accumulated drift makes clicks on visual "Christ's passion" return
+    // a char position deep into "the sign of the cross" / "three motives".
+    let per_char_advances_vec: Option<Vec<i32>> = if !formatting_runs.is_empty() {
+        // Map each char index to which formatting_run covers it.
+        // Runs use BYTE positions; convert via char_indices.
+        let chars_total = text.chars().count();
+        let mut advances: Vec<i32> = Vec::with_capacity(chars_total);
+        // Cache loaded variant atlases by canonical name so we don't
+        // re-load Arial Bold once per run.
+        let mut variant_cache: std::collections::HashMap<String, std::rc::Rc<crate::player::font::BitmapFont>> =
+            std::collections::HashMap::new();
+        let min_sp = min_space_adv.unwrap_or(0) as i32;
+        // Resolve each run's font once (lazy via cache).
+        let resolve_font = |player: &mut DirPlayer,
+                            cache: &mut std::collections::HashMap<String, std::rc::Rc<crate::player::font::BitmapFont>>,
+                            run_font_id: u16|
+         -> Option<std::rc::Rc<crate::player::font::BitmapFont>> {
+            let resolved_name = field_font_table.get(&run_font_id).cloned()?;
+            if let Some(f) = cache.get(&resolved_name) {
+                return Some(f.clone());
+            }
+            let f = player.font_manager.get_font_with_cast_and_bitmap(
+                &resolved_name,
+                &player.movie.cast_manager,
+                &mut player.bitmap_manager,
+                if font_size > 0 { Some(font_size) } else { None },
+                None,
+            )?;
+            cache.insert(resolved_name, f.clone());
+            Some(f)
+        };
+        // Walk chars, looking up which run covers each (by BYTE position).
+        // Renderer-side scaling: each char's advance is multiplied by
+        // `run.font_size / field.font_size` because the renderer loads
+        // variant atlases at the FIELD's base size and scales when drawing
+        // chars at oversize (24pt "Fugue No. 4" header runs render at 2×
+        // the advance of the loaded-at-12 Arial Bold atlas). Without this
+        // scaling, hit-test underestimates the width consumed by the
+        // header runs, the header wraps differently than the renderer
+        // drew it, and every body line below the header is shifted in
+        // source-text content.
+        let field_base_size = if font_size > 0 { font_size as i32 } else { 12 };
+        let mut char_iter = text.char_indices().enumerate();
+        // Pre-resolve a "default base" advance per char for fallback.
+        while let Some((_ci, (byte_pos, c))) = char_iter.next() {
+            // Find the active run for this byte position.
+            let active_run = formatting_runs.iter().rev()
+                .find(|r| (r.start_position as usize) <= byte_pos);
+            let run_font_opt = active_run
+                .and_then(|r| resolve_font(player, &mut variant_cache, r.font_id));
+            let run_font_for_char = run_font_opt.as_deref().unwrap_or(&font);
+            let run_size = active_run
+                .map(|r| if r.font_size >= 6 { r.font_size as i32 } else { field_base_size })
+                .unwrap_or(field_base_size);
+            let raw_atlas = run_font_for_char.get_char_advance(c as u8) as i32;
+            // Mirror the renderer's `size_px / base_size` scale factor
+            // applied per-char in the PFR multi-span draw loop.
+            let raw = (raw_atlas * run_size / field_base_size.max(1)).max(if c == ' ' { 0 } else { 1 });
+            let clamped = if c == ' ' { raw.max(min_sp) } else { raw };
+            advances.push(clamped);
+        }
+        Some(advances)
+    } else {
+        None
+    };
+
+    // Per-char effective font_size (for variable-line-height hit-testing).
+    // Needed because the Narrative field has a 24pt "Fugue No. 4" header
+    // on a wrap-line that also carries 12pt content — the renderer makes
+    // that visual line as tall as its max font_size (24px), while a
+    // plain hit-test using a fixed line_h (12) drifts a full line below
+    // the renderer's actual layout for every click on the body.
+    let per_char_font_sizes_vec: Option<Vec<i16>> = if !formatting_runs.is_empty() {
+        let chars_total = text.chars().count();
+        let mut sizes: Vec<i16> = Vec::with_capacity(chars_total);
+        let base_size = if font_size > 0 { font_size as i16 } else { 12 };
+        for (byte_pos, _c) in text.char_indices() {
+            let active_run = formatting_runs.iter().rev()
+                .find(|r| (r.start_position as usize) <= byte_pos);
+            let s = active_run
+                .map(|r| if r.font_size >= 6 { r.font_size as i16 } else { base_size })
+                .unwrap_or(base_size);
+            sizes.push(s);
+        }
+        Some(sizes)
+    } else {
+        None
+    };
+
+    // Variable-line-height hit-test. Walks chars, wraps using per-char
+    // advances, finalizes each visual line's height as the max of the
+    // per-char font_sizes (matching the renderer's `line.max_size` rule),
+    // and finds the char at the target (local_x, text_y).
+    let idx = if let (Some(advs), Some(sizes)) = (per_char_advances_vec.as_ref(), per_char_font_sizes_vec.as_ref()) {
+        let wrap_max = if word_wrap && wrap_width > 0 { wrap_width as i32 } else { i32::MAX };
+        let base_size = if font_size > 0 { font_size as i32 } else { 12 };
+        let chars_vec: Vec<char> = text.chars().collect();
+        let mut line_start_idx: usize = 0;
+        let mut line_w: i32 = 0;
+        let mut last_space_idx_after: Option<usize> = None; // idx AFTER the space
+        let mut last_space_w_at: i32 = 0;
+        let mut line_y: i32 = top_spacing as i32;
+        // Visual lines as (start_idx_inclusive, end_idx_exclusive, line_h)
+        let mut visual_lines: Vec<(usize, usize, i32)> = Vec::new();
+        let mut line_max_size: i32 = base_size;
+        let finalize_line = |start: usize, end: usize, max_size: i32, lines: &mut Vec<(usize, usize, i32)>, line_y: &mut i32| {
+            let line_h = max_size.max(base_size).max(1);
+            lines.push((start, end, line_h));
+            *line_y += line_h;
+        };
+        let mut ci: usize = 0;
+        while ci < chars_vec.len() {
+            let c = chars_vec[ci];
+            let cs = sizes.get(ci).copied().unwrap_or(base_size as i16) as i32;
+            line_max_size = line_max_size.max(cs);
+            if c == '\r' || c == '\n' {
+                finalize_line(line_start_idx, ci, line_max_size, &mut visual_lines, &mut line_y);
+                ci += 1;
+                line_start_idx = ci;
+                line_w = 0;
+                line_max_size = base_size;
+                last_space_idx_after = None;
+                last_space_w_at = 0;
+                continue;
+            }
+            let cw = advs.get(ci).copied().unwrap_or(0);
+            if line_w + cw > wrap_max && ci > line_start_idx {
+                if let Some(sp) = last_space_idx_after.filter(|&sp| sp > line_start_idx) {
+                    finalize_line(line_start_idx, sp, line_max_size, &mut visual_lines, &mut line_y);
+                    line_start_idx = sp;
+                    line_w -= last_space_w_at;
+                    last_space_idx_after = None;
+                    last_space_w_at = 0;
+                    line_max_size = base_size;
+                    // Re-evaluate max for the wrapped tail (chars sp..ci).
+                    for k in sp..=ci {
+                        let ks = sizes.get(k).copied().unwrap_or(base_size as i16) as i32;
+                        line_max_size = line_max_size.max(ks);
+                    }
+                }
+            }
+            line_w += cw;
+            if c == ' ' {
+                last_space_idx_after = Some(ci + 1);
+                last_space_w_at = line_w;
+            }
+            ci += 1;
+        }
+        if line_start_idx < chars_vec.len() {
+            finalize_line(line_start_idx, chars_vec.len(), line_max_size, &mut visual_lines, &mut line_y);
+        }
+        // Find the visual line containing text_y, then the char in it.
+        let mut chosen_idx = chars_vec.len().saturating_sub(1);
+        let mut accum_y: i32 = top_spacing as i32;
+        for &(start, end, line_h) in &visual_lines {
+            if text_y >= accum_y && text_y < accum_y + line_h {
+                // Walk x within this line.
+                let mut x_accum: i32 = 0;
+                let mut found = end.saturating_sub(1);
+                for k in start..end {
+                    let cw = advs.get(k).copied().unwrap_or(0);
+                    if local_x < x_accum + cw {
+                        found = k;
+                        break;
+                    }
+                    x_accum += cw;
+                    found = k;
+                }
+                chosen_idx = found;
+                break;
+            }
+            accum_y += line_h;
+        }
+        chosen_idx
+    } else {
+        let params = crate::player::font::DrawTextParams {
+            font: &font,
+            line_height: None,
+            line_spacing,
+            top_spacing,
+            char_spacing: 0,
+            member_width: if word_wrap && wrap_width > 0 { Some(wrap_width as i16) } else { None },
+            min_space_advance: min_space_adv,
+            per_char_advances: per_char_advances_vec.as_deref(),
+        };
+        crate::player::font::get_text_index_at_pos(&text, &params, local_x, text_y)
+    };
+    let total = text.chars().count();
+
+    if idx >= total { -1 } else { (idx + 1) as i32 }
 }
 
 /// Tick the global SoundManager by `delta` seconds — advances fades

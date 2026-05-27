@@ -370,18 +370,52 @@ impl StringBytecodeHandler {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            
+
             // Read all chunk parameters
             let chunks = Self::read_all_chunks(player, ctx)?;
-            
-            // Apply chunks sequentially
-            let mut result = player.get_datum(&string_ref).string_value()?;
-            for chunk_expr in chunks {
-                result = StringChunkUtils::resolve_chunk_expr_string(&result, &chunk_expr)?;
-            }
-            
-            let result_datum = Datum::String(result);
-            let result_ref = player.alloc_datum(result_datum);
+
+            // For chunked access on a CastMember (`member.line[5].word[1]`)
+            // or on another StringChunk (already nested), build a StringChunk
+            // chain rather than flattening to a String. The chain lets
+            // downstream property reads — `.fontStyle`, `.font`, `.color`,
+            // `.charSpacing` — walk back to the source member and look up
+            // STXT formatting_runs / styled spans for the resolved char
+            // range. Without this, `member.line[5].word[1].fontStyle`
+            // errored with "Invalid string built-in property fontStyle"
+            // because the chunk had already lost its member back-reference.
+            //
+            // Plain `String` inputs (`"hello".word[2]`) have no member to
+            // chain to, so the original flatten-to-String behaviour is
+            // preserved for them.
+            let source_datum = player.get_datum(&string_ref).clone();
+            let initial_chain_source: Option<StringChunkSource> = match &source_datum {
+                Datum::CastMember(member_ref) => Some(StringChunkSource::Member(member_ref.clone())),
+                Datum::StringChunk(..) => Some(StringChunkSource::Datum(string_ref.clone())),
+                _ => None,
+            };
+
+            let result_ref = if let Some(initial_source) = initial_chain_source {
+                let mut current_source = initial_source;
+                let mut current_str = source_datum.string_value()?;
+                let mut current_ref = string_ref.clone();
+                for expr in chunks.iter() {
+                    current_str = StringChunkUtils::resolve_chunk_expr_string(&current_str, expr)?;
+                    current_ref = player.alloc_datum(Datum::StringChunk(
+                        current_source.clone(),
+                        expr.clone(),
+                        current_str.clone(),
+                    ));
+                    current_source = StringChunkSource::Datum(current_ref.clone());
+                }
+                current_ref
+            } else {
+                let mut result = source_datum.string_value()?;
+                for chunk_expr in chunks {
+                    result = StringChunkUtils::resolve_chunk_expr_string(&result, &chunk_expr)?;
+                }
+                player.alloc_datum(Datum::String(result))
+            };
+
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_ref);
             Ok(HandlerExecutionResult::Advance)
