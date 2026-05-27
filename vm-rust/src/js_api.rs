@@ -928,12 +928,18 @@ impl JsApi {
                 return;
             }
 
-            let cast = player
-                .movie
-                .cast_manager
-                .get_cast(member_ref.cast_lib as u32)
-                .unwrap();
-            let member = cast.members.get(&(member_ref.cast_member as u32)).unwrap();
+            // The cast or slot can vanish between the change firing and this
+            // async task running (e.g. mouseUp on the timeline triggers
+            // sprite reslotting in mid-handler, then the snapshot dispatch
+            // lands after the member is gone). Bail silently instead of
+            // panicking — the next change event will repaint the inspector
+            // correctly.
+            let Ok(cast) = player.movie.cast_manager.get_cast(member_ref.cast_lib as u32) else {
+                return;
+            };
+            let Some(member) = cast.members.get(&(member_ref.cast_member as u32)) else {
+                return;
+            };
             let member_map = Self::get_member_snapshot(member, member_ref.cast_lib as u32, cast.lctx.as_ref(), player);
 
             onCastMemberChanged(member_ref.to_js().to_js_value(), member_map.to_js_object());
