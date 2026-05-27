@@ -428,6 +428,8 @@ impl CastLib {
                 CastMemberType::Sound(SoundMember {
                     info: SoundInfo::default(),
                     sound: SoundChunk::default(),
+                    cue_point_times: Vec::new(),
+                    cue_point_names: Vec::new(),
                 }),
             )),
             "script" => Ok(CastMember::new(

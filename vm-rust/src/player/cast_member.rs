@@ -817,6 +817,14 @@ pub struct FilmLoopMember {
 pub struct SoundMember {
     pub info: SoundInfo,
     pub sound: SoundChunk,
+    /// Cue point times in milliseconds, parsed from the member's `cupt`
+    /// child chunk. Exposed to Lingo as `member.cuePointTimes`. The
+    /// SoundChannel reads these on `queue()` so playback can fire
+    /// `on cuePassed` as the playhead crosses each entry.
+    pub cue_point_times: Vec<u32>,
+    /// Names parallel to `cue_point_times`. Empty string when the
+    /// authoring tool didn't assign one.
+    pub cue_point_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -2409,6 +2417,7 @@ impl CastMember {
             Chunk::Effect(_) => "FXmp",
             Chunk::Thum(_) => "Thum",
             Chunk::XtraList(_) => "XTRl",
+            Chunk::CuePoints(_) => "cupt",
             Chunk::Raw(_) => "Raw",
         }
     }
@@ -4716,6 +4725,18 @@ impl CastMember {
                     }
                 }
 
+                // Pluck the cue-points child chunk (`cupt`), if present. Director
+                // stores these alongside the sound payload on the cast member; the
+                // movie's `on cuePassed` handler is driven by the playhead crossing
+                // these times.
+                let (cue_point_times, cue_point_names) = member_def.children.iter()
+                    .filter_map(|c| c.as_ref())
+                    .find_map(|c| match c {
+                        Chunk::CuePoints(cp) => Some((cp.times_ms.clone(), cp.names.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
                 // Try to find a sound chunk - check multiple formats:
                 // 1. "snd " chunk (Mac snd resource)
                 // 2. "ediM" chunk (MediaChunk)
@@ -4824,12 +4845,16 @@ impl CastMember {
                     CastMemberType::Sound(SoundMember {
                         info,
                         sound: sound_chunk,
+                        cue_point_times,
+                        cue_point_names,
                     })
                 } else {
                     warn!("No sound chunk found for member {}", number);
                     CastMemberType::Sound(SoundMember {
                         info: SoundInfo::default(),
                         sound: SoundChunk::default(),
+                        cue_point_times,
+                        cue_point_names,
                     })
                 }
             }

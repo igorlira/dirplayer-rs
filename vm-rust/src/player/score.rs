@@ -114,6 +114,14 @@ pub struct Score {
     pub sprite_spans: Vec<ScoreSpriteSpan>,
     pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
+    /// Sound channel sprite spans extracted from `frame_intervals`. Keyed by
+    /// channel_index (4 = Sound1, 3 = Sound2 on D6+). Used by the audio-time
+    /// score-sync logic in `run_frame_loop` so it only catches up to audio
+    /// time while the playhead is inside the authored sound 1 span — outside
+    /// that range, the score is meant to advance at its own tempo. The
+    /// regular `sprite_spans` Vec excludes effects channels (1-5) so we
+    /// stash these separately.
+    pub sound_channel_spans: HashMap<u32, (u32, u32)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
     pub frame_labels: Vec<FrameLabel>,
@@ -238,6 +246,7 @@ impl Score {
             frame_labels: vec![],
             channel_initialization_data: vec![],
             sound_channel_data: vec![],
+            sound_channel_spans: HashMap::new(),
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
             sprite_spans: vec![],
@@ -2545,6 +2554,21 @@ impl Score {
             &score_chunk.frame_data.frame_channel_data,
             &score_chunk.frame_intervals
         ));
+
+        // Capture sound-channel sprite spans (channel_index 3 = Sound2,
+        // 4 = Sound1 on D6+). These are excluded from the regular
+        // sprite_spans Vec below, but the audio-time score-sync code
+        // needs Sound1's span range so it only catches up while the
+        // playhead is inside the authored span.
+        for (primary, _) in &score_chunk.frame_intervals {
+            if primary.channel_index == 3 || primary.channel_index == 4 {
+                let entry = self.sound_channel_spans
+                    .entry(primary.channel_index)
+                    .or_insert((primary.start_frame, primary.end_frame));
+                entry.0 = entry.0.min(primary.start_frame);
+                entry.1 = entry.1.max(primary.end_frame);
+            }
+        }
 
         for (primary, secondary) in &score_chunk.frame_intervals {
             let is_frame_script_or_sprite_script =
