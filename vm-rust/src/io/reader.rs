@@ -2,7 +2,7 @@ use std::io::Read;
 
 use binary_reader::BinaryReader;
 
-use crate::io::encoding::decode_win1252;
+use crate::io::encoding::decode_text_auto;
 
 pub trait DirectorExt {
     fn read_var_int(&mut self) -> Result<i32, std::io::Error>;
@@ -50,13 +50,22 @@ impl DirectorExt for BinaryReader {
     }
 
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error> {
-        // Director text is Windows-1252 (CP1252), not UTF-8. The old
-        // from_utf8_lossy here silently replaced every non-ASCII byte with
-        // U+FFFD, killing umlauts (ä ö ü ß), Scandinavian (å ø æ), and
-        // Spanish (á é í ó ú ñ) characters in fields, text members, Lingo
-        // string literals, score labels, etc.
+        // Director's on-disk text encoding is movie-version-dependent.
+        // D6-D9 movies stored field/text member content as Windows-1252.
+        // D10+ (Unicode-aware) authoring tools store the same content as
+        // UTF-8 — e.g. Fugue No.4 (D11.5) has "música" encoded as
+        // `m c3 ba sica`. Decoding such bytes as plain Win-1252 would
+        // yield "mÃºsica" mojibake.
+        //
+        // `decode_text_auto` tries strict UTF-8 first, falling back to
+        // Win-1252 only when the bytes don't form a valid UTF-8 sequence.
+        // The check is cheap and the false-positive rate is negligible:
+        // arbitrary Win-1252 byte streams almost never coincidentally
+        // satisfy UTF-8's continuation-byte constraints, so legitimate
+        // Win-1252 text always falls through to the existing Win-1252
+        // path. Older movies keep working; D11 Unicode authoring works.
         let bytes = self.read_bytes(len).unwrap();
-        return Ok(decode_win1252(&bytes));
+        return Ok(decode_text_auto(&bytes));
     }
 
     fn read_apple_float_80(&mut self) -> Result<f64, String> {
