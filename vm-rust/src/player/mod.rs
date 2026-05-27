@@ -255,6 +255,23 @@ pub struct DirPlayer {
     pub drag_offset: (i32, i32),
     pub trails_bitmap: Option<bitmap::bitmap::Bitmap>,
     pub click_on_sprite: i16,
+    /// Queue of pending `on cuePassed` events that `SoundChannel::update`
+    /// has detected but not yet dispatched. The frame loop drains this
+    /// after `tick_sound_manager` (`SoundChannel::update` runs synchronously
+    /// from inside that tick, so the actual `player_invoke_frame_and_movie_scripts`
+    /// call — which is `async` — has to happen outside the tick).
+    /// Tuple: (channel_num_1_based, cue_number_1_based, cue_name).
+    pub pending_cue_events: Vec<(i32, i32, String)>,
+    /// Anchor for syncing score-frame advance to audio-context time while
+    /// sound channel 1 is playing. Set the moment audio actually starts
+    /// (`source.start()`), cleared when audio stops. The frame loop uses
+    /// this to compute the target frame from `audio_currentTime` and skip
+    /// the per-frame `target_delay_ms` wait when the score is behind —
+    /// without it, the wall-clock'd frame loop drifts behind audio over
+    /// time and visuals (Fugue No.4's Cross sprites tweened by the score)
+    /// fall behind the audio-clocked `on cuePassed` driven cursor.
+    /// Tuple: (score_frame_at_audio_start, audio_context_time_at_audio_start).
+    pub audio_sync_anchor: Option<(u32, f64)>,
     pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
     pub is_subscribed_to_channel_names: bool,       // TODO move to debug module
     pub font_manager: FontManager,
@@ -483,6 +500,8 @@ impl DirPlayer {
             date_objects: HashMap::new(),
             math_objects: HashMap::new(),
             click_on_sprite: 0,
+            pending_cue_events: Vec::new(),
+            audio_sync_anchor: None,
             enable_stream_status_handler: false,
             stream_status_reported: HashMap::new(),
             is_in_frame_update: false,
@@ -3996,6 +4015,32 @@ pub async fn run_frame_loop() {
             let tempo = reserve_player_ref(|player| player.current_frame_tempo);
             let delta = if tempo == 0 { 1.0 / 30.0 } else { 1.0 / tempo as f64 };
             tick_sound_manager(delta);
+        }
+
+        // Drain cue-point events SoundChannel::update detected. The handler
+        // dispatch is async — has to happen out here in the frame loop, not
+        // inside the synchronous sound tick. Pass each as
+        // `on cuePassed channelSymbol, number, name` per Director 11.5 spec
+        // (channel arg is a symbol like `#sound1`). Dispatched to frame +
+        // movie scripts in order.
+        loop {
+            let events = reserve_player_mut(|player| std::mem::take(&mut player.pending_cue_events));
+            if events.is_empty() {
+                break;
+            }
+            for (channel_num, cue_number, cue_name) in events {
+                let args = reserve_player_mut(|player| {
+                    let chan_sym = player.alloc_datum(crate::director::lingo::datum::Datum::Symbol(
+                        format!("sound{}", channel_num),
+                    ));
+                    let number_ref = player.alloc_datum(crate::director::lingo::datum::Datum::Int(cue_number));
+                    let name_ref = player.alloc_datum(crate::director::lingo::datum::Datum::String(cue_name));
+                    vec![chan_sym, number_ref, name_ref]
+                });
+                if let Err(err) = player_invoke_frame_and_movie_scripts("cuePassed", &args).await {
+                    warn!("cuePassed dispatch failed: {}", err.message);
+                }
+            }
         }
 
         // Also check after frame execution: if scripts tried to access a Flash
