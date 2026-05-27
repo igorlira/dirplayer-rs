@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
+
 use crate::{
-    director::lingo::datum::Datum,
+    director::lingo::datum::{Datum, DatumType},
     player::{cast_lib::CastMemberRef, reserve_player_mut, DirPlayer, ScriptError},
 };
 
@@ -25,6 +27,27 @@ impl SoundMemberHandlers {
             "channelCount" => Ok(Datum::Int(sound.info.channels as i32)),
             "sampleCount" => Ok(Datum::Int(sound.info.sample_count as i32)),
             "loop" => Ok(Datum::Int(if sound.info.loop_enabled { 1 } else { 0 })),
+            // Cue-point properties — list of ms times and parallel names.
+            // Director uses 1-based indices into these lists when firing
+            // `on cuePassed`. Returned as Lingo lists so scripts can do
+            // `member(N).cuePointTimes[i]`.
+            "cuePointTimes" => {
+                // Snapshot the times to drop the borrow on `sound` (which
+                // holds `player` immutably) before re-borrowing `player`
+                // mutably via alloc_datum.
+                let times: Vec<u32> = sound.cue_point_times.clone();
+                let items: VecDeque<_> = times.into_iter()
+                    .map(|t| player.alloc_datum(Datum::Int(t as i32)))
+                    .collect();
+                Ok(Datum::List(DatumType::List, items, false))
+            }
+            "cuePointNames" => {
+                let names: Vec<String> = sound.cue_point_names.clone();
+                let items: VecDeque<_> = names.into_iter()
+                    .map(|n| player.alloc_datum(Datum::String(n)))
+                    .collect();
+                Ok(Datum::List(DatumType::List, items, false))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for sound",
                 prop
