@@ -2052,6 +2052,169 @@ impl WebGL2Renderer {
                         style |= 4;
                     }
 
+                    // Build StyledSpans from STXT formatting_runs so the
+                    // renderer can apply per-character underline visually.
+                    // Use the field-level font/size/color as the DEFAULT
+                    // for each span — don't override font_size from each
+                    // run because Director field styling per-run is
+                    // style-only (bold/italic/underline), not size; a
+                    // per-run size from STXT can be a stale member-level
+                    // snapshot and would split words onto wrong-sized lines.
+                    // Snapshot the cast lib's font_table once so the per-run
+                    // bold/italic detection below can resolve `run.font_id`
+                    // to an actual font name (e.g. "Arial Italic") rather
+                    // than guessing via bit heuristics. Same lookup the
+                    // Lingo `.font` / `.fontStyle` chunk getters use — keeps
+                    // the renderer and the script-visible style in sync so
+                    // a run that reports `[#italic]` to Lingo also draws
+                    // italic on stage.
+                    let field_font_table: std::collections::HashMap<u16, String> = player
+                        .movie
+                        .cast_manager
+                        .get_cast(member_ref.cast_lib as u32)
+                        .map(|cl| cl.font_table.clone())
+                        .unwrap_or_default();
+                    let field_styled_spans: Option<Vec<crate::player::handlers::datum_handlers::cast_member::font::StyledSpan>>
+                        = if field_member.formatting_runs.len() >= 2 {
+                        use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle};
+                        let text_str = &field_member.text;
+                        // STXT formatting_runs use BYTE positions in
+                        // Director's text data. Build a byte→char index map
+                        // so multi-byte chars (ñ/ç/é in Narrative's
+                        // Spanish/Portuguese text) don't shift visual spans
+                        // by 1 char per multi-byte char before them.
+                        let mut byte_to_char: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                        let mut total_chars: Vec<char> = Vec::new();
+                        for (ci, (bi, c)) in text_str.char_indices().enumerate() {
+                            byte_to_char.insert(bi, ci);
+                            total_chars.push(c);
+                        }
+                        byte_to_char.insert(text_str.len(), total_chars.len());
+                        let resolve_char = |byte_pos: usize| -> usize {
+                            // Snap to nearest known boundary <= byte_pos.
+                            // STXT positions should sit on char boundaries
+                            // but guard against malformed offsets.
+                            for b in (0..=byte_pos.min(text_str.len())).rev() {
+                                if let Some(&c) = byte_to_char.get(&b) { return c; }
+                            }
+                            0
+                        };
+                        let mut spans: Vec<StyledSpan> = Vec::new();
+                        let runs = &field_member.formatting_runs;
+                        // Detect whether the runs actually carry non-trivial
+                        // per-run sizes (≥6pt and at least one differing from
+                        // the member default). Director STXT runs that just
+                        // tag style changes typically share `font_size == 0`
+                        // or share the member's default; in that case keep
+                        // uniform sizing so Canvas2D anti-aliasing lands on
+                        // integer pixels (per-run sizes blur it). When the
+                        // movie actually authored per-section sizes (Fugue
+                        // No. 4 Narrative: 18pt section headers + 12pt body,
+                        // David's Notes 18pt title + 12pt body), feed the
+                        // real per-run sizes through — the PFR multi-span
+                        // path scales each run individually and wrap
+                        // positions then match Shockwave's layout.
+                        let member_size = field_member.font_size as i32;
+                        let per_run_sizing = {
+                            let mut seen_size: Option<i32> = None;
+                            let mut differs = false;
+                            for run in runs.iter() {
+                                let s = run.font_size as i32;
+                                if s < 6 { continue; }
+                                match seen_size {
+                                    None => seen_size = Some(s),
+                                    Some(prev) if prev != s => { differs = true; break; }
+                                    _ => {}
+                                }
+                            }
+                            if differs {
+                                true
+                            } else if let Some(s) = seen_size {
+                                member_size > 0 && s != member_size
+                            } else {
+                                false
+                            }
+                        };
+                        for (i, run) in runs.iter().enumerate() {
+                            let start = resolve_char(run.start_position as usize);
+                            let end = if i + 1 < runs.len() {
+                                resolve_char(runs[i + 1].start_position as usize)
+                            } else {
+                                total_chars.len()
+                            };
+                            if start >= total_chars.len() || end <= start {
+                                continue;
+                            }
+                            let end = end.min(total_chars.len());
+                            let span_text: String = total_chars[start..end].iter().collect();
+                            // Resolve the run's font name via the file's
+                            // Fmap/VWFM table. Movies that ship separate
+                            // "Arial", "Arial Bold", "Arial Italic" cast
+                            // members signal the variant by mapping the
+                            // run's `font_id` to one of those names — the
+                            // style byte often stays at 0x00. OR with the
+                            // style-byte bits so movies that author bold/
+                            // italic via the style byte (single Arial cast
+                            // member) still work.
+                            let resolved_font = field_font_table.get(&run.font_id);
+                            let name_bold = resolved_font
+                                .map(|n| n.to_ascii_lowercase().contains("bold"))
+                                .unwrap_or(false);
+                            let name_italic = resolved_font
+                                .map(|n| n.to_ascii_lowercase().contains("italic"))
+                                .unwrap_or(false);
+                            let bold = (run.style & 0x01) != 0 || name_bold;
+                            let italic = (run.style & 0x02) != 0 || name_italic;
+                            let underline = (run.style & 0x04) != 0;
+                            let span_font_size = if per_run_sizing && (run.font_size as i32) >= 6 {
+                                Some(run.font_size as i32)
+                            } else if field_member.font_size > 0 {
+                                Some(field_member.font_size as i32)
+                            } else {
+                                None
+                            };
+                            // Use the run's resolved font name (e.g.
+                            // "Arial Bold" / "Arial Italic") as the span's
+                            // font_face so the per-span atlas-loader in
+                            // render_text_to_texture can pick the correct
+                            // variant PFR atlas for that run. Without this
+                            // every span carries field_member.font ("Arial")
+                            // and the loader sees no variants to load.
+                            let span_font_face = resolved_font
+                                .cloned()
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    if field_member.font.is_empty() {
+                                        None
+                                    } else {
+                                        Some(field_member.font.clone())
+                                    }
+                                });
+                            spans.push(StyledSpan {
+                                text: span_text,
+                                style: HtmlStyle {
+                                    font_face: span_font_face,
+                                    font_size: span_font_size,
+                                    color: None,
+                                    bg_color: None,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    kerning: 0,
+                                    char_spacing: 0,
+                                    hyperlink: None,
+                                },
+                            });
+                        }
+                        if spans.is_empty() {
+                            None
+                        } else {
+                            Some(spans)
+                        }
+                    } else {
+                        None
+                    };
+
                     // Color priority for fields:
                     // 1. Non-default RGB sprite color wins outright. Covers both
                     //    score-frame-data tweens (FurniFactory; sprite.color = RGB but
@@ -2100,6 +2263,24 @@ impl WebGL2Renderer {
                         field_member.box_type, field_member.editable, field_member.border, width, height,
                     );
 
+                    // `scrollTop` (Director 11.5 Scripting Dictionary p.1158)
+                    // is "the distance, in pixels, from the top of the field
+                    // cast member to the top of the field that is currently
+                    // visible". We implement it by shifting the text-draw
+                    // origin upward via top_spacing: a positive scroll_top
+                    // produces a negative effective top_spacing, so the
+                    // first lines render above the bitmap top (clipped) and
+                    // the visible content appears scrolled up. Hashing the
+                    // adjusted top_spacing into the cache key (which already
+                    // hashes top_spacing) makes the texture re-rasterize each
+                    // time scrollTop changes. Force keep_authored_height so
+                    // the bitmap stays at sprite height instead of shrinking
+                    // to fit the scrolled-up content.
+                    let scroll_top_i = field_member.scroll_top as i32;
+                    let effective_top_spacing = (field_member.top_spacing as i32 - scroll_top_i)
+                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    let scroll_active = scroll_top_i != 0;
+
                     // Include focus state in cache key so cursor state changes invalidate cache
                     let field_caret_blink = caret_blink_visible_now();
                     let mut cache_key = RenderedTextCacheKey::new_with_focus(
@@ -2121,11 +2302,26 @@ impl WebGL2Renderer {
                         field_member.font_size,
                         if style == 0 { None } else { Some(style) },
                         field_member.fixed_line_space,
-                        field_member.top_spacing,
+                        effective_top_spacing,
                     );
                     let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
-                    cache_key.keep_authored_height = transform_active;
+                    // Paged/scrollable fields (box_type #scroll, #fixed,
+                    // #limit) must keep the bitmap at the sprite's
+                    // authored height regardless of how tall the
+                    // wrapped content is — otherwise switching from a
+                    // short to a long member (Narrative -> Spanish,
+                    // which has 28k chars wrapping to thousands of
+                    // pixels) blows the bitmap up to the full text
+                    // height and the overflow renders all over the
+                    // stage instead of clipping to the visible field.
+                    // #adjust is the only box_type where the field is
+                    // expected to grow to fit content.
+                    let box_clipped = matches!(
+                        field_member.box_type.as_str(),
+                        "scroll" | "fixed" | "limit"
+                    );
+                    cache_key.keep_authored_height = transform_active || scroll_active || box_clipped;
                     cache_key.transform_active = transform_active;
 
                     TextureSource::RenderedText {
@@ -2136,14 +2332,14 @@ impl WebGL2Renderer {
                         font_style: if style == 0 { None } else { Some(style) },
                         font_id: field_member.font_id,
                         line_spacing: field_member.fixed_line_space,
-                        top_spacing: field_member.top_spacing,
+                        top_spacing: effective_top_spacing,
                         bottom_spacing: 0,
                         width,
                         height,
                         wrap_width,
                         text_fg_color: effective_fg,
                         text_bg_color: effective_bg,
-                        styled_spans: None,
+                        styled_spans: field_styled_spans,
                         alignment: field_member.alignment.clone(),
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
@@ -4554,9 +4750,15 @@ impl WebGL2Renderer {
         let underline = (style_bits & 4) != 0;
         let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
 
-        // Get the font bitmap
-        let font_bitmap = match player.bitmap_manager.get_bitmap(font.bitmap_ref) {
-            Some(b) => b,
+        // Get the font bitmap. We clone it locally so the immutable
+        // borrow on `player.bitmap_manager` is released — the PFR
+        // multi-span path below needs to call back into
+        // `player.font_manager.get_font_with_cast_and_bitmap` (which
+        // mutably borrows `bitmap_manager`) to load per-span variant
+        // atlases. Cloning ~88KB once per render is cheap vs. the
+        // borrow-checker dance of holding the original `&Bitmap`.
+        let font_bitmap_owned = match player.bitmap_manager.get_bitmap(font.bitmap_ref) {
+            Some(b) => b.clone(),
             None => {
                 // Font bitmap not found - log warning and return None
                 web_sys::console::warn_1(
@@ -4565,6 +4767,7 @@ impl WebGL2Renderer {
                 return None;
             }
         };
+        let font_bitmap = &font_bitmap_owned;
 
         let mut render_width = width as u16;
         let mut render_height = height as u16;
@@ -5156,6 +5359,13 @@ impl WebGL2Renderer {
                     bold: bool,
                     italic: bool,
                     underline: bool,
+                    /// Resolved font name for this run (e.g. "Arial",
+                    /// "Arial Bold", "Arial Italic"). Used to pick a
+                    /// variant atlas at draw time so bold/italic runs
+                    /// render from their pre-designed PFR cast members
+                    /// rather than applying fake-bold double-strike or
+                    /// fake-italic shear to the field's base atlas.
+                    font_name: Option<String>,
                 }
 
                 #[derive(Clone)]
@@ -5220,19 +5430,81 @@ impl WebGL2Renderer {
                         bold: style.bold,
                         italic: style.italic,
                         underline: style.underline,
+                        font_name: style.font_face.clone(),
                     }
                 };
 
+                // Minimum space-character advance. Some PFR1 fonts ship
+                // a space `set_width` so narrow that at small render sizes
+                // (12 pt) the advance rounds to 1–2 px and text wraps way
+                // later than Shockwave's reference — extra words squeeze
+                // onto each line. Shockwave's authentic render of these
+                // movies uses what looks like GDI's default Arial space
+                // (~30% em). 0.30 × size_px ≈ 4 px at 12 pt — within a
+                // half-pixel of Windows Arial's space metric. Clamps
+                // only spaces; non-space glyph advances are untouched.
+                let space_min_advance = |size_px: i32| -> i32 {
+                    ((size_px as f32 * 0.30).round() as i32).max(2)
+                };
+                // Pre-load variant atlases for every distinct `font_face`
+                // referenced by the styled spans (Arial, Arial Bold, Arial
+                // Italic, …). The map is used twice: by `token_width` below
+                // to compute WRAP-time widths with the same per-run atlas
+                // the draw uses, AND by the per-line draw loop further down.
+                // Doing wrap measurement with regular Arial while drawing
+                // with Arial Bold made the rendered bold text overflow the
+                // wrap boundary, which then made `the mouseChar` resolve
+                // clicks on visual "Christ's passion" to char positions
+                // deep inside "the sign of the cross" / "three motives".
+                struct PfrWrapVariant {
+                    font: std::rc::Rc<crate::player::font::BitmapFont>,
+                }
+                let mut wrap_variants: std::collections::HashMap<String, PfrWrapVariant> = std::collections::HashMap::new();
+                {
+                    let mut unique_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    if let Some(spans) = styled_spans {
+                        for span in spans {
+                            if let Some(ref name) = span.style.font_face {
+                                if !name.is_empty() && !name.eq_ignore_ascii_case(font_name) {
+                                    unique_names.insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    for variant_name in unique_names {
+                        if let Some(vf) = player.font_manager.get_font_with_cast_and_bitmap(
+                            &variant_name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            Some(requested_font_size),
+                            None,
+                        ) {
+                            if vf.char_widths.is_some() {
+                                wrap_variants.insert(
+                                    variant_name.to_ascii_lowercase(),
+                                    PfrWrapVariant { font: vf },
+                                );
+                            }
+                        }
+                    }
+                }
                 let token_width = |token_text: &str, style: &PfrRunStyle| -> i32 {
-                    // See blit logic below for the rationale on
-                    // `size_px / base_size` vs `size_px / native_char_height`.
                     let scale_num = style.size_px.max(1);
                     let scale_den = base_size.max(1);
+                    let space_min = space_min_advance(style.size_px);
+                    // Pick the run's variant atlas font for wrap-time
+                    // advances when available, so wrap widths match the
+                    // per-span draw widths.
+                    let variant_font = style.font_name.as_ref()
+                        .and_then(|n| wrap_variants.get(&n.to_ascii_lowercase()))
+                        .map(|v| &*v.font);
+                    let measure_font = variant_font.unwrap_or(&*font);
                     token_text
                         .chars()
                         .map(|c| {
-                            ((font.get_char_advance(c as u8) as i32) * scale_num / scale_den)
-                                .max(1)
+                            let raw = ((measure_font.get_char_advance(c as u8) as i32) * scale_num / scale_den)
+                                .max(1);
+                            if c == ' ' { raw.max(space_min) } else { raw }
                         })
                         .sum()
                 };
@@ -5355,6 +5627,58 @@ impl WebGL2Renderer {
                     );
                 }
 
+                // Pre-load every variant atlas referenced by the styled
+                // spans (typically "Arial" / "Arial Bold" / "Arial Italic"
+                // for Fugue No. 4's Narrative field). Cloning the bitmap
+                // up-front sidesteps the borrow-checker conflict between
+                // looking up `player.bitmap_manager` for the source atlas
+                // while the destination text_bitmap is being mutated, and
+                // means we only need the `&Bitmap` reference inside the
+                // per-glyph draw call. ~88KB per variant × ~4 variants
+                // = ~350KB per cache miss; cached afterwards.
+                struct PfrVariantAtlas {
+                    font: std::rc::Rc<crate::player::font::BitmapFont>,
+                    bitmap: Bitmap,
+                }
+                let mut variant_atlases: std::collections::HashMap<String, PfrVariantAtlas> = std::collections::HashMap::new();
+                {
+                    let mut unique_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for line in &lines {
+                        for run in &line.runs {
+                            if let Some(ref name) = run.style.font_name {
+                                if !name.is_empty() && !name.eq_ignore_ascii_case(font_name) {
+                                    unique_names.insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    for variant_name in unique_names {
+                        if let Some(variant_font) = player.font_manager.get_font_with_cast_and_bitmap(
+                            &variant_name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            Some(requested_font_size),
+                            None,
+                        ) {
+                            if variant_font.char_widths.is_some() {
+                                if let Some(bmp) = player.bitmap_manager.get_bitmap(variant_font.bitmap_ref) {
+                                    variant_atlases.insert(
+                                        variant_name.to_ascii_lowercase(),
+                                        PfrVariantAtlas { font: variant_font.clone(), bitmap: bmp.clone() },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if DEBUG_WEBGL2_TEXT {
+                        debug!(
+                            "[webgl2.text.pfr.variants] base='{}' variants_loaded={}",
+                            font_name,
+                            variant_atlases.len()
+                        );
+                    }
+                }
+
                 // Paragraph-boundary spacing rule (XMED-verified against
                 // Buggy info-card):
                 //
@@ -5428,46 +5752,55 @@ impl WebGL2Renderer {
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         };
 
-                        // Scale glyphs by per-span size relative to the
-                        // member's base size, then map onto native cell
-                        // dimensions. When style.size_px == base_size (the
-                        // common default-size case), this yields a 1:1
-                        // render at native (matching the non-multi-span
-                        // bitmap path). The previous formula
-                        // `size_px / native_char_height` was off when
-                        // base_size != native_char_height (e.g. 04b_08 *:
-                        // base 12, native cell 14 — glyphs got blitted
-                        // at 12/14=86% size, making CS Junkbot WELCOME
-                        // text visibly thinner than READY TO PLAY which
-                        // used the non-multi-span path at 100%).
+                        // Pick the run's atlas. When the run names a variant
+                        // we've pre-loaded (e.g. "Arial Bold" or "Arial
+                        // Italic" cast members in Fugue No. 4), draw the
+                        // glyphs directly from that atlas — the variant
+                        // PFR1 already encodes bold/italic stroke shapes,
+                        // so no double-strike or shear is needed. Falling
+                        // back to the field's base atlas means we apply
+                        // the legacy fake-bold / fake-italic transforms.
+                        let run_variant = run.style.font_name.as_ref()
+                            .and_then(|n| variant_atlases.get(&n.to_ascii_lowercase()));
+                        let (run_font, run_font_bitmap, use_variant) = match run_variant {
+                            Some(v) => (&*v.font as &crate::player::font::BitmapFont, &v.bitmap, true),
+                            None => (&*font, font_bitmap, false),
+                        };
+                        let run_native_char_h = run_font.char_height.max(1) as i32;
+                        let run_native_char_w = run_font.char_width as i32;
                         let span_scale_num = run.style.size_px.max(1);
                         let span_scale_den = base_size.max(1);
-                        let char_h = (native_char_height * span_scale_num / span_scale_den).max(1);
+                        let char_h = (run_native_char_h * span_scale_num / span_scale_den).max(1);
                         let char_w =
-                            ((font.char_width as i32) * span_scale_num / span_scale_den).max(1);
-                        // When the span uses the document's default size,
-                        // dispatch to the unscaled `bitmap_font_copy_char`
-                        // (the same call the non-multi-span path uses).
-                        // `bitmap_font_copy_char_scaled` adds sampling
-                        // overhead even for 1:1 dimensions and produced
-                        // visibly thinner glyphs on CS Junkbot credits
-                        // vs. WELCOME (which used the unscaled path).
+                            (run_native_char_w * span_scale_num / span_scale_den).max(1);
                         let span_is_default_size = span_scale_num == span_scale_den;
+                        // When drawing from a pre-designed variant atlas
+                        // (Arial Bold / Italic), the style is already in
+                        // the glyph shapes — suppress fake-bold and
+                        // fake-italic so we don't stack them on top.
+                        let apply_fake_bold = run.style.bold && !use_variant;
+                        let apply_fake_italic = run.style.italic && !use_variant;
+                        let italic_default_size = apply_fake_italic && span_is_default_size;
                         let underline_y = y + char_h - 1;
                         let run_start_x = x;
 
+                        let space_min = space_min_advance(run.style.size_px);
                         for ch in run.text.chars() {
-                            // Map Unicode char -> Win-1252 atlas slot before
-                            // looking up glyph width/cell. `c as u8` truncates
-                            // codepoints like € (U+20AC=0x20AC) to 0xAC, so the
-                            // renderer would pull the wrong glyph from the
-                            // atlas.
                             let glyph_b = crate::io::encoding::glyph_byte_for(ch);
-                            let advance = if span_is_default_size {
-                                font.get_char_advance(glyph_b) as i32
+                            let raw_advance = if span_is_default_size {
+                                run_font.get_char_advance(glyph_b) as i32
                             } else {
-                                ((font.get_char_advance(glyph_b) as i32) * span_scale_num / span_scale_den)
+                                ((run_font.get_char_advance(glyph_b) as i32) * span_scale_num / span_scale_den)
                                     .max(1)
+                            };
+                            // Mirror the wrap-time clamp: spaces with a tiny
+                            // stored set_width get widened to ≥ font_size/4 so
+                            // word advance matches measurement and lines wrap
+                            // where we said they would.
+                            let advance = if ch == ' ' {
+                                raw_advance.max(space_min)
+                            } else {
+                                raw_advance
                             };
 
                             if ch == ' ' {
@@ -5475,31 +5808,24 @@ impl WebGL2Renderer {
                                 continue;
                             }
 
-                            // Each glyph is drawn exactly once. Bold uses fake
-                            // double-strike (x and x+1); italic uses per-row
-                            // shear via the _italic helpers. Italic is only
-                            // available at default size — _scaled doesn't have
-                            // an italic variant yet, so scaled italic falls
-                            // through to the non-italic scaled copy.
-                            let italic_default_size = run.style.italic && span_is_default_size;
                             let draw_glyph = |dest: &mut Bitmap, dx: i32| {
                                 if italic_default_size {
                                     bitmap_font_copy_char_italic(
-                                        &font, font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
+                                        run_font, run_font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
                                     );
                                 } else if span_is_default_size {
                                     bitmap_font_copy_char(
-                                        &font, font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
+                                        run_font, run_font_bitmap, glyph_b, dest, dx, y, &palettes, &run_params,
                                     );
                                 } else {
                                     bitmap_font_copy_char_scaled(
-                                        &font, font_bitmap, glyph_b, dest, dx, y,
+                                        run_font, run_font_bitmap, glyph_b, dest, dx, y,
                                         char_w, char_h, &palettes, &run_params,
                                     );
                                 }
                             };
                             draw_glyph(&mut text_bitmap, x);
-                            if run.style.bold {
+                            if apply_fake_bold {
                                 draw_glyph(&mut text_bitmap, x + 1);
                             }
 

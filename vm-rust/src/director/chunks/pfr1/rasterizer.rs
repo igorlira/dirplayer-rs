@@ -5,6 +5,17 @@ use super::types::*;
 use super::glyph::fixed_point_multiply16;
 use super::log;
 
+/// Master switch for the "make text bolder" post-processing applied to
+/// glyph coverage. When `true`, edge alpha is darkened via a sqrt() gamma
+/// boost in the software-scanline path and via `steepen_alpha_ramp(48, 208)`
+/// for non-pixel fonts. This was added originally for readability at small
+/// sizes but produces a visibly heavier weight than Shockwave's native
+/// rasterizer (most noticeable on long-form body text such as the Fugue
+/// No. 4 Narrative field). Flip to `false` to get the thinner Shockwave-like
+/// rendering; flip back to `true` to restore the legacy weight without any
+/// other code change.
+pub const PFR_EDGE_BOOST: bool = false;
+
 /// Rasterize a single glyph using the browser's Canvas2D path fill.
 /// This leverages the browser's native rasterizer which handles edge cases
 /// (self-intersecting contours, sub-pixel alignment) more accurately than
@@ -237,9 +248,11 @@ fn rasterize_glyph_to_alpha_mask(
                 }
             }
             let raw_coverage = (count * 255 / block) as u8;
-            // Apply gamma boost (gamma=0.5) to make anti-aliased edges more prominent.
-            // This makes text bolder and more readable at small sizes.
-            let coverage = if raw_coverage == 0 || raw_coverage == 255 {
+            // Optional gamma boost (gamma=0.5) to make anti-aliased edges
+            // more prominent. Gated by `PFR_EDGE_BOOST` so the weight can
+            // be flipped back to Shockwave-like thin rendering without
+            // touching call sites.
+            let coverage = if !PFR_EDGE_BOOST || raw_coverage == 0 || raw_coverage == 255 {
                 raw_coverage
             } else {
                 let norm = raw_coverage as f32 / 255.0;
@@ -462,6 +475,25 @@ pub fn rasterize_pfr1_font(
     target_height: usize,
     design_size: usize,
 ) -> RasterizedFont {
+    rasterize_pfr1_font_with_options(parsed_font, target_height, design_size, false)
+}
+
+/// Variant of `rasterize_pfr1_font` that exposes additional knobs.
+///
+/// `thin_stem_boost = true` applies a `sqrt(α/255)` gamma curve to AA pixel
+/// coverage values, lifting faint partial-coverage thin-stem pixels into a
+/// visible range. Intended for italic-variant atlases where lowercase `l`,
+/// `i` and uppercase `I` are 1-orus-wide stems whose AA coverage at small
+/// render sizes (12 px) lands at α≈30–80 — without the boost they read as
+/// barely-there gray; with it they read as a clear thin stroke. Don't use
+/// it for regular-weight atlases: the same curve thickens the AA edges of
+/// solid stems and makes the whole atlas look bold.
+pub fn rasterize_pfr1_font_with_options(
+    parsed_font: &Pfr1ParsedFont,
+    target_height: usize,
+    design_size: usize,
+    thin_stem_boost: bool,
+) -> RasterizedFont {
     let phys = &parsed_font.physical_font;
 
     let outline_res = phys.outline_resolution as f32;
@@ -469,8 +501,18 @@ pub fn rasterize_pfr1_font(
     let coords_scaled = target_em_px > 0.0 && outline_res > 0.0;
 
     let scale = if coords_scaled {
-        // Coordinates are already in target pixel space (parsed at actual target size).
-        1.0
+        // Coordinates were parsed at `target_em_px` pixel space (typically
+        // = outline_resolution, à la Fontinator). Downscale to the actual
+        // render height. When target_em_px equals the requested
+        // target_height this is 1.0 (legacy behaviour); when parse was at
+        // outline_res and we render at e.g. 12 px, this is 12/2048 ≈ 0.006
+        // — the same downscale Fontinator does at paint time. Avoids the
+        // broken "parse-with-target=12 → fragmented zone hints" path.
+        if target_em_px > 0.0 {
+            target_height as f32 / target_em_px
+        } else {
+            1.0
+        }
     } else if outline_res > 0.0 {
         // Scale from ORU space to target pixel size.
         // Must use outline_res (not metric_height = ascender - descender) to match the
@@ -780,17 +822,27 @@ pub fn rasterize_pfr1_font(
             (-min_y * glyph_scale_y).round()
         };
 
-        // Use Canvas2D (Skia-backed) for all font rendering. For coords_scaled
-        // pixel fonts, threshold the anti-aliased output to binary. This matches
-        // Skia's pixel boundary rules exactly, producing output identical to
-        // SkiaSharp. Our custom scanline rasterizer had
-        // subtly different boundary pixel rules causing ~1px extra width on
-        // some characters (98 pixel differences across 34 chars).
+        // Use Canvas2D (Skia-backed) for all font rendering.
         //
-        // For non-pixel fonts, keep the anti-aliased Canvas2D output as-is
-        // for higher quality rendering with oversampled fallback.
-        let alpha_mask = if coords_scaled {
-            // Canvas2D with even-odd fill → binary threshold
+        // For PIXEL fonts (PFR1 cast members that ship pre-rendered bitmap
+        // glyphs alongside outlines — fff_reaction, volter, prima_mono,
+        // v/vb, etc.): threshold the Canvas2D AA output to binary at 128.
+        // The bitmap glyphs are designed for integer-coordinate cells, and
+        // any sub-pixel AA would blur their crisp pixel edges. The earlier
+        // gate `coords_scaled` was too coarse — with our parse-at-
+        // outline_resolution change it became `true` for *all* outline
+        // fonts too, which then killed thin italic stems (lowercase l, i,
+        // uppercase I in fugue_arial_italic) whose AA coverage falls
+        // below 128 at small render sizes. Fontinator's SkiaSharp path
+        // does NOT threshold and renders these correctly at 12px.
+        //
+        // For OUTLINE fonts (Arial / Verdana / fugue_arial etc.): keep
+        // the Canvas2D AA coverage as-is. Matches Skia's analytic AA and
+        // Font Xtra's 4-bit-per-pixel coverage + SRCPAINT composite.
+        let is_pixel_font = phys.has_bitmap_section
+            && !parsed_font.bitmap_glyphs.is_empty();
+        let alpha_mask = if coords_scaled && is_pixel_font {
+            // Canvas2D with even-odd fill → binary threshold (pixel-font path)
             let canvas_result = {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -800,10 +852,6 @@ pub fn rasterize_pfr1_font(
                             glyph_scale_x, glyph_scale_y,
                             glyph_offset_x, glyph_offset_y,
                         )?;
-                        // Threshold to binary: Canvas2D anti-aliases at edges,
-                        // but for integer-coordinate pixel fonts the coverage
-                        // at boundaries is deterministic. Threshold at 128
-                        // matches Skia's non-anti-aliased behavior.
                         for a in alpha.iter_mut() {
                             *a = if *a >= 128 { 255 } else { 0 };
                         }
@@ -827,6 +875,29 @@ pub fn rasterize_pfr1_font(
                 )
             })
         } else {
+            // Optional thin-stem alpha boost: a sqrt(α/255) gamma curve
+            // that lifts faint partial-coverage pixels (α≈30–80) into a
+            // visible range while leaving solid centers (255) untouched.
+            // Used for italic atlases where lowercase l, i, uppercase I
+            // are 1-orus-wide stems whose AA coverage at 12 px is too
+            // faint to read. Caller decides per-font via the `thin_stem_
+            // boost` parameter — applying it to regular-weight atlases
+            // thickens AA edges of solid stems and makes the body look
+            // bold, so don't.
+            let apply_thin_stem_boost = |alpha: &mut [u8]| {
+                if thin_stem_boost {
+                    for a in alpha.iter_mut() {
+                        if *a == 0 || *a == 255 {
+                            continue;
+                        }
+                        let norm = (*a as f32) / 255.0;
+                        *a = (norm.sqrt() * 255.0).round().min(255.0) as u8;
+                    }
+                }
+                if PFR_EDGE_BOOST {
+                    steepen_alpha_ramp(alpha, 48, 208);
+                }
+            };
             let canvas_result = {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -836,9 +907,7 @@ pub fn rasterize_pfr1_font(
                             glyph_scale_x, glyph_scale_y,
                             glyph_offset_x, glyph_offset_y,
                         )?;
-                        // Steepen alpha ramp for crisper edges at small sizes.
-                        // lo=48 removes faint fringe, hi=208 saturates near-solid.
-                        steepen_alpha_ramp(&mut alpha, 48, 208);
+                        apply_thin_stem_boost(&mut alpha);
                         Some(alpha)
                     })
                 }
@@ -856,7 +925,7 @@ pub fn rasterize_pfr1_font(
                     glyph_offset_y,
                     4, // 4x oversampling for anti-aliased output
                 );
-                steepen_alpha_ramp(&mut alpha, 48, 208);
+                apply_thin_stem_boost(&mut alpha);
                 alpha
             })
         };

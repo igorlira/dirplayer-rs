@@ -396,6 +396,8 @@ impl FontMemberHandlers {
                     top_spacing: text.top_spacing,
                     char_spacing: 0,
                     member_width: None,
+                    min_space_advance: None,
+                    per_char_advances: None,
                 };
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);

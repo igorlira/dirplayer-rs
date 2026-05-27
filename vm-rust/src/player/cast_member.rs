@@ -52,6 +52,12 @@ pub struct FieldMember {
     pub font_style: String,
     pub font_size: u16,
     pub font_id: Option<u16>, // STXT font ID for lookup by ID
+    /// All STXT formatting runs parsed for this field. Each run has a
+    /// `start_position` (char index) and applies until the next run begins
+    /// (or end of text). Director's `the textStyle of char N of member`
+    /// and `member.char[N].fontStyle` resolve by walking these runs.
+    /// Empty when the field has uniform styling (older parser behaviour).
+    pub formatting_runs: Vec<crate::director::chunks::text::StxtFormattingRun>,
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
     pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
@@ -216,6 +222,7 @@ impl FieldMember {
             font_style: "plain".to_string(),
             font_size: 12,
             font_id: None,
+            formatting_runs: Vec::new(),
             text_height: 100,
             fixed_line_space: 0,
             top_spacing: 0,
@@ -288,6 +295,7 @@ impl FieldMember {
             font_style: "plain".to_string(),
             font_size: 12,
             font_id: None,
+            formatting_runs: Vec::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
             fixed_line_space: 0,  // Use default line spacing for text rendering
             top_spacing: field_info.scroll as i16,
@@ -4100,7 +4108,90 @@ impl CastMember {
 
                 // Parse STXT formatting data to extract actual fontId, fontSize, and style
                 let formatting_runs = text_chunk.parse_formatting_runs();
-                if let Some(first_run) = formatting_runs.first() {
+                // Keep the FULL run list on the field so per-char prop access
+                // (`the textStyle of char N of member`, `member.char[N].fontStyle`)
+                // and per-run rendering (underline links, mixed bold spans)
+                // can read it. Without this, fields with rich STXT formatting
+                // (Fugue No.4's "Narrative" text-link field, etc.) would
+                // collapse to a single uniform style and the script's
+                // link-detection logic never fires.
+                field_member.formatting_runs = formatting_runs.clone();
+                // Pick the DOMINANT font_size — the size used by the most
+                // characters — as the member-wide default. Director's
+                // rendering effectively uses this size for the bulk of
+                // the field; the first run's size (e.g. David's Notes
+                // header at 18) is correct for that range but the body
+                // (12) is what dominates the rendered area. Picking
+                // dominant matches Shockwave's visual output for
+                // Spanish/Portuguese/David's Notes alike.
+                //
+                // Algorithm:
+                //   1. For each run, compute its char coverage as
+                //      (next_run.start_position - run.start_position),
+                //      or text_len - run.start_position for the last
+                //      run.
+                //   2. Sum coverage per font_size (skipping bogus sizes
+                //      <6 from marker runs).
+                //   3. Pick the size with the highest total coverage.
+                //
+                // Other member-wide defaults (font, fixed_line_space,
+                // fore_color) still come from the FIRST run with that
+                // dominant size, so any consistent per-run formatting
+                // tied to the body comes through correctly.
+                let text_byte_len = text_chunk.text.len() as u32;
+                let mut coverage_by_size: std::collections::HashMap<u16, u32> =
+                    std::collections::HashMap::new();
+                for (i, r) in formatting_runs.iter().enumerate() {
+                    if r.font_size < 6 { continue; }
+                    let next_pos = if i + 1 < formatting_runs.len() {
+                        formatting_runs[i + 1].start_position
+                    } else {
+                        text_byte_len
+                    };
+                    let coverage = next_pos.saturating_sub(r.start_position);
+                    *coverage_by_size.entry(r.font_size).or_insert(0) += coverage;
+                }
+                let dominant_size: Option<u16> = coverage_by_size
+                    .iter()
+                    .max_by_key(|&(_, c)| *c)
+                    .map(|(s, _)| *s);
+                // Among runs at the dominant size, prefer one whose
+                // font_id resolves to a NON-styled (no "Bold"/"Italic")
+                // variant. The renderer loads one atlas per field and
+                // applies bold via double-strike / italic via shear on
+                // that atlas — if the atlas itself is "Arial Bold" or
+                // "Arial Italic", stacking another transformation on
+                // top produces bold-italic or extra-bold glyphs that
+                // don't match Shockwave's render. Fugue No. 4
+                // Narrative's 12pt body has its dominant run pointed
+                // at "Arial Bold" in the Fmap; without this preference
+                // the whole body atlas comes out heavy.
+                let resolve_name = |fid: u16| -> Option<String> {
+                    font_table.get(&fid).cloned()
+                };
+                let is_neutral_name = |name: &str| -> bool {
+                    let lc = name.to_ascii_lowercase();
+                    !lc.contains("bold") && !lc.contains("italic")
+                };
+                let primary_run = dominant_size
+                    .and_then(|sz| {
+                        formatting_runs.iter()
+                            .find(|r| r.font_size == sz
+                                && resolve_name(r.font_id)
+                                    .as_deref()
+                                    .map(is_neutral_name)
+                                    .unwrap_or(false))
+                            .or_else(|| formatting_runs.iter().find(|r| r.font_size == sz))
+                    })
+                    .or_else(|| formatting_runs.iter()
+                        .find(|r| r.font_size >= 6
+                            && resolve_name(r.font_id)
+                                .as_deref()
+                                .map(is_neutral_name)
+                                .unwrap_or(false)))
+                    .or_else(|| formatting_runs.iter().find(|r| r.font_size >= 6))
+                    .or_else(|| formatting_runs.first());
+                if let Some(first_run) = primary_run {
                     // Extract foreground color from STXT formatting run
                     let fg_r = (first_run.color_r >> 8) as u8;
                     let fg_g = (first_run.color_g >> 8) as u8;

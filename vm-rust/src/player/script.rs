@@ -763,7 +763,7 @@ pub fn get_obj_prop(
                 }
                 _ if matches!(prop_name.to_ascii_lowercase().as_str(),
                     "fixedlinespace" | "topspacing" | "bottomspacing"
-                    | "font" | "fontsize" | "fontstyle"
+                    | "font" | "fontsize" | "fontstyle" | "textstyle"
                     | "color" | "bgcolor" | "alignment") => {
                     // Per-chunk properties — walk to the source member and
                     // resolve the chunk's char range, then look up the
@@ -782,9 +782,156 @@ pub fn get_obj_prop(
                     let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
                         return Ok(player.alloc_datum(Datum::Void));
                     };
-                    // Field path: lacks per-paragraph data; fall back to
-                    // member-level values for the chunk too.
-                    if let Some(_field) = member.member_type.as_field() {
+                    // Field path: per-character styles live in the STXT
+                    // formatting_runs (start_position + style byte).
+                    // Director's `the textStyle of char N of member`
+                    // returns a comma-separated string like "underline"
+                    // or "bold,italic"; `fontStyle` returns a list of
+                    // symbols. The Fugue No.4 Narrative script branches
+                    // on `the textStyle of char ... = "underline"` so
+                    // the string form has to work for fields. Other
+                    // chunk-level field props still fall back to the
+                    // member-wide values (fields don't have per-line
+                    // par_infos like text members do).
+                    // Snapshot the cast lib's font_table so font_id → name
+                    // lookups inside the field branch don't need to re-borrow
+                    // cast_manager (which is already lent immutably via the
+                    // `member` borrow above). The font_table is the only
+                    // authoritative mapping from STXT formatting_run.font_id
+                    // to a resolved font name like "Arial Italic" — bit
+                    // heuristics on font_id mis-tag bold vs italic depending
+                    // on how the file packed its table.
+                    let font_table_snapshot: std::collections::HashMap<u16, String> = player
+                        .movie
+                        .cast_manager
+                        .get_cast(member_ref.cast_lib as u32)
+                        .map(|cl| cl.font_table.clone())
+                        .unwrap_or_default();
+                    let resolve_run_style = |font_id: u16, style_byte: u8| -> (bool, bool, Option<String>) {
+                        let resolved = font_table_snapshot.get(&font_id).cloned();
+                        let name_bold = resolved.as_ref()
+                            .map(|n| n.to_ascii_lowercase().contains("bold"))
+                            .unwrap_or(false);
+                        let name_italic = resolved.as_ref()
+                            .map(|n| n.to_ascii_lowercase().contains("italic"))
+                            .unwrap_or(false);
+                        let bold = (style_byte & 0x01) != 0 || name_bold;
+                        let italic = (style_byte & 0x02) != 0 || name_italic;
+                        (bold, italic, resolved)
+                    };
+                    if let Some(field) = member.member_type.as_field() {
+                        let lc = prop_name.to_ascii_lowercase();
+                        if lc == "textstyle" || lc == "fontstyle" {
+                            // STXT formatting_runs use BYTE positions, not
+                            // char positions. Convert char_start -> byte
+                            // offset so multi-byte chars (ñ/ç/é in
+                            // Narrative's Spanish/Portuguese text) don't
+                            // shift the run-boundary lookup by 1 char per
+                            // multi-byte char before the queried char.
+                            let byte_start: usize = field.text
+                                .char_indices()
+                                .nth(char_start)
+                                .map(|(b, _)| b)
+                                .unwrap_or_else(|| field.text.len());
+                            let active_run = field.formatting_runs.iter()
+                                .rev()
+                                .find(|r| (r.start_position as usize) <= byte_start);
+                            let (active_style, active_font_id) = active_run
+                                .map(|r| (r.style, r.font_id))
+                                .unwrap_or((0, 0));
+                            // Resolve via the file's font_table (the only
+                            // authoritative source). The STXT `style` byte
+                            // can also independently signal bold/italic on
+                            // movies that ship just one Arial cast member
+                            // and rely on style bits — OR with name match.
+                            let (bold, italic, _resolved) =
+                                resolve_run_style(active_font_id, active_style);
+                            let underline = (active_style & 0x04) != 0;
+                            if lc == "textstyle" {
+                                // Director string form (legacy `the textStyle`).
+                                let mut parts: Vec<&str> = Vec::new();
+                                if bold { parts.push("bold"); }
+                                if italic { parts.push("italic"); }
+                                if underline { parts.push("underline"); }
+                                let s = if parts.is_empty() {
+                                    "plain".to_string()
+                                } else {
+                                    parts.join(",")
+                                };
+                                return Ok(player.alloc_datum(Datum::String(s)));
+                            } else {
+                                // fontStyle list form.
+                                let mut items = std::collections::VecDeque::new();
+                                if bold {
+                                    items.push_back(player.alloc_datum(Datum::Symbol("bold".to_string())));
+                                }
+                                if italic {
+                                    items.push_back(player.alloc_datum(Datum::Symbol("italic".to_string())));
+                                }
+                                if underline {
+                                    items.push_back(player.alloc_datum(Datum::Symbol("underline".to_string())));
+                                }
+                                if items.is_empty() {
+                                    items.push_back(player.alloc_datum(Datum::Symbol("plain".to_string())));
+                                }
+                                return Ok(player.alloc_datum(Datum::List(
+                                    crate::director::lingo::datum::DatumType::List,
+                                    items,
+                                    false,
+                                )));
+                            }
+                        }
+                        // `the font of char N..M of member` returns the
+                        // font name of those chars. Director synthesizes
+                        // a "FontName Bold *" / "FontName Italic *" name
+                        // when the run has bold/italic style bits set —
+                        // Fugue No.4 Cues#AdvanceScroll relies on this:
+                        // `if member(nar).line[o].char[1..x].font =
+                        //   "Arial Bold *"` to detect bold-styled
+                        // hyperlink anchors. Look up the active run at
+                        // char_start in field.formatting_runs and emit
+                        // the synthesized name with the field's base
+                        // font as prefix.
+                        if lc == "font" {
+                            let byte_start: usize = field.text
+                                .char_indices()
+                                .nth(char_start)
+                                .map(|(b, _)| b)
+                                .unwrap_or_else(|| field.text.len());
+                            let active_run = field.formatting_runs.iter().rev()
+                                .find(|r| (r.start_position as usize) <= byte_start);
+                            let (active_style, active_font_id) = active_run
+                                .map(|r| (r.style, r.font_id))
+                                .unwrap_or((0, 0));
+                            let (bold, italic, resolved_name) =
+                                resolve_run_style(active_font_id, active_style);
+                            // Prefer the font_table's resolved name (e.g.
+                            // "Arial Italic") so the AdvanceScroll-style
+                            // `if .font = "Arial Bold *"` comparisons see
+                            // the exact variant the file authored. If the
+                            // table doesn't list this id (fallback path),
+                            // synthesise from the field's base font + the
+                            // bold/italic flags we just derived.
+                            let base_for_synth = field.font.trim_end_matches(" *")
+                                .trim_end_matches('*')
+                                .trim()
+                                .to_string();
+                            let s = if let Some(name) = resolved_name {
+                                let trimmed = name.trim_end_matches(" *")
+                                    .trim_end_matches('*')
+                                    .trim()
+                                    .to_string();
+                                format!("{} *", trimmed)
+                            } else {
+                                let mut parts: Vec<&str> = Vec::new();
+                                let base_owned = if base_for_synth.is_empty() { "Arial".to_string() } else { base_for_synth };
+                                parts.push(base_owned.as_str());
+                                if bold { parts.push("Bold"); }
+                                if italic { parts.push("Italic"); }
+                                format!("{} *", parts.join(" "))
+                            };
+                            return Ok(player.alloc_datum(Datum::String(s)));
+                        }
                         return Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                             &obj_clone.string_value()?,
                             &prop_name,
