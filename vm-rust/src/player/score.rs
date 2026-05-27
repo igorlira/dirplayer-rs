@@ -194,7 +194,7 @@ pub fn get_sprite_in_context_mut<'a>(player: &'a mut DirPlayer, sprite_id: i16) 
 }
 
 /// Get sprite rect using current score context
-fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
+pub fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
     let sprite = get_sprite_in_context(player, sprite_id);
     let sprite = match sprite {
         Some(sprite) => sprite,
@@ -4160,8 +4160,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         "loc" => borrow_sprite_mut(
             sprite_id,
-            |_| value.clone(),  // Pass the value through so we can use it in the sprite closure
-            |sprite, value| -> Result<(), ScriptError> {
+            // flag (D6+) so the sprite-mut closure doesn't need to re-borrow.
+            |player| Ok::<_, ScriptError>(value.clone()),
+            |sprite, prep| -> Result<(), ScriptError> {
+                let value = prep?;
                 match value {
                     Datum::Point(vals, _) => {
                         sprite.loc_h = vals[0] as i32;
@@ -4193,67 +4195,68 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             },
         ),
         "rect" => reserve_player_mut(|player| {
-            borrow_sprite_mut(
-                sprite_id,
-                |player| {
-                    let sprite = player.movie.score.get_sprite(sprite_id).unwrap();
-                    let member_ref = sprite.member.as_ref();
-                    let cast_member =
-                        member_ref.and_then(|x| player.movie.cast_manager.find_member_by_ref(&x));
-                    let reg_point = cast_member
-                        .map(|x| match &x.member_type {
-                            CastMemberType::Bitmap(bitmap) => bitmap.reg_point,
-                            CastMemberType::FilmLoop(film_loop) => {
-                                // For filmloops, registration point is the center of the content bounds
-                                let w = film_loop.initial_rect.width();
-                                let h = film_loop.initial_rect.height();
-                                ((w / 2) as i16, (h / 2) as i16)
-                            }
-                            CastMemberType::Flash(flash) => flash.reg_point,
-                            _ => (0, 0),
-                        })
-                        .unwrap_or((0, 0));
+            // Extract the target rect from `value`.
+            let rect_values = match value {
+                Datum::Rect(ref vals, _) => {
+                    Some([vals[0] as i32, vals[1] as i32, vals[2] as i32, vals[3] as i32])
+                }
+                Datum::List(_, ref items, _) if items.len() == 4 => {
+                    Some([
+                        player.get_datum(&items[0]).int_value()?,
+                        player.get_datum(&items[1]).int_value()?,
+                        player.get_datum(&items[2]).int_value()?,
+                        player.get_datum(&items[3]).int_value()?,
+                    ])
+                }
+                Datum::Point(ref vals, _) => {
+                    let s = player.movie.score.get_sprite(sprite_id);
+                    let (sw, sh) = s.map(|s| (s.width, s.height)).unwrap_or((0, 0));
+                    let x = vals[0] as i32;
+                    let y = vals[1] as i32;
+                    Some([x, y, x + sw, y + sh])
+                }
+                _ => return Err(ScriptError::new(format!(
+                    "rect must be a rect (got {})", value.type_str()
+                ))),
+            };
+            let [left, top, right, bottom] = rect_values
+                .ok_or_else(|| ScriptError::new("rect parse failed".to_string()))?;
+            let new_width = right - left;
+            let new_height = bottom - top;
 
-                    reg_point
-                },
-                |sprite, reg_point| {
-                    let rect_values = match value {
-                        Datum::Rect(ref vals, _) => {
-                            Some([
-                                vals[0] as i32,
-                                vals[1] as i32,
-                                vals[2] as i32,
-                                vals[3] as i32,
-                            ])
-                        }
-                        Datum::List(_, ref items, _) if items.len() == 4 => {
-                            Some([
-                                player.get_datum(&items[0]).int_value()?,
-                                player.get_datum(&items[1]).int_value()?,
-                                player.get_datum(&items[2]).int_value()?,
-                                player.get_datum(&items[3]).int_value()?,
-                            ])
-                        }
-                        Datum::Point(ref vals, _) => {
-                            let x = vals[0] as i32;
-                            let y = vals[1] as i32;
-                            Some([x, y, x + sprite.width, y + sprite.height])
-                        }
-                        _ => None,
-                    };
-                    match rect_values {
-                        Some([left, top, right, bottom]) => {
-                            sprite.loc_h = left + reg_point.0 as i32;
-                            sprite.loc_v = top + reg_point.1 as i32;
-                            sprite.width = right - left;
-                            sprite.height = bottom - top;
-                            sprite.has_size_changed = true;
-                            Ok(())
-                        }
-                        None => Err(ScriptError::new(format!("rect must be a rect (got {})", value.type_str()))),
-                    }
-                },
-            )
+            // Probe approach: clone the sprite, apply the new dimensions with
+            // loc=0,0, then ask the *real* renderer logic what rect it would
+            // produce. Whatever offset it picks (scaled reg point, bbox-driven
+            // reg, centerRegPoint, vector-shape natural-rect scaling, …)
+            // becomes the offset we need to invert. This guarantees the
+            // round-trip property `sprite.rect = R → sprite.left == R.left`
+            // that Director provides, regardless of which member type or
+            // heuristic path the renderer takes. Fugue No.4's `cueCursor`
+            // relies on this for `if sprite(6).left < 20`.
+            let mut probe: Sprite = match player.movie.score.get_sprite(sprite_id) {
+                Some(s) => s.clone(),
+                None => return Err(ScriptError::new(format!(
+                    "rect: sprite {} not found", sprite_id
+                ))),
+            };
+            probe.loc_h = 0;
+            probe.loc_v = 0;
+            probe.width = new_width;
+            probe.height = new_height;
+            probe.has_size_changed = true;
+            let probe_rect = get_concrete_sprite_rect(player, &probe);
+            // probe_rect.left = -effective_reg_x with loc=0, so to make the
+            // real getter return `left`, write loc_h = left - probe_rect.left.
+            let new_loc_h = left - probe_rect.left;
+            let new_loc_v = top - probe_rect.top;
+
+            let s = player.movie.score.get_sprite_mut(sprite_id);
+            s.loc_h = new_loc_h;
+            s.loc_v = new_loc_v;
+            s.width = new_width;
+            s.height = new_height;
+            s.has_size_changed = true;
+            Ok(())
         }),
         "scriptInstanceList" => {
             let ref_list = value.to_list()?;
@@ -4638,6 +4641,30 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
                         || script.get_own_handler("mouseUpOutSide").is_some()
                     {
                         return false;
+                    }
+                }
+            }
+            // Fallback: behavior scripts attached to Field/Text members live
+            // in the cast's lctx, not as Script-type cast members, so
+            // get_script_by_ref above can return None for them. Consult
+            // get_script_id() → lctx.scripts directly. This is the path
+            // used by member-attached BehaviorScripts in Director 11.5
+            // (e.g. Fugue No.4's Narrative / Portuguese / Spanish fields).
+            if let Some(script_id) = member.get_script_id() {
+                if let Ok(cast) = player.movie.cast_manager.get_cast(member_ref.cast_lib as u32) {
+                    if let Some(lctx) = cast.lctx.as_ref() {
+                        if let Some(script_chunk) = lctx.scripts.get(&script_id) {
+                            let has_mouse_handler = script_chunk.handlers.iter().any(|h| {
+                                lctx.names.get(h.name_id as usize)
+                                    .map(|n| n.eq_ignore_ascii_case("mouseDown")
+                                        || n.eq_ignore_ascii_case("mouseUp")
+                                        || n.eq_ignore_ascii_case("mouseUpOutSide"))
+                                    .unwrap_or(false)
+                            });
+                            if has_mouse_handler {
+                                return false;
+                            }
+                        }
                     }
                 }
             }
