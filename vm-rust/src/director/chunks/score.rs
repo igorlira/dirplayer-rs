@@ -1619,16 +1619,32 @@ impl ScoreChunk {
             // Primary entries: 40 bytes base (5 x u32 fields + 20-byte
             // TweenInfo) plus zero or more trailing u32s of authored
             // keyframe indices. v8.0 movies only ever produce 40/44/48
-            // byte primaries (0-2 trailing keyframes); v8.5+ adds a
-            // 52-byte size for spans with 3 trailing keyframes (where
-            // path tweens with authored interior keyframes live —
-            // sprite 2 / sprites 41-42 of 15love_hs). Accepting 52+
-            // unconditionally previously over-matched non-primary
-            // chunks in Junkbot (v8.0), so we gate the wider sizes
-            // strictly on movie version.
+            // byte primaries (0-2 trailing keyframes); v8.5+ extends to
+            // 52 (3 trailing keyframes) and beyond — Fugue No.4 / i04.dir
+            // has primary entries of 72, 116, 188, 232, 336+ bytes for
+            // sprites with many authored keyframes along an animated
+            // path. Accepting 52+ unconditionally previously
+            // over-matched non-primary chunks in Junkbot (v8.0), so we
+            // still gate the wider sizes by movie version AND validate
+            // the first 8 bytes look like (start_frame, end_frame) of
+            // a real primary (small, ascending) to avoid false matches.
             let accept_extended = dir_version >= 850;
-            let size_accepted = matches!(entry_bytes.len(), 40 | 44 | 48)
+            let size_accepted_basic = matches!(entry_bytes.len(), 40 | 44 | 48)
                 || (accept_extended && entry_bytes.len() == 52);
+            // Allow any 4-byte-aligned entry >= 40 bytes on D8.5+ if the
+            // header looks plausible — that's the path-keyframe-bearing
+            // case that was getting rejected.
+            let size_accepted_extended = accept_extended
+                && entry_bytes.len() > 52
+                && entry_bytes.len() % 4 == 0
+                && entry_bytes.len() >= 8
+                && {
+                    let b = entry_bytes;
+                    let sf = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                    let ef = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+                    sf >= 1 && sf <= 10000 && ef >= sf && ef <= 100000
+                };
+            let size_accepted = size_accepted_basic || size_accepted_extended;
             match entry_bytes.len() {
                 _ if size_accepted => {
                     // Primary entry
