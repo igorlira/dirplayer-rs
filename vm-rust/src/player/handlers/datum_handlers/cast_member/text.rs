@@ -24,6 +24,41 @@ use crate::{
 pub struct TextMemberHandlers {}
 const DEBUG_TEXT_IMAGE: bool = true;
 
+/// Per-line vertical step in pixels for `linePosToLocV` / `locVToLinePos`.
+/// Matches what `charPosToLoc` in [handlers/manager.rs] uses: explicit
+/// `fixed_line_space` when set, otherwise font_size as the implicit line
+/// height. Field members behave identically.
+pub(crate) fn line_step_px(fixed_line_space: u16, font_size: u16) -> i32 {
+    if fixed_line_space > 0 { fixed_line_space as i32 } else { font_size as i32 }
+}
+
+/// Count the lines of a Director-style string. Director uses bare `\r` as
+/// its line separator; `str::lines()` only handles `\n` and `\r\n`, so a
+/// `\r`-separated text reads as a single line. We treat each `\r`, `\n`, or
+/// `\r\n` as one separator and return `separator_count + 1` (minimum 1).
+pub(crate) fn count_director_lines(text: &str) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    let bytes = text.as_bytes();
+    let mut lines = 1usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\r' {
+            lines += 1;
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                i += 2;
+                continue;
+            }
+        } else if c == b'\n' {
+            lines += 1;
+        }
+        i += 1;
+    }
+    lines
+}
+
 /// Result of parsing a Director-style RTF document back into the
 /// fields a TextMember holds. Symmetric counterpart to the data
 /// `generate_rtf_from_text_member` reads when emitting RTF.
@@ -114,6 +149,40 @@ impl TextMemberHandlers {
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
+            }
+            // Director 11.5 Scripting Dictionary p.443 / p.449.
+            //
+            // Director returns the BASELINE Y of the line, not its top edge.
+            // Hover-highlight idiom in scripts (e.g. spineworld_dcr's
+            // pDropList) is `rect(..., tPosV - 9, ..., tPosV + 5)` —
+            // asymmetric around tPosV (9 above, 5 below). The numbers
+            // -9/+5 are tuned for a 12pt font where the baseline sits
+            // ~9px from the line top (ascent ≈ 0.75 × font_size). With
+            // that convention the highlight top aligns with the line's
+            // top and the rect covers ~14px down, matching Director's
+            // natural line height. Returning line top or line center
+            // shifts the highlight off the line bucket (one line above
+            // the cursor; or overlapping into the previous line's
+            // click bucket).
+            "linePosToLocV" => {
+                let line_num = player.get_datum(&args[0]).int_value()?.max(1);
+                let line_step = line_step_px(text.fixed_line_space, text.font_size);
+                let baseline_offset = (line_step * 3) / 4;
+                let y = text.top_spacing as i32 + (line_num - 1) * line_step + baseline_offset;
+                Ok(player.alloc_datum(Datum::Int(y)))
+            }
+            "locVToLinePos" => {
+                let loc_v = player.get_datum(&args[0]).int_value()?;
+                let line_step = line_step_px(text.fixed_line_space, text.font_size).max(1);
+                // Director uses bare \r as its line separator. Rust's
+                // `str::lines()` only splits on \n / \r\n, so a \r-separated
+                // Director text reads as one line and the line-count clamp
+                // forces every locVToLinePos result back to 1 (spineworld_dcr's
+                // pDropList country list selected Afghanistan no matter where
+                // you clicked). Count any of \r, \n, or \r\n as a separator.
+                let line_count = count_director_lines(&text.text) as i32;
+                let line = ((loc_v - text.top_spacing as i32) / line_step) + 1;
+                Ok(player.alloc_datum(Datum::Int(line.clamp(1, line_count))))
             }
             "setProp" => {
                 // setProp(#line, index, value) or setProp(#word, index, value) etc.
@@ -1616,10 +1685,21 @@ impl TextMemberHandlers {
                 // sharp text — without the threshold the catalog list looks
                 // washed out compared to Shockwave.
                 if !text_data.anti_alias && bitmap.bit_depth == 32 {
+                    // Director with `anti_alias=false` rasterises text as 1-bit
+                    // — no coverage to threshold. Our pipeline renders via
+                    // Canvas2D (always AA) and then thresholds the alpha to
+                    // simulate the 1-bit effect. The file's
+                    // `anti_alias_threshold` is often 0 for these members
+                    // (spineworld_dcr txt_droplist authored at 0); honouring
+                    // that value lets every halo pixel through and produces a
+                    // thick / double-struck appearance. Floor at 128 — the
+                    // midpoint of the coverage scale, which empirically
+                    // matches Director's crispness for non-AA text (Coke
+                    // Studios jukebox catalog and others).
                     let threshold = text_data.info.as_ref()
                         .map(|i| i.anti_alias_threshold as u8)
                         .unwrap_or(128)
-                        .max(1);
+                        .max(128);
                     for i in (3..bitmap.data.len()).step_by(4) {
                         bitmap.data[i] = if bitmap.data[i] >= threshold { 255 } else { 0 };
                     }
@@ -1680,6 +1760,14 @@ impl TextMemberHandlers {
             // Runtime selection state
             "selstart" => Ok(Datum::Int(text_data.sel_start)),
             "selend" => Ok(Datum::Int(text_data.sel_end)),
+            // Director 11.5 Scripting Dictionary p.1164. Returns a two-element
+            // linear list `[start, end]` so scripts can test for an active
+            // selection via `selection[1] <> selection[2]`.
+            "selection" => {
+                let start = player.alloc_datum(Datum::Int(text_data.sel_start));
+                let end = player.alloc_datum(Datum::Int(text_data.sel_end));
+                Ok(Datum::List(DatumType::List, VecDeque::from(vec![start, end]), false))
+            }
             "selectedtext" => {
                 let len = text_data.text.len() as i32;
                 let lo = text_data.sel_start.min(text_data.sel_end).clamp(0, len);

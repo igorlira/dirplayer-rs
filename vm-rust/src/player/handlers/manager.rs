@@ -1585,61 +1585,132 @@ impl BuiltInHandlerManager {
                     if !is_pfr && !font_name.is_empty() {
                         // Native Canvas2D path: measure the substring up to `index` using the
                         // member's font so the returned x matches the rasterised image width.
-                        // Handle multi-line text by tracking which line `index` falls on.
+                        // Honours explicit `\r`/`\n` line breaks AND `word_wrap` + `member.width`
+                        // greedy word-wrap, so the returned y advances per wrapped line. Without
+                        // wrap awareness the script-side `getBubbleSize` pattern (which calls
+                        // `charPosToLoc(textLength)` to get bubble height) returns single-line
+                        // height for multi-line wrapped text and the resulting copyPixels src
+                        // rect is too short — only the first wrapped line gets copied.
                         let display_font_name = if font_name.is_empty() { "Arial".to_string() } else { font_name.clone() };
                         let display_font_size = if font_size > 0 { font_size } else { 12 };
 
-                        let mut consumed = 0usize;
-                        let mut line_idx = 0usize;
-                        let mut line_start: Option<&str> = None;
-                        let mut prefix_chars = 0usize;
                         let chars_vec: Vec<char> = text.chars().collect();
                         let target = index.min(chars_vec.len());
 
-                        // Split on \r / \n; treat \r\n as single break.
-                        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
-                        for (li, line) in normalised.split('\n').enumerate() {
-                            let line_len = line.chars().count();
-                            if target <= consumed + line_len {
-                                line_idx = li;
-                                line_start = Some(line);
-                                prefix_chars = target - consumed;
-                                break;
-                            }
-                            consumed += line_len + 1; // +1 for the line break
-                        }
-                        let (line_ref, prefix_len) = match line_start {
-                            Some(l) => (l, prefix_chars),
-                            None => {
-                                // target was beyond end-of-text: use last line, full length.
-                                let lines: Vec<&str> = normalised.split('\n').collect();
-                                let last = lines.last().copied().unwrap_or("");
-                                line_idx = lines.len().saturating_sub(1);
-                                (last, last.chars().count())
-                            }
-                        };
-                        let prefix: String = line_ref.chars().take(prefix_len).collect();
-
-                        // Measure prefix width AND full line width via Canvas2D.
-                        // Full-line width is needed to apply alignment offset (center/right)
-                        // so the returned x matches the rasterised image's pixel position.
-                        let (prefix_w, line_w) = {
+                        // Build the measurement context once and reuse it for all
+                        // word-wrap probes below.
+                        let measure_ctx = {
                             use wasm_bindgen::JsCast;
-                            let font_str_for_log = format!("{}px {}", display_font_size, display_font_name);
+                            let font_str = format!("{}px {}", display_font_size, display_font_name);
                             web_sys::window()
                                 .and_then(|w| w.document())
                                 .and_then(|d| d.create_element("canvas").ok())
                                 .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
                                 .and_then(|c| c.get_context("2d").ok().flatten())
                                 .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
-                                .map(|ctx| {
-                                    ctx.set_font(&font_str_for_log);
-                                    let p = ctx.measure_text(&prefix).ok().map(|m| m.width()).unwrap_or(0.0);
-                                    let l = ctx.measure_text(line_ref).ok().map(|m| m.width()).unwrap_or(0.0);
-                                    (p, l)
-                                })
-                                .unwrap_or((0.0, 0.0))
+                                .map(|ctx| { ctx.set_font(&font_str); ctx })
                         };
+                        let measure = |s: &str| -> f64 {
+                            measure_ctx.as_ref()
+                                .and_then(|ctx| ctx.measure_text(s).ok())
+                                .map(|m| m.width()).unwrap_or(0.0)
+                        };
+
+                        // Greedy word-wrap: returns the (start_char, end_char_exclusive)
+                        // bounds in `line` of each sub-line after wrapping at `wrap_w`
+                        // pixels. Whitespace-only break preferred; falls back to hard
+                        // break when a single token already exceeds `wrap_w`.
+                        let wrap_sub_lines = |line: &str, wrap_w: f64| -> Vec<(usize, usize)> {
+                            let chars: Vec<char> = line.chars().collect();
+                            if chars.is_empty() { return vec![(0, 0)]; }
+                            if wrap_w <= 0.0 || wrap_w == f64::INFINITY {
+                                return vec![(0, chars.len())];
+                            }
+                            let mut subs = Vec::new();
+                            let mut start = 0usize;
+                            let mut last_space: Option<usize> = None;
+                            let mut i = 0usize;
+                            while i < chars.len() {
+                                let c = chars[i];
+                                if c == ' ' || c == '\t' { last_space = Some(i); }
+                                let probe: String = chars[start..=i].iter().collect();
+                                if measure(&probe) > wrap_w && i > start {
+                                    let break_at = match last_space {
+                                        Some(lb) if lb > start => lb,
+                                        _ => i,
+                                    };
+                                    subs.push((start, break_at));
+                                    let mut next = break_at;
+                                    if next < chars.len() && (chars[next] == ' ' || chars[next] == '\t') {
+                                        next += 1;
+                                    }
+                                    start = next;
+                                    last_space = None;
+                                    i = start;
+                                    continue;
+                                }
+                                i += 1;
+                            }
+                            subs.push((start, chars.len()));
+                            subs
+                        };
+
+                        let want_wrap = word_wrap && member_width > 0;
+                        let wrap_w = if want_wrap { member_width as f64 } else { f64::INFINITY };
+
+                        // Locate the natural line (split on \r/\n) containing `target`,
+                        // then locate the sub-line within it.
+                        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+                        let natural_lines: Vec<&str> = normalised.split('\n').collect();
+                        let mut consumed = 0usize;
+                        let mut natural_idx = 0usize;
+                        let mut pos_in_natural = 0usize;
+                        let mut found = false;
+                        for (li, line) in natural_lines.iter().enumerate() {
+                            let line_len = line.chars().count();
+                            if target <= consumed + line_len {
+                                natural_idx = li;
+                                pos_in_natural = target - consumed;
+                                found = true;
+                                break;
+                            }
+                            consumed += line_len + 1;
+                        }
+                        if !found {
+                            natural_idx = natural_lines.len().saturating_sub(1);
+                            pos_in_natural = natural_lines.last().map_or(0, |l| l.chars().count());
+                        }
+
+                        // Sum sub-line counts of natural lines preceding the target's.
+                        let mut total_line_idx = 0usize;
+                        for li in 0..natural_idx {
+                            let subs = wrap_sub_lines(natural_lines[li], wrap_w);
+                            total_line_idx += subs.len().max(1);
+                        }
+
+                        // Within the target's natural line, find which sub-line owns `pos_in_natural`.
+                        let target_line = natural_lines[natural_idx];
+                        let subs = wrap_sub_lines(target_line, wrap_w);
+                        let mut sub_idx = 0usize;
+                        let mut sub_start = 0usize;
+                        let mut sub_end = target_line.chars().count();
+                        for (idx, (s, e)) in subs.iter().enumerate() {
+                            if pos_in_natural <= *e {
+                                sub_idx = idx;
+                                sub_start = *s;
+                                sub_end = *e;
+                                break;
+                            }
+                        }
+                        let target_chars: Vec<char> = target_line.chars().collect();
+                        let prefix: String = target_chars[sub_start..pos_in_natural.min(target_chars.len())]
+                            .iter().collect();
+                        let sub_line_text: String = target_chars[sub_start..sub_end.min(target_chars.len())]
+                            .iter().collect();
+                        let prefix_w = measure(&prefix);
+                        let line_w = measure(&sub_line_text);
+                        let line_idx = total_line_idx + sub_idx;
+
                         let start_x = match align_kind {
                             1 if member_width > 0 => ((member_width as f64 - line_w) / 2.0).max(0.0),
                             2 if member_width > 0 => (member_width as f64 - line_w).max(0.0),
