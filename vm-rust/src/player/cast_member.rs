@@ -3379,6 +3379,55 @@ impl CastMember {
                 .unwrap_or_default();
             let mut text_member = TextMember::new();
             text_member.text = text;
+            // NOTE: a previous attempt to read the authored font/size from
+            // XMED raw bytes (`scan_xmed_for_font_info`) was REMOVED because
+            // its u16-in-range heuristic picked up arbitrary nearby bytes —
+            // bubbletext member ended up with fontsize=44 from random data
+            // following the "Arial" name. Until we have a real Section 7
+            // parse, this fallback keeps TextMember::new()'s Arial/12
+            // defaults. Text members authored at smaller sizes (Verdana 9
+            // in spineworld_dcr's txt_password) render a few pixels taller
+            // than Director — visible but tolerable; better than wildly
+            // wrong values.
+            // Pull authored width/height (and other text-shaped settings) from
+            // chunk.specific_data when it parsed as TextInfo. Without this,
+            // text members that take this fallback path keep TextMember::new()'s
+            // 100×20 defaults and word_wrap clamps text to a 100px box even
+            // when the author set width=349 (e.g. spineworld_dcr's
+            // `txt_droplist`, which is empty at authoring and gets populated by
+            // Lingo at runtime — the dropdown list then wrapped "Antigua and
+            // Barbuda" mid-string because the wrap budget was 100 instead of
+            // the authored 349).
+            let text_info_to_apply: Option<crate::director::enums::TextInfo> = match &chunk.specific_data {
+                crate::director::chunks::cast_member::CastMemberSpecificData::Text(ti) => Some(ti.clone()),
+                _ if !chunk.specific_data_raw.is_empty()
+                    && crate::director::enums::TextInfo::looks_like_text_info(chunk.specific_data_raw.as_slice()) =>
+                {
+                    Some(crate::director::enums::TextInfo::from(chunk.specific_data_raw.as_slice()))
+                }
+                _ => None,
+            };
+            if let Some(text_info) = text_info_to_apply {
+                if text_info.width > 0 {
+                    text_member.width = text_info.width as u16;
+                }
+                if text_info.height > 0 {
+                    text_member.height = text_info.height as u16;
+                }
+                text_member.word_wrap = !text_info.dont_wrap;
+                text_member.box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+                // Propagate anti_alias from the TextInfo so the text-image
+                // setter's alpha-threshold branch (which only fires when
+                // anti_alias=false) doesn't promote anti-aliased halo pixels
+                // to fully opaque. TextMember::new() defaults anti_alias to
+                // false; without this propagation, modern #text members
+                // authored with AA on still get rendered with the alpha
+                // threshold, which makes Arial 12 look thick/double-struck
+                // (verified in spineworld_dcr's txt_droplist after the
+                // earlier "info=Some" change).
+                text_member.anti_alias = text_info.anti_alias;
+                text_member.info = Some(text_info);
+            }
             let xmed_script_id = chunk
                 .member_info
                 .as_ref()
@@ -3543,12 +3592,25 @@ impl CastMember {
                 .default_font_size
                 .or(first_span_size)
                 .unwrap_or(fallback_max);
-            (
-                first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string()),
-                chosen_size,
-            )
+            // Same precedence for font NAME — pull from the char-run
+            // → Section 7 lookup so the (font, size) pair stays consistent.
+            // `styled_spans[0]` can hold Arial 12 (style[0]) while the real
+            // authored style is later in the table (style[3] = Verdana 9 for
+            // spineworld_dcr txt_password). default_font_name covers that.
+            let chosen_name = styled_text
+                .default_font_name
+                .clone()
+                .or_else(|| first_style.font_face.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Arial".to_string());
+            (chosen_name, chosen_size)
         } else {
-            ("Arial".to_string(), 12)
+            // Empty char-run section (member with no styled text). Still try
+            // the default_font_name (sourced from par-run table) before
+            // falling back to Arial/12.
+            let name = styled_text.default_font_name.clone().unwrap_or_else(|| "Arial".to_string());
+            let size = styled_text.default_font_size.unwrap_or(12);
+            (name, size)
         };
         // Correct XMED font sizes using STXT point size when available
         if let Some(stxt_size) = stxt_font_size {
