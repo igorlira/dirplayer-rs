@@ -126,6 +126,31 @@ pub fn get_system_default_palette() -> BuiltInPalette {
     BuiltInPalette::SystemWin
 }
 
+/// Returns the palette index in `palette` whose RGB is closest (smallest
+/// squared Euclidean distance) to `(r,g,b)`. Used by Director's
+/// `color.paletteIndex` getter: per the 11.5 Scripting Dictionary p.832,
+/// reading `.paletteIndex` on an RGB color returns the nearest match in the
+/// current palette regardless of color type — e.g. `rgb(155,0,75).paletteIndex`
+/// resolves to 106 on the default palette.
+pub fn nearest_palette_index(r: u8, g: u8, b: u8, palette: &BuiltInPalette) -> u8 {
+    let mut best_index: u8 = 0;
+    let mut best_distance: i32 = i32::MAX;
+    for i in 0u16..256u16 {
+        if let Some((pr, pg, pb)) = lookup_builtin_palette(palette, i as u8, 8) {
+            let dr = pr as i32 - r as i32;
+            let dg = pg as i32 - g as i32;
+            let db = pb as i32 - b as i32;
+            let d = dr * dr + dg * dg + db * db;
+            if d < best_distance {
+                best_distance = d;
+                best_index = i as u8;
+                if d == 0 { break; }
+            }
+        }
+    }
+    best_index
+}
+
 #[derive(Clone)]
 pub struct Bitmap {
     pub width: u16,
