@@ -208,23 +208,24 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// / default not-set, treated as opaque).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 ///
-/// Director quirk: both extremes of the score byte (0 AND 255) are treated
-/// as "default opaque" at render time. A v850 sprite authored without an
-/// explicit blend has raw=255, which our Lingo getter would otherwise
-/// report as `the blend = 0` and our renderer would draw at 0% alpha —
-/// invisible. Director's runtime instead skips blending entirely when the
-/// score byte is 0 or 255 and only applies blend for intermediate values.
-/// We mirror that by mapping raw=255 to 100% so the sprite renders
-/// normally. Scripts that need a sprite hidden should use `the visibility
-/// of sprite` (or set blend to a small non-zero value, matching Director).
+/// Director D8+ stores blend INVERTED in the score byte: raw=0 means fully
+/// opaque (100%), raw=255 means fully transparent (0%), intermediate values
+/// linearly interpolate. raw=0 is also the "no override" sentinel used when
+/// the author hasn't touched blend in the Score, which matches the desired
+/// 100% default — handled by the same linear formula.
+///
+/// Previously we also clamped raw=255 → 100 on the theory that some v850
+/// sprites authored with no explicit blend stored raw=255. That heuristic
+/// masked legitimate `blend=0` authoring: spineworld_dcr's pDropList
+/// sprite 799 is a fullscreen click-catching modal background authored at
+/// `blend=0` (verified in Director Property Inspector) so it stays
+/// invisible. Forcing raw=255 → 100 turned that sprite into a fullscreen
+/// black overlay. The override is removed; if a v850 movie surfaces
+/// unintended raw=255 invisibility, the right fix is to identify the
+/// missing "blend is set" flag in the score chunk, not to clamp the value.
 pub(crate) fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
     if dir_version > 600 {
-        // D8+: inverted 0-255 scale, both 0 and 255 are "default opaque"
-        if raw == 0 || raw == 255 {
-            100
-        } else {
-            ((255.0 - raw as f32) * 100.0 / 255.0) as i32
-        }
+        ((255.0 - raw as f32) * 100.0 / 255.0).round() as i32
     } else {
         // D5-D7: direct percentage, 0 = fully opaque (not set)
         if raw == 0 { 100 } else { (raw as i32).min(100) }
@@ -4563,6 +4564,36 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     if sprite.editable {
         return false;
     }
+    // A sprite with `the blend of sprite = 0` is fully transparent on screen
+    // and should not eat clicks. Common idiom: a black/white overlay sprite
+    // that fades in/out during intros; once faded to blend=0 it stays in the
+    // score but is visually gone, so clicks must reach what's underneath.
+    // Only treat as transparent when there's no behavior actively trapping
+    // mouse events on it — script-attached overlays may set blend=0 as a
+    // hidden hit zone and need to keep their clicks.
+    if sprite.blend == 0 && !sprite_has_mouse_handler(player, sprite) {
+        return true;
+    }
+    // Translucent Shape / VectorShape overlays (blend < 50) with no mouse
+    // handler are also click-transparent — Director's hit test on these
+    // follows the visual: a semi-transparent highlight bar (e.g. spineworld
+    // pDropList's pSelSprite = sprite(802), GUI_dropsel at blend=20) sits
+    // ON TOP of an interactive sprite below and must let clicks pass through
+    // so the underlying sprite gets the mouseUp. Limited to shapes because
+    // bitmaps at low blend are usually still hit-test targets (e.g. ghosted
+    // buttons in a disabled state).
+    if sprite.blend < 50 && !sprite_has_mouse_handler(player, sprite) {
+        if let Some(member_ref) = sprite.member.as_ref() {
+            if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                if matches!(
+                    &member.member_type,
+                    CastMemberType::Shape(_) | CastMemberType::VectorShape(_)
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
     // Check if it's a non-editable text or field member
     let is_non_editable_text_or_field = if let Some(member_ref) = sprite.member.as_ref() {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -4586,40 +4617,79 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     if !is_non_editable_text_or_field {
         return false;
     }
-    // Check if any sprite behavior script has a mouse handler.
-    // If so, this sprite captures clicks (not transparent).
+    !sprite_has_mouse_handler(player, sprite)
+}
+
+fn sprite_has_mouse_handler(player: &DirPlayer, sprite: &Sprite) -> bool {
+    sprite_has_handler(player, sprite, &["mouseDown", "mouseUp", "mouseUpOutSide"])
+}
+
+/// Returns true when any behaviour on `sprite` (sprite-attached, Lingo-added,
+/// or cast-member-attached) defines a handler matching any of `names`. Used to
+/// decide whether a sprite that would otherwise be click-transparent (e.g.
+/// non-editable text/field, blend=0 overlay) should actually keep its clicks,
+/// and to decide whether clicking a non-editable sprite should still steal
+/// keyboard focus (because a `keyDown` behaviour needs it).
+///
+/// Three places a behaviour can live, all of which need checking:
+///   1. `sprite.script_instance_list` — score-authored behaviours.
+///   2. The Lingo-side cached `scriptInstanceList` (Datum::List held in
+///      `player.script_instance_list_cache`) — populated when a script
+///      does `sprite.scriptInstanceList.add(...)` at runtime, which does
+///      NOT mirror back into the sprite's internal Vec.
+///   3. The cast member's attached "BehaviorScript" (Director's member
+///      script export) — covers movies that attach the handler at the
+///      cast level rather than per-sprite.
+pub fn sprite_has_handler(player: &DirPlayer, sprite: &Sprite, names: &[&str]) -> bool {
+    let script_has_any = |script: &crate::player::script::Script| -> bool {
+        names.iter().any(|n| script.get_own_handler(n).is_some())
+    };
+
+    // (1) Score-authored sprite behaviours.
     for instance_ref in &sprite.script_instance_list {
         if let Some(instance) = player.allocator.get_script_instance_opt(instance_ref) {
             if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
-                if script.get_own_handler("mouseDown").is_some()
-                    || script.get_own_handler("mouseUp").is_some()
-                    || script.get_own_handler("mouseUpOutSide").is_some()
-                {
-                    return false;
+                if script_has_any(script) {
+                    return true;
                 }
             }
         }
     }
-    // Also consult the cast member's own attached script (Director's
-    // "BehaviorScript" export, distinct from sprite-attached behaviors).
-    // Field/Text-typed buttons in some movies (e.g. ClubMarian)
-    // attach the mouseUp handler at the cast level; without this check
-    // the sprite is reported as transparent and clicks pass through.
-    if let Some(member_ref) = sprite.member.as_ref() {
-        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
-            if let Some(script_ref) = member.get_member_script_ref() {
-                if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
-                    if script.get_own_handler("mouseDown").is_some()
-                        || script.get_own_handler("mouseUp").is_some()
-                        || script.get_own_handler("mouseUpOutSide").is_some()
-                    {
-                        return false;
+
+    // (2) Runtime-added behaviours via `sprite.scriptInstanceList.add(...)`.
+    if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite.number as i16)) {
+        if let crate::director::lingo::datum::Datum::List(_, items, _) = player.get_datum(cached_ref) {
+            for item_ref in items {
+                if let crate::director::lingo::datum::Datum::ScriptInstanceRef(id) =
+                    player.get_datum(item_ref)
+                {
+                    if let Some(instance) = player.allocator.get_script_instance_opt(id) {
+                        if let Some(script) =
+                            player.movie.cast_manager.get_script_by_ref(&instance.script)
+                        {
+                            if script_has_any(script) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    true
+
+    // (3) Cast member's attached script.
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+            if let Some(script_ref) = member.get_member_script_ref() {
+                if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+                    if script_has_any(script) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {
