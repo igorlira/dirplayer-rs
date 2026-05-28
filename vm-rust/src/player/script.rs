@@ -625,11 +625,24 @@ pub fn get_obj_prop(
         Datum::PropList(prop_list, ..) => {
             PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)
         }
-        Datum::List(_, list, _) => Ok(player.alloc_datum(ListDatumUtils::get_prop(
-            &list,
-            &prop_name,
-            &player.allocator,
-        )?)),
+        Datum::List(list_type, list, sorted) => {
+            // Director: every datum has `.string` returning its textual form.
+            // ListDatumUtils::get_prop can't format because it doesn't have
+            // player context; intercept here. Mirrors the same intercept in
+            // ListDatumHandlers::get_prop (which the bytecode `get_set` path
+            // uses) — this script.rs path is reached by chained-prop access
+            // patterns like `inList.string`.
+            if prop_name.eq_ignore_ascii_case("string") {
+                let datum_clone = Datum::List(list_type, list.clone(), sorted);
+                let s = crate::player::datum_formatting::format_concrete_datum(&datum_clone, player);
+                return Ok(player.alloc_datum(Datum::String(s)));
+            }
+            Ok(player.alloc_datum(ListDatumUtils::get_prop(
+                &list,
+                &prop_name,
+                &player.allocator,
+            )?))
+        }
         Datum::Stage => {
             let result = get_stage_prop(player, &prop_name)?;
             Ok(player.alloc_datum(result))
