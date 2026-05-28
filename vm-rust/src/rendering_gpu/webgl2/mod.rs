@@ -1605,9 +1605,28 @@ impl WebGL2Renderer {
                     // which squishes 2.5× into the 36-px quad.
                     let has_transform_for_height =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    // #fixed / #scroll / #limit box types are CLIPPED to the
+                    // sprite rect by Director — they never grow. Never pick
+                    // `content_estimate` (which adds a +2 wrap buffer ×
+                    // max_stride) over `base_height` for these, otherwise a
+                    // 14-px field box gets allocated ~33 rows for a single
+                    // Verdana-9 line, and the texture stretches/spills past
+                    // the sprite quad into adjacent UI (spineworld_dcr
+                    // registration form: txt_password's render covered the
+                    // "Again:" label one row down once content was present).
+                    // `content_estimate` stays in play only for the
+                    // `else`-of-else cases (explicit-break #adjust members,
+                    // non-transform #fixed members with multi-line text where
+                    // the authored height was too tight for what's now there).
+                    let is_fixed_like = matches!(
+                        text_member.box_type.as_str(),
+                        "fixed" | "#fixed" | "scroll" | "#scroll" | "limit" | "#limit"
+                    );
                     let height = if is_adjust && !has_explicit_breaks {
                         base_height.max(1) as u32
                     } else if has_transform_for_height {
+                        base_height.max(1) as u32
+                    } else if is_fixed_like {
                         base_height.max(1) as u32
                     } else {
                         (base_height.max(content_estimate)).max(1) as u32
