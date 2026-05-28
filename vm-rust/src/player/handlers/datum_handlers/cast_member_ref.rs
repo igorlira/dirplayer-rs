@@ -930,8 +930,19 @@ impl CastMemberRefHandlers {
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 member.reg_point = (x, y);
+                // Explicitly setting regPoint turns off centerRegPoint — the
+                // user is saying "no, use THIS point, not the auto-center".
+                // Without this, the renderer's center-reg-point branch in
+                // get_concrete_sprite_rect overrides the explicit value with
+                // bitmap-center, which broke spineworld_dcr's pDropList box:
+                // the script does `pMember.image = timg; pMember.regPoint =
+                // point(0, 0)`, but the image setter auto-centers AND leaves
+                // centerRegPoint enabled, so the dropdown rendered with its
+                // top-left shifted by (-bitmap_w/2, -bitmap_h/2) and the box
+                // ended up at top-left of the stage instead of (280, 216).
                 if let CastMemberType::Bitmap(ref mut bm) = member.member_type {
                     bm.reg_point = (x as i16, y as i16);
+                    bm.info.center_reg_point = false;
                 }
                 Ok(())
             });

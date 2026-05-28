@@ -405,12 +405,28 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                         .and_then(|x| x.member.as_ref())
                         .and_then(|x| player.movie.cast_manager.find_member_by_ref(&x));
                     if let Some(sprite_member) = sprite_member {
-                        let editable = match &sprite_member.member_type {
+                        // Four cases where a clicked sprite should become the
+                        // keyboardFocusSprite (so subsequent keyDown events route
+                        // through it):
+                        //   - `field.editable` / `text.info.editable` from the file
+                        //   - `the editable of sprite` set at runtime
+                        //   - The sprite has a behaviour with a `keyDown` handler
+                        //     (fake-input pattern: a non-editable text member with
+                        //     a sprite behaviour that traps keyDown and renders its
+                        //     own buffer into `myMember.text`, e.g. spineworld_dcr's
+                        //     `formscript` on the password fields).
+                        let member_editable = match &sprite_member.member_type {
                             CastMemberType::Field(f) => f.editable,
                             CastMemberType::Text(t) => t.info.as_ref().map_or(false, |i| i.editable),
                             _ => false,
                         };
-                        if editable {
+                        let sprite_editable = sprite
+                            .map(|s| s.editable)
+                            .unwrap_or(false);
+                        let has_keydown = sprite
+                            .map(|s| crate::player::score::sprite_has_handler(player, s, &["keyDown", "keyUp"]))
+                            .unwrap_or(false);
+                        if sprite_editable || member_editable || has_keydown {
                             player.keyboard_focus_sprite = sprite_number as i16;
                         }
                     }
