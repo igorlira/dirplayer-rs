@@ -198,6 +198,32 @@ impl FieldMemberHandlers {
                 }
                 Ok(DatumRef::Void)
             }
+            // Director 11.5 Scripting Dictionary p.443 / p.449.
+            "linePosToLocV" | "locVToLinePos" => {
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .unwrap();
+                let field = member.member_type.as_field().unwrap();
+                let step = super::text::line_step_px(field.fixed_line_space, field.font_size).max(1);
+                let arg = player.get_datum(&args[0]).int_value()?;
+                if handler_name == "linePosToLocV" {
+                    let line_num = arg.max(1);
+                    // Baseline anchor — see text.rs linePosToLocV comment.
+                    let baseline_offset = (step * 3) / 4;
+                    let y = field.top_spacing as i32 + (line_num - 1) * step + baseline_offset;
+                    Ok(player.alloc_datum(Datum::Int(y)))
+                } else {
+                    // Director uses bare \r as its line separator — see
+                    // count_director_lines() comment in text.rs for why
+                    // str::lines() is wrong here.
+                    let line_count = super::text::count_director_lines(&field.text) as i32;
+                    let line = ((arg - field.top_spacing as i32) / step) + 1;
+                    Ok(player.alloc_datum(Datum::Int(line.clamp(1, line_count))))
+                }
+            }
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for field member type"
             ))),
@@ -495,6 +521,16 @@ impl FieldMemberHandlers {
             // Runtime selection state
             "selStart" => Ok(Datum::Int(field.sel_start)),
             "selEnd" => Ok(Datum::Int(field.sel_end)),
+            // Director 11.5 Scripting Dictionary p.1164. Returns a two-element
+            // linear list `[start, end]` so scripts can test for an active
+            // selection via `selection[1] <> selection[2]`.
+            "selection" => {
+                let start_val = field.sel_start;
+                let end_val = field.sel_end;
+                let start = player.alloc_datum(Datum::Int(start_val));
+                let end = player.alloc_datum(Datum::Int(end_val));
+                Ok(Datum::List(DatumType::List, VecDeque::from(vec![start, end]), false))
+            }
             "selectedText" => {
                 let len = field.text.len() as i32;
                 let lo = field.sel_start.min(field.sel_end).clamp(0, len);
