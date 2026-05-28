@@ -62,6 +62,18 @@ impl ListDatumHandlers {
         datum_ref: &DatumRef,
         prop_name: &str,
     ) -> Result<DatumRef, ScriptError> {
+        // Director: every datum has a `string` property returning its
+        // textual representation. For lists this is the bracketed literal
+        // form `[item1, item2, item3]` (with strings quoted, symbols `#sym`,
+        // nested lists recursed). Used by Habbo / spineworld idioms like
+        // `appearanceToString` (MovieScript 2 global events line 299) that
+        // do `inList.string` then strip `[`, `]`, spaces to serialise an
+        // appearance list into a flat custom-delimited string.
+        if prop_name.eq_ignore_ascii_case("string") {
+            let datum_clone = player.get_datum(datum_ref).clone();
+            let s = format_concrete_datum(&datum_clone, player);
+            return Ok(player.alloc_datum(Datum::String(s)));
+        }
         let list_vec = player.get_datum(datum_ref).to_list()?;
         let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
         Ok(player.alloc_datum(result))
@@ -559,11 +571,23 @@ impl ListDatumHandlers {
                 return Ok(DatumRef::Void);
             }
 
-            let position = player.get_datum(&args[0]).int_value()? - 1;
-            let item_ref = &args[1];
+            // Director 11.5 spec (p.255) documents addAt(position, value) with
+            // both args required, but the shipped runtime silently accepts the
+            // one-arg form `list.addAt(value)` and treats it as append, for any
+            // value type (int / string / list / etc.) and even on []. Verified
+            // in Director's message window. Habbo's spineworld_dcr Docs script
+            // `getXMLItem` relies on this: `tList.addAt(tAdd)` in a repeat loop.
+            let (position, item_ref) = if args.len() == 1 {
+                let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
+                (list_vec.len(), args[0].clone())
+            } else {
+                let pos = player.get_datum(&args[0]).int_value()? - 1;
+                (pos.max(0) as usize, args[1].clone())
+            };
 
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-            list_vec.insert(position as usize, item_ref.clone());
+            let clamped = position.min(list_vec.len());
+            list_vec.insert(clamped, item_ref);
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)

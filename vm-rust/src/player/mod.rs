@@ -432,6 +432,7 @@ impl DirPlayer {
                 trace_script: false,
                 trace_log_file: String::new(),
                 debug_playback_enabled: false,
+                edit_shortcuts_enabled: true,
                 mouse_down: false,
                 right_mouse_down: false,
                 click_loc: (0,0),
