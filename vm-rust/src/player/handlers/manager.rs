@@ -711,20 +711,27 @@ impl BuiltInHandlerManager {
             Ok((member_ref, file_or_url, trim_white_space))
         })?;
 
-        // Validate the target is a bitmap member up front so we don't
-        // fetch + decode for nothing.
-        let existing_bitmap_ref = reserve_player_ref(|player| {
+        // Determine the target member kind up front so we don't fetch for a
+        // member type we can't import into. importFileInto replaces a member's
+        // content with the named file (Director 11.5 Scripting Dictionary,
+        // `importFileInto()`); we support bitmap and sound members.
+        enum ImportTarget {
+            Bitmap(crate::player::bitmap::manager::BitmapRef),
+            Sound,
+        }
+        let import_target = reserve_player_ref(|player| {
             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
             match member.map(|m| &m.member_type) {
-                Some(CastMemberType::Bitmap(b)) => Some(b.image_ref),
+                Some(CastMemberType::Bitmap(b)) => Some(ImportTarget::Bitmap(b.image_ref)),
+                Some(CastMemberType::Sound(_)) => Some(ImportTarget::Sound),
                 _ => None,
             }
         });
-        let existing_bitmap_ref = match existing_bitmap_ref {
-            Some(r) => r,
+        let import_target = match import_target {
+            Some(t) => t,
             None => {
                 warn!(
-                    "importFileInto: member ({}, {}) is not a bitmap (v1 scope)",
+                    "importFileInto: member ({}, {}) is not a bitmap or sound (v1 scope)",
                     member_ref.cast_lib, member_ref.cast_member
                 );
                 return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-2))));
@@ -753,6 +760,34 @@ impl BuiltInHandlerManager {
             Some(Err(code)) => {
                 warn!("importFileInto: net fetch failed ({}) for '{}'", code, file_or_url);
                 return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-200))));
+            }
+        };
+
+        // Sound members: store the downloaded media verbatim. The playback
+        // path (sound_channel.rs) sniffs MP3 frames and hands compressed data
+        // to the browser's decodeAudioData, so the raw file bytes are exactly
+        // what it expects — no eager decode here. Sample metadata stays at
+        // defaults until the browser decodes the buffer at play time.
+        let existing_bitmap_ref = match import_target {
+            ImportTarget::Bitmap(r) => r,
+            ImportTarget::Sound => {
+                use crate::director::chunks::sound::SoundChunk;
+                let byte_len = bytes.len();
+                return reserve_player_mut(|player| {
+                    if let Some(member) =
+                        player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                    {
+                        if let CastMemberType::Sound(s) = &mut member.member_type {
+                            s.sound = SoundChunk::new(bytes);
+                        }
+                    }
+                    debug!(
+                        "importFileInto: imported '{}' ({} bytes) into sound member ({}, {})",
+                        file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
+                    );
+                    JsApi::dispatch_cast_member_changed(member_ref.clone());
+                    Ok(player.alloc_datum(Datum::Int(0)))
+                });
             }
         };
 

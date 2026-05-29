@@ -39,7 +39,8 @@ pub struct CastMember {
 pub enum Media {
     Field(FieldMember),
     Bitmap { bitmap: Bitmap, reg_point: (i16, i16) },
-    Palette(PaletteMember)
+    Palette(PaletteMember),
+    Sound(SoundMember),
 }
 
 #[derive(Clone, Default)]
