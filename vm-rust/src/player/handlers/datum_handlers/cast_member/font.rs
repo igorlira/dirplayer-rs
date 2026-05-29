@@ -331,6 +331,17 @@ pub struct NativeCaretOverlay {
     pub caret_blink_on: bool,
 }
 
+/// Per-character style for the PFR outline-composition renderer
+/// (`render_pfr_outline_text_to_bitmap`). One entry per character of the
+/// CRLF-normalised text.
+#[derive(Clone, Copy, Debug)]
+pub struct OutlineCharStyle {
+    pub color: (u8, u8, u8),
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
 pub struct FontMemberHandlers {}
 
 impl FontMemberHandlers {
@@ -1327,6 +1338,394 @@ impl FontMemberHandlers {
         }
 
         Ok(())
+    }
+
+    /// Sub-pixel outline composition for PFR **outline** fonts.
+    ///
+    /// Unlike the atlas-copy path (`text.rs::flush_line` → `bitmap_font_copy_char`),
+    /// which pre-rasterizes each glyph into an integer-pixel cell and advances
+    /// the pen by an integer pixel count, this draws each glyph's actual outline
+    /// onto a 2× Canvas2D at a fractional cursor position and advances by the
+    /// fractional `set_width`. At small sizes (Coke Studios' Verdana 10px) the
+    /// sub-pixel side bearings survive as anti-aliased coverage instead of
+    /// quantizing to zero, so adjacent round letters no longer merge
+    /// ("London" → "Lurdur"). Mirrors the FontinatorFINAL SkiaSharp reference
+    /// (`px = cmd.X·scale + cursorX`, baseline = round(ascender·scale)).
+    ///
+    /// Draws each char in its own foreColor on a transparent canvas, then
+    /// alpha-weighted-downscales into `bitmap` — so per-span colour (CS
+    /// audition rows = blue, special = red), bold (double-draw), italic (shear)
+    /// and underline are all honoured. `per_char` is indexed by character
+    /// position in the CRLF-normalised text (same convention as flush_line).
+    #[cfg(target_arch = "wasm32")]
+    pub fn render_pfr_outline_text_to_bitmap(
+        bitmap: &mut Bitmap,
+        parsed: &crate::director::chunks::pfr1::types::Pfr1ParsedFont,
+        font_size: u16,
+        text: &str,
+        per_char: &[OutlineCharStyle],
+        default_style: OutlineCharStyle,
+        start_x: i32,
+        start_y: i32,
+        render_width: i32,
+        render_height: i32,
+        alignment: TextAlignment,
+        max_width: i32,
+        word_wrap: bool,
+        fixed_line_space: u16,
+        top_spacing: i16,
+        bottom_spacing: i16,
+        char_spacing: i32,
+        tab_stops: &[crate::player::cast_member::TabStop],
+    ) -> Result<(), ScriptError> {
+        use crate::director::chunks::pfr1::types::PfrCmdType;
+        use crate::io::encoding::glyph_byte_for;
+
+        let phys = &parsed.physical_font;
+        let outline_res = phys.outline_resolution as f64;
+        if outline_res <= 0.0 || font_size == 0 {
+            return Err(ScriptError::new("PFR outline: bad metrics".to_string()));
+        }
+        let scale = font_size as f64 / outline_res;
+        let m = parsed
+            .logical_fonts
+            .get(0)
+            .map(|l| l.font_matrix)
+            .unwrap_or([256, 0, 0, 256]);
+        let matrix_sx = m[0] as f64 / 256.0;
+        let matrix_sy = m[3] as f64 / 256.0;
+        let scale_x = scale * matrix_sx.abs();
+        let scale_y_mag = scale * matrix_sy.abs();
+        // Same Y orientation rule as the rasterizer: when the font matrix
+        // already flips Y (m[3] < 0) the parsed coords are Y-down, so we use a
+        // positive scale; otherwise flip.
+        let glyph_scale_y = if matrix_sy < 0.0 { scale_y_mag } else { -scale_y_mag };
+        let baseline = (phys.metrics.ascender as f64 * scale).round();
+
+        // Per-char advance from the glyph's set_width (fractional → sub-pixel).
+        let advance_of = |code: u8| -> f64 {
+            let sw = parsed
+                .glyphs
+                .get(&code)
+                .map(|g| g.set_width as f64)
+                .unwrap_or(outline_res * 0.5);
+            sw * scale + char_spacing as f64
+        };
+        let style_at = |idx: usize| -> OutlineCharStyle {
+            per_char.get(idx).copied().unwrap_or(default_style)
+        };
+
+        // --- Build visual lines, tracking each char's original index into
+        // `per_char` so styling stays aligned even after word-wrap drops a
+        // break space. A line is a Vec of (char, original_index). Tabs are
+        // kept inline (their glyph_byte is 9, zero ink).
+        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut lines: Vec<Vec<(char, usize)>> = Vec::new();
+        {
+            let chars: Vec<char> = normalised.chars().collect();
+            let wrap_w = if word_wrap && max_width > 0 { max_width as f64 } else { f64::MAX };
+            let mut cur: Vec<(char, usize)> = Vec::new();
+            let mut cur_w: f64 = 0.0;
+            let mut last_space: Option<usize> = None; // index within `cur`
+            let mut width_to: f64 = 0.0; // width up to last_space (exclusive of space)
+            for (i, &c) in chars.iter().enumerate() {
+                if c == '\n' {
+                    lines.push(std::mem::take(&mut cur));
+                    cur_w = 0.0; last_space = None; width_to = 0.0;
+                    continue;
+                }
+                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c)) };
+                let has_tab = cur.iter().any(|&(ch, _)| ch == '\t');
+                if word_wrap && !has_tab && cur_w + adv > wrap_w && !cur.is_empty() {
+                    if let Some(sp) = last_space {
+                        // Break at the last space: move the tail to a new line.
+                        let tail: Vec<(char, usize)> = cur.split_off(sp + 1);
+                        cur.pop(); // drop the break space itself
+                        lines.push(std::mem::take(&mut cur));
+                        cur = tail;
+                        cur_w = cur.iter()
+                            .map(|&(ch, _)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch)) })
+                            .sum();
+                        let _ = width_to;
+                        last_space = None;
+                    } else {
+                        lines.push(std::mem::take(&mut cur));
+                        cur_w = 0.0; last_space = None;
+                    }
+                }
+                if c == ' ' { last_space = Some(cur.len()); width_to = cur_w; }
+                cur.push((c, i));
+                cur_w += adv;
+            }
+            lines.push(cur);
+        }
+
+        // --- Canvas at 2× for crisp anti-aliasing (matches the native path). ---
+        let document = web_sys::window()
+            .ok_or_else(|| ScriptError::new("No window".to_string()))?
+            .document()
+            .ok_or_else(|| ScriptError::new("No document".to_string()))?;
+        let canvas: web_sys::HtmlCanvasElement = document
+            .create_element("canvas")
+            .map_err(|_| ScriptError::new("create canvas".to_string()))?
+            .dyn_into()
+            .map_err(|_| ScriptError::new("cast canvas".to_string()))?;
+        // 4× supersample: at 10px, Verdana's ~1px stems need fine coverage,
+        // otherwise they downscale to faint half-coverage grey. Combined with
+        // integer-snapped glyph origins this keeps thin stems crisp.
+        let sf = 4u32;
+        let cw2 = (render_width.max(1) as u32) * sf;
+        let ch2 = (render_height.max(1) as u32) * sf;
+        canvas.set_width(cw2);
+        canvas.set_height(ch2);
+        let ctx: web_sys::CanvasRenderingContext2d = canvas
+            .get_context("2d")
+            .map_err(|_| ScriptError::new("get 2d".to_string()))?
+            .ok_or_else(|| ScriptError::new("no 2d".to_string()))?
+            .dyn_into()
+            .map_err(|_| ScriptError::new("cast ctx".to_string()))?;
+        let _ = ctx.scale(sf as f64, sf as f64);
+        // Transparent background; draw glyphs in their real colours.
+        ctx.clear_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
+
+        const SLANT: f64 = 0.21; // ~12° oblique for emulated italic
+        let bold_off = (font_size as f64 * 0.04).max(0.5);
+
+        // Draw one glyph's outline at (cursor_x, baseline_y) with the current
+        // fill style. Returns nothing; caller sets fill colour first.
+        let draw_glyph = |code: u8, cursor_x: f64, baseline_y: f64, italic: bool| {
+            let glyph = match parsed.glyphs.get(&code) {
+                Some(g) if !g.contours.is_empty() => g,
+                _ => return,
+            };
+            ctx.begin_path();
+            for contour in &glyph.contours {
+                for cmd in &contour.commands {
+                    let gy = cmd.y as f64 * glyph_scale_y;
+                    let shear = if italic { -gy * SLANT } else { 0.0 };
+                    let x = cursor_x + cmd.x as f64 * scale_x + shear;
+                    let y = baseline_y + gy;
+                    match cmd.cmd_type {
+                        PfrCmdType::MoveTo => ctx.move_to(x, y),
+                        PfrCmdType::LineTo => ctx.line_to(x, y),
+                        PfrCmdType::CurveTo => {
+                            let gy1 = cmd.y1 as f64 * glyph_scale_y;
+                            let gy2 = cmd.y2 as f64 * glyph_scale_y;
+                            let s1 = if italic { -gy1 * SLANT } else { 0.0 };
+                            let s2 = if italic { -gy2 * SLANT } else { 0.0 };
+                            ctx.bezier_curve_to(
+                                cursor_x + cmd.x1 as f64 * scale_x + s1, baseline_y + gy1,
+                                cursor_x + cmd.x2 as f64 * scale_x + s2, baseline_y + gy2,
+                                x, y,
+                            );
+                        }
+                        PfrCmdType::Close => ctx.close_path(),
+                    }
+                }
+                ctx.close_path();
+            }
+            ctx.fill();
+        };
+
+        let line_natural = (((phys.metrics.ascender - phys.metrics.descender) as f64) * scale)
+            .round()
+            .max(1.0);
+        let effective_line_h = if fixed_line_space > 0 {
+            fixed_line_space as f64
+        } else {
+            line_natural
+        };
+        let line_step = effective_line_h + bottom_spacing as f64 + top_spacing as f64;
+
+        let seg_width = |seg: &[(char, usize)]| -> f64 {
+            seg.iter().map(|&(c, _)| advance_of(glyph_byte_for(c))).sum()
+        };
+        let has_right_tab = tab_stops.iter().any(|t| t.tab_type == "right");
+
+        let mut y_top = top_spacing as f64;
+        for line in &lines {
+            if y_top >= render_height as f64 { break; }
+            let baseline_y = y_top + baseline;
+
+            // Split into tab segments.
+            let mut segments: Vec<Vec<(char, usize)>> = vec![Vec::new()];
+            for &(c, idx) in line {
+                if c == '\t' {
+                    segments.push(Vec::new());
+                } else {
+                    segments.last_mut().unwrap().push((c, idx));
+                }
+            }
+
+            // Logical width for alignment (when no right-tab anchors the edge).
+            let logical_w: f64 = if segments.len() == 1 {
+                seg_width(&segments[0])
+            } else {
+                let mut acc = seg_width(&segments[0]);
+                for i in 1..segments.len() {
+                    let sw = seg_width(&segments[i]);
+                    if let Some(stop) = tab_stops.get(i - 1) {
+                        let pos = stop.position as f64;
+                        acc = match stop.tab_type.as_str() {
+                            "right" => pos,
+                            "center" => (pos + sw / 2.0).max(acc),
+                            _ => (pos + sw).max(acc + sw),
+                        };
+                    } else {
+                        acc += sw;
+                    }
+                }
+                acc
+            };
+            let line_offset = if has_right_tab {
+                0.0
+            } else {
+                match alignment {
+                    TextAlignment::Center => ((max_width as f64 - logical_w) / 2.0).max(0.0),
+                    TextAlignment::Right => (max_width as f64 - logical_w).max(0.0),
+                    _ => 0.0,
+                }
+            };
+
+            // Resolve each segment's start x.
+            let mut seg_starts: Vec<f64> = Vec::with_capacity(segments.len());
+            seg_starts.push(line_offset);
+            let mut cursor = line_offset + seg_width(&segments[0]);
+            for i in 1..segments.len() {
+                let sw = seg_width(&segments[i]);
+                let sx = match tab_stops.get(i - 1) {
+                    Some(stop) => {
+                        let pos = stop.position as f64;
+                        match stop.tab_type.as_str() {
+                            "right" => (pos - sw).max(cursor),
+                            "center" => (pos - sw / 2.0).max(cursor),
+                            _ => pos.max(cursor),
+                        }
+                    }
+                    None => cursor,
+                };
+                seg_starts.push(sx);
+                cursor = sx + sw;
+            }
+
+            // Draw each segment.
+            for (si, seg) in segments.iter().enumerate() {
+                let mut x = seg_starts[si];
+                for &(c, idx) in seg {
+                    let code = glyph_byte_for(c);
+                    let st = style_at(idx);
+                    let adv = advance_of(code);
+                    // Snap the glyph's draw origin to the pixel grid (like the
+                    // FontinatorFINAL/Director reference's per-glyph 16.16
+                    // rounding). The cursor `x` keeps accumulating the *float*
+                    // advance so inter-letter spacing stays exact, but drawing
+                    // at an integer origin keeps each glyph's vertical stems
+                    // from straddling two columns and smearing — the thin "!"
+                    // and "I" stems in particular.
+                    let draw_x = x.round();
+                    if c != ' ' {
+                        let css = format!("rgb({},{},{})", st.color.0, st.color.1, st.color.2);
+                        ctx.set_fill_style_str(&css);
+                        draw_glyph(code, draw_x, baseline_y, st.italic);
+                        if st.bold {
+                            draw_glyph(code, draw_x + bold_off, baseline_y, st.italic);
+                        }
+                    }
+                    if st.underline {
+                        let uy = baseline_y + 1.0;
+                        ctx.set_fill_style_str(&format!("rgb({},{},{})", st.color.0, st.color.1, st.color.2));
+                        ctx.fill_rect(draw_x, uy, adv.max(1.0), 1.0);
+                    }
+                    x += adv;
+                }
+            }
+
+            y_top += line_step;
+        }
+
+        // --- Alpha-weighted 2×→1× downscale into the destination bitmap. ---
+        let image_data = ctx
+            .get_image_data(0.0, 0.0, cw2 as f64, ch2 as f64)
+            .map_err(|_| ScriptError::new("getImageData".to_string()))?;
+        let px = image_data.data();
+        let out_w = render_width.max(1) as usize;
+        let out_h = render_height.max(1) as usize;
+        let cw2u = cw2 as usize;
+        for cy in 0..out_h {
+            let dest_y = start_y + cy as i32;
+            if dest_y < 0 || dest_y >= bitmap.height as i32 { continue; }
+            for cx in 0..out_w {
+                let dest_x = start_x + cx as i32;
+                if dest_x < 0 || dest_x >= bitmap.width as i32 { continue; }
+                let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
+                for sy in 0..sf as usize {
+                    for sx in 0..sf as usize {
+                        let i = ((cy * sf as usize + sy) * cw2u + (cx * sf as usize + sx)) * 4;
+                        if i + 3 < px.len() {
+                            let a = px[i + 3] as u32;
+                            sr += px[i] as u32 * a;
+                            sg += px[i + 1] as u32 * a;
+                            sb += px[i + 2] as u32 * a;
+                            sa += a;
+                        }
+                    }
+                }
+                let avg_a = (sa / (sf as u32 * sf as u32)) as u8;
+                if avg_a == 0 { continue; }
+                // Steepen the coverage ramp for Shockwave-crisp edges (same
+                // idea as the atlas path's `steepen_alpha_ramp`): clip the
+                // faint outer halo to transparent so edges stay tight, and
+                // lift mid coverage so Verdana's thin stems read as solid —
+                // instead of the soft grey a plain box-average/gamma produces.
+                const LO: f32 = 45.0;
+                const HI: f32 = 135.0;
+                let out_a = if (avg_a as f32) <= LO {
+                    0
+                } else if (avg_a as f32) >= HI {
+                    255
+                } else {
+                    (((avg_a as f32 - LO) / (HI - LO)) * 255.0).round() as u8
+                };
+                if out_a == 0 { continue; }
+                let r = (sr / sa) as u8;
+                let g = (sg / sa) as u8;
+                let b = (sb / sa) as u8;
+                let di = (dest_y as usize * bitmap.width as usize + dest_x as usize) * 4;
+                if di + 3 < bitmap.data.len() {
+                    bitmap.data[di] = r;
+                    bitmap.data[di + 1] = g;
+                    bitmap.data[di + 2] = b;
+                    bitmap.data[di + 3] = out_a;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-wasm stub: outline composition needs Canvas2D. Returning Err lets
+    /// callers fall back to the atlas-copy path in native test builds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_pfr_outline_text_to_bitmap(
+        _bitmap: &mut Bitmap,
+        _parsed: &crate::director::chunks::pfr1::types::Pfr1ParsedFont,
+        _font_size: u16,
+        _text: &str,
+        _per_char: &[OutlineCharStyle],
+        _default_style: OutlineCharStyle,
+        _start_x: i32,
+        _start_y: i32,
+        _render_width: i32,
+        _render_height: i32,
+        _alignment: TextAlignment,
+        _max_width: i32,
+        _word_wrap: bool,
+        _fixed_line_space: u16,
+        _top_spacing: i16,
+        _bottom_spacing: i16,
+        _char_spacing: i32,
+        _tab_stops: &[crate::player::cast_member::TabStop],
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new("PFR outline rendering requires Canvas2D".to_string()))
     }
 
     /// Word wrap helper for native text rendering
