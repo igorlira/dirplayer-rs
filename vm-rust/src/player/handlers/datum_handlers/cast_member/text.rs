@@ -14,7 +14,7 @@ use crate::{
         cast_lib::CastMemberRef,
         font::{get_text_index_at_pos, get_glyph_preference, GlyphPreference, measure_text, measure_text_wrapped, DrawTextParams},
         handlers::datum_handlers::{
-            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, StyledSpan, TextAlignment},
+            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         },
         DatumRef, DirPlayer, ScriptError,
@@ -957,6 +957,49 @@ impl TextMemberHandlers {
                 };
                 let is_pfr_font = font.char_widths.is_some();
 
+                // For PFR OUTLINE fonts (no bitmap strikes), grab the parsed
+                // outlines so the renderer can compose text from sub-pixel glyph
+                // outlines instead of the atlas-copy path (which quantizes side
+                // bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                // Cloned once (consistent with `text_data` above); .image is not
+                // a per-frame call for cached members.
+                let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> = if is_pfr_font {
+                    let name = preferred_font_name.as_deref().unwrap_or("");
+                    if name.is_empty() {
+                        None
+                    } else {
+                        use crate::player::cast_member::CastMemberType;
+                        use crate::player::font::FontManager;
+                        let lc = name.to_ascii_lowercase();
+                        let canon = FontManager::canonical_font_name(name);
+                        let mut found = None;
+                        'find_outline: for cast in &player.movie.cast_manager.casts {
+                            for m in cast.members.values() {
+                                if let CastMemberType::Font(fd) = &m.member_type {
+                                    let matches = fd.font_info.name.to_lowercase() == lc
+                                        || m.name.to_lowercase() == lc
+                                        || (!canon.is_empty()
+                                            && (FontManager::canonical_font_name(&fd.font_info.name) == canon
+                                                || FontManager::canonical_font_name(&m.name) == canon));
+                                    if matches {
+                                        if let Some(p) = &fd.pfr_parsed {
+                                            // Outline-only fonts: bitmap-strike fonts
+                                            // stay on the atlas path (pixel-perfect).
+                                            if !p.glyphs.is_empty() && p.bitmap_glyphs.is_empty() {
+                                                found = Some(p.clone());
+                                                break 'find_outline;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    }
+                } else {
+                    None
+                };
+
                 // Compute the authored box width (used as max_width for word wrap).
                 // Doing this BEFORE measuring so PFR measurement can wrap correctly.
                 let explicit_box_width = if text_data.width > 0 {
@@ -1169,6 +1212,12 @@ impl TextMemberHandlers {
                     }
                 };
 
+                // Set when the PFR outline compositor handled this member, so
+                // the binary anti-alias threshold below is skipped — outline
+                // output is already crisp anti-aliased text matching Shockwave,
+                // and binarizing it would shred the thin strokes.
+                let mut rendered_via_outline = false;
+
                 if use_native && !is_pfr_font {
                     // Native Canvas2D rendering for standard fonts
                     let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
@@ -1252,6 +1301,68 @@ impl TextMemberHandlers {
                         warn!("[text.image] Native render error: {:?}", e);
                     }
                 } else {
+                    // Sub-pixel outline composition for OUTLINE PFR fonts —
+                    // preserves side bearings at small sizes (Verdana 10px in
+                    // the Coke Studios Navigator). Falls through to the
+                    // atlas-copy path below when there's no outline data or the
+                    // Canvas2D render errors.
+                    if let Some(ref parsed) = pfr_outline {
+                        let default_bold = text_data.font_style.iter().any(|s| s == "bold");
+                        let default_italic = text_data.font_style.iter().any(|s| s == "italic");
+                        let default_underline = text_data.font_style.iter().any(|s| s == "underline");
+                        let (dr, dg, db) = {
+                            use crate::player::bitmap::bitmap::resolve_color_ref;
+                            let palettes = player.movie.cast_manager.palettes();
+                            resolve_color_ref(&palettes, &member.color, &bitmap.palette_ref, bitmap.original_bit_depth)
+                        };
+                        let default_style = OutlineCharStyle {
+                            color: (dr, dg, db),
+                            bold: default_bold,
+                            italic: default_italic,
+                            underline: default_underline,
+                        };
+                        // Per-char styles aligned to CRLF-normalised text (same
+                        // convention the renderer uses to index `per_char`).
+                        let mut per_char: Vec<OutlineCharStyle> = Vec::new();
+                        if text_data.html_styled_spans.len() >= 2 {
+                            let mut prev_was_cr = false;
+                            for span in &text_data.html_styled_spans {
+                                let col = span.style.color
+                                    .map(|c| (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+                                    .unwrap_or((dr, dg, db));
+                                let entry = OutlineCharStyle {
+                                    color: col,
+                                    bold: span.style.bold,
+                                    italic: span.style.italic,
+                                    underline: span.style.underline,
+                                };
+                                for c in span.text.chars() {
+                                    if prev_was_cr && c == '\n' { prev_was_cr = false; continue; }
+                                    prev_was_cr = c == '\r';
+                                    per_char.push(entry);
+                                }
+                            }
+                        }
+                        let cs_px: i32 = text_data.html_styled_spans.first()
+                            .map(|s| s.style.char_spacing)
+                            .unwrap_or(0);
+                        let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
+                        match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
+                            &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
+                            // start_y = 0: the renderer applies `top_spacing`
+                            // internally (y_top starts at top_spacing), matching
+                            // the atlas-copy path. Passing it here too would
+                            // double the top inset.
+                            0, 0, box_width as i32, box_height as i32,
+                            alignment, box_width as i32, text_data.word_wrap,
+                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                            cs_px, &text_data.tab_stops,
+                        ) {
+                            Ok(()) => rendered_via_outline = true,
+                            Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),
+                        }
+                    }
+                    if !rendered_via_outline {
                     // Bitmap glyph rendering using PFR rasterizer font
                     let font_bitmap = player
                         .bitmap_manager
@@ -1601,6 +1712,7 @@ impl TextMemberHandlers {
                         y += line_step;
                         char_offset += line.chars().count() + 1; // +1 for the line break
                     }
+                    } // end !rendered_via_outline (atlas-copy fallback)
 
                 } // end bitmap glyph else branch
 
@@ -1613,7 +1725,7 @@ impl TextMemberHandlers {
                 // AA explicitly (see cataloglist script line 85) and expects
                 // sharp text — without the threshold the catalog list looks
                 // washed out compared to Shockwave.
-                if !text_data.anti_alias && bitmap.bit_depth == 32 {
+                if !text_data.anti_alias && bitmap.bit_depth == 32 && !rendered_via_outline {
                     let threshold = text_data.info.as_ref()
                         .map(|i| i.anti_alias_threshold as u8)
                         .unwrap_or(128)
