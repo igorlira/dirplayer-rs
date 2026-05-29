@@ -1031,15 +1031,24 @@ fn encode_bitmap_32bit(bitmap: &Bitmap, scan_width: u16) -> Result<Vec<u8>, Stri
 ///   0x00..0x7F: literal run of (control + 1) bytes follows
 ///   0x80:       no-op (not emitted by compressor)
 ///   0x81..0xFF: repeat run, next byte repeated (257 - control) times
+///
+/// Runs and literals are capped at 127 (not the PackBits theoretical max of
+/// 128). Real Director / Shockwave never emits a 128-length op — its longest
+/// repeat control is 0x82 (127×) and longest literal is 0x7E (127 bytes). The
+/// old Director Multiuser xtra's RLE decoder sizes its run buffer for 127, so
+/// a 128-length run (control 0x81) overruns it and crashes the connection when
+/// the receiving client deserializes the media (observed: real Shockwave
+/// disconnects while *viewing* a dirplayer photo). Matching the 127 cap keeps
+/// dirplayer's media byte-compatible with what Director itself produces.
 pub fn compress_bitmap(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
     let len = data.len();
     let mut i = 0;
 
     while i < len {
-        // Look ahead for a run of identical bytes
+        // Look ahead for a run of identical bytes (capped at 127)
         let mut run_len = 1;
-        while i + run_len < len && data[i + run_len] == data[i] && run_len < 128 {
+        while i + run_len < len && data[i + run_len] == data[i] && run_len < 127 {
             run_len += 1;
         }
 
@@ -1049,11 +1058,11 @@ pub fn compress_bitmap(data: &[u8]) -> Vec<u8> {
             result.push(data[i]);
             i += run_len;
         } else {
-            // Collect literal bytes until we hit a run of 3+
+            // Collect literal bytes until we hit a run of 3+ (capped at 127)
             let start = i;
             let mut literal_len = 0;
 
-            while i < len && literal_len < 128 {
+            while i < len && literal_len < 127 {
                 // Check if we're about to start a run of 3+ identical bytes
                 if i + 2 < len && data[i] == data[i + 1] && data[i] == data[i + 2] {
                     break;

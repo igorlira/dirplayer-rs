@@ -372,6 +372,7 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
+uniform vec4 u_fg_color;
 uniform vec4 u_bg_color;
 
 out vec4 fragColor;
@@ -382,14 +383,16 @@ void main() {
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
 
-    // Director ink 41 (Darken): multiply source by bgColor
-    // result_color = src.rgb * bgColor.rgb
-    // Then alpha-blend with destination using standard blending
-    vec3 darkened = src.rgb * u_bg_color.rgb;
+    // Director ink 41 (Darken): a foreColor/bgColor brightness duotone, NOT a
+    // multiply. Map the source's luminance through the foreColor..bgColor
+    // range — dark areas take foreColor, light areas take bgColor. Habbo's
+    // camera renders the grayscale photo this way (color=dark, bgColor=light)
+    // to get its sepia look. Then alpha-blend the result normally.
+    float lum = dot(src.rgb, vec3(0.299, 0.587, 0.114));
+    vec3 duotone = mix(u_fg_color.rgb, u_bg_color.rgb, lum);
 
-    // Apply blend factor and source alpha
     float alpha = src.a * u_blend;
-    fragColor = vec4(darkened, alpha);
+    fragColor = vec4(duotone, alpha);
 }
 "#;
 

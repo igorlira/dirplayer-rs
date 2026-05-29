@@ -3143,6 +3143,7 @@ impl WebGL2Renderer {
         let u_rotation = program.u_rotation.clone();
         let u_rotation_center = program.u_rotation_center.clone();
         let u_blend = program.u_blend.clone();
+        let u_fg_color = program.u_fg_color.clone();
         let u_bg_color = program.u_bg_color.clone();
         let u_color_tolerance = program.u_color_tolerance.clone();
 
@@ -3300,6 +3301,20 @@ impl WebGL2Renderer {
                     0.01
                 };
                 gl.uniform1f(Some(loc), tolerance);
+            }
+        }
+
+        // Darken (ink 41) is a foreColor/bgColor duotone — feed the shader the
+        // sprite's foreColor as well as the bgColor set above.
+        if effective_ink == InkMode::Darken {
+            if let Some(ref loc) = u_fg_color {
+                gl.uniform4f(
+                    Some(loc),
+                    fg_color_rgb.0 as f32 / 255.0,
+                    fg_color_rgb.1 as f32 / 255.0,
+                    fg_color_rgb.2 as f32 / 255.0,
+                    1.0,
+                );
             }
         }
 

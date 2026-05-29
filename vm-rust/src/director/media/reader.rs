@@ -9,9 +9,19 @@ pub trait MediaReader {
 
 impl MediaReader for BinaryReader {
     fn read_media(&mut self) -> Result<Media, std::io::Error> {
-        let magic = self.read_u32()?; // Bitmap: e8 92 14 68
+        let magic = self.read_u32()?;
         match magic {
-            0xE8921468 => {
+            // Known bitmap-media magics:
+            //   0x18438963 — indexed PixMap; what real Shockwave emits for
+            //                <=8-bit media (v7 camera photos). Ground truth.
+            //   0xE8921468 — direct-color; the form dirplayer historically
+            //                wrote (and still writes for >8-bit media).
+            //   0x88811468 — an interim value dirplayer briefly wrote for
+            //                indexed media; accepted so already-stored photos
+            //                still load.
+            // The metadata parse below masks the rowBytes PixMap flag and
+            // ignores the format byte, so the body is identical for all three.
+            0xE8921468 | 0x88811468 | 0x18438963 => {
                 let metadata = self.read_bitmap_media_metadata()?;
                 let chunk_id = self.read_u32()?;
                 let endian = if chunk_id == FOURCC("BITD") {
@@ -24,7 +34,18 @@ impl MediaReader for BinaryReader {
                 self.set_endian(endian);
                 let chunk_size = self.read_u32()? as usize;
                 let chunk_data = self.read_bytes(chunk_size)?.to_vec();
-                let decompressed = decompress_bitmap(&chunk_data, &metadata, 0, 0).unwrap();
+                // decompress_bitmap previously .unwrap()ed here — a malformed
+                // or unexpected chunk would panic and poison MUS message
+                // processing (manifesting as VOID content + disconnect).
+                // Surface it as an Err instead so the caller falls back to Void.
+                let decompressed = decompress_bitmap(&chunk_data, &metadata, 0, 0)
+                    .map_err(|e| {
+                        log::warn!(
+                            "read_media: decompress_bitmap failed (magic=0x{:08X}, {}x{}, depth={}): {:?}",
+                            magic, metadata.width, metadata.height, metadata.bit_depth, e
+                        );
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "decompress_bitmap failed")
+                    })?;
                 Ok(Media::Bitmap { bitmap: decompressed, reg_point: (metadata.reg_y, metadata.reg_x) })
             }
             _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown media magic number: {}", magic))),

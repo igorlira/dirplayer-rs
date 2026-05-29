@@ -46,8 +46,27 @@ impl MediaWriter for BinaryWriter<'_> {
                 let raw_data = encode_bitmap_data(bitmap, target_bit_depth, pitch)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-                // Compress with PackBits RLE
-                let compressed = compress_bitmap(&raw_data);
+                // Compress with PackBits RLE, ONE ROW AT A TIME. Director's
+                // BITD/DTIB RLE is per-row: every row of `pitch` bytes is
+                // compressed independently and must decode back to exactly
+                // `pitch` bytes before the next row begins. Compressing the
+                // whole image as a single stream lets a run or literal span a
+                // row boundary (e.g. the row's pad byte + the next row's first
+                // pixel as one literal). dirplayer's own stream decoder
+                // tolerates that, but the real Director Multiuser xtra decodes
+                // per row, so a boundary-crossing op makes a row decode to the
+                // wrong length, desyncs the bitmap, and drops the connection
+                // when a real Shockwave client *views* the photo. Matching the
+                // per-row scheme keeps each row aligned to `pitch`.
+                let pitch_bytes = pitch as usize;
+                let mut compressed = Vec::new();
+                if pitch_bytes > 0 {
+                    for row in raw_data.chunks(pitch_bytes) {
+                        compressed.extend_from_slice(&compress_bitmap(row));
+                    }
+                } else {
+                    compressed = compress_bitmap(&raw_data);
+                }
 
                 // Use compressed only if it's actually smaller
                 let chunk_data = if compressed.len() < raw_data.len() {
@@ -56,8 +75,25 @@ impl MediaWriter for BinaryWriter<'_> {
                     raw_data
                 };
 
-                // Write magic
-                let mut written = self.write_u32(0xE8921468u32).map_err(map_err)?;
+                // The MUS media header encodes the imaging model. Director
+                // serializes an indexed (<=8-bit) PixMap with magic
+                // 0x18438963, and a direct-color (>=16-bit) image with
+                // 0xE8921468. Habbo v7's camera photos are 8-bit #grayscale,
+                // so they MUST use the paletted magic — otherwise the real
+                // Multiuser xtra can't instantiate the value, the message
+                // content comes through VOID, and the client disconnects.
+                // The magic value (and the rest of the header) is verified
+                // byte-for-byte against the bytes a real Shockwave v7 client
+                // sends to the woodpecker server (server log: head=[18 43 89
+                // 63 02 00 .. 80 A2 .. C0 08 .. DTIB]). The >8-bit path keeps
+                // the pre-existing magic (unverified, left unchanged so
+                // truecolor media doesn't regress).
+                let magic = if target_bit_depth <= 8 {
+                    0x18438963u32
+                } else {
+                    0xE8921468u32
+                };
+                let mut written = self.write_u32(magic).map_err(map_err)?;
 
                 // Write metadata
                 written += self.write_bitmap_media_metadata(&info)?;
@@ -91,11 +127,20 @@ impl MediaWriter for BinaryWriter<'_> {
     }
 
     fn write_bitmap_media_metadata(&mut self, info: &BitmapInfo) -> Result<usize, std::io::Error> {
+        // Indexed bitmaps (2..=8-bit) are QuickDraw PixMaps: rowBytes carries
+        // the 0x8000 high-bit flag and the format byte (_unknown_6) is 0xC0.
+        // Direct-color / 1-bit images use the plain pitch and 0xA0. The 8-bit
+        // case is verified against the real Shockwave v7 photo; the others are
+        // left at the previous values to avoid regressing untested paths.
+        let is_indexed_pixmap = info.bit_depth >= 2 && info.bit_depth <= 8;
+        let row_bytes_field = if is_indexed_pixmap { info.pitch | 0x8000 } else { info.pitch };
+        let format_byte: u8 = if is_indexed_pixmap { 0xC0 } else { 0xA0 };
+
         let mut written = self.write_u16(0x0200u16).map_err(map_err)?;       // _unknown_0: Constant 02 00
         written += self.write_bytes(&[0u8; 14]).map_err(map_err)?;            // _unknown_1: All zeros
         written += self.write_u16(0x0100u16).map_err(map_err)?;               // _unknown_2: Constant 01 00
         written += self.write_bytes(&[0u8; 6]).map_err(map_err)?;             // _unknown_3: All zeros
-        written += self.write_u16(info.pitch).map_err(map_err)?;              // row_bytes (pitch)
+        written += self.write_u16(row_bytes_field).map_err(map_err)?;        // row_bytes (pitch) [+0x8000 PixMap flag]
         written += self.write_i16(0i16).map_err(map_err)?;                    // rect_top
         written += self.write_i16(0i16).map_err(map_err)?;                    // rect_left
         written += self.write_i16(info.height as i16).map_err(map_err)?;      // rect_bottom
@@ -104,7 +149,7 @@ impl MediaWriter for BinaryWriter<'_> {
         written += self.write_bytes(&[0u8; 7]).map_err(map_err)?;             // _unknown_5: All zeros
         written += self.write_i16(info.reg_y).map_err(map_err)?;              // reg_y
         written += self.write_i16(info.reg_x).map_err(map_err)?;              // reg_x
-        written += self.write_i8(0xa0u8 as i8).map_err(map_err)?;            // _unknown_6: Constant 0xa0
+        written += self.write_i8(format_byte as i8).map_err(map_err)?;       // _unknown_6: 0xC0 indexed PixMap / 0xA0 otherwise
         written += self.write_u8(info.bit_depth).map_err(map_err)?;           // depth
         written += self.write_i16(-1i16).map_err(map_err)?;                   // clut_cast_lib: -1 for builtin palettes
         written += self.write_i16(info.palette_id + 1).map_err(map_err)?;     // palette stored as BuiltInPalette enum value + 1
