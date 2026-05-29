@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::{
     director::{
-        cast::CastDef, enums::{ScriptType, BitmapInfo},
+        cast::CastDef, chunks::sound::SoundChunk, enums::{ScriptType, BitmapInfo, SoundInfo},
         file::{read_director_file_bytes, DirectorFile},
         lingo::{datum::Datum, script::ScriptContext},
     },
@@ -21,7 +21,8 @@ use super::{
         manager::BitmapManager,
     },
     cast_member::{
-        BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, TextMember,
+        BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, SoundMember,
+        TextMember,
     },
     datum_ref::DatumRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -417,6 +418,17 @@ impl CastLib {
             "palette" => Ok(CastMember::new(
                 number,
                 CastMemberType::Palette(PaletteMember::new()),
+            )),
+            // `new(#sound, castLib)` creates an empty sound member; its media is
+            // populated later, typically via `importFileInto` (Director 11.5
+            // Scripting Dictionary, `new()` / `importFileInto()`). Habbo's
+            // Download Manager relies on this for streamed trax samples.
+            "sound" => Ok(CastMember::new(
+                number,
+                CastMemberType::Sound(SoundMember {
+                    info: SoundInfo::default(),
+                    sound: SoundChunk::default(),
+                }),
             )),
             "script" => Ok(CastMember::new(
                 number,
