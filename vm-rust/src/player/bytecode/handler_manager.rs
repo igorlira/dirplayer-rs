@@ -296,7 +296,6 @@ impl StaticBytecodeHandlerManager {
     }
 }
 
-#[async_recursion(?Send)]
 #[inline(always)]
 pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,

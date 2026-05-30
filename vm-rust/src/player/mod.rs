@@ -66,6 +66,7 @@ use std::{
 use allocator::{
     DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait,
 };
+use async_recursion::async_recursion;
 use async_std::{
     channel::{self, Sender},
     future::{self, timeout},
@@ -2730,6 +2731,7 @@ pub async fn player_call_script_handler(
     player_call_script_handler_raw_args(receiver, handler_ref, arg_list, false).await
 }
 
+#[async_recursion(?Send)]
 pub async fn player_call_script_handler_raw_args(
     receiver: Option<ScriptInstanceRef>,
     handler_ref: ScriptHandlerRef,
