@@ -10,6 +10,18 @@ use super::log;
 /// (self-intersecting contours, sub-pixel alignment) more accurately than
 /// our custom scanline fill.
 /// Returns an alpha mask (one byte per pixel) or None if Canvas2D is unavailable.
+///
+/// `snap_to_pixels`: when true, all path coordinates are rounded to the nearest
+/// integer before being passed to Canvas2D. Use this for pixel-perfect bitmap
+/// fonts (coords_scaled = true) where coordinates are already in pixel space.
+/// Without snapping, non-integer scale factors (e.g. font_matrix[3]/256 ≠ 1.0)
+/// place path boundaries at sub-pixel Y positions. Safari's CoreGraphics
+/// anti-aliasing distributes coverage differently from Chrome's Skia at these
+/// boundaries, causing thin counters (holes in 'e', 'r', 'c', etc.) to receive
+/// ≥128 coverage on Safari and be incorrectly thresholded as ink.
+/// Snapping to integers removes all sub-pixel boundaries so every pixel is
+/// either fully inside (255) or fully outside (0) the path — deterministic
+/// across all browsers regardless of their anti-aliasing implementation.
 #[cfg(target_arch = "wasm32")]
 fn rasterize_glyph_canvas2d(
     ctx: &web_sys::CanvasRenderingContext2d,
@@ -20,6 +32,7 @@ fn rasterize_glyph_canvas2d(
     scale_y: f32,
     offset_x: f32,
     offset_y: f32,
+    snap_to_pixels: bool,
 ) -> Option<Vec<u8>> {
     ctx.clear_rect(0.0, 0.0, cell_width as f64, cell_height as f64);
 
@@ -29,20 +42,22 @@ fn rasterize_glyph_canvas2d(
     let ox = offset_x as f64;
     let oy = offset_y as f64;
 
+    let snap = |v: f64| if snap_to_pixels { v.round() } else { v };
+
     // Build path from all contours (Canvas2D uses non-zero winding by default)
     ctx.begin_path();
     for contour in &glyph.contours {
         for cmd in &contour.commands {
-            let x = cmd.x as f64 * sx + ox;
-            let y = cmd.y as f64 * sy + oy;
+            let x = snap(cmd.x as f64 * sx + ox);
+            let y = snap(cmd.y as f64 * sy + oy);
             match cmd.cmd_type {
                 PfrCmdType::MoveTo => ctx.move_to(x, y),
                 PfrCmdType::LineTo => ctx.line_to(x, y),
                 PfrCmdType::CurveTo => {
-                    let x1 = cmd.x1 as f64 * sx + ox;
-                    let y1 = cmd.y1 as f64 * sy + oy;
-                    let x2 = cmd.x2 as f64 * sx + ox;
-                    let y2 = cmd.y2 as f64 * sy + oy;
+                    let x1 = snap(cmd.x1 as f64 * sx + ox);
+                    let y1 = snap(cmd.y1 as f64 * sy + oy);
+                    let x2 = snap(cmd.x2 as f64 * sx + ox);
+                    let y2 = snap(cmd.y2 as f64 * sy + oy);
                     ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
                 }
                 PfrCmdType::Close => ctx.close_path(),
@@ -790,7 +805,14 @@ pub fn rasterize_pfr1_font(
         // For non-pixel fonts, keep the anti-aliased Canvas2D output as-is
         // for higher quality rendering with oversampled fallback.
         let alpha_mask = if coords_scaled {
-            // Canvas2D with even-odd fill → binary threshold
+            // Canvas2D with snap-to-pixels + binary threshold.
+            // Snapping to integer coordinates ensures all path boundaries land
+            // on pixel edges, so every pixel is either fully inside (255) or
+            // fully outside (0). Without snapping, non-integer font matrix
+            // scale factors place boundaries at sub-pixel Y positions; Safari's
+            // CoreGraphics then distributes ~50% coverage across adjacent pixels,
+            // which crosses the 128 threshold and fills counters that should be
+            // transparent (holes in 'e', 'r', 'c', etc.).
             let canvas_result = {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -799,11 +821,11 @@ pub fn rasterize_pfr1_font(
                             ctx, glyph, cell_width, cell_height,
                             glyph_scale_x, glyph_scale_y,
                             glyph_offset_x, glyph_offset_y,
+                            true, // snap_to_pixels
                         )?;
-                        // Threshold to binary: Canvas2D anti-aliases at edges,
-                        // but for integer-coordinate pixel fonts the coverage
-                        // at boundaries is deterministic. Threshold at 128
-                        // matches Skia's non-anti-aliased behavior.
+                        // Threshold to binary: with integer-snapped coordinates,
+                        // coverage is 0 or 255 on all browsers, so the threshold
+                        // value no longer matters — keep 128 for safety.
                         for a in alpha.iter_mut() {
                             *a = if *a >= 128 { 255 } else { 0 };
                         }
@@ -835,10 +857,18 @@ pub fn rasterize_pfr1_font(
                             ctx, glyph, cell_width, cell_height,
                             glyph_scale_x, glyph_scale_y,
                             glyph_offset_x, glyph_offset_y,
+                            true, // snap_to_pixels: same as coords_scaled path.
+                                  // Without snapping, Safari CoreGraphics distributes
+                                  // sub-pixel coverage into counters (holes in 'e', 'r',
+                                  // 'c', etc.), producing alpha 50–100 there. The old
+                                  // steepen_alpha_ramp(lo=48) let those values through,
+                                  // filling holes on Safari while Chrome was fine.
                         )?;
-                        // Steepen alpha ramp for crisper edges at small sizes.
-                        // lo=48 removes faint fringe, hi=208 saturates near-solid.
-                        steepen_alpha_ramp(&mut alpha, 48, 208);
+                        // Binary threshold — identical to the coords_scaled path.
+                        // With snapped coordinates every pixel is fully inside or outside.
+                        for a in alpha.iter_mut() {
+                            *a = if *a >= 128 { 255 } else { 0 };
+                        }
                         Some(alpha)
                     })
                 }
