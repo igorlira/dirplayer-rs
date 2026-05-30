@@ -844,45 +844,107 @@ pub async fn player_load_system_font(path: &str) {
 
     match result {
         Ok(result) => {
-            let result = if let Some(blob) = result.dyn_ref::<web_sys::Blob>() {
-                web_sys::Response::new_with_opt_blob(Some(blob)).unwrap()
-            } else {
-                result.dyn_into::<web_sys::Response>().unwrap()
-            };
-            let blob = JsFuture::from(result.blob().unwrap()).await.unwrap();
-            let blob = blob.dyn_into::<web_sys::Blob>().unwrap();
-            let image_data = window.create_image_bitmap_with_blob(&blob).unwrap();
-            let image_data = JsFuture::from(image_data).await.unwrap();
-            let image_bitmap = image_data.dyn_into::<web_sys::ImageBitmap>().unwrap();
+            // Helper: log a warning and bail. A missing / invalid system-font
+            // asset must NOT panic — this runs inside DirPlayer::reset() at
+            // startup, so an unwrap here takes down the whole WASM module.
+            macro_rules! bail {
+                ($($arg:tt)*) => {{
+                    warn!($($arg)*);
+                    return;
+                }};
+            }
 
-            let canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
+            let response = if let Some(blob) = result.dyn_ref::<web_sys::Blob>() {
+                match web_sys::Response::new_with_opt_blob(Some(blob)) {
+                    Ok(r) => r,
+                    Err(e) => bail!("System font: failed to wrap blob in Response: {:?}", e),
+                }
+            } else {
+                match result.dyn_into::<web_sys::Response>() {
+                    Ok(r) => r,
+                    Err(e) => bail!("System font: fetch result is neither Blob nor Response: {:?}", e),
+                }
+            };
+
+            // fetch() resolves even for 404/500 responses — the body is then an
+            // HTML error page, not an image, and createImageBitmap below would
+            // reject (the original `JsValue(Response)` panic). Detect it early.
+            if !response.ok() {
+                bail!(
+                    "System font not loaded: HTTP {} for {} — check the font asset path",
+                    response.status(),
+                    path
+                );
+            }
+
+            let blob_promise = match response.blob() {
+                Ok(p) => p,
+                Err(e) => bail!("System font: response.blob() failed: {:?}", e),
+            };
+            let blob = match JsFuture::from(blob_promise).await {
+                Ok(b) => b,
+                Err(e) => bail!("System font: reading blob failed: {:?}", e),
+            };
+            let blob = match blob.dyn_into::<web_sys::Blob>() {
+                Ok(b) => b,
+                Err(e) => bail!("System font: response body is not a Blob: {:?}", e),
+            };
+            let image_promise = match window.create_image_bitmap_with_blob(&blob) {
+                Ok(p) => p,
+                Err(e) => bail!("System font: createImageBitmap() rejected: {:?}", e),
+            };
+            let image_data = match JsFuture::from(image_promise).await {
+                Ok(img) => img,
+                Err(e) => bail!(
+                    "System font: could not decode {} as an image (asset missing or not an image?): {:?}",
+                    path, e
+                ),
+            };
+            let image_bitmap = match image_data.dyn_into::<web_sys::ImageBitmap>() {
+                Ok(b) => b,
+                Err(e) => bail!("System font: decoded value is not an ImageBitmap: {:?}", e),
+            };
+
+            let document = match web_sys::window().and_then(|w| w.document()) {
+                Some(d) => d,
+                None => bail!("System font: no document available"),
+            };
+            let canvas = match document
                 .create_element("canvas")
-                .unwrap();
-            let canvas = canvas.dyn_into::<web_sys::HtmlCanvasElement>().unwrap();
+                .ok()
+                .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            {
+                Some(c) => c,
+                None => bail!("System font: failed to create canvas element"),
+            };
             canvas.set_width(image_bitmap.width());
             canvas.set_height(image_bitmap.height());
-            let context = canvas
+            let context = match canvas
                 .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
+                .ok()
+                .flatten()
+                .and_then(|ctx| ctx.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
+            {
+                Some(ctx) => ctx,
+                None => bail!("System font: failed to get 2d canvas context"),
+            };
 
-            context
-                .draw_image_with_image_bitmap(&image_bitmap, 0.0, 0.0)
-                .unwrap();
+            if let Err(e) = context.draw_image_with_image_bitmap(&image_bitmap, 0.0, 0.0) {
+                bail!("System font: drawImage failed: {:?}", e);
+            }
 
-            let image_data = context
-                .get_image_data(
-                    0.0,
-                    0.0,
-                    image_bitmap.width() as f64,
-                    image_bitmap.height() as f64,
-                )
-                .unwrap();
+            // getImageData throws a SecurityError on a tainted (cross-origin,
+            // non-CORS) canvas — guard it so a CORS misconfig degrades to the
+            // built-in font path instead of crashing.
+            let image_data = match context.get_image_data(
+                0.0,
+                0.0,
+                image_bitmap.width() as f64,
+                image_bitmap.height() as f64,
+            ) {
+                Ok(d) => d,
+                Err(e) => bail!("System font: getImageData failed (tainted canvas / CORS?): {:?}", e),
+            };
 
             let bitmap = Bitmap {
                 width: image_data.width() as u16,
