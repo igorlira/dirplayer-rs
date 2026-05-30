@@ -2,7 +2,6 @@ use log::{debug, error};
 use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
     scope::ScopeRef,
-    ci_string::{CiStr, CiString},
     script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name, script_get_prop, script_set_prop},
     DatumRef, DirPlayer, ScriptError,
 };
@@ -70,12 +69,12 @@ pub fn player_get_context_var(
             let receiver = scope.receiver.clone();
             let script_ref = scope.script_ref.clone();
             if let Some(instance_ref) = receiver {
-                script_get_prop(player, &instance_ref, &prop_name)
+                script_get_prop(player, &instance_ref, prop_name)
             } else {
                 // Static property on script
                 let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
                 let properties = script_rc.properties.borrow();
-                Ok(properties.get(CiStr::new(&prop_name)).unwrap_or(&DatumRef::Void).clone())
+                Ok(properties.get(&prop_name).unwrap_or(&DatumRef::Void).clone())
             }
         }
         0x4 => {
@@ -90,9 +89,9 @@ pub fn player_get_context_var(
             // local
             let local_name_ids = &handler.local_name_ids;
             let name_id = if let Datum::Symbol(name) = id {
-                // Find the name_id matching the symbol name
+                // Find the name_id matching the symbol name (Symbol is normalized to lowercase)
                 let found = local_name_ids.iter().find(|&&nid| {
-                    get_name(player, ctx, nid).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false)
+                    get_name(player, ctx, nid).map(|n| n == *name).unwrap_or(false)
                 });
                 match found {
                     Some(&nid) => nid,
@@ -170,13 +169,13 @@ pub fn player_set_context_var(
             };
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
             if let Some(instance_ref) = scope.receiver.clone() {
-                script_set_prop(player, &instance_ref, &prop_name, value_ref, true)
+                script_set_prop(player, &instance_ref, prop_name, value_ref, true)
             } else {
                 let scope = player.scopes.get(ctx.scope_ref).unwrap();
                 let script_ref = scope.script_ref.clone();
                 let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
                 let mut properties = script_rc.properties.borrow_mut();
-                properties.insert(CiString::from(prop_name), value_ref.clone());
+                properties.insert(prop_name, value_ref.clone());
                 Ok(())
             }
         }
@@ -193,7 +192,7 @@ pub fn player_set_context_var(
             let local_name_ids = &handler.local_name_ids;
             let name_id = if let Datum::Symbol(name) = id_datum {
                 let found = local_name_ids.iter().find(|&&nid| {
-                    get_name(player, ctx, nid).map(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(false)
+                    get_name(player, ctx, nid).map(|n| n == *name).unwrap_or(false)
                 });
                 match found {
                     Some(&nid) => nid,

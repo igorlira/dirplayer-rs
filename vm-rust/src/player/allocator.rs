@@ -3,7 +3,7 @@ use std::cell::UnsafeCell;
 use fxhash::FxHashMap;
 use log::{debug, warn};
 
-use crate::director::lingo::datum::Datum;
+use crate::{director::lingo::datum::Datum, player::symbols::symbol::Symbol};
 
 use super::{
     datum_ref::{DatumId, DatumRef},
@@ -255,7 +255,7 @@ pub struct DatumAllocator {
     pub int_dealloc_count: usize,
     pub snapshot_max_id: usize,
     int_pool_ids: [DatumId; INT_POOL_SIZE],
-    symbol_pool: FxHashMap<String, DatumId>,
+    symbol_pool: FxHashMap<Symbol, DatumId>,
 }
 
 const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;

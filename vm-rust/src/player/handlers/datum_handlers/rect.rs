@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{reserve_player_mut, symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct RectDatumHandlers {}
@@ -35,10 +35,10 @@ impl RectDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
+        match handler_name.as_str() {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "intersect" => Self::intersect(datum, args),
@@ -131,7 +131,7 @@ impl RectDatumHandlers {
         })
     }
 
-    pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: &str) -> Result<Datum, ScriptError> {
+    pub fn get_prop(player: &DirPlayer, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
         let (vals, flags) = player.get_datum(datum).to_rect_inline()?;
 
         let left = vals[0];
@@ -139,8 +139,8 @@ impl RectDatumHandlers {
         let right = vals[2];
         let bottom = vals[3];
 
-        match prop {
-            "ilk" => Ok(Datum::Symbol("rect".to_string())),
+        match prop.as_str() {
+            "ilk" => Ok(Datum::Symbol(Symbol::from_str("rect"))),
             "width" => Ok(Datum::from_f64(right - left)),
             "height" => Ok(Datum::from_f64(bottom - top)),
             "left" => Ok(Datum::inline_component_to_datum(left, Datum::inline_is_float(flags, 0))),
@@ -151,8 +151,8 @@ impl RectDatumHandlers {
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &str, value_ref: &DatumRef) -> Result<(), ScriptError> {
-        let idx = match prop {
+    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        let idx = match prop.as_str() {
             "left" => 0usize,
             "top" => 1usize,
             "right" => 2usize,

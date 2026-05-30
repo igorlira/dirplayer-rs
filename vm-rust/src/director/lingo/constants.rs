@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::OnceLock};
 
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+
 use super::opcode::OpCode;
 
 pub fn opcode_names() -> &'static HashMap<OpCode, Box<str>> {
@@ -88,134 +90,134 @@ pub fn opcode_names() -> &'static HashMap<OpCode, Box<str>> {
     })
 }
 
-fn anim_prop_names() -> &'static HashMap<u16, Box<str>> {
-    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+fn anim_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+    static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
-            (0x01, "beepOn".into()),
-            (0x02, "buttonStyle".into()),
-            (0x03, "centerStage".into()),
-            (0x04, "checkBoxAccess".into()),
-            (0x05, "checkboxType".into()),
-            (0x06, "colorDepth".into()),
-            (0x07, "colorQD".into()),
-            (0x08, "exitLock".into()),
-            (0x09, "fixStageSize".into()),
-            (0x0a, "fullColorPermit".into()),
-            (0x0b, "imageDirect".into()),
-            (0x0c, "doubleClick".into()),
-            (0x0d, "key".into()),
-            (0x0e, "lastClick".into()),
-            (0x0f, "lastEvent".into()),
-            (0x10, "keyCode".into()),
-            (0x11, "lastKey".into()),
-            (0x12, "lastRoll".into()),
-            (0x13, "timeoutLapsed".into()),
-            (0x14, "multiSound".into()),
-            (0x15, "pauseState".into()),
-            (0x16, "quickTimePresent".into()),
-            (0x17, "selEnd".into()),
-            (0x18, "selStart".into()),
-            (0x19, "soundEnabled".into()),
-            (0x1a, "soundLevel".into()),
-            (0x1b, "stageColor".into()),
+            (0x01, BuiltInSymbol::BeepOn),
+            (0x02, BuiltInSymbol::ButtonStyle),
+            (0x03, BuiltInSymbol::CenterStage),
+            (0x04, BuiltInSymbol::CheckBoxAccess),
+            (0x05, BuiltInSymbol::CheckBoxType),
+            (0x06, BuiltInSymbol::ColorDepth),
+            (0x07, BuiltInSymbol::ColorQD),
+            (0x08, BuiltInSymbol::ExitLock),
+            (0x09, BuiltInSymbol::FixStageSize),
+            (0x0a, BuiltInSymbol::FullColorPermit),
+            (0x0b, BuiltInSymbol::ImageDirect),
+            (0x0c, BuiltInSymbol::DoubleClick),
+            (0x0d, BuiltInSymbol::Key),
+            (0x0e, BuiltInSymbol::LastClick),
+            (0x0f, BuiltInSymbol::LastEvent),
+            (0x10, BuiltInSymbol::KeyCode),
+            (0x11, BuiltInSymbol::LastKey),
+            (0x12, BuiltInSymbol::LastRoll),
+            (0x13, BuiltInSymbol::TimeoutLapsed),
+            (0x14, BuiltInSymbol::MultiSound),
+            (0x15, BuiltInSymbol::PauseState),
+            (0x16, BuiltInSymbol::QuickTimePresent),
+            (0x17, BuiltInSymbol::SelEnd),
+            (0x18, BuiltInSymbol::SelStart),
+            (0x19, BuiltInSymbol::SoundEnabled),
+            (0x1a, BuiltInSymbol::SoundLevel),
+            (0x1b, BuiltInSymbol::StageColor),
             // 0x1c indicates dontPassEvent was called.
             // It doesn't seem to have a Lingo-accessible name.
-            (0x1d, "switchColorDepth".into()),
-            (0x1e, "timeoutKeyDown".into()),
-            (0x1f, "timeoutLength".into()),
-            (0x20, "timeoutMouse".into()),
-            (0x21, "timeoutPlay".into()),
-            (0x22, "timer".into()),
-            (0x23, "preLoadRAM".into()),
-            (0x24, "videoForWindowsPresent".into()),
-            (0x25, "netPresent".into()),
-            (0x26, "safePlayer".into()),
-            (0x27, "soundKeepDevice".into()),
-            (0x28, "soundMixMedia".into()),
+            (0x1d, BuiltInSymbol::SwitchColorDepth),
+            (0x1e, BuiltInSymbol::TimeoutKeyDown),
+            (0x1f, BuiltInSymbol::TimeoutLength),
+            (0x20, BuiltInSymbol::TimeoutMouse),
+            (0x21, BuiltInSymbol::TimeoutPlay),
+            (0x22, BuiltInSymbol::Timer),
+            (0x23, BuiltInSymbol::PreLoadRAM),
+            (0x24, BuiltInSymbol::VideoForWindowsPresent),
+            (0x25, BuiltInSymbol::NetPresent),
+            (0x26, BuiltInSymbol::SafePlayer),
+            (0x27, BuiltInSymbol::SoundKeepDevice),
+            (0x28, BuiltInSymbol::SoundMixMedia),
         ])
     })
 }
 
-fn anim2_prop_names() -> &'static HashMap<u16, Box<str>> {
-    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+fn anim2_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+    static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
-            (0x01, "perFrameHook".into()),
-            (0x02, "number of castMembers".into()),
-            (0x03, "number of menus".into()),
-            (0x04, "number of castLibs".into()),
-            (0x05, "number of xtras".into()),
+            (0x01, BuiltInSymbol::PerFrameHook),
+            (0x02, BuiltInSymbol::NumberOfCastMembers),
+            (0x03, BuiltInSymbol::NumberOfMenus),
+            (0x04, BuiltInSymbol::NumberOfCastLibs),
+            (0x05, BuiltInSymbol::NumberOfXtras),
         ])
     })
 }
 
-pub fn movie_prop_names() -> &'static HashMap<u16, Box<str>> {
-    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+pub fn movie_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+    static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
-            (0x00, "floatPrecision".into()),
-            (0x01, "mouseDownScript".into()),
-            (0x02, "mouseUpScript".into()),
-            (0x03, "keyDownScript".into()),
-            (0x04, "keyUpScript".into()),
-            (0x05, "timeoutScript".into()),
-            (0x06, "short time".into()),
-            (0x07, "abbr time".into()),
-            (0x08, "long time".into()),
-            (0x09, "short date".into()),
-            (0x0a, "abbr date".into()),
-            (0x0b, "long date".into()),
+            (0x00, BuiltInSymbol::FloatPrecision),
+            (0x01, BuiltInSymbol::MouseDownScript),
+            (0x02, BuiltInSymbol::MouseUpScript),
+            (0x03, BuiltInSymbol::KeyDownScript),
+            (0x04, BuiltInSymbol::KeyUpScript),
+            (0x05, BuiltInSymbol::TimeoutScript),
+            (0x06, BuiltInSymbol::ShortTime),
+            (0x07, BuiltInSymbol::AbbrTime),
+            (0x08, BuiltInSymbol::LongTime),
+            (0x09, BuiltInSymbol::ShortDate),
+            (0x0a, BuiltInSymbol::AbbrDate),
+            (0x0b, BuiltInSymbol::LongDate),
         ])
     })
 }
 
-pub fn sprite_prop_names() -> &'static HashMap<u16, Box<str>> {
-    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+pub fn sprite_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+    static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
-            (0x01, "type".into()),
-            (0x02, "backColor".into()),
-            (0x03, "bottom".into()),
-            (0x04, "castNum".into()),
-            (0x05, "constraint".into()),
-            (0x06, "cursor".into()),
-            (0x07, "foreColor".into()),
-            (0x08, "height".into()),
-            (0x09, "immediate".into()),
-            (0x0a, "ink".into()),
-            (0x0b, "left".into()),
-            (0x0c, "lineSize".into()),
-            (0x0d, "locH".into()),
-            (0x0e, "locV".into()),
-            (0x0f, "movieRate".into()),
-            (0x10, "movieTime".into()),
-            (0x11, "pattern".into()),
-            (0x12, "puppet".into()),
-            (0x13, "right".into()),
-            (0x14, "startTime".into()),
-            (0x15, "stopTime".into()),
-            (0x16, "stretch".into()),
-            (0x17, "top".into()),
-            (0x18, "trails".into()),
-            (0x19, "visible".into()),
-            (0x1a, "volume".into()),
-            (0x1b, "width".into()),
-            (0x1c, "blend".into()),
-            (0x1d, "scriptNum".into()),
-            (0x1e, "moveableSprite".into()),
-            (0x1f, "editableText".into()),
-            (0x20, "scoreColor".into()),
-            (0x21, "loc".into()),
-            (0x22, "rect".into()),
-            (0x23, "memberNum".into()),
-            (0x24, "castLibNum".into()),
-            (0x25, "member".into()),
-            (0x26, "scriptInstanceList".into()),
-            (0x27, "currentTime".into()),
-            (0x28, "mostRecentCuePoint".into()),
-            (0x29, "tweened".into()),
-            (0x2a, "name".into()),
+            (0x01, BuiltInSymbol::Type),
+            (0x02, BuiltInSymbol::BackColor),
+            (0x03, BuiltInSymbol::Bottom),
+            (0x04, BuiltInSymbol::CastNum),
+            (0x05, BuiltInSymbol::Constraint),
+            (0x06, BuiltInSymbol::Cursor),
+            (0x07, BuiltInSymbol::ForeColor),
+            (0x08, BuiltInSymbol::Height),
+            (0x09, BuiltInSymbol::Immediate),
+            (0x0a, BuiltInSymbol::Ink),
+            (0x0b, BuiltInSymbol::Left),
+            (0x0c, BuiltInSymbol::LineSize),
+            (0x0d, BuiltInSymbol::LocH),
+            (0x0e, BuiltInSymbol::LocV),
+            (0x0f, BuiltInSymbol::MovieRate),
+            (0x10, BuiltInSymbol::MovieTime),
+            (0x11, BuiltInSymbol::Pattern),
+            (0x12, BuiltInSymbol::Puppet),
+            (0x13, BuiltInSymbol::Right),
+            (0x14, BuiltInSymbol::StartTime),
+            (0x15, BuiltInSymbol::StopTime),
+            (0x16, BuiltInSymbol::Stretch),
+            (0x17, BuiltInSymbol::Top),
+            (0x18, BuiltInSymbol::Trails),
+            (0x19, BuiltInSymbol::Visible),
+            (0x1a, BuiltInSymbol::Volume),
+            (0x1b, BuiltInSymbol::Width),
+            (0x1c, BuiltInSymbol::Blend),
+            (0x1d, BuiltInSymbol::ScriptNum),
+            (0x1e, BuiltInSymbol::MoveableSprite),
+            (0x1f, BuiltInSymbol::EditableText),
+            (0x20, BuiltInSymbol::ScoreColor),
+            (0x21, BuiltInSymbol::Loc),
+            (0x22, BuiltInSymbol::Rect),
+            (0x23, BuiltInSymbol::MemberNum),
+            (0x24, BuiltInSymbol::CastLibNum),
+            (0x25, BuiltInSymbol::Member),
+            (0x26, BuiltInSymbol::ScriptInstanceList),
+            (0x27, BuiltInSymbol::CurrentTime),
+            (0x28, BuiltInSymbol::MostRecentCuePoint),
+            (0x29, BuiltInSymbol::Tweened),
+            (0x2a, BuiltInSymbol::Name),
         ])
     })
 }
@@ -226,56 +228,53 @@ pub fn get_opcode_name(opcode: OpCode) -> &'static str {
 }
 
 #[inline]
-pub fn get_anim_prop_name(name_id: u16) -> &'static str {
-    anim_prop_names().get(&name_id).unwrap().as_ref()
+pub fn get_anim_prop_name(name_id: u16) -> BuiltInSymbol {
+    *anim_prop_names().get(&name_id).unwrap()
 }
 
 #[inline]
-pub fn get_anim2_prop_name(name_id: u16) -> &'static str {
-    anim2_prop_names().get(&name_id).unwrap().as_ref()
+pub fn get_anim2_prop_name(name_id: u16) -> BuiltInSymbol {
+    *anim2_prop_names().get(&name_id).unwrap()
 }
 
-pub fn get_sprite_prop_name(name_id: u16) -> &'static str {
-    sprite_prop_names().get(&name_id).unwrap().as_ref()
+pub fn get_sprite_prop_name(name_id: u16) -> BuiltInSymbol {
+    *sprite_prop_names().get(&name_id).unwrap()
 }
 
-fn cast_member_prop_names() -> &'static HashMap<u16, Box<str>> {
-    static MAP: OnceLock<HashMap<u16, Box<str>>> = OnceLock::new();
+fn cast_member_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+    static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
-            (0x01, "name".into()),
-            (0x02, "text".into()),
-            (0x03, "fontStyle".into()),
-            (0x04, "font".into()),
-            (0x05, "height".into()),
-            (0x06, "alignment".into()),
-            (0x07, "fontSize".into()),
-            (0x08, "picture".into()),
-            (0x09, "hilite".into()),
-            (0x0a, "number".into()),
-            (0x0b, "size".into()),
-            (0x11, "foreColor".into()),
-            (0x12, "backColor".into()),
+            (0x01, BuiltInSymbol::Name),
+            (0x02, BuiltInSymbol::Text),
+            (0x03, BuiltInSymbol::FontStyle),
+            (0x04, BuiltInSymbol::Font),
+            (0x05, BuiltInSymbol::Height),
+            (0x06, BuiltInSymbol::Alignment),
+            (0x07, BuiltInSymbol::FontSize),
+            (0x08, BuiltInSymbol::Picture),
+            (0x09, BuiltInSymbol::Hilite),
+            (0x0a, BuiltInSymbol::Number),
+            (0x0b, BuiltInSymbol::Size),
+            (0x11, BuiltInSymbol::ForeColor),
+            (0x12, BuiltInSymbol::BackColor),
         ])
     })
 }
 
-pub fn get_cast_member_prop_name(name_id: u16) -> &'static str {
-    cast_member_prop_names()
-        .get(&name_id)
-        .map(|s| s.as_ref())
-        .unwrap_or("unknown")
+pub fn get_cast_member_prop_name(name_id: u16) -> BuiltInSymbol {
+    *cast_member_prop_names().get(&name_id).unwrap_or(&BuiltInSymbol::Unknown)
 }
 
-pub fn get_sound_prop_name(property_id: u16) -> String {
+pub fn get_sound_prop_name(property_id: u16) -> BuiltInSymbol {
     match property_id {
-        0x01 => "volume".to_string(),
-        0x02 => "pan".to_string(),
-        0x03 => "loopCount".to_string(),
-        0x04 => "startTime".to_string(),
-        0x05 => "endTime".to_string(),
-        0x06 => "loopStartTime".to_string(),
-        0x07 => "loopEndTime".to_string(),
-        _ => format!("unknown_sound_prop_{}", property_id),
+        0x01 => BuiltInSymbol::Volume,
+        0x02 => BuiltInSymbol::Pan,
+        0x03 => BuiltInSymbol::LoopCount,
+        0x04 => BuiltInSymbol::StartTime,
+        0x05 => BuiltInSymbol::EndTime,
+        0x06 => BuiltInSymbol::LoopStartTime,
+        0x07 => BuiltInSymbol::LoopEndTime,
+        _ => BuiltInSymbol::UnknownSoundProp,
     }
 }

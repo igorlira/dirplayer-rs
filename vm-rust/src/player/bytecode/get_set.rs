@@ -3,24 +3,19 @@ use log::warn;
 use crate::{
     director::lingo::{
         constants::{
-            get_anim_prop_name, get_cast_member_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names, get_sound_prop_name,
+            get_anim_prop_name, get_cast_member_prop_name, get_sound_prop_name, get_sprite_prop_name, movie_prop_names, sprite_prop_names
         },
         datum::{Datum, StringChunkType},
     },
     player::{
-        allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
-        handlers::datum_handlers::{
+        DatumRef, DirPlayer, HandlerExecutionResult, PLAYER_OPT, ScriptError, allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait}, handlers::datum_handlers::{
             cast_member_ref::CastMemberRefHandlers,
             string_chunk::StringChunkUtils,
-        },
-        reserve_player_mut,
-        score::{sprite_get_prop, sprite_set_prop},
-        script::{
+        }, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{
             get_current_handler_def, get_current_variable_multiplier, get_obj_prop,
             player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
             script_set_static_prop,
-        },
-        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 use super::handler_manager::BytecodeHandlerContext;
@@ -33,14 +28,14 @@ impl GetSetUtils {
     pub fn get_the_built_in_prop(
         player: &mut DirPlayer,
         ctx: &BytecodeHandlerContext,
-        prop_name: &str,
+        prop_name: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop_name {
-            "paramCount" => Ok(player.alloc_datum(Datum::Int(
+        match prop_name.into_builtin_or_error()? {
+            BuiltInSymbol::ParamCount => Ok(player.alloc_datum(Datum::Int(
                 player.scopes.get(ctx.scope_ref).unwrap().args.len() as i32,
             ))),
-            "result" => Ok(player.last_handler_result.clone()),
-            "pi" => Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))),
+            BuiltInSymbol::Result => Ok(player.last_handler_result.clone()),
+            BuiltInSymbol::Pi => Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))),
             _ => player.get_movie_prop(prop_name),
         }
     }
@@ -48,7 +43,7 @@ impl GetSetUtils {
     pub fn set_the_built_in_prop(
         player: &mut DirPlayer,
         _ctx: &BytecodeHandlerContext,
-        prop_name: &str,
+        prop_name: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
         match prop_name {
@@ -58,15 +53,15 @@ impl GetSetUtils {
 
     pub fn get_top_level_prop(
         player: &mut DirPlayer,
-        prop_name: &str,
+        prop_name: Symbol,
     ) -> Result<Datum, ScriptError> {
-        match prop_name {
-            "_player" => Ok(Datum::PlayerRef),
-            "_movie" => Ok(Datum::MovieRef),
-            "_mouse" => Ok(Datum::MouseRef),
-            "_system" => Ok(Datum::MovieRef), // _system properties like randomSeed are movie-level
-            "_sound" => Ok(Datum::MovieRef),  // _sound properties like soundDevice are movie-level
-            "_key" => Ok(Datum::PlayerRef),    // _key properties handled via PlayerRef
+        match prop_name.into_builtin_or_error()? {
+            BuiltInSymbol::_Player => Ok(Datum::PlayerRef),
+            BuiltInSymbol::_Movie => Ok(Datum::MovieRef),
+            BuiltInSymbol::_Mouse => Ok(Datum::MouseRef),
+            BuiltInSymbol::_System => Ok(Datum::MovieRef), // _system properties like randomSeed are movie-level
+            BuiltInSymbol::_Sound => Ok(Datum::MovieRef),  // _sound properties like soundDevice are movie-level
+            BuiltInSymbol::_Key => Ok(Datum::PlayerRef),    // _key properties handled via PlayerRef
             _ => Err(ScriptError::new(format!(
                 "Invalid top level prop: {}",
                 prop_name
@@ -124,9 +119,9 @@ impl GetSetBytecodeHandler {
                 player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
                 hi
             };
-            script_get_prop(player, &handler_instance, &prop_name)?
+            script_get_prop(player, &handler_instance, prop_name)?
         } else {
-            script_get_static_prop(player, &script_ref, &prop_name)?
+            script_get_static_prop(player, &script_ref, prop_name)?
         };
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push(result);
@@ -160,11 +155,11 @@ impl GetSetBytecodeHandler {
                         player.scopes.get_mut(ctx.scope_ref).unwrap().cached_handler_instance = Some(hi.clone());
                         hi
                     };
-                    script_set_prop(player, &handler_instance, &prop_name, &value_ref, false)?;
+                    script_set_prop(player, &handler_instance, prop_name, &value_ref, false)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 None => {
-                    script_set_static_prop(player, &script_ref, &prop_name, &value_ref, true)?;
+                    script_set_static_prop(player, &script_ref, prop_name, &value_ref, true)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
             }
@@ -182,7 +177,7 @@ impl GetSetBytecodeHandler {
             let obj_datum_ref = scope.stack.pop().unwrap();
             Ok((value, obj_datum_ref))
         })?;
-        player_set_obj_prop(&obj_datum_ref, &prop_name, &value).await?;
+        player_set_obj_prop(&obj_datum_ref, prop_name, &value).await?;
         Ok(HandlerExecutionResult::Advance)
     }
 
@@ -203,7 +198,7 @@ impl GetSetBytecodeHandler {
                     crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
                         player,
                         &obj_datum_ref,
-                        &prop_name,
+                        prop_name,
                     )?;
 
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -212,7 +207,7 @@ impl GetSetBytecodeHandler {
                 return Ok(HandlerExecutionResult::Advance);
             }
 
-            let result_ref = get_obj_prop(player, &obj_datum_ref, &prop_name)?;
+            let result_ref = get_obj_prop(player, &obj_datum_ref, prop_name)?;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_ref);
             Ok(HandlerExecutionResult::Advance)
@@ -246,7 +241,7 @@ impl GetSetBytecodeHandler {
                     if property_id <= 0x0b {
                         // movie prop
                         let prop_name = movie_prop_names().get(&(property_id as u16)).unwrap();
-                        GetSetUtils::set_the_built_in_prop(player, ctx, prop_name, value)?;
+                        GetSetUtils::set_the_built_in_prop(player, ctx, Symbol::builtin(*prop_name), value)?;
                         Ok(HandlerExecutionResult::Advance)
                     } else {
                         // last chunk
@@ -268,7 +263,7 @@ impl GetSetBytecodeHandler {
                     // Create a SoundChannel datum with the channel number
                     let sound_channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num as u16));
                     
-                    SoundChannelDatumHandlers::set_prop(player, &sound_channel_datum, &prop_name, &value_ref)?;
+                    SoundChannelDatumHandlers::set_prop(player, &sound_channel_datum, Symbol::builtin(prop_name), &value_ref)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 0x06 => {
@@ -278,12 +273,12 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
-                    sprite_set_prop(sprite_num as i16, prop_name, value)?;
+                    sprite_set_prop(sprite_num as i16, Symbol::builtin(prop_name), value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 0x07 => {
                     let prop_name = get_anim_prop_name(property_id as u16);
-                    player.set_movie_prop(&prop_name, value)?;
+                    player.set_movie_prop(Symbol::builtin(prop_name), value)?;
                     Ok(HandlerExecutionResult::Advance)
                 }
                 0x0b => {
@@ -302,7 +297,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let member_id_datum = player.get_datum(&member_id_ref).clone();
-                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let prop_name = get_cast_member_prop_name(property_id as u16);
                     let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                         &member_id_datum,
                         cast_lib_datum.as_ref(),
@@ -310,7 +305,7 @@ impl GetSetBytecodeHandler {
                     )?;
                     match member_ref {
                         Some(member_ref) => {
-                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            CastMemberRefHandlers::set_prop(&member_ref, prop_name.into(), value)?;
                             Ok(HandlerExecutionResult::Advance)
                         }
                         None => {
@@ -342,7 +337,7 @@ impl GetSetBytecodeHandler {
                             scope.stack.pop().unwrap();
                         }
                     }
-                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let prop_name = get_cast_member_prop_name(property_id as u16);
                     let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                         &member_id_datum,
                         cast_lib_datum.as_ref(),
@@ -350,7 +345,7 @@ impl GetSetBytecodeHandler {
                     )?;
                     match member_ref {
                         Some(member_ref) => {
-                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            CastMemberRefHandlers::set_prop(&member_ref, prop_name.into(), value)?;
                             Ok(HandlerExecutionResult::Advance)
                         }
                         None => {
@@ -376,7 +371,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let member_id_datum = player.get_datum(&member_id_ref).clone();
-                    let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
+                    let prop_name = get_cast_member_prop_name(property_id as u16);
                     let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                         &member_id_datum,
                         cast_lib_datum.as_ref(),
@@ -384,7 +379,7 @@ impl GetSetBytecodeHandler {
                     )?;
                     match member_ref {
                         Some(member_ref) => {
-                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            CastMemberRefHandlers::set_prop(&member_ref, prop_name.into(), value)?;
                             Ok(HandlerExecutionResult::Advance)
                         }
                         None => {
@@ -421,7 +416,7 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             let value_ref = player
                 .globals
-                .get(prop_name)
+                .get(&prop_name)
                 .unwrap_or(&DatumRef::Void)
                 .clone();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -610,7 +605,7 @@ impl GetSetBytecodeHandler {
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
-        let prop_name = ctx.get_name(name_id).to_owned();
+        let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let obj_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -621,7 +616,7 @@ impl GetSetBytecodeHandler {
             let obj_type = player.get_datum(&obj_ref).type_enum();
 
             // Check if prop_name is a numeric index
-            let is_numeric_index = prop_name.parse::<i32>().is_ok();
+            let is_numeric_index = prop_name.as_str().parse::<i32>().is_ok();
 
             let result_ref = match obj_type {
                 crate::director::lingo::datum::DatumType::SpriteRef => {
@@ -633,7 +628,7 @@ impl GetSetBytecodeHandler {
                     match crate::player::score::sprite_get_prop(
                         player,
                         sprite_num as i16,
-                        &prop_name,
+                        prop_name,
                     ) {
                         Ok(datum) => {
                             let result = player.last_sprite_prop_ref.take()
@@ -655,7 +650,7 @@ impl GetSetBytecodeHandler {
                                 if let Ok(result) = crate::player::script::script_get_prop(
                                     player,
                                     &instance_ref,
-                                    &prop_name,
+                                    prop_name,
                                 ) {
                                     let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                                     scope.stack.push(result);
@@ -672,11 +667,11 @@ impl GetSetBytecodeHandler {
                 }
                 crate::director::lingo::datum::DatumType::XmlRef => {
                     crate::player::handlers::datum_handlers::xml::XmlDatumHandlers::get_prop(
-                        player, &obj_ref, &prop_name,
+                        player, &obj_ref, prop_name,
                     )?
                 }
-                crate::director::lingo::datum::DatumType::String => match prop_name.as_str() {
-                    "length" => {
+                crate::director::lingo::datum::DatumType::String => match prop_name.into_builtin() {
+                    Some(BuiltInSymbol::Length) => {
                         let len = if let Datum::String(s) = player.get_datum(&obj_ref) {
                             s.chars().count() as i32
                         } else {
@@ -684,7 +679,7 @@ impl GetSetBytecodeHandler {
                         };
                         player.alloc_datum(Datum::Int(len))
                     }
-                    "char" | "line" | "word" | "item" => {
+                    Some(BuiltInSymbol::Char) | Some(BuiltInSymbol::Line) | Some(BuiltInSymbol::Word) | Some(BuiltInSymbol::Item) => {
                         // `string.char` / `.line` / `.word` / `.item` (no
                         // index) returns a StringChunk that represents
                         // the *collection* of chunks of that kind. The
@@ -701,7 +696,7 @@ impl GetSetBytecodeHandler {
                         } else {
                             unreachable!()
                         };
-                        let chunk_type = StringChunkType::from(prop_name.as_str());
+                        let chunk_type = StringChunkType::from(prop_name);
                         let delim = player.movie.item_delimiter;
                         let count = StringChunkUtils::resolve_chunk_count(
                             &s_clone, chunk_type.clone(), delim,
@@ -721,7 +716,7 @@ impl GetSetBytecodeHandler {
                         ))
                     }
                     _ => {
-                        let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                        let result = get_obj_prop(player, &obj_ref, prop_name.to_owned())?;
                         // Track sub-property refs for Transform3D compound assignment
                         // (e.g., transform.position.z = value needs to write back to transform)
                         let is_transform = matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d);
@@ -732,7 +727,7 @@ impl GetSetBytecodeHandler {
                                 if player.transform_sub_refs.len() > 32 {
                                     player.transform_sub_refs.drain(0..16);
                                 }
-                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name.clone()));
+                                player.transform_sub_refs.push((result.clone(), obj_ref.clone(), prop_name));
                             }
                         }
                         result
@@ -741,7 +736,7 @@ impl GetSetBytecodeHandler {
                 crate::director::lingo::datum::DatumType::List => {
                     // Handle numeric indices for lists
                     if is_numeric_index {
-                        let index = prop_name.parse::<i32>().unwrap();
+                        let index = prop_name.as_str().parse::<i32>().unwrap();
                         if let Datum::List(_, list, _) = player.get_datum(&obj_ref) {
                             // Lingo uses 1-based indexing
                             let zero_based_index = (index - 1) as usize;
@@ -759,22 +754,22 @@ impl GetSetBytecodeHandler {
                         }
                     } else {
                         // Route all property access to ListDatumHandlers
-                        ListDatumHandlers::get_prop(player, &obj_ref, &prop_name)?
+                        ListDatumHandlers::get_prop(player, &obj_ref, prop_name)?
                     }
                 }
                 crate::director::lingo::datum::DatumType::PropList => {
                     // Route all property access to get_obj_prop which handles PropList properly
-                    get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                    get_obj_prop(player, &obj_ref, prop_name.to_owned())?
                 }
                 crate::director::lingo::datum::DatumType::ScriptInstanceRef => {
                     // If it's a numeric index, try to find a default indexable property
                     if is_numeric_index {
                         // Common indexable properties in Director scripts
-                        let indexable_property_names = vec!["aSquares", "list", "items", "data"];
+                        let indexable_property_names = vec![BuiltInSymbol::ASquares, BuiltInSymbol::List, BuiltInSymbol::Items, BuiltInSymbol::Data];
 
                         let mut found_indexable = None;
                         for prop in indexable_property_names {
-                            if let Ok(prop_ref) = get_obj_prop(player, &obj_ref, &prop.to_string())
+                            if let Ok(prop_ref) = get_obj_prop(player, &obj_ref, Symbol::builtin(prop))
                             {
                                 // Check if this property is a list
                                 if let Datum::List(_, _, _) = player.get_datum(&prop_ref) {
@@ -786,7 +781,7 @@ impl GetSetBytecodeHandler {
 
                         if let Some(list_ref) = found_indexable {
                             // Now index into the list
-                            let index = prop_name.parse::<i32>().unwrap();
+                            let index = prop_name.as_str().parse::<i32>().unwrap();
                             if let Datum::List(_, list, _) = player.get_datum(&list_ref) {
                                 // Lingo uses 1-based indexing
                                 let zero_based_index = (index - 1) as usize;
@@ -812,11 +807,11 @@ impl GetSetBytecodeHandler {
                         }
                     } else {
                         // Regular property access
-                        get_obj_prop(player, &obj_ref, &prop_name.to_owned())?
+                        get_obj_prop(player, &obj_ref, prop_name)?
                     }
                 }
                 _ => {
-                    let result = get_obj_prop(player, &obj_ref, &prop_name.to_owned())?;
+                    let result = get_obj_prop(player, &obj_ref, prop_name)?;
                     // Track sub-property refs for Transform3D compound assignment
                     // (e.g., transform.position.z = value needs to write back to transform)
                     if matches!(obj_type, crate::director::lingo::datum::DatumType::Transform3d) {
@@ -853,7 +848,7 @@ impl GetSetBytecodeHandler {
             let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
                 // movie prop
                 let prop_name = movie_prop_names().get(&(prop_id as u16)).unwrap();
-                GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)
+                GetSetUtils::get_the_built_in_prop(player, ctx, Symbol::builtin(*prop_name))
             } else if prop_type == 0 {
                 // last chunk
                 let string_id = {
@@ -878,7 +873,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let sprite_num = player.get_datum(&datum_ref).int_value()?;
-                    let result = sprite_get_prop(player, sprite_num as i16, prop_name.unwrap())?;
+                    let result = sprite_get_prop(player, sprite_num as i16, Symbol::builtin(*prop_name.unwrap()))?;
                     Ok(player.last_sprite_prop_ref.take()
                         .unwrap_or_else(|| player.alloc_datum(result)))
                 } else {
@@ -942,7 +937,7 @@ impl GetSetBytecodeHandler {
                     scope.stack.pop().unwrap()
                 };
                 let member_id_datum = player.get_datum(&member_id_ref).clone();
-                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let prop_name = Symbol::builtin(get_cast_member_prop_name(prop_id as u16));
                 let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                     &member_id_datum,
                     cast_lib_datum.as_ref(),
@@ -950,7 +945,7 @@ impl GetSetBytecodeHandler {
                 )?;
                 match member_ref {
                     Some(member_ref) => {
-                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
                         Ok(player.alloc_datum(result))
                     }
                     None => {
@@ -982,7 +977,7 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap();
                     }
                 }
-                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let prop_name = Symbol::builtin(get_cast_member_prop_name(prop_id as u16));
                 let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                     &member_id_datum,
                     cast_lib_datum.as_ref(),
@@ -990,7 +985,7 @@ impl GetSetBytecodeHandler {
                 )?;
                 match member_ref {
                     Some(member_ref) => {
-                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
                         Ok(player.alloc_datum(result))
                     }
                     None => {
@@ -1014,7 +1009,7 @@ impl GetSetBytecodeHandler {
                     scope.stack.pop().unwrap()
                 };
                 let member_id_datum = player.get_datum(&member_id_ref).clone();
-                let prop_name = get_cast_member_prop_name(prop_id as u16).to_string();
+                let prop_name = Symbol::builtin(get_cast_member_prop_name(prop_id as u16));
                 let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                     &member_id_datum,
                     cast_lib_datum.as_ref(),
@@ -1022,7 +1017,7 @@ impl GetSetBytecodeHandler {
                 )?;
                 match member_ref {
                     Some(member_ref) => {
-                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, &prop_name)?;
+                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
                         Ok(player.alloc_datum(result))
                     }
                     None => {

@@ -30,6 +30,7 @@ use crate::player::js_lingo::{decode_script, disasm::disassemble, JsScriptIR};
 use crate::player::js_lingo::interpreter::JsRuntime;
 use crate::player::reserve_player_mut;
 use crate::player::script::Script;
+use crate::player::symbols::symbol::Symbol;
 
 thread_local! {
     /// JS runtime per script (one per JS-Lingo cast member).
@@ -200,10 +201,10 @@ pub fn try_invoke_js_handler(
         .map(|v| format!("{:?}", v))
         .collect::<Vec<_>>()
         .join(", ");
-    log::debug!(
-        "[js-call v3 me={}] {}:{}::{}({})",
-        me_prepended, script_member_ref.cast_lib, script_member_ref.cast_member, handler_name, arg_summary
-    );
+    // log::debug!(
+    //     "[js-call v3 me={}] {}:{}::{}({})",
+    //     me_prepended, script_member_ref.cast_lib, script_member_ref.cast_member, handler_name, arg_summary
+    // );
 
     // Director's JS-Lingo treats the calling script as `this` for method
     // calls. Pass the runtime's global object so `this.helper(...)` inside
@@ -243,7 +244,7 @@ impl JsHostBridge for PlayerBridge {
         let datum_args: Vec<DatumRef> = reserve_player_mut(|player| {
             args.iter().map(|v| js_value_to_datum_ref(player, v)).collect()
         });
-        match crate::player::handlers::manager::BuiltInHandlerManager::call_handler("member", &datum_args) {
+        match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(Symbol::from_str("member"), &datum_args) {
             Ok(dref) => reserve_player_mut(|player| datum_ref_to_js_value(player, &dref)),
             Err(_) => JsValue::Undefined,
         }
@@ -259,7 +260,7 @@ impl JsHostBridge for PlayerBridge {
             let datum_args: Vec<DatumRef> = args.iter()
                 .map(|v| js_value_to_datum_ref(player, v))
                 .collect();
-            let r = crate::player::handlers::manager::BuiltInHandlerManager::call_handler(name, &datum_args);
+            let r = crate::player::handlers::manager::BuiltInHandlerManager::call_handler(Symbol::from_str(name), &datum_args);
             // Convert return value back.
             match r {
                 Ok(dref) => Ok(datum_ref_to_js_value(player, &dref)),
@@ -284,7 +285,7 @@ pub fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &Datum
         Datum::Int(i) => JsValue::Int(i),
         Datum::Float(f) => JsValue::Number(f),
         Datum::String(s) => JsValue::String(Rc::new(s)),
-        Datum::Symbol(s) => JsValue::String(Rc::new(s)),
+        Datum::Symbol(s) => JsValue::String(Rc::new(s.to_string())),
         Datum::Void | Datum::Null => JsValue::Undefined,
         Datum::List(_, items, _) => {
             let arr: Vec<JsValue> = items.iter().map(|r| datum_ref_to_js_value(player, r)).collect();
@@ -354,10 +355,10 @@ fn script_ref_to_js_proxy(member_ref: CastMemberRef) -> JsValue {
         };
         for name in handler_names {
             let ref_clone = member_ref.clone();
-            let name_owned = name.clone();
+            let name_clone = name.clone();
             let native = NativeFn {
                 name: "<script_method>",
-                call: Box::new(move |args| invoke_script_method(&ref_clone, &name_owned, args)),
+                call: Box::new(move |args| invoke_script_method(&ref_clone, &name_clone, args)),
             };
             obj.set_own(&name, JsValue::Native(Rc::new(native)));
         }
@@ -398,7 +399,8 @@ fn js_value_to_datum_ref_from_jsvalue(player: &mut crate::player::DirPlayer, v: 
 fn datum_ref_to_string(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> String {
     let d = player.allocator.get_datum(dref).clone();
     match d {
-        Datum::String(s) | Datum::Symbol(s) => s,
+        Datum::String(s) => s,
+        Datum::Symbol(s) => s.to_string(),
         Datum::Int(i) => i.to_string(),
         Datum::Float(f) => f.to_string(),
         _ => crate::player::datum_formatting::format_datum(dref, player),
@@ -430,7 +432,7 @@ pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue)
                 .props
                 .iter()
                 .map(|(k, val)| {
-                    let key_dr = player.allocator.alloc_datum(Datum::Symbol(k.clone())).unwrap();
+                    let key_dr = player.allocator.alloc_datum(Datum::Symbol(Symbol::from_str(k))).unwrap();
                     let val_dr = js_value_to_datum_ref(player, val);
                     (key_dr, val_dr)
                 })

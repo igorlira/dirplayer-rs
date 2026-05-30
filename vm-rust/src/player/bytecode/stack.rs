@@ -2,11 +2,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        context_vars::player_get_context_var,
-        handlers::datum_handlers::script::ScriptDatumHandlers,
-        reserve_player_mut,
-        script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name},
-        DatumRef, HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        DatumRef, HandlerExecutionResult, PLAYER_OPT, ScriptError, context_vars::player_get_context_var, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name}, symbols::builtin::BuiltInSymbol
     },
 };
 
@@ -248,7 +244,7 @@ impl StackBytecodeHandler {
         let (script_ref, extra_args) = reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(&ctx);
             let obj_type = get_name(player, &ctx, bytecode.obj as u16).unwrap();
-            if obj_type != "script" {
+            if obj_type.into_builtin() != Some(BuiltInSymbol::Script) {
                 return Err(ScriptError::new(format!(
                     "Cannot create new instance of non-script: {}",
                     obj_type

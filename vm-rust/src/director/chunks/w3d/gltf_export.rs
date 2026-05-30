@@ -13,7 +13,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
     let skeleton = scene.skeletons.first().filter(|s| !s.bones.is_empty());
     let mesh_bind_transform = skeleton
-        .and_then(|s| scene.find_transform_for_resource_pub(&s.name))
+        .and_then(|s| scene.find_transform_for_resource_pub(s.name))
         .unwrap_or_else(identity_matrix);
 
     let mut root_children = vec![];
@@ -42,7 +42,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             let (rx, ry, rz, rw) =
                 normalize_quaternion(bind_pose.rot_x, bind_pose.rot_y, bind_pose.rot_z, bind_pose.rot_w);
             gltf.nodes.push(GltfNode {
-                name: bone.name.clone(),
+                name: bone.name.to_string(),
                 translation: Some([bind_pose.pos_x, bind_pose.pos_y, bind_pose.pos_z]),
                 rotation: Some([rx, ry, rz, rw]),
                 ..Default::default()
@@ -102,7 +102,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
         // Combine ALL submeshes into one (matching C# BuildMesh behavior)
         let mut combined = ClodDecodedMesh {
-            name: resource_name.clone(),
+            name: *resource_name,
             positions: vec![], normals: vec![], tex_coords: vec![],
             faces: vec![], diffuse_colors: vec![], specular_colors: vec![],
             bone_indices: vec![], bone_weights: vec![],
@@ -137,20 +137,20 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
         if combined.positions.is_empty() || combined.faces.is_empty() { continue; }
 
-        let mesh_idx = export_mesh(&mut gltf, &mut bin, &combined, resource_name, scene);
+        let mesh_idx = export_mesh(&mut gltf, &mut bin, &combined, resource_name.as_str(), scene);
         let node_idx = gltf.nodes.len();
         let mut node = GltfNode {
-            name: resource_name.clone(),
+            name: resource_name.to_string(),
             mesh: Some(mesh_idx),
             ..Default::default()
         };
         if let Some(current_skin_idx) = skin_idx {
             if mesh_node_indices.is_empty() {
                 node.skin = Some(current_skin_idx);
-            } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name) {
+            } else if let Some(transform) = scene.find_transform_for_resource_pub(*resource_name) {
                 node.matrix = Some(transform);
             }
-        } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name) {
+        } else if let Some(transform) = scene.find_transform_for_resource_pub(*resource_name) {
             node.matrix = Some(transform);
         }
         gltf.nodes.push(node);
@@ -177,10 +177,10 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             bone_indices: vec![],
             bone_weights: vec![],
         };
-        let mesh_idx = export_mesh(&mut gltf, &mut bin, &decoded, &mesh.name, scene);
+        let mesh_idx = export_mesh(&mut gltf, &mut bin, &decoded, mesh.name.as_str(), scene);
         let node_idx = gltf.nodes.len();
         gltf.nodes.push(GltfNode {
-            name: mesh.name.clone(),
+            name: mesh.name.to_string(),
             mesh: Some(mesh_idx),
             ..Default::default()
         });
@@ -362,7 +362,7 @@ fn export_animation(
     let mut samplers = vec![];
 
     for track in &motion.tracks {
-        let bone_idx = match skeleton.find_bone_by_name(&track.bone_name) {
+        let bone_idx = match skeleton.find_bone_by_name(track.bone_name) {
             Some(i) => i,
             None => continue,
         };
@@ -492,7 +492,7 @@ fn export_animation(
 
     if !channels.is_empty() {
         gltf.animations.push(GltfAnimation {
-            name: motion.name.clone(),
+            name: motion.name.to_string(),
             channels,
             samplers,
         });
@@ -512,11 +512,11 @@ fn export_textures(gltf: &mut GltfRoot, bin: &mut BinaryBuffer, scene: &W3dScene
         gltf.images.push(GltfImage {
             buffer_view: buf_view_idx,
             mime_type: mime.to_string(),
-            name: name.clone(),
+            name: name.to_string(),
         });
         gltf.textures.push(GltfTexture {
             source: image_idx,
-            name: name.clone(),
+            name: name.to_string(),
         });
     }
 }
@@ -530,7 +530,7 @@ fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
                 if layer.name.is_empty() {
                     continue;
                 }
-                if let Some(tex_idx) = gltf.textures.iter().position(|t| t.name == layer.name) {
+                if let Some(tex_idx) = gltf.textures.iter().position(|t| t.name == layer.name.as_str()) {
                     if layer.tex_mode == 0 || layer.tex_mode == 5 {
                         base_color_texture = Some(tex_idx);
                     }
@@ -540,7 +540,7 @@ fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
         }
 
         gltf.materials.push(GltfMaterial {
-            name: mat.name.clone(),
+            name: mat.name.to_string(),
             base_color: [mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity],
             metallic: mat.reflectivity,
             roughness: 1.0 - mat.reflectivity,
@@ -561,7 +561,7 @@ fn find_material_name_for_resource<'a>(scene: &'a W3dScene, resource_name: &str)
         } else {
             &node.resource_name
         };
-        if candidate != resource_name || node.shader_name.is_empty() {
+        if candidate.as_str() != resource_name || node.shader_name.is_empty() {
             continue;
         }
         if let Some(shader) = scene.shaders.iter().find(|s| s.name == node.shader_name) {

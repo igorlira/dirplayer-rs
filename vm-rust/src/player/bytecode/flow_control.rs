@@ -3,7 +3,7 @@ use crate::{
     player::{
         HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::{
             player_call_datum_handler, script_instance::ScriptInstanceUtils,
-        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}
+        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, symbols::symbol::Symbol
     },
 };
 
@@ -31,7 +31,7 @@ impl FlowControlBytecodeHandler {
 
             let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
 
-            let name = get_name(player_cell, &ctx, name_id).unwrap().to_owned();
+            let name = get_name(player_cell, &ctx, name_id).unwrap();
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let arg_list_datum_ref = match scope.stack.pop() {
                 Some(datum_ref) => datum_ref,
@@ -98,7 +98,7 @@ impl FlowControlBytecodeHandler {
             let mut handler_ref = script
                 .get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize)
                 .unwrap();
-            let handler_name = &handler_ref.1;
+            let handler_name = handler_ref.1;
 
             // if first arg is a script or script instance and has a handler by the same name
             // use that handler instead
@@ -191,9 +191,8 @@ impl FlowControlBytecodeHandler {
                 &player,
                 &ctx,
                 bytecode.obj as u16,
-            )
-            .map(|s| s.to_owned())
-            .unwrap_or_else(|| "?".to_owned());
+            ) // TODO(perf): cache this conversion
+            .unwrap_or_else(|| Symbol::from_str("?"));
             let arg_list_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 match scope.stack.pop() {
@@ -220,7 +219,7 @@ impl FlowControlBytecodeHandler {
         })?;
         // end_profiling(token);
         // let token = start_profiling(handler_name.clone());
-        let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
+        let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;
         // end_profiling(token);
         // let token = start_profiling("_obj_call_push_result".to_string());
         reserve_player_mut(|player| {
@@ -270,7 +269,7 @@ impl FlowControlBytecodeHandler {
 
             Ok((obj, handler_name, args, is_no_ret))
         })?;
-        let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
+        let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;
         reserve_player_mut(|player| {
             player.last_handler_result = result.clone();
             if !is_no_ret {

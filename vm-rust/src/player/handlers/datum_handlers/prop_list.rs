@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use log::{warn, debug};
 
 use crate::PLAYER_OPT;
+use crate::player::symbols::builtin::BuiltInSymbol;
+use crate::player::symbols::symbol::Symbol;
 use crate::{
     director::lingo::datum::{datum_bool, Datum, PropListPair},
     player::{
@@ -87,12 +89,12 @@ impl PropListUtils {
     ) -> Result<bool, ScriptError> {
         let result = match (left, right) {
             (Datum::String(l), Datum::String(r)) => l == r, // exact (case-sensitive for keys)
-            (Datum::String(l), Datum::Symbol(r)) => l == r,
-            (Datum::Symbol(l), Datum::String(r)) => l == r,
+            (Datum::String(l), Datum::Symbol(r)) => l == r.as_str(),
+            (Datum::Symbol(l), Datum::String(r)) => l.as_str() == r,
 
             // Handle symbol-to-int comparison (e.g., #2 should match key 2)
             (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
-                s.parse::<i32>().ok() == Some(*i)
+                s.as_str().parse::<i32>().ok() == Some(*i)
             }
 
             _ => datum_equals(left, right, allocator)?,
@@ -104,10 +106,10 @@ impl PropListUtils {
     pub fn get_prop_or_built_in(
         player: &mut DirPlayer,
         prop_list: &VecDeque<PropListPair>,
-        key: &str,
+        key: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let key_index =
-            Self::get_key_index(prop_list, &Datum::String(key.to_owned()), &player.allocator)?;
+            Self::get_key_index(prop_list, &Datum::String(key.to_string()), &player.allocator)?;
         if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
         }
@@ -125,11 +127,11 @@ impl PropListUtils {
 
     pub fn get_built_in_prop(
         prop_list: &VecDeque<PropListPair>,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
-        match prop {
-            "count" => Ok(Datum::Int(prop_list.len() as i32)),
-            "ilk" => Ok(Datum::Symbol("propList".to_owned())),
+        match prop.into_builtin_or_error()?{
+            BuiltInSymbol::Count => Ok(Datum::Int(prop_list.len() as i32)),
+            BuiltInSymbol::Ilk => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::PropList))),
             _ => {
                 return Err(ScriptError::new(format!(
                     "Invalid prop list built-in property {}",
@@ -279,17 +281,17 @@ impl PropListUtils {
 impl PropListDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
-            "sort" => Self::sort(datum, args),
-            "getPropAt" => Self::get_prop_at(datum, args),
-            "addProp" => Self::add_prop(datum, args),
-            "setaProp" => Self::set_opt_prop(datum, args),
-            "setProp" => {
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::GetAt) => Self::get_at(datum, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
+            Some(BuiltInSymbol::Sort) => Self::sort(datum, args),
+            Some(BuiltInSymbol::GetPropAt) => Self::get_prop_at(datum, args),
+            Some(BuiltInSymbol::AddProp) => Self::add_prop(datum, args),
+            Some(BuiltInSymbol::SetaProp) => Self::set_opt_prop(datum, args),
+            Some(BuiltInSymbol::SetProp) => {
                 if args.len() == 3 {
                     reserve_player_mut(|player| {
                         let prop_key_ref = &args[0];
@@ -390,26 +392,26 @@ impl PropListDatumHandlers {
                     )))
                 }
             }
-            "getProp" => Self::get_prop(datum, args),
-            "getaProp" => Self::get_a_prop(datum, args),
-            "deleteProp" => Self::delete_prop(datum, args),
-            "deleteAt" => Self::delete_at(datum, args),
-            "deleteOne" => Self::delete_one(datum, args),
-            "getOne" => Self::get_one(datum, args),
-            "findPos" => Self::find_pos(datum, args),
-            "getPos" => Self::get_pos(datum, args),
-            "duplicate" => Self::duplicate(datum, args),
-            "getLast" => Self::get_last(datum, args),
-            "count" => Self::count(datum, args),
-            "getPropRef" => Self::get_prop_ref(datum, args),
-            "toString" => {
+            Some(BuiltInSymbol::GetProp) => Self::get_prop(datum, args),
+            Some(BuiltInSymbol::GetaProp) => Self::get_a_prop(datum, args),
+            Some(BuiltInSymbol::DeleteProp) => Self::delete_prop(datum, args),
+            Some(BuiltInSymbol::DeleteAt) => Self::delete_at(datum, args),
+            Some(BuiltInSymbol::DeleteOne) => Self::delete_one(datum, args),
+            Some(BuiltInSymbol::GetOne) => Self::get_one(datum, args),
+            Some(BuiltInSymbol::FindPos) => Self::find_pos(datum, args),
+            Some(BuiltInSymbol::GetPos) => Self::get_pos(datum, args),
+            Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
+            Some(BuiltInSymbol::GetLast) => Self::get_last(datum, args),
+            Some(BuiltInSymbol::Count) => Self::count(datum, args),
+            Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
+            Some(BuiltInSymbol::ToString) => {
                 // Support toString() on PropLists that have a #toString property (e.g. Flash Date objects)
                 reserve_player_mut(|player| {
                     let prop_list = player.get_datum(datum).to_map()?;
                     for (key_ref, val_ref) in prop_list {
                         let key = player.get_datum(&key_ref);
                         if let Datum::Symbol(s) = key {
-                            if s == "toString" {
+                            if *s == Symbol::builtin(BuiltInSymbol::ToString) {
                                 return Ok(val_ref.clone());
                             }
                         }
@@ -423,9 +425,9 @@ impl PropListDatumHandlers {
                 // Flash object prop lists from callbacks: handle getter/setter methods
                 // by mapping to properties. e.g. getScreenName() -> #screenName,
                 // getTypeOf() -> #typeOf, setScreenName(v) -> #screenName = v
-                let name_lower = handler_name.to_lowercase();
-                if name_lower.starts_with("get") && handler_name.len() > 3 {
-                    let prop_name = &handler_name[3..];
+                let name_str = handler_name.as_str();
+                if name_str.starts_with("get") && name_str.len() > 3 {
+                    let prop_name = &name_str[3..];
                     let prop_name_camel = {
                         let mut chars = prop_name.chars();
                         match chars.next() {
@@ -437,7 +439,7 @@ impl PropListDatumHandlers {
                         let prop_list = player.get_datum(datum).to_map()?.clone();
                         for (key_ref, val_ref) in &prop_list {
                             if let Datum::Symbol(s) = player.get_datum(key_ref) {
-                                if s == &prop_name_camel || s.eq_ignore_ascii_case(&prop_name_camel) {
+                                if *s == Symbol::builtin(BuiltInSymbol::ToString) {
                                     return Ok(val_ref.clone());
                                 }
                             }
@@ -445,7 +447,7 @@ impl PropListDatumHandlers {
                         Ok(player.alloc_datum(Datum::Void))
                     });
                 }
-                if name_lower.starts_with("set") && handler_name.len() > 3 {
+                if name_str.starts_with("set") && name_str.len() > 3 {
                     // Silently ignore setters on prop lists
                     return Ok(DatumRef::Void);
                 }

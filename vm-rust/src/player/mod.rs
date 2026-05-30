@@ -53,6 +53,7 @@ pub mod testing_shared;
 pub mod testing;
 #[cfg(target_arch = "wasm32")]
 pub mod testing_browser;
+pub mod symbols;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -66,6 +67,7 @@ use std::{
 use allocator::{
     DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait,
 };
+use async_recursion::async_recursion;
 use async_std::{
     channel::{self, Sender},
     future::{self, timeout},
@@ -94,29 +96,17 @@ use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
 use rand::SeedableRng;
 
 use crate::{
-    director::{
+    console_warn, director::{
         chunks::handler::{Bytecode, HandlerDef},
         enums::ScriptType,
-        file::{read_director_file_bytes, DirectorFile},
+        file::{DirectorFile, read_director_file_bytes},
         lingo::{
-            constants::{get_anim2_prop_name, get_anim_prop_name},
-            datum::{datum_bool, Datum, DatumType, VarRef},
+            constants::{get_anim_prop_name, get_anim2_prop_name},
+            datum::{Datum, DatumType, VarRef, datum_bool},
         },
-    },
-    console_warn,
-    js_api::JsApi,
-    player::{
-        bytecode::handler_manager::{player_execute_bytecode, BytecodeHandlerContext},
-        datum_formatting::format_datum,
-        geometry::IntRect,
-        profiling::get_profiler_report,
-        scope::Scope,
-        events::{player_dispatch_event_beginsprite, player_invoke_event_to_instances,
-        dispatch_event_to_all_behaviors, player_invoke_frame_and_movie_scripts, dispatch_system_event_to_timeouts,
-        player_invoke_targeted_event},
-    },
-    rendering::with_renderer_mut,
-    utils::{get_base_url, get_elapsed_ticks},
+    }, js_api::JsApi, player::{
+        bytecode::handler_manager::{BytecodeHandlerContext, player_execute_bytecode}, datum_formatting::format_datum, events::{dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_event_to_instances, player_invoke_frame_and_movie_scripts, player_invoke_targeted_event}, geometry::IntRect, profiling::get_profiler_report, scope::Scope, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::init_symbol_table}
+    }, rendering::with_renderer_mut, utils::{get_base_url, get_elapsed_ticks}
 };
 use url::Url;
 
@@ -212,7 +202,7 @@ pub struct DirPlayer {
     pub is_script_paused: bool,
     pub next_frame: Option<u32>,
     pub queue_tx: Sender<PlayerVMExecutionItem>,
-    pub globals: FxHashMap<String, DatumRef>,
+    pub globals: FxHashMap<Symbol, DatumRef>,
     pub scopes: Vec<Scope>,
     pub bytecode_handler_manager: StaticBytecodeHandlerManager,
     pub breakpoint_manager: BreakpointManager,
@@ -248,7 +238,7 @@ pub struct DirPlayer {
     pub cursor_is_hidden: bool,
     /// Track parent DatumRef for chained property access (transform.position.z = value)
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
-    pub transform_sub_refs: Vec<(DatumRef, DatumRef, String)>,
+    pub transform_sub_refs: Vec<(DatumRef, DatumRef, Symbol)>,
     pub last_mouse_down_time: i64,
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
@@ -942,17 +932,17 @@ impl DirPlayer {
         }
     }
 
-    pub fn get_hydrated_globals(&self) -> FxHashMap<&str, &Datum> {
+    pub fn get_hydrated_globals(&self) -> FxHashMap<Symbol, &Datum> {
         self.globals
             .iter()
-            .map(|(k, v)| (k.as_str(), self.get_datum(v)))
+            .map(|(k, v)| (*k, self.get_datum(v)))
             .collect()
     }
 
     #[allow(dead_code)]
-    pub fn get_global(&self, name: &str) -> Option<&Datum> {
+    pub fn get_global(&self, name: Symbol) -> Option<&Datum> {
         self.globals
-            .get(name)
+            .get(&name)
             .map(|datum_ref| self.get_datum(datum_ref))
     }
 
@@ -1063,43 +1053,43 @@ impl DirPlayer {
     pub fn initialize_globals(&mut self) {
         // Initialize the actorList as a global variable
         let actor_list_datum = self.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
-        self.globals.insert("actorList".to_string(), actor_list_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::ActorList), actor_list_datum);
         self.actor_list_generation = 0;
 
         // Mathematical constant
         let pi_datum = self.alloc_datum(Datum::Float(std::f64::consts::PI));
-        self.globals.insert("PI".to_string(), pi_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Pi), pi_datum);
         
         // Special values
         let void_datum = self.alloc_datum(Datum::Void);
-        self.globals.insert("VOID".to_string(), void_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Void), void_datum);
         
         let empty_datum = self.alloc_datum(Datum::String("".to_string()));
-        self.globals.insert("EMPTY".to_string(), empty_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Empty), empty_datum);
         
         // String constants
         let return_datum = self.alloc_datum(Datum::String("\r".to_string()));
-        self.globals.insert("RETURN".to_string(), return_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Return), return_datum);
 
         let enter_datum = self.alloc_datum(Datum::String("\x03".to_string()));
-        self.globals.insert("ENTER".to_string(), enter_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Enter), enter_datum);
         
         let quote_datum = self.alloc_datum(Datum::String("\"".to_string()));
-        self.globals.insert("QUOTE".to_string(), quote_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Quote), quote_datum);
         
         let tab_datum = self.alloc_datum(Datum::String("\t".to_string()));
-        self.globals.insert("TAB".to_string(), tab_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::Tab), tab_datum);
         
         // Backspace character
         let backspace_datum = self.alloc_datum(Datum::String("\x08".to_string()));
-        self.globals.insert("BACKSPACE".to_string(), backspace_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::BackSpace), backspace_datum);
         
         // Boolean constants (these are typically handled as keywords, but can be globals)
         let true_datum = self.alloc_datum(Datum::Int(1));
-        self.globals.insert("TRUE".to_string(), true_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::True), true_datum);
         
         let false_datum = self.alloc_datum(Datum::Int(0));
-        self.globals.insert("FALSE".to_string(), false_datum);
+        self.globals.insert(Symbol::builtin(BuiltInSymbol::False), false_datum);
     }
 
     #[inline]
@@ -1391,7 +1381,7 @@ impl DirPlayer {
     }
 
     pub fn note_actor_list_mutation(&mut self, datum_ref: &DatumRef) {
-        if self.globals.get("actorList").is_some_and(|actor_list_ref| actor_list_ref == datum_ref) {
+        if self.globals.get(&Symbol::builtin(BuiltInSymbol::ActorList)).is_some_and(|actor_list_ref| actor_list_ref == datum_ref) {
             self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
         }
     }
@@ -1399,7 +1389,7 @@ impl DirPlayer {
     pub fn actor_list_stepframe_snapshot(&self) -> (VecDeque<DatumRef>, HashSet<usize>, u64) {
         let actor_list_ref = self
             .globals
-            .get("actorList")
+            .get(&Symbol::builtin(BuiltInSymbol::ActorList))
             .cloned()
             .unwrap_or(DatumRef::Void);
         match self.get_datum(&actor_list_ref) {
@@ -1415,7 +1405,7 @@ impl DirPlayer {
     pub fn actor_list_active_ids(&self) -> (HashSet<usize>, u64) {
         let actor_list_ref = self
             .globals
-            .get("actorList")
+            .get(&Symbol::builtin(BuiltInSymbol::ActorList))
             .cloned()
             .unwrap_or(DatumRef::Void);
         match self.get_datum(&actor_list_ref) {
@@ -1731,42 +1721,43 @@ impl DirPlayer {
         result
     }
 
-    fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
-        match_ci!(prop, {
-            "datumStats" => {
+    fn get_movie_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
+        let builtin_prop = prop.into_builtin_or_error()?;
+        match builtin_prop {
+            BuiltInSymbol::DatumStats => {
                 let stats = self.allocator.datum_type_stats();
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
             },
-            "datumSnapshot" => {
+            BuiltInSymbol::DatumSnapshot => {
                 self.allocator.take_datum_snapshot();
                 debug!("Datum snapshot taken. Use 'put the datumStats' to see new datums since snapshot.");
                 Ok(DatumRef::Void)
             },
-            "datumLeakScan" => {
+            BuiltInSymbol::DatumLeakScan => {
                 let stats = self.datum_leak_scan();
                 web_sys::console::log_1(&stats.clone().into());
                 Ok(self.alloc_datum(Datum::String(stats)))
             },
-            "systemDate" => {
+            BuiltInSymbol::SystemDate => {
                 let date_id = self.allocator.get_free_script_instance_id();
                 let date_obj = crate::player::handlers::datum_handlers::date::DateObject::new(date_id);
                 self.date_objects.insert(date_id, date_obj);
                 Ok(self.alloc_datum(Datum::DateRef(date_id)))
             },
-            "stage" => Ok(self.alloc_datum(Datum::Stage)),
-            "time" => Ok(self.alloc_datum(Datum::String(
+            BuiltInSymbol::Stage => Ok(self.alloc_datum(Datum::Stage)),
+            BuiltInSymbol::Time => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
             ))),
-            "milliSeconds" => Ok(self.alloc_datum(Datum::Int(
+            BuiltInSymbol::MilliSeconds => Ok(self.alloc_datum(Datum::Int(
                 chrono::Local::now()
                     .signed_duration_since(self.system_start_time)
                     .num_milliseconds() as i32,
             ))),
-            "keyboardFocusSprite" => {
+            BuiltInSymbol::KeyboardFocusSprite => {
                 Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32)))
             },
-            "selection" => {
+            BuiltInSymbol::Selection => {
                 // Returns the currently selected text in the focused editable
                 // Field/Text member, or "" if none.
                 let s = if self.keyboard_focus_sprite >= 0 {
@@ -1797,41 +1788,41 @@ impl DirPlayer {
                 };
                 Ok(self.alloc_datum(Datum::String(s)))
             },
-            "clipBoard" => {
+            BuiltInSymbol::ClipBoard => {
                 Ok(self.alloc_datum(Datum::String(self.clipboard_mirror.clone())))
             },
-            "frameTempo" => {
+            BuiltInSymbol::FrameTempo => {
                 // Get tempo from current frame in score, or use default frame_rate
                 let frame_tempo = self.movie.score.get_frame_tempo(self.movie.current_frame)
                     .unwrap_or(self.movie.frame_rate as u32);
                 Ok(self.alloc_datum(Datum::Int(frame_tempo as i32)))
             },
-            "mouseLoc" => {
+            BuiltInSymbol::MouseLoc => {
                 Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             },
-            "mouseH" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
-            "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
-            "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
-            "rollover" => {
+            BuiltInSymbol::MouseH => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
+            BuiltInSymbol::MouseV => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
+            BuiltInSymbol::StillDown => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
+            BuiltInSymbol::Rollover => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
                 Ok(self.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
             },
-            "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
-            "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
-            "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
-            "commandDown" => {
+            BuiltInSymbol::KeyCode => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
+            BuiltInSymbol::ShiftDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
+            BuiltInSymbol::OptionDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            BuiltInSymbol::CommandDown => {
                 Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down())))
             },
-            "controlDown" => {
+            BuiltInSymbol::ControlDown => {
                 Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down())))
             },
-            "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
-            "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
-            "keyPressed" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
-            "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
-            "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
-            "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
-            "frameLabel" => {
+            BuiltInSymbol::AltDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            BuiltInSymbol::Key => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+            BuiltInSymbol::KeyPressed => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
+            BuiltInSymbol::FloatPrecision => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
+            BuiltInSymbol::DoubleClick => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
+            BuiltInSymbol::Ticks => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
+            BuiltInSymbol::FrameLabel => {
                 let frame_label = self
                     .movie
                     .score
@@ -1844,7 +1835,7 @@ impl DirPlayer {
                     frame_label.unwrap_or_else(|| "0".to_string()),
                 )))
             },
-            "currentSpriteNum" => {
+            BuiltInSymbol::CurrentSpriteNum => {
                 // TODO: this can also be called by a static script
                 let script_instance_ref = self
                     .scopes
@@ -1853,7 +1844,7 @@ impl DirPlayer {
 
                 if let Some(script_instance_ref) = script_instance_ref {
                     // Try to get spriteNum from the script instance
-                    if let Some(datum_ref) = script_get_prop_opt(self, &script_instance_ref, &"spriteNum".to_owned()) {
+                    if let Some(datum_ref) = script_get_prop_opt(self, &script_instance_ref, Symbol::builtin(BuiltInSymbol::SpriteNum)) {
                         let datum = self.get_datum(&datum_ref);
                         // Check if it's Void - if so, return 0 as default
                         if !matches!(datum, Datum::Void) {
@@ -1867,32 +1858,32 @@ impl DirPlayer {
                 // Default: return 0 when no sprite context is available
                 Ok(self.alloc_datum(Datum::Int(0)))
             },
-            "actorList" => {
+            BuiltInSymbol::ActorList => {
                 // Return the reference to the global actorList, not a clone of its contents
                 Ok(self
                     .globals
-                    .get("actorList")
+                    .get(&Symbol::builtin(BuiltInSymbol::ActorList))
                     .unwrap_or(&DatumRef::Void)
                     .clone())
             },
-            "clickOn" => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
-            "environment" | "environmentPropList" => {
+            BuiltInSymbol::ClickOn => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
+            BuiltInSymbol::Environment | BuiltInSymbol::EnvironmentPropList => {
                 // Build the environment property list
                 let props = VecDeque::from(vec![
                     (
-                        self.alloc_datum(Datum::Symbol("shockMachine".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShockMachine))),
                         self.alloc_datum(Datum::Int(0))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("shockMachineVersion".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShockMachineVersion))),
                         self.alloc_datum(Datum::String("".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("platform".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Platform))),
                         self.alloc_datum(Datum::String("Windows,32".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("runMode".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::RunMode))),
                         self.alloc_datum(Datum::String(
                             self.external_params.get("_runMode")
                                 .cloned()
@@ -1900,52 +1891,52 @@ impl DirPlayer {
                         ))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("colorDepth".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ColorDepth))),
                         self.alloc_datum(Datum::Int(32))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("internetConnected".to_string())),
-                        self.alloc_datum(Datum::Symbol("online".to_string()))
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::InternetConnected))),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Online)))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("uiLanguage".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::UILanguage))),
                         self.alloc_datum(Datum::String("English".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("osLanguage".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::OSLanguage))),
                         self.alloc_datum(Datum::String("English".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("productBuildVersion".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ProductBuildVersion))),
                         self.alloc_datum(Datum::String("188".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("productVersion".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ProductVersion))),
                         self.alloc_datum(Datum::String("11.0".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("osVersion".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::OSVersion))),
                         self.alloc_datum(Datum::String("Windows XP,5,1,148,2,Service Pack 3".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("directXVersion".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::DirectXVersion))),
                         self.alloc_datum(Datum::String("9.0.0".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("licenseType".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::LicenseType))),
                         self.alloc_datum(Datum::String("Full".to_string()))
                     ),
                     (
-                        self.alloc_datum(Datum::Symbol("trialTime".to_string())),
+                        self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::TrialTime))),
                         self.alloc_datum(Datum::Int(0))
                     ),
                 ]);
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
-            "clickLoc" => {
+            BuiltInSymbol::ClickLoc => {
                 Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
             },
-            "markerList" => {
+            BuiltInSymbol::MarkerList => {
                 let labels: Vec<_> = self.movie.score.frame_labels
                     .iter()
                     .map(|fl| (fl.label.clone(), fl.frame_num))
@@ -1960,19 +1951,19 @@ impl DirPlayer {
                     .collect();
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
-            "xtraList" => {
+            BuiltInSymbol::XtraList => {
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: VecDeque<DatumRef> = xtra_names
                     .iter()
                     .map(|name| {
-                        let name_key = self.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_key = self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
                         let name_val = self.alloc_datum(Datum::String(name.to_string()));
                         self.alloc_datum(Datum::PropList(VecDeque::from(vec![(name_key, name_val)]), false))
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             },
-            "runMode" => {
+            BuiltInSymbol::RunMode => {
                 let mode = self.external_params.get("_runMode")
                     .cloned()
                     .unwrap_or_else(|| "Plugin".to_string());
@@ -1991,7 +1982,7 @@ impl DirPlayer {
             // the load-time logic in `load_movie_from_dir`. Label sources
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
-            "moviePath" => {
+            BuiltInSymbol::MoviePath => {
                 let label = self.external_params
                     .get("_moviePath")
                     .filter(|s| !s.is_empty())
@@ -2031,7 +2022,7 @@ impl DirPlayer {
             // the full URL for security/whitelist checks. Without this
             // companion intercept, `movieName` would still come from the
             // actually-loaded file, breaking the concatenation.
-            "movieName" => {
+            BuiltInSymbol::MovieName => {
                 let label = self.external_params
                     .get("_moviePath")
                     .filter(|s| !s.is_empty())
@@ -2060,59 +2051,59 @@ impl DirPlayer {
                     Ok(self.alloc_datum(datum))
                 }
             },
-            "stageleft" | "stagetop" | "stageright" | "stagebottom" => {
+            BuiltInSymbol::StageLeft | BuiltInSymbol::StageTop | BuiltInSymbol::StageRight | BuiltInSymbol::StageBottom => {
                 let layout = crate::player::stage::stage_layout(self);
-                let value = match_ci!(prop, {
-                    "stageleft" => layout.stage_rect[0],
-                    "stagetop" => layout.stage_rect[1],
-                    "stageright" => layout.stage_rect[2],
-                    "stagebottom" => layout.stage_rect[3],
+                let value = match builtin_prop {
+                    BuiltInSymbol::StageLeft => layout.stage_rect[0],
+                    BuiltInSymbol::StageTop => layout.stage_rect[1],
+                    BuiltInSymbol::StageRight => layout.stage_rect[2],
+                    BuiltInSymbol::StageBottom => layout.stage_rect[3],
                     _ => unreachable!(),
-                });
+                };
                 Ok(self.alloc_datum(Datum::Int(value as i32)))
             },
             _ => {
                 let datum = self.movie.get_prop(prop)?;
                 Ok(self.alloc_datum(datum))
             }
-        })
+        }
     }
 
-    fn get_player_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
-        match prop {
-            "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
-            "productVersion" => Ok(self.alloc_datum(Datum::String("11.0".to_string()))), // TODO
-            "runMode" => {
+    fn get_player_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::TraceScript => Ok(self.alloc_datum(datum_bool(false))), // TODO
+            BuiltInSymbol::ProductVersion => Ok(self.alloc_datum(Datum::String("11.0".to_string()))), // TODO
+            BuiltInSymbol::RunMode => {
                 let mode = self.external_params.get("_runMode")
                     .cloned()
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
             }
             // Key state properties (also accessible via _key.optionDown etc.)
-            "optionDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
-            "commandDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down()))),
-            "controlDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down()))),
-            "shiftDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
-            "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
-            "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
-            "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
+            BuiltInSymbol::OptionDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            BuiltInSymbol::CommandDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_command_down()))),
+            BuiltInSymbol::ControlDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_control_down()))),
+            BuiltInSymbol::ShiftDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_shift_down()))),
+            BuiltInSymbol::AltDown => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
+            BuiltInSymbol::KeyCode => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
+            BuiltInSymbol::Key => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
             _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
         }
     }
 
-    fn get_mouse_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
-        match prop {
-            "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
-            "mouseLoc" => {
+    fn get_mouse_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::DoubleClick => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
+            BuiltInSymbol::MouseLoc => {
                 Ok(self.alloc_datum(Datum::Point([self.mouse_loc.0 as f64, self.mouse_loc.1 as f64], 0)))
             }
             _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
         }
     }
 
-    fn set_mouse_prop(&mut self, prop: &str, value_ref: &DatumRef) -> Result<(), ScriptError> {
-        match prop {
-            "mouseLoc" => {
+    fn set_mouse_prop(&mut self, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::MouseLoc => {
                 let value = self.get_datum(value_ref).clone();
                 match value {
                     Datum::Point(vals, _flags) => {
@@ -2133,18 +2124,18 @@ impl DirPlayer {
         }
     }
 
-    fn set_player_prop(&mut self, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
-        match prop {
-            "itemDelimiter" => {
+    fn set_player_prop(&mut self, prop: Symbol, value: &DatumRef) -> Result<(), ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::ItemDelimiter => {
                 let value = self.get_datum(value);
                 self.movie.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             }
-            "traceScript" => {
+            BuiltInSymbol::TraceScript => {
                 // Accepted, no-op
                 Ok(())
             }
-            "debugPlaybackEnabled" => {
+            BuiltInSymbol::DebugPlaybackEnabled => {
                 let v = self.get_datum(value).int_value()? != 0;
                 self.movie.debug_playback_enabled = v;
                 Ok(())
@@ -2156,32 +2147,32 @@ impl DirPlayer {
     fn get_anim_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
         let prop_name = get_anim_prop_name(prop_id);
         match prop_name {
-            "colorDepth" => Ok(Datum::Int(32)),
-            "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
-            "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay" => Ok(Datum::Int(0)),
-            "timeoutLapsed" => Ok(Datum::Int(0)),
-            "soundEnabled" => Ok(Datum::Int(1)),
-            "soundLevel" => Ok(Datum::Int(7)), // max volume
-            "beepOn" | "fixStageSize" => Ok(Datum::Int(0)),
-            "centerStage" => Ok(datum_bool(self.center_stage)),
-            "exitLock" => Ok(datum_bool(self.movie.exit_lock)),
-            "key" => Ok(Datum::String(self.keyboard_manager.key())),
-            "keyPressed" => Ok(Datum::String(self.keyboard_manager.key_pressed())),
-            "keyCode" => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
-            "stageColor" => Ok(Datum::Int(0)),
-            "doubleClick" => Ok(datum_bool(self.is_double_click)),
-            "lastClick" | "lastEvent" | "lastKey" | "lastRoll" => {
+            BuiltInSymbol::ColorDepth => Ok(Datum::Int(32)),
+            BuiltInSymbol::FullColorPermit => Ok(Datum::Int(1)), // Full color mode is permitted
+            BuiltInSymbol::Timer => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
+            BuiltInSymbol::TimeoutLength | BuiltInSymbol::TimeoutKeyDown | BuiltInSymbol::TimeoutMouse | BuiltInSymbol::TimeoutPlay => Ok(Datum::Int(0)),
+            BuiltInSymbol::TimeoutLapsed => Ok(Datum::Int(0)),
+            BuiltInSymbol::SoundEnabled => Ok(Datum::Int(1)),
+            BuiltInSymbol::SoundLevel => Ok(Datum::Int(7)), // max volume
+            BuiltInSymbol::BeepOn | BuiltInSymbol::FixStageSize => Ok(Datum::Int(0)),
+            BuiltInSymbol::CenterStage => Ok(datum_bool(self.center_stage)),
+            BuiltInSymbol::ExitLock => Ok(datum_bool(self.movie.exit_lock)),
+            BuiltInSymbol::Key => Ok(Datum::String(self.keyboard_manager.key())),
+            BuiltInSymbol::KeyPressed => Ok(Datum::String(self.keyboard_manager.key_pressed())),
+            BuiltInSymbol::KeyCode => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
+            BuiltInSymbol::StageColor => Ok(Datum::Int(0)),
+            BuiltInSymbol::DoubleClick => Ok(datum_bool(self.is_double_click)),
+            BuiltInSymbol::LastClick | BuiltInSymbol::LastEvent | BuiltInSymbol::LastKey | BuiltInSymbol::LastRoll => {
                 Ok(Datum::Int(get_elapsed_ticks(self.start_time)))
             }
-            "multiSound" => Ok(Datum::Int(1)),
-            "pauseState" => Ok(datum_bool(self.is_script_paused)),
-            "selStart" => Ok(Datum::Int(self.text_selection_start as i32)),
-            "selEnd" => Ok(Datum::Int(self.text_selection_end as i32)),
-            "switchColorDepth" | "imageDirect" | "colorQD" | "quickTimePresent"
-            | "videoForWindowsPresent" | "netPresent" | "safePlayer"
-            | "soundKeepDevice" | "soundMixMedia" | "preLoadRAM"
-            | "buttonStyle" | "checkBoxAccess" | "checkboxType" => Ok(Datum::Int(0)),
+            BuiltInSymbol::MultiSound => Ok(Datum::Int(1)),
+            BuiltInSymbol::PauseState => Ok(datum_bool(self.is_script_paused)),
+            BuiltInSymbol::SelStart => Ok(Datum::Int(self.text_selection_start as i32)),
+            BuiltInSymbol::SelEnd => Ok(Datum::Int(self.text_selection_end as i32)),
+            BuiltInSymbol::SwitchColorDepth | BuiltInSymbol::ImageDirect | BuiltInSymbol::ColorQD | BuiltInSymbol::QuickTimePresent
+            | BuiltInSymbol::VideoForWindowsPresent | BuiltInSymbol::NetPresent | BuiltInSymbol::SafePlayer
+            | BuiltInSymbol::SoundKeepDevice | BuiltInSymbol::SoundMixMedia | BuiltInSymbol::PreLoadRAM
+            | BuiltInSymbol::ButtonStyle | BuiltInSymbol::CheckBoxAccess | BuiltInSymbol::CheckBoxType => Ok(Datum::Int(0)),
             _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name))),
         }
     }
@@ -2189,8 +2180,8 @@ impl DirPlayer {
     fn get_anim2_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
         let prop_name = get_anim2_prop_name(prop_id);
         match prop_name {
-            "number of castLibs" => Ok(Datum::Int(self.movie.cast_manager.casts.len() as i32)),
-            "number of castMembers" => Ok(Datum::Int(
+            BuiltInSymbol::NumberOfCastLibs => Ok(Datum::Int(self.movie.cast_manager.casts.len() as i32)),
+            BuiltInSymbol::NumberOfCastMembers => Ok(Datum::Int(
                 self.movie
                     .cast_manager
                     .casts
@@ -2205,43 +2196,43 @@ impl DirPlayer {
         }
     }
 
-    fn set_movie_prop(&mut self, prop: &str, value: Datum) -> Result<(), ScriptError> {
-        match_ci!(prop, {
-            "keyboardFocusSprite" => {
+    fn set_movie_prop(&mut self, prop: Symbol, value: Datum) -> Result<(), ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::KeyboardFocusSprite => {
                 // TODO switch focus
                 self.keyboard_focus_sprite = value.int_value()? as i16;
                 Ok(())
             },
-            "selStart" => {
+            BuiltInSymbol::SelStart => {
                 self.text_selection_start = value.int_value()? as u16;
                 Ok(())
             },
-            "selEnd" => {
+            BuiltInSymbol::SelEnd => {
                 self.text_selection_end = value.int_value()? as u16;
                 Ok(())
             },
-            "clipBoard" => {
+            BuiltInSymbol::ClipBoard => {
                 self.clipboard_mirror = value.string_value()?;
                 Ok(())
             },
-            "floatPrecision" => {
+            BuiltInSymbol::FloatPrecision => {
                 self.float_precision = value.int_value()? as u8;
                 Ok(())
             },
-            "centerStage" => {
+            BuiltInSymbol::CenterStage => {
                 self.center_stage = value.int_value()? != 0;
                 crate::player::stage::apply_stage_draw_rect(self);
                 let (w, h) = crate::player::stage::stage_canvas_dims(self);
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, self.center_stage);
                 Ok(())
             },
-            "actorList" => {
+            BuiltInSymbol::ActorList => {
                 // Setting actorList - update the global variable
                 match value {
                     Datum::List(list_type, list_items, sorted) => {
                         let new_actor_list =
                             self.alloc_datum(Datum::List(list_type, list_items, sorted));
-                        self.globals.insert("actorList".to_string(), new_actor_list);
+                        self.globals.insert(Symbol::builtin(BuiltInSymbol::ActorList), new_actor_list);
                         self.actor_list_generation = self.actor_list_generation.wrapping_add(1);
                         Ok(())
                     }
@@ -2249,7 +2240,7 @@ impl DirPlayer {
                 }
             },
             _ => self.movie.set_prop(prop, value, &self.allocator)
-        })
+        }
     }
 
     fn on_script_error(&mut self, err: &ScriptError) {
@@ -2581,7 +2572,7 @@ pub fn player_handle_scope_return(scope: &ScopeResult) {
 }
 
 pub async fn player_call_global_handler(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
@@ -2591,7 +2582,7 @@ pub async fn player_call_global_handler(
         let mut receiver_handler = None;
 
         // "new" invocations should always go through the built-in handler
-        if handler_name != "new" {
+        if handler_name != Symbol::builtin(BuiltInSymbol::New) {
             // Director appears to support customFunc(firstArg, ..) invocations
             // where firstArg is a script or script instance
             receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
@@ -2603,7 +2594,7 @@ pub async fn player_call_global_handler(
                         .find_map(|script_ref| {
                             let script = player.movie.cast_manager.get_script_by_ref(script_ref);
                             script
-                                .and_then(|x| x.get_own_handler_ref(&handler_name))
+                                .and_then(|x| x.get_own_handler_ref(handler_name))
                                 .map(|handler_pair| (None, handler_pair))
                         });
             }
@@ -2621,7 +2612,7 @@ pub async fn player_call_global_handler(
                             .get_script_by_ref(&script_instance.script)
                             .unwrap();
                         script
-                            .get_own_handler_ref(&handler_name)
+                            .get_own_handler_ref(handler_name)
                             .map(|handler_pair| (Some(instance_receiver_ref.clone()), handler_pair))
                     });
             }
@@ -2660,8 +2651,8 @@ pub async fn player_call_global_handler(
     // Xtra static async handlers (e.g. Curl's exec/execAsync). These would
     // otherwise be eaten by BuiltInHandlerManager::call_handler and reported
     // as "No built-in handler".
-    if xtra::manager::has_xtra_static_async_handler(handler_name) {
-        return xtra::manager::call_xtra_static_async_handler(handler_name, args).await;
+    if xtra::manager::has_xtra_static_async_handler(handler_name.into()) {
+        return xtra::manager::call_xtra_static_async_handler(handler_name.into(), args).await;
     }
     BuiltInHandlerManager::call_handler(handler_name, args)
 }
@@ -2730,17 +2721,18 @@ pub async fn player_call_script_handler(
     player_call_script_handler_raw_args(receiver, handler_ref, arg_list, false).await
 }
 
+#[async_recursion(?Send)]
 pub async fn player_call_script_handler_raw_args(
     receiver: Option<ScriptInstanceRef>,
     handler_ref: ScriptHandlerRef,
     arg_list: &Vec<DatumRef>,
     use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
-    let (script_member_ref, handler_name) = &handler_ref;
+    let (script_member_ref, handler_name) = handler_ref;
 
     // Check for virtual script handler before running bytecode
     let virtual_result = reserve_player_mut(|player| {
-        virtual_scripts::VirtualScriptRegistry::try_call_handler(player, script_member_ref, receiver.as_ref(), handler_name, arg_list)
+        virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_member_ref, receiver.as_ref(), handler_name, arg_list)
     });
     match virtual_result {
         Ok(Some(return_value)) => {
@@ -2759,8 +2751,8 @@ pub async fn player_call_script_handler_raw_args(
     // came in as `script(X).handler(...)` -- Director's calling convention
     // makes `me` an implicit slot-0 arg in that case.
     if let Some(js_result) = js_lingo_loader::try_invoke_js_handler(
-        script_member_ref,
-        handler_name,
+        &script_member_ref,
+        handler_name.as_str(),
         arg_list,
         receiver.is_some(),
     ) {
@@ -2778,7 +2770,7 @@ pub async fn player_call_script_handler_raw_args(
                 cast_lib: fs.cast_lib.into(),
                 cast_member: fs.cast_member.into(),
             };
-            script_member_ref == &frame_script_ref
+            script_member_ref == frame_script_ref
         } else {
             false
         }
@@ -2800,16 +2792,13 @@ pub async fn player_call_script_handler_raw_args(
                 .unwrap();
             let script = script_rc.as_ref();
             let script_ptr = script as *const Script;
-            let names_ptr = player
+            let names_ptr = &player
                 .movie
                 .cast_manager
                 .get_cast(script.member_ref.cast_lib as u32)
                 .unwrap()
-                .lctx
-                .as_ref()
-                .map(|lctx| &lctx.names as *const Vec<String>)
-                .unwrap();
-            let handler = script.get_own_handler(&handler_name);
+                .name_symbols as *const Vec<Symbol>;
+            let handler = script.get_own_handler(handler_name);
 
             if let Some(handler_rc) = handler {
                 let handler_name_id = handler_rc.name_id;
@@ -2909,57 +2898,57 @@ pub async fn player_call_script_handler_raw_args(
         });
 
         // Only check breakpoints and step mode if the debugger is actually active
-        if debugger_active {
-            if let Some(breakpoint) = reserve_player_ref(|player| {
-                player
-                    .breakpoint_manager
-                    .find_breakpoint_for_bytecode(
-                        unsafe { &(&*script_ptr).name },
-                        &handler_name,
-                        bytecode_index,
-                    )
-                    .cloned()
-            }) {
-                player_trigger_breakpoint(
-                    breakpoint,
-                    script_member_ref.to_owned(),
-                    handler_ref.to_owned(),
-                    bytecode_index,
-                )
-                .await;
-            }
+        // if debugger_active {
+        //     if let Some(breakpoint) = reserve_player_ref(|player| {
+        //         player
+        //             .breakpoint_manager
+        //             .find_breakpoint_for_bytecode(
+        //                 unsafe { &(&*script_ptr).name },
+        //                 &handler_name,
+        //                 bytecode_index,
+        //             )
+        //             .cloned()
+        //     }) {
+        //         player_trigger_breakpoint(
+        //             breakpoint,
+        //             script_member_ref.to_owned(),
+        //             handler_ref.to_owned(),
+        //             bytecode_index,
+        //         )
+        //         .await;
+        //     }
 
-            let should_step_break = reserve_player_ref(|player| {
-                match &player.step_mode {
-                    StepMode::None => false,
-                    StepMode::Into => true,
-                    StepMode::IntoLine { skip_bytecode_indices } => {
-                        !skip_bytecode_indices.contains(&bytecode_index)
-                    }
-                    StepMode::Over => player.scope_count <= player.step_scope_depth,
-                    StepMode::OverLine { skip_bytecode_indices } => {
-                        player.scope_count <= player.step_scope_depth
-                            && !skip_bytecode_indices.contains(&bytecode_index)
-                    }
-                    StepMode::Out => player.scope_count < player.step_scope_depth,
-                }
-            });
+        //     let should_step_break = reserve_player_ref(|player| {
+        //         match &player.step_mode {
+        //             StepMode::None => false,
+        //             StepMode::Into => true,
+        //             StepMode::IntoLine { skip_bytecode_indices } => {
+        //                 !skip_bytecode_indices.contains(&bytecode_index)
+        //             }
+        //             StepMode::Over => player.scope_count <= player.step_scope_depth,
+        //             StepMode::OverLine { skip_bytecode_indices } => {
+        //                 player.scope_count <= player.step_scope_depth
+        //                     && !skip_bytecode_indices.contains(&bytecode_index)
+        //             }
+        //             StepMode::Out => player.scope_count < player.step_scope_depth,
+        //         }
+        //     });
 
-            if should_step_break {
-                let breakpoint = Breakpoint {
-                    script_name: unsafe { (&*script_ptr).name.clone() },
-                    handler_name: handler_name.clone(),
-                    bytecode_index,
-                };
-                player_trigger_breakpoint(
-                    breakpoint,
-                    script_member_ref.to_owned(),
-                    handler_ref.to_owned(),
-                    bytecode_index,
-                )
-                .await;
-            }
-        }
+        //     if should_step_break {
+        //         let breakpoint = Breakpoint {
+        //             script_name: unsafe { (&*script_ptr).name.clone() },
+        //             handler_name: handler_name.clone(),
+        //             bytecode_index,
+        //         };
+        //         player_trigger_breakpoint(
+        //             breakpoint,
+        //             script_member_ref.to_owned(),
+        //             handler_ref.to_owned(),
+        //             bytecode_index,
+        //         )
+        //         .await;
+        //     }
+        // }
 
         let result = match player_execute_bytecode(&ctx).await {
             Ok(result) => result,
@@ -3085,7 +3074,7 @@ pub async fn player_call_script_handler_raw_args(
 /// Dispatch stopMovie events and end all sprites. Used by both `run_frame_loop`
 /// (when `is_playing` becomes false) and `transition_to_net_movie`.
 async fn stop_movie_sequence() {
-    dispatch_system_event_to_timeouts(&"stopMovie".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::StopMovie, &vec![]).await;
 
     reserve_player_mut(|player| {
         player.timeout_manager.clear();
@@ -3093,7 +3082,7 @@ async fn stop_movie_sequence() {
 
     player_wait_available().await;
 
-    if let Err(err) = player_invoke_global_event(&"stopMovie".to_string(), &vec![]).await {
+    if let Err(err) = player_invoke_global_event(Symbol::builtin(BuiltInSymbol::StopMovie), &vec![]).await {
         if err.code != ScriptErrorCode::Abort {
             reserve_player_mut(|player| player.on_script_error(&err));
         }
@@ -3126,9 +3115,9 @@ async fn stop_movie_sequence() {
 async fn run_movie_init_sequence() {
     // prepareMovie
     debug!(">>> Dispatching prepareMovie");
-    dispatch_system_event_to_timeouts(&"prepareMovie".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareMovie, &vec![]).await;
 
-    if let Err(err) = player_invoke_global_event(&"prepareMovie".to_string(), &vec![]).await {
+    if let Err(err) = player_invoke_global_event(Symbol::builtin(BuiltInSymbol::PrepareMovie), &vec![]).await {
         web_sys::console::error_1(&format!("prepareMovie FAILED: {}", err.message).into());
         if err.code != ScriptErrorCode::Abort {
             reserve_player_mut(|player| player.on_script_error(&err));
@@ -3139,7 +3128,7 @@ async fn run_movie_init_sequence() {
 
     // Log bPreloadCasts state after prepareMovie
     reserve_player_ref(|player| {
-        let val = player.globals.get("bPreloadCasts");
+        let val = player.globals.get(&Symbol::builtin(BuiltInSymbol::BPreloadCasts));
         let desc = match val {
             Some(r) => format!("{}", player.get_datum(r).type_str()),
             None => "NOT SET".to_string(),
@@ -3210,7 +3199,7 @@ async fn run_movie_init_sequence() {
     });
 
     let begin_sprite_nums = player_dispatch_event_beginsprite(
-        &"beginSprite".to_string(),
+        Symbol::builtin(BuiltInSymbol::BeginSprite),
         &vec![]
     ).await;
 
@@ -3250,7 +3239,7 @@ async fn run_movie_init_sequence() {
     for behavior_ref in &remaining_behaviors {
         let receivers = vec![behavior_ref.clone()];
         let _ = player_invoke_targeted_event(
-            &"beginSprite".to_string(),
+            Symbol::builtin(BuiltInSymbol::BeginSprite),
             &vec![],
             Some(&receivers),
         ).await;
@@ -3285,7 +3274,7 @@ async fn run_movie_init_sequence() {
 
             if still_active {
                 let result =
-                    player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+                    player_call_datum_handler(&actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![]).await;
 
                 if let Err(err) = result {
                     if err.code == ScriptErrorCode::Abort {
@@ -3326,8 +3315,8 @@ async fn run_movie_init_sequence() {
         player.in_prepare_frame = true;
     });
 
-    dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
-    let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
+    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
 
     // Tick W3D #timeMS event registrations (member.registerForEvent).
     // Sits next to prepareFrame so handlers run with the same per-frame
@@ -3356,9 +3345,9 @@ async fn run_movie_init_sequence() {
     });
 
     // startMovie
-    dispatch_system_event_to_timeouts(&"startMovie".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::StartMovie, &vec![]).await;
 
-    if let Err(err) = player_invoke_global_event(&"startMovie".to_string(), &vec![]).await {
+    if let Err(err) = player_invoke_global_event(Symbol::builtin(BuiltInSymbol::StartMovie), &vec![]).await {
         if err.code != ScriptErrorCode::Abort {
             reserve_player_mut(|player| player.on_script_error(&err));
         }
@@ -3372,7 +3361,7 @@ async fn run_movie_init_sequence() {
         player.in_enter_frame = true;
     });
 
-    let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::EnterFrame), &vec![]).await;
 
     reserve_player_mut(|player| {
         player.in_enter_frame = false;
@@ -3381,8 +3370,8 @@ async fn run_movie_init_sequence() {
     player_wait_available().await;
 
     // exitFrame
-    dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
-    let _ = dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::ExitFrame, &vec![]).await;
+    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
 
     player_wait_available().await;
 
@@ -3510,7 +3499,7 @@ extern "C" {
 /// once at the start so handlers that take time don't cause cascading re-fires.
 pub async fn fire_pending_timeouts() {
     let now = testing_shared::now_ms();
-    let pending_timeouts: Vec<(DatumRef, String, String)> = reserve_player_mut(|player| {
+    let pending_timeouts: Vec<(DatumRef, Symbol, String)> = reserve_player_mut(|player| {
         let mut ready = Vec::new();
         for t in player.timeout_manager.timeouts.values_mut() {
             if t.is_scheduled {
@@ -3527,9 +3516,9 @@ pub async fn fire_pending_timeouts() {
         let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name.clone()));
         let args = vec![ref_datum];
         let result = if target_ref != DatumRef::Void {
-            player_call_datum_handler(&target_ref, &handler_name, &args).await
+            player_call_datum_handler(&target_ref, handler_name, &args).await
         } else {
-            player_invoke_global_event(&handler_name, &args).await
+            player_invoke_global_event(Symbol::builtin(BuiltInSymbol::Timeout), &args).await
         };
         if let Err(err) = result {
             if err.code != ScriptErrorCode::HandlerNotFound {
@@ -3638,7 +3627,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     player_wait_available().await;
 
     // Relay exitFrame to timeout targets
-    dispatch_system_event_to_timeouts(&"exitFrame".to_string(), &vec![]).await;
+    dispatch_system_event_to_timeouts(BuiltInSymbol::ExitFrame, &vec![]).await;
 
     let mut stayed_on_same_frame = false;
 
@@ -3651,9 +3640,9 @@ pub async fn run_single_frame() -> (bool, bool) {
         player_wait_available().await;
 
         if has_frame_changed_in_go && go_direction == 1 { // backwards
-            dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+            dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
         } else {
-            if let Err(err) = player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await {
+            if let Err(err) = player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await {
                 if err.code != ScriptErrorCode::Abort {
                     reserve_player_mut(|player| player.on_script_error(&err));
                 }
@@ -3683,7 +3672,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     } else {
         player_wait_available().await;
 
-        dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
+        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
 
         player_wait_available().await;
 
@@ -3827,7 +3816,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     });
 
     let begin_sprite_nums = player_dispatch_event_beginsprite(
-        &"beginSprite".to_string(),
+        Symbol::builtin(BuiltInSymbol::BeginSprite),
         &vec![]
     ).await;
 
@@ -3869,7 +3858,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     for behavior_ref in &remaining_behaviors {
         let receivers = vec![behavior_ref.clone()];
         let _ = player_invoke_event_to_instances(
-            &"beginSprite".to_string(),
+            Symbol::builtin(BuiltInSymbol::BeginSprite),
             &vec![],
             &receivers,
         ).await;
@@ -4076,7 +4065,7 @@ pub async fn player_trigger_error_pause(
     });
     let breakpoint = Breakpoint {
         script_name,
-        handler_name: handler_ref.1.clone(),
+        handler_name: handler_ref.1.to_string(),
         bytecode_index,
     };
     let breakpoint_ctx = BreakpointContext {
@@ -4106,6 +4095,7 @@ pub async fn player_is_playing() -> bool {
 pub(crate) static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
 static mut PLAYER_EVENT_TX: Option<Sender<PlayerVMEvent>> = None;
 pub static mut PLAYER_OPT: Option<DirPlayer> = None;
+// pub static mut PLAYER_NAMES: Option<lasso::Rodeo> = None;
 
 /// Generation counter incremented each time the player is reset (e.g. between
 /// tests). Long-running spawned tasks (frame loop, command loop) capture the
@@ -4116,6 +4106,24 @@ pub fn player_semaphone() -> &'static Mutex<()> {
     static MAP: OnceLock<Mutex<()>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(()))
 }
+
+// pub fn get_name_string(name: &lasso::Spur) -> &'static str {
+//     unsafe {
+//         PLAYER_NAMES
+//             .as_ref()
+//             .unwrap()
+//             .resolve(name)
+//     }
+// }
+
+// pub fn get_name_spur(name: &str) -> lasso::Spur {
+//     unsafe {
+//         PLAYER_NAMES
+//             .as_mut()
+//             .unwrap()
+//             .get_or_intern(name)
+//     }
+// }
 
 pub fn init_player() {
     console_log::init_with_level(log::Level::Error).unwrap_or(());
@@ -4130,8 +4138,10 @@ pub fn init_player() {
         CURL_XTRA_MANAGER_OPT = Some(CurlXtraManager::new());
     }
 
+    init_symbol_table();
     unsafe {
         PLAYER_OPT = Some(DirPlayer::new(tx));
+        // PLAYER_NAMES = Some(lasso::Rodeo::default());
     }
     // let mut player = //PLAYER_LOCK.try_write().unwrap();
     // *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
@@ -4149,7 +4159,7 @@ pub fn init_player() {
 
 fn get_active_static_script_refs<'a>(
     movie: &'a Movie,
-    globals: &'a FxHashMap<&str, &'a Datum>,
+    globals: &'a FxHashMap<Symbol, &'a Datum>,
 ) -> Vec<CastMemberRef> {
     let frame_script = movie.score.get_script_in_frame(movie.current_frame);
     let movie_scripts = movie.cast_manager.get_movie_scripts();
@@ -4202,7 +4212,7 @@ fn get_active_static_script_refs<'a>(
 // }
 
 async fn player_ext_call<'a>(
-    name: String,
+    name: Symbol,
     args: &Vec<DatumRef>,
     scope_ref: ScopeRef,
 ) -> (HandlerExecutionResult, DatumRef) {
@@ -4236,7 +4246,7 @@ async fn player_ext_call<'a>(
             (HandlerExecutionResult::Stop, return_value)
         }
         _ => {
-            let result = player_call_global_handler(&name, args).await;
+            let result = player_call_global_handler(name, args).await;
 
             match result {
                 Ok(result_datum_ref) => {

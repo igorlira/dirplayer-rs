@@ -16,8 +16,8 @@ use wasm_bindgen_futures::JsFuture;
 use crate::{
     director::lingo::datum::{Datum, DatumType, XtraInstanceId},
     player::{
-        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, DatumRef,
-        ScriptError,
+        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref,
+        symbols::symbol::Symbol, DatumRef, ScriptError,
     },
 };
 
@@ -345,7 +345,7 @@ fn set_header_callback(
         player.get_datum(arg).symbol_value()
     })?;
     let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
-    instance.header_callback = Some((target, handler));
+    instance.header_callback = Some((target, handler.to_string()));
     Ok(DatumRef::Void)
 }
 
@@ -360,7 +360,7 @@ fn set_progress_callback(
         player.get_datum(arg).symbol_value()
     })?;
     let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
-    instance.progress_callback = Some((target, handler));
+    instance.progress_callback = Some((target, handler.to_string()));
     Ok(DatumRef::Void)
 }
 
@@ -420,7 +420,7 @@ async fn exec_async(
                 .transpose()?
                 .unwrap_or(0);
             if let Some(handler) = handler.as_ref() {
-                instance.completion_callback = Some((target.clone(), handler.clone()));
+                instance.completion_callback = Some((target.clone(), handler.to_string()));
             }
             Ok::<_, ScriptError>((
                 handler,
@@ -467,7 +467,7 @@ async fn exec_async(
                 _ => vec![status_ref, body_ref, headers_ref],
             }
         });
-        player_dispatch_callback_event(target, &handler, &cb_args);
+        player_dispatch_callback_event(target, Symbol::from_str(&handler), &cb_args);
     }
 
     // Return value of execAsync itself: status code (or libcurl error).

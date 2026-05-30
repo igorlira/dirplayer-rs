@@ -4,7 +4,7 @@ use crate::{
         DirPlayer, ScriptError,
         cast_lib::CastMemberRef,
         cast_member::ButtonType,
-        handlers::datum_handlers::cast_member_ref::borrow_member_mut,
+        handlers::datum_handlers::cast_member_ref::borrow_member_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 
@@ -14,11 +14,11 @@ impl ButtonMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &crate::player::DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<crate::player::DatumRef>,
     ) -> Result<crate::player::DatumRef, ScriptError> {
-        match handler_name {
-            "count" => {
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::Count => {
                 let member_ref = player.get_datum(datum).to_member_ref()?;
                 let member = player
                     .movie
@@ -26,13 +26,13 @@ impl ButtonMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let button = member.member_type.as_button().unwrap();
-                let count_of = player.get_datum(&args[0]).string_value()?;
+                let count_of = player.get_datum(&args[0]).symbol_value()?;
                 use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
                 
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &button.field.text,
-                    count_of.as_str().into(),
+                    count_of.into(),
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -46,7 +46,7 @@ impl ButtonMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -55,26 +55,26 @@ impl ButtonMemberHandlers {
             .unwrap();
         let button = member.member_type.as_button().unwrap();
 
-        match prop {
-            "text" => Ok(Datum::String(button.field.text.to_owned())),
-            "font" => Ok(Datum::String(button.field.font.to_owned())),
-            "fontSize" => Ok(Datum::Int(button.field.font_size as i32)),
-            "fontStyle" => Ok(Datum::String(button.field.font_style.to_owned())),
-            "alignment" => Ok(Datum::String(button.field.alignment.to_owned())),
-            "width" => Ok(Datum::Int(button.field.width as i32)),
-            "height" => Ok(Datum::Int(button.field.height as i32)),
-            "hilite" => Ok(datum_bool(button.hilite)),
-            "buttonType" => Ok(Datum::Symbol(button.button_type.symbol_string().to_string())),
-            "foreColor" => {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Text => Ok(Datum::String(button.field.text.to_owned())),
+            BuiltInSymbol::Font => Ok(Datum::String(button.field.font.to_owned())),
+            BuiltInSymbol::FontSize => Ok(Datum::Int(button.field.font_size as i32)),
+            BuiltInSymbol::FontStyle => Ok(Datum::String(button.field.font_style.to_string())),
+            BuiltInSymbol::Alignment => Ok(Datum::String(button.field.alignment.to_string())),
+            BuiltInSymbol::Width => Ok(Datum::Int(button.field.width as i32)),
+            BuiltInSymbol::Height => Ok(Datum::Int(button.field.height as i32)),
+            BuiltInSymbol::Hilite => Ok(datum_bool(button.hilite)),
+            BuiltInSymbol::ButtonType => Ok(Datum::Symbol(Symbol::builtin(button.button_type.symbol()))),
+            BuiltInSymbol::ForeColor => {
                 match &button.field.fore_color {
                     Some(crate::player::sprite::ColorRef::Rgb(r, _, _)) => Ok(Datum::Int(*r as i32)),
                     Some(crate::player::sprite::ColorRef::PaletteIndex(idx)) => Ok(Datum::Int(*idx as i32)),
                     None => Ok(Datum::Int(255)),
                 }
             }
-            "wordWrap" => Ok(datum_bool(button.field.word_wrap)),
-            "border" => Ok(Datum::Int(button.field.border as i32)),
-            "editable" => Ok(datum_bool(button.field.editable)),
+            BuiltInSymbol::WordWrap => Ok(datum_bool(button.field.word_wrap)),
+            BuiltInSymbol::Border => Ok(Datum::Int(button.field.border as i32)),
+            BuiltInSymbol::Editable => Ok(datum_bool(button.field.editable)),
             _ => Err(ScriptError::new(format!(
                 "Button member doesn't support property {}",
                 prop
@@ -84,11 +84,11 @@ impl ButtonMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "text" => borrow_member_mut(
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Text => borrow_member_mut(
                 member_ref,
                 |_player| value.string_value(),
                 |cast_member, value| {
@@ -96,7 +96,7 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "hilite" => borrow_member_mut(
+            BuiltInSymbol::Hilite => borrow_member_mut(
                 member_ref,
                 |_player| value.bool_value(),
                 |cast_member, value| {
@@ -104,7 +104,7 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "buttonType" => borrow_member_mut(
+            BuiltInSymbol::ButtonType => borrow_member_mut(
                 member_ref,
                 |_player| value.string_value(),
                 |cast_member, value| {
@@ -119,7 +119,7 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "font" => borrow_member_mut(
+            BuiltInSymbol::Font => borrow_member_mut(
                 member_ref,
                 |_player| value.string_value(),
                 |cast_member, value| {
@@ -127,7 +127,7 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontSize" => borrow_member_mut(
+            BuiltInSymbol::FontSize => borrow_member_mut(
                 member_ref,
                 |_player| value.int_value(),
                 |cast_member, value| {
@@ -135,15 +135,15 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "alignment" => borrow_member_mut(
+            BuiltInSymbol::Alignment => borrow_member_mut(
                 member_ref,
                 |_player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_button_mut().unwrap().field.alignment = value?;
+                    cast_member.member_type.as_button_mut().unwrap().field.alignment = Symbol::from_str(&value?).into_builtin_or_error()?;
                     Ok(())
                 },
             ),
-            "width" => borrow_member_mut(
+            BuiltInSymbol::Width => borrow_member_mut(
                 member_ref,
                 |_player| value.int_value(),
                 |cast_member, value| {
@@ -151,7 +151,7 @@ impl ButtonMemberHandlers {
                     Ok(())
                 },
             ),
-            "height" => borrow_member_mut(
+            BuiltInSymbol::Height => borrow_member_mut(
                 member_ref,
                 |_player| value.int_value(),
                 |cast_member, value| {

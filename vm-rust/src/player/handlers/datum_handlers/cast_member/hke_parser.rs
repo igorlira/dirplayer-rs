@@ -11,8 +11,10 @@
 
 use log::debug;
 
+use crate::player::symbols::symbol::Symbol;
+
 pub struct HkeCollisionMesh {
-    pub name: String,
+    pub name: Symbol,
     pub entry_type: u16,
     pub vertices: Vec<[f32; 3]>,
     pub triangles: Vec<[u32; 3]>,
@@ -21,7 +23,7 @@ pub struct HkeCollisionMesh {
 /// Per-body properties parsed from the HKE tail section.
 #[derive(Clone, Debug)]
 pub struct HkeBodyProps {
-    pub name: String,
+    pub name: Symbol,
     pub total_mass: f32,
     pub restitution: Option<f32>,
     pub static_friction: Option<f32>,
@@ -206,7 +208,7 @@ fn parse_mesh_entry(data: &[u8], marker_pos: usize) -> Option<(HkeCollisionMesh,
         pos += ENTRY_SEPARATOR.len();
     }
 
-    Some((HkeCollisionMesh { name, entry_type, vertices, triangles }, pos))
+    Some((HkeCollisionMesh { name: Symbol::from_str(&name), entry_type, vertices, triangles }, pos))
 }
 
 /// Parse the tail section after all collision meshes.
@@ -292,7 +294,7 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
     let payload = &data[*pos..body_end];
 
     let mut body = HkeBodyProps {
-        name,
+        name: Symbol::from_str(&name),
         total_mass: 0.0,
         restitution: try_read_f32_after_token(payload, &RESTITUTION_TOKEN),
         static_friction: try_read_f32_after_token(payload, &STATIC_FRICTION_TOKEN),

@@ -8,10 +8,7 @@ use crate::{
         cast::CastDef, chunks::sound::SoundChunk, enums::{ScriptType, BitmapInfo, SoundInfo},
         file::{read_director_file_bytes, DirectorFile},
         lingo::{datum::Datum, script::ScriptContext},
-    },
-    js_api::JsApi,
-    utils::{get_base_url, get_basename_no_extension, log_i},
-    player::{cast_member::ScriptMember, ci_string::CiString},
+    }, js_api::JsApi, player::{cast_member::ScriptMember, ci_string::CiString, symbols::{builtin::BuiltInSymbol, symbol::Symbol}}, utils::{get_base_url, get_basename_no_extension, log_i}
 };
 
 use super::{
@@ -52,6 +49,7 @@ pub struct CastLib {
     pub lctx: Option<ScriptContext>,
     pub members: FxHashMap<u32, CastMember>,
     pub scripts: FxHashMap<u32, Rc<Script>>,
+    pub name_symbols: Vec<Symbol>,
     pub preload_mode: u16,
     pub capital_x: bool,
     pub dir_version: u16,
@@ -201,19 +199,19 @@ impl CastLib {
 
     pub fn set_prop(
         &mut self,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
         // TODO
-        match prop {
-            "preloadMode" => {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::PreloadMode => {
                 self.preload_mode = value.int_value()? as u16;
             }
-            "name" => {
+            BuiltInSymbol::Name => {
                 self.set_name(value.string_value()?);
             }
-            "fileName" => {
+            BuiltInSymbol::FileName => {
                 self.file_name = value.string_value()?;
             }
             _ => {
@@ -226,10 +224,10 @@ impl CastLib {
         Ok(())
     }
 
-    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match prop {
-            "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
-            "fileName" => {
+    pub fn get_prop(&self, prop: Symbol) -> Result<Datum, ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::PreloadMode => Ok(Datum::Int(self.preload_mode as i32)),
+            BuiltInSymbol::FileName => {
                 // Only return the fileName if the cast is actually loaded.
                 // External casts with preloadMode=0 ("When Needed") have file_name set
                 // in the movie structure but aren't loaded yet. Scripts like PreloadCast
@@ -241,9 +239,9 @@ impl CastLib {
                     Ok(Datum::String(self.file_name.clone()))
                 }
             }
-            "number" => Ok(Datum::Int(self.number as i32)),
-            "name" => Ok(Datum::String(self.name.clone())),
-            "number of castMembers" | "number of members" => {
+            BuiltInSymbol::Number => Ok(Datum::Int(self.number as i32)),
+            BuiltInSymbol::Name => Ok(Datum::String(self.name.clone())),
+            BuiltInSymbol::NumberOfCastMembers | BuiltInSymbol::NumberOfMembers => {
                 // Director semantics: the highest member slot number in use,
                 // not the population count. Casts routinely have gaps, and
                 // Lingo code like `repeat with i = 1 to the number of
@@ -307,6 +305,9 @@ impl CastLib {
         font_table: &HashMap<u16, String>,
     ) {
         self.lctx = cast_def.lctx.clone();
+        self.name_symbols = self.lctx.as_ref()
+            .map(|lctx| lctx.names.iter().map(|n| Symbol::from_str(n)).collect())
+            .unwrap_or_default();
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;
         self.palette_id_offset = cast_def.palette_id_offset;
@@ -340,20 +341,23 @@ impl CastLib {
 
             if let Some(script_def) = script_def {
                 let mut handler_names = Vec::new();
+                let mut handler_names_raw = Vec::new();
                 let mut handler_name_map = FxHashMap::default();
                 for handler in &script_def.handlers {
                     let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-                    handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-                    handler_names.push(handler_name.to_owned());
+                    let handler_name_symbol = Symbol::from_str(handler_name);
+                    handler_name_map.insert(handler_name_symbol, Rc::new(handler.clone()));
+                    handler_names.push(handler_name_symbol);
+                    handler_names_raw.push(handler_name.clone());
                 }
 
                 let property_names = script_def
                     .property_name_ids
                     .iter()
-                    .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+                    .map(|id| Symbol::from_str(&self.lctx.as_ref().unwrap().names[*id as usize]));
                 let mut properties = FxHashMap::default();
                 for name in property_names {
-                    properties.insert(CiString::from(name), DatumRef::Void);
+                    properties.insert(name, DatumRef::Void);
                 }
 
                 let script = Script {
@@ -363,6 +367,7 @@ impl CastLib {
                     script_type: script_member.script_type,
                     handlers: handler_name_map,
                     handler_names,
+                    handler_names_raw,
                     properties: RefCell::new(properties),
                 };
                 // JS Lingo diagnostic: decode and disassemble each XDR-wrapped JSScript
@@ -467,21 +472,24 @@ impl CastLib {
         
         // Build handler map
         let mut handler_names = Vec::new();
+        let mut handler_names_raw = Vec::new();
         let mut handler_name_map = FxHashMap::default();
         for handler in &script_chunk.handlers {
             let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-            handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-            handler_names.push(handler_name.to_owned());
+            let handler_name_symbol = Symbol::from_str(handler_name);
+            handler_name_map.insert(handler_name_symbol, Rc::new(handler.clone()));
+            handler_names.push(handler_name_symbol);
+            handler_names_raw.push(handler_name.clone());
         }
 
         // Build properties
         let property_names = script_chunk
             .property_name_ids
             .iter()
-            .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+            .map(|id| Symbol::from_str(&self.lctx.as_ref().unwrap().names[*id as usize]));
         let mut properties = FxHashMap::default();
         for name in property_names {
-            properties.insert(CiString::from(name), DatumRef::Void);
+            properties.insert(name, DatumRef::Void);
         }
 
         let script = Rc::new(Script {
@@ -491,6 +499,7 @@ impl CastLib {
             script_type: ScriptType::Member,
             handlers: handler_name_map,
             handler_names,
+            handler_names_raw,
             properties: RefCell::new(properties),
         });
         
@@ -501,7 +510,7 @@ impl CastLib {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct CastMemberRef {
     pub cast_lib: i32,
     pub cast_member: i32,
@@ -532,15 +541,16 @@ impl CastMemberRef {
 
 pub async fn player_cast_lib_set_prop(
     cast_lib: u32,
-    prop_name: &str,
+    prop_name: Symbol,
     value: Datum,
 ) -> Result<(), ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let builtin_prop_name = prop_name.into_builtin_or_error()?;
 
     let cast_manager = &mut player.movie.cast_manager;
     let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
 
-    if prop_name == "fileName" {
+    if builtin_prop_name == BuiltInSymbol::FileName {
         log_i(
             format_args!(
                 "Setting fileName of castLib {} ('{}') to '{}'",
@@ -553,8 +563,8 @@ pub async fn player_cast_lib_set_prop(
         );
     }
 
-    cast_lib_obj.set_prop(&prop_name, value, &player.allocator)?;
-    if prop_name == "fileName" {
+    cast_lib_obj.set_prop(prop_name, value, &player.allocator)?;
+    if builtin_prop_name == BuiltInSymbol::FileName {
         cast_lib_obj
             .preload(
                 &mut player.net_manager,

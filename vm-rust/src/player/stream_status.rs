@@ -2,6 +2,8 @@ use crate::director::lingo::datum::Datum;
 use crate::player::events::{player_invoke_global_event, player_wait_available};
 use crate::player::net_task::StreamStatusPhase;
 use crate::player::reserve_player_mut;
+use crate::player::symbols::builtin::BuiltInSymbol;
+use crate::player::symbols::symbol::Symbol;
 
 struct StreamEvent {
     url: String,
@@ -106,7 +108,7 @@ pub async fn dispatch_pending_stream_status() {
             let error_datum = player.alloc_datum(Datum::Int(event.error));
             vec![url_datum, state_datum, bytes_so_far_datum, bytes_total_datum, error_datum]
         });
-        let _ = player_invoke_global_event(&"streamStatus".to_string(), &args).await;
+        let _ = player_invoke_global_event(Symbol::builtin(BuiltInSymbol::StreamStatus), &args).await;
         player_wait_available().await;
     }
 }

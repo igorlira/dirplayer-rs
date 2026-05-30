@@ -8,6 +8,7 @@ use web_sys::WebGlTexture;
 
 use crate::player::cast_lib::CastMemberRef;
 use crate::player::sprite::ColorRef;
+use crate::player::symbols::builtin::BuiltInSymbol;
 
 /// Cache key that includes member reference, ink mode, and colorize parameters
 /// Different ink modes may need different textures because the matte mask computation
@@ -262,7 +263,7 @@ impl RenderedTextCacheKey {
             false,
             width,
             height,
-            "left",
+            BuiltInSymbol::Left,
             false,
             "",
             0,
@@ -286,7 +287,7 @@ impl RenderedTextCacheKey {
         caret_blink_on: bool,
         width: u32,
         height: u32,
-        alignment: &str,
+        alignment: BuiltInSymbol,
         word_wrap: bool,
         font_name: &str,
         font_size: u16,
@@ -333,7 +334,7 @@ impl RenderedTextCacheKey {
         caret_blink_on: bool,
         width: u32,
         height: u32,
-        alignment: &str,
+        alignment: BuiltInSymbol,
         word_wrap: bool,
         font_name: &str,
         font_size: u16,
@@ -370,8 +371,7 @@ impl RenderedTextCacheKey {
         // Hash alignment, word_wrap, and font settings
         let mut settings_hasher = DefaultHasher::new();
         font_name.hash(&mut settings_hasher);
-        let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
-        alignment_key.hash(&mut settings_hasher);
+        alignment.hash(&mut settings_hasher);
         word_wrap.hash(&mut settings_hasher);
         font_name.hash(&mut settings_hasher);
         font_size.hash(&mut settings_hasher);

@@ -1,8 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        cast_lib::CastMemberRef, reserve_player_mut, DatumRef, ScriptError,
-        ScriptErrorCode,
+        DatumRef, ScriptError, ScriptErrorCode, cast_lib::CastMemberRef, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -11,13 +10,13 @@ pub struct CastLibDatumHandlers {}
 impl CastLibDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "getPropRef" | "getProp" => Self::get_prop_ref(datum, args),
-            "count" => Self::count(datum, args),
-            "findEmpty" => Self::find_empty(datum, args),
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::GetPropRef | BuiltInSymbol::GetProp => Self::get_prop_ref(datum, args),
+            BuiltInSymbol::Count => Self::count(datum, args),
+            BuiltInSymbol::FindEmpty => Self::find_empty(datum, args),
             _ => Err(ScriptError::new_code(
                 ScriptErrorCode::HandlerNotFound,
                 format!("No handler {handler_name} for castLib datum"),
@@ -70,8 +69,8 @@ impl CastLibDatumHandlers {
 
             let prop_name = player.get_datum(&args[0]).symbol_value()?;
 
-            match prop_name.to_lowercase().as_str() {
-                "member" => {
+            match prop_name.into_builtin_or_error()? {
+                BuiltInSymbol::Member => {
                     if args.len() < 2 {
                         return Err(ScriptError::new(
                             "getPropRef(#member, ...) requires a member name or number".to_string(),

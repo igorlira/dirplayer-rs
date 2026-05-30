@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError},
+    player::{symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct SymbolDatumHandlers {}
@@ -9,23 +9,21 @@ impl SymbolDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for symbol"
-            ))),
-        }
+        Err(ScriptError::new(format!(
+            "No handler {handler_name} for symbol"
+        )))
     }
 
     pub fn get_prop(
         player: &mut DirPlayer,
         _: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop {
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol("symbol".to_string()))),
+        match prop.as_str() {
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("symbol")))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get symbol property {}",
                 prop

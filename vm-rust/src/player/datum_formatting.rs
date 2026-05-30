@@ -203,7 +203,7 @@ pub fn datum_to_string_for_concat(datum: &Datum, player: &DirPlayer) -> String {
     match datum {
         Datum::String(s) => s.clone(),
         
-        Datum::Symbol(s) => s.clone(),
+        Datum::Symbol(s) => s.as_str().to_string(),
         
         // Void/Null become empty string in concatenation
         Datum::Void | Datum::Null => String::new(),

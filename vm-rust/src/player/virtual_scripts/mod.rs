@@ -9,6 +9,7 @@ use fxhash::FxHashMap;
 use crate::director::chunks::script::ScriptChunk;
 use crate::director::enums::ScriptType;
 use crate::director::lingo::datum::Datum;
+use crate::player::symbols::symbol::Symbol;
 
 use super::allocator::ScriptInstanceAllocatorTrait;
 use super::cast_lib::{cast_member_ref, CastMemberRef};
@@ -36,12 +37,12 @@ pub trait VirtualScriptHandler {
     /// Check if this virtual script handles the given handler name.
     /// Used by `has_async_handler` checks to avoid claiming support for
     /// handler names the virtual script doesn't actually implement.
-    fn has_handler(&self, _name: &str) -> bool {
+    fn has_handler(&self, _name: Symbol) -> bool {
         true
     }
 
     /// Property names for new virtual scripts (used when creating instances without lctx).
-    fn get_property_names(&self) -> Vec<String> {
+    fn get_property_names(&self) -> Vec<Symbol> {
         vec![]
     }
 
@@ -53,7 +54,7 @@ pub trait VirtualScriptHandler {
         &self,
         _player: &mut DirPlayer,
         _instance: Option<&ScriptInstanceRef>,
-        _name: &str,
+        _name: Symbol,
         _args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
         Ok(None)
@@ -64,7 +65,7 @@ pub trait VirtualScriptHandler {
         &self,
         _player: &mut DirPlayer,
         _instance: &ScriptInstanceRef,
-        _name: &str,
+        _name: Symbol,
     ) -> Result<Option<DatumRef>, ScriptError> {
         Ok(None)
     }
@@ -74,7 +75,7 @@ pub trait VirtualScriptHandler {
         &self,
         _player: &mut DirPlayer,
         _instance: &ScriptInstanceRef,
-        _name: &str,
+        _name: Symbol,
         _value: &DatumRef,
     ) -> Result<Option<()>, ScriptError> {
         Ok(None)
@@ -121,6 +122,7 @@ impl VirtualScriptRegistry {
             script_type,
             handlers: FxHashMap::default(),
             handler_names: vec![],
+            handler_names_raw: vec![],
             properties: RefCell::new(FxHashMap::default()),
         };
 
@@ -182,7 +184,7 @@ impl VirtualScriptRegistry {
         let mut properties = FxHashMap::default();
         if let Some(vh) = player.virtual_scripts.get(script_ref) {
             for prop_name in vh.get_property_names() {
-                properties.insert(CiString::from(prop_name), DatumRef::Void);
+                properties.insert(prop_name, DatumRef::Void);
             }
         }
         let instance = ScriptInstance {
@@ -205,7 +207,7 @@ impl VirtualScriptRegistry {
     pub fn has_script_handler(
         player: &DirPlayer,
         script_ref: &CastMemberRef,
-        name: &str,
+        name: Symbol,
     ) -> bool {
         player
             .virtual_scripts
@@ -218,7 +220,7 @@ impl VirtualScriptRegistry {
     pub fn has_instance_handler(
         player: &DirPlayer,
         instance_ref: &ScriptInstanceRef,
-        name: &str,
+        name: Symbol,
     ) -> bool {
         let script_ref = &player.allocator.get_script_instance(instance_ref).script;
         Self::has_script_handler(player, script_ref, name)
@@ -235,7 +237,7 @@ impl VirtualScriptRegistry {
         player: &mut DirPlayer,
         script_ref: &CastMemberRef,
         instance: Option<&ScriptInstanceRef>,
-        name: &str,
+        name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
         if let Some(vh) = player.virtual_scripts.get(script_ref).cloned() {
@@ -250,7 +252,7 @@ impl VirtualScriptRegistry {
     pub fn try_call_instance_handler(
         player: &mut DirPlayer,
         instance_ref: &ScriptInstanceRef,
-        name: &str,
+        name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
         let script_ref = player
@@ -265,7 +267,7 @@ impl VirtualScriptRegistry {
     pub fn try_get_instance_prop(
         player: &mut DirPlayer,
         instance_ref: &ScriptInstanceRef,
-        name: &str,
+        name: Symbol,
     ) -> Result<Option<DatumRef>, ScriptError> {
         let script_ref = player
             .allocator
@@ -283,7 +285,7 @@ impl VirtualScriptRegistry {
     pub fn try_set_instance_prop(
         player: &mut DirPlayer,
         instance_ref: &ScriptInstanceRef,
-        name: &str,
+        name: Symbol,
         value: &DatumRef,
     ) -> Result<Option<()>, ScriptError> {
         let script_ref = player
@@ -303,7 +305,7 @@ impl VirtualScriptRegistry {
     /// are eligible, matching Director's semantics.
     pub fn try_call_any_global_handler(
         player: &mut DirPlayer,
-        name: &str,
+        name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
         let handlers: Vec<_> = player.virtual_scripts.values().cloned().collect();
@@ -321,5 +323,5 @@ impl VirtualScriptRegistry {
 
 /// Register all built-in virtual scripts.
 pub fn register_virtual_scripts(player: &mut DirPlayer) {
-    VirtualScriptRegistry::register(player, "JavaScriptProxy", Rc::new(javascript_proxy::JavascriptProxy));
+    // VirtualScriptRegistry::register(player, "JavaScriptProxy", Rc::new(javascript_proxy::JavascriptProxy));
 }

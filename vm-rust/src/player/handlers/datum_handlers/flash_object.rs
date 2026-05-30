@@ -3,10 +3,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, FlashObjectRef},
     player::{
-        handlers::datum_handlers::date::DateObject,
-        reserve_player_mut,
-        DatumRef,
-        ScriptError,
+        DatumRef, ScriptError, handlers::datum_handlers::date::DateObject, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     }
 };
 use wasm_bindgen::prelude::*;
@@ -116,7 +113,7 @@ impl FlashObjectDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -146,7 +143,7 @@ impl FlashObjectDatumHandlers {
             match ruffle_call_function_global(sprite_num, &method_path, &args_str) {
                 Ok(result) => {
                     // Special handling for getGatewayConnection
-                    if handler_name == "getGatewayConnection" {
+                    if handler_name == BuiltInSymbol::GetGatewayConnection {
                         let gateway_ref = FlashObjectRef::from_path_with_member("_level0.oGatewayConnection", flash_ref.cast_lib, flash_ref.cast_member);
                         return Ok(player.alloc_datum(Datum::FlashObjectRef(gateway_ref)));
                     }
@@ -165,7 +162,7 @@ impl FlashObjectDatumHandlers {
 
     pub fn set_prop(
         datum: &DatumRef,
-        prop_name: &str,
+        prop_name: Symbol,
         value: &Datum,
     ) -> Result<(), ScriptError> {
         reserve_player_mut(|player| {

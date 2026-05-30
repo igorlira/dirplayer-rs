@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        reserve_player_mut, reserve_player_ref, timeout::Timeout, DatumRef, DirPlayer, ScriptError,
+        DatumRef, DirPlayer, ScriptError, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol}, timeout::Timeout
     },
 };
 
@@ -11,12 +11,12 @@ impl TimeoutDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "forget" => Self::forget(datum, args),
-            "setAt" => Self::set_at(datum, args),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Forget) => Self::forget(datum, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for timeout"
             ))),
@@ -27,9 +27,9 @@ impl TimeoutDatumHandlers {
         // TimeoutInstance needs to support setAt for #ancestor to work with Object Manager
         // We silently ignore ancestor setting since timeouts don't use ancestor chains
         reserve_player_ref(|player| {
-            let key = player.get_datum(&args[0]).string_value()?;
-            match key.as_str() {
-                "ancestor" => {
+            let key = player.get_datum(&args[0]).symbol_value()?;
+            match key.into_builtin() {
+                Some(BuiltInSymbol::Ancestor) => {
                     // Silently accept but ignore - timeouts don't use ancestor chains
                     Ok(DatumRef::Void)
                 }
@@ -40,21 +40,18 @@ impl TimeoutDatumHandlers {
         })
     }
 
-    pub fn has_async_handler(name: &str) -> bool {
-        match name {
-            "new" => true,
-            _ => false,
-        }
+    pub fn has_async_handler(name: Symbol) -> bool {
+        matches!(name.into_builtin(), Some(BuiltInSymbol::New))
     }
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "new" => Self::new(datum, args).await,
-            "forget" => Self::forget_async(datum).await,
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::New) => Self::new(datum, args).await,
+            Some(BuiltInSymbol::Forget) => Self::forget_async(datum).await,
             _ => Err(ScriptError::new(format!(
                 "No async handler {handler_name} for timeout"
             ))),
@@ -181,8 +178,8 @@ impl TimeoutDatumHandlers {
 
         let timeout_handler = reserve_player_ref(|player| {
             match player.get_datum(&args[handler_arg]) {
-                Datum::String(s) => Ok(s.clone()),
-                Datum::Symbol(s) => Ok(s.clone()),
+                Datum::String(s) => Ok(Symbol::from_str(s)),
+                Datum::Symbol(s) => Ok(*s),
                 _ => Err(ScriptError::new(
                     "Timeout handler must be a string or symbol".to_string(),
                 )),
@@ -243,10 +240,10 @@ impl TimeoutDatumHandlers {
         if let Some(script_instance_ref) = script_instance_ref {
             // Call the script's destroy() handler to remove it from actorList
             use super::script_instance::ScriptInstanceDatumHandlers;
-            if ScriptInstanceDatumHandlers::has_async_handler(&script_instance_ref, &"destroy".to_string())? {
+            if ScriptInstanceDatumHandlers::has_async_handler(&script_instance_ref, Symbol::builtin(BuiltInSymbol::Destroy))? {
                 let _ = ScriptInstanceDatumHandlers::call_async(
                     &script_instance_ref,
-                    &"destroy".to_string(),
+                    Symbol::builtin(BuiltInSymbol::Destroy),
                     &vec![],
                 ).await;
             }
@@ -287,13 +284,13 @@ impl TimeoutDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let timeout_datum = player.get_datum(datum);
         match timeout_datum {
             Datum::TimeoutRef(timeout_name) => {
                 let timeout = player.timeout_manager.get_timeout(timeout_name);
-                match prop {
+                match prop.as_str() {
                     "name" => Ok(player.alloc_datum(Datum::String(timeout_name.to_owned()))),
                     "target" => Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone())),
                     _ => Err(ScriptError::new(format!(
@@ -303,7 +300,7 @@ impl TimeoutDatumHandlers {
                 }
             }
             Datum::TimeoutInstance { name, target, .. } => {
-                match prop {
+                match prop.as_str() {
                     "name" => Ok(player.alloc_datum(Datum::String(name.to_owned()))),
                     "target" => Ok(target.clone()),
                     _ => Err(ScriptError::new(format!(
@@ -321,7 +318,7 @@ impl TimeoutDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let timeout_datum = player.get_datum(datum);
@@ -334,8 +331,8 @@ impl TimeoutDatumHandlers {
         };
         
         let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
-        match prop {
-            "target" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Target) => {
                 let new_target = value;
                 if let Some(timeout) = timeout {
                     timeout.target_ref = new_target.clone();
@@ -348,7 +345,7 @@ impl TimeoutDatumHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set timeout property {}",
-                prop
+                prop.to_string()
             ))),
         }
     }

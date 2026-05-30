@@ -1,6 +1,6 @@
 use crate::{
-    director::lingo::datum::{datum_bool, Datum},
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    director::lingo::datum::{Datum, datum_bool},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::symbol::Symbol},
 };
 
 pub struct PointDatumHandlers {}
@@ -9,10 +9,10 @@ impl PointDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
+        match handler_name.as_str() {
             "getAt" => Self::get_at(datum, args),
             "setAt" => Self::set_at(datum, args),
             "inside" => Self::inside(datum, args),
@@ -86,14 +86,14 @@ impl PointDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         let (vals, flags) = player.get_datum(datum).to_point_inline()?;
 
-        match prop {
+        match prop.as_str() {
             "locH" => Ok(Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(flags, 0))),
             "locV" => Ok(Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(flags, 1))),
-            "ilk"  => Ok(Datum::Symbol("point".to_string())),
+            "ilk"  => Ok(Datum::Symbol(Symbol::from_str("point"))),
             _ => Err(ScriptError::new(format!("Cannot get point property {}", prop))),
         }
     }
@@ -101,13 +101,13 @@ impl PointDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         let new_val = player.get_datum(value_ref).clone();
         let (val, is_float) = Datum::datum_to_inline_component(&new_val)?;
 
-        let idx = match prop {
+        let idx = match prop.as_str() {
             "locH" => 0usize,
             "locV" => 1usize,
             _ => return Err(ScriptError::new(format!("Cannot set point property {}", prop))),
