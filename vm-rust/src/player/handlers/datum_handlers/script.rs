@@ -1,25 +1,19 @@
 use std::collections::VecDeque;
 use log::error;
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     player::{
-        allocator::ScriptInstanceAllocatorTrait,
-        cast_lib::CastMemberRef,
-        player_call_script_handler, player_handle_scope_return, reserve_player_mut,
-        reserve_player_ref,
-        script::{get_lctx_for_script, ScriptInstance},
-        script_ref::ScriptInstanceRef,
-        DatumRef, ScriptError, ScriptErrorCode,
+        DatumRef, ScriptError, ScriptErrorCode, allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{ScriptInstance, get_lctx_for_script}, script_ref::ScriptInstanceRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 pub struct ScriptDatumHandlers {}
 
 impl ScriptDatumHandlers {
-    pub fn has_async_handler(obj_ref: &DatumRef, name: &str) -> bool {
-        match name {
-            "new" => true,
-            "rawNew" => false,
-            "handler" => false,
+    pub fn has_async_handler(obj_ref: &DatumRef, name: Symbol) -> bool {
+        match name.into_builtin() {
+            Some(BuiltInSymbol::New) => true,
+            Some(BuiltInSymbol::RawNew) => false,
+            Some(BuiltInSymbol::Handler) => false,
             _ => {
                 reserve_player_ref(|player| {
                     if let Datum::ScriptRef(script_ref) = player.get_datum(obj_ref) {
@@ -42,12 +36,12 @@ impl ScriptDatumHandlers {
 
     pub async fn call_async(
         obj_ref: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "new" => Self::new(obj_ref, args).await,
-            "rawNew" => Self::raw_new(obj_ref),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::New) => Self::new(obj_ref, args).await,
+            Some(BuiltInSymbol::RawNew) => Self::raw_new(obj_ref),
             _ => {
                 // Try to call a handler defined in the script itself
                 let handler_ref = reserve_player_ref(|player| {
@@ -100,13 +94,13 @@ impl ScriptDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "rawNew" => Self::raw_new(datum),
-            "handler" => Self::handler(datum, args),
-            "handlers" => Self::handlers(datum, args),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::RawNew) => Self::raw_new(datum),
+            Some(BuiltInSymbol::Handler) => Self::handler(datum, args),
+            Some(BuiltInSymbol::Handlers) => Self::handlers(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for script datum"
             ))),
@@ -139,7 +133,7 @@ impl ScriptDatumHandlers {
 
     pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let name = player.get_datum(&args[0]).string_value()?;
+            let name = player.get_datum(&args[0]).symbol_value()?;
             let script_ref = match player.get_datum(datum) {
                 Datum::ScriptRef(script_ref) => script_ref,
                 _ => {
@@ -153,7 +147,7 @@ impl ScriptDatumHandlers {
                 .cast_manager
                 .get_script_by_ref(script_ref)
                 .unwrap();
-            let own_handler = script.get_own_handler(&name);
+            let own_handler = script.get_own_handler(name);
             Ok(player.alloc_datum(datum_bool(own_handler.is_some())))
         })
     }
@@ -225,10 +219,10 @@ impl ScriptDatumHandlers {
                     .cast_manager
                     .get_script_by_ref(&script_ref)
                     .unwrap();
-                let new_handler_ref = script.get_own_handler_ref(&"new".to_string());
+                let new_handler_ref = script.get_own_handler_ref(BuiltInSymbol::New.into());
 
                 let param_count = if let Some(_) = &new_handler_ref {
-                    let handler_def = script.get_own_handler(&"new".to_string()).unwrap();
+                    let handler_def = script.get_own_handler(BuiltInSymbol::New.into()).unwrap();
                     handler_def.argument_name_ids.len()
                 } else {
                     0
@@ -242,7 +236,7 @@ impl ScriptDatumHandlers {
             })?;
 
         let virtual_new_result = reserve_player_mut(|player| {
-            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), "new", args)
+            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), BuiltInSymbol::New.into(), args)
         });
         match virtual_new_result {
             Ok(Some(_)) => return Ok(datum_ref),

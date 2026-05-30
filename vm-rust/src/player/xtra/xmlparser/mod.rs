@@ -4,7 +4,7 @@ use xml::reader::{EventReader, XmlEvent};
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{reserve_player_mut, DatumRef, ScriptError},
+    player::{DatumRef, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 /// Represents a parsed XML node
@@ -114,29 +114,29 @@ impl XmlParserXtraInstance {
     fn node_to_prop_list(node: &XmlNode) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             // Create #name property
-            let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+            let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
             let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
             // Create #attributes property list and #attributeName/#attributeValue lists
-            let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
+            let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
             let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
             let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
             let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
             for (attr_name, attr_value) in &node.attributes {
-                let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
+                let attr_key = player.alloc_datum(Datum::Symbol(Symbol::from_str(attr_name)));
                 let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
                 attr_pairs.push_back((attr_key, attr_val));
                 attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
                 attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
             }
             let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
-            let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
+            let attr_name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
             let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
-            let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
+            let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeValue)));
             let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
 
             // Create #child list and collect #charData
-            let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
+            let child_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
             let mut children_refs: VecDeque<DatumRef> = VecDeque::new();
             let mut char_data = String::new();
 
@@ -159,7 +159,7 @@ impl XmlParserXtraInstance {
             let children_value =
                 player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-            let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+            let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
             let chardata_value = player.alloc_datum(Datum::String(char_data));
 
             let prop_list = Datum::PropList(
@@ -184,29 +184,29 @@ impl XmlParserXtraInstance {
         node: &XmlNode,
     ) -> Result<DatumRef, ScriptError> {
         // Create #name property
-        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+        let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
         let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
         // Create #attributes property list and #attributeName/#attributeValue lists
-        let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
+        let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
         let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
         let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
         let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
         for (attr_name, attr_value) in &node.attributes {
-            let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
+            let attr_key = player.alloc_datum(Datum::Symbol(Symbol::from_str(attr_name)));
             let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
             attr_pairs.push_back((attr_key, attr_val));
             attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
             attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
         }
         let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
-        let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
+        let attr_name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
         let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
-        let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
+        let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeValue)));
         let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
 
         // Create #child list and collect #charData
-        let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
+        let child_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
         let mut children_refs: VecDeque<DatumRef> = VecDeque::new();
         let mut char_data = String::new();
 
@@ -229,7 +229,7 @@ impl XmlParserXtraInstance {
         let children_value =
             player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-        let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+        let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
         let chardata_value = player.alloc_datum(Datum::String(char_data));
 
         let prop_list = Datum::PropList(
@@ -261,19 +261,19 @@ impl XmlParserXtraInstance {
         player: &mut crate::player::DirPlayer,
         text: &str,
     ) -> DatumRef {
-        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+        let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
         let name_value = player.alloc_datum(Datum::String(String::new()));
 
-        let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
+        let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
         let attributes_value = player.alloc_datum(Datum::PropList(VecDeque::new(), false));
 
-        let chardata_key = player.alloc_datum(Datum::Symbol("charData".to_string()));
+        let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
         let chardata_value = player.alloc_datum(Datum::String(text.to_string()));
 
-        let text_key = player.alloc_datum(Datum::Symbol("text".to_string()));
+        let text_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Text)));
         let text_value = player.alloc_datum(Datum::String(text.to_string()));
 
-        let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
+        let child_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
         let child_value =
             player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
 
@@ -402,14 +402,14 @@ impl XmlParserXtraManager {
                     if let Some(arg) = args.get(0) {
                         player.get_datum(arg).symbol_value()
                     } else {
-                        Ok("child".to_string()) // Default to child count
+                        Ok(Symbol::builtin(BuiltInSymbol::Child)) // Default to child count
                     }
                 })?;
 
                 if let Some(ref _root) = instance.parsed_root {
-                    let count = match prop_name.to_lowercase().as_str() {
-                        "child" | "children" => 1, // The parser object has one child: the root element
-                        "attribute" | "attributes" => 0, // Parser object has no attributes
+                    let count = match prop_name.into_builtin_or_error()? {
+                        BuiltInSymbol::Child | BuiltInSymbol::Children => 1, // The parser object has one child: the root element
+                        BuiltInSymbol::Attribute | BuiltInSymbol::Attributes => 0, // Parser object has no attributes
                         _ => 0,
                     };
                     reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(count))))
@@ -528,8 +528,8 @@ impl XmlParserXtraManager {
                 })?;
 
                 if let Some(ref root) = instance.parsed_root {
-                    match prop_name.to_lowercase().as_str() {
-                        "child" | "children" => {
+                    match prop_name.into_builtin_or_error()? {
+                        BuiltInSymbol::Child | BuiltInSymbol::Children => {
                             // The parser object has one child: the root element (index 1)
                             if index == 1 {
                                 XmlParserXtraInstance::node_to_prop_list(root)
@@ -537,7 +537,7 @@ impl XmlParserXtraManager {
                                 Ok(DatumRef::Void)
                             }
                         }
-                        "attribute" | "attributes" => {
+                        BuiltInSymbol::Attribute | BuiltInSymbol::Attributes => {
                             let idx = (index - 1) as usize;
                             if idx < root.attributes.len() {
                                 reserve_player_mut(|player| {

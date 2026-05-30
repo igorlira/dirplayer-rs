@@ -1,7 +1,7 @@
 //! Native Havok physics engine — complete port from C# reference implementation.
 //! Reverse-engineered from PPC/x86 decompilation of Havok Xtra 10.1.
 
-use crate::player::cast_member::HavokPhysicsState;
+use crate::player::{cast_member::HavokPhysicsState, symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
 
 // ============================================================
 // TYPE ALIASES
@@ -416,7 +416,7 @@ pub fn compute_polyhedron_unit_inertia(
 // Collision mesh
 // ============================================================
 pub struct CollisionMesh {
-    pub name: String,
+    pub name: Symbol,
     pub vertices: Vec<V3>,
     pub triangles: Vec<[u32; 3]>,
     pub aabb_min: V3,
@@ -900,8 +900,8 @@ fn apply_springs(state: &mut HavokPhysicsState, _dt: f64) {
         let on_compression = spring.on_compression;
         let on_extension = spring.on_extension;
 
-        let idx_a = match find_body_idx(state, &rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n));
+        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
 
         // Transform points to world space
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
@@ -967,8 +967,8 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
         let strength = dashpot.strength;
         let damping_coeff = dashpot.damping;
 
-        let idx_a = match find_body_idx(state, &rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n));
+        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
 
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
         let (world_b, vel_b) = if let Some(ib) = idx_b {
@@ -1029,8 +1029,8 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
         let strength = dashpot.strength;
         let damping_coeff = dashpot.damping;
 
-        let idx_a = match find_body_idx(state, &rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n));
+        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
 
         // Target quaternion from axis-angle degrees
         let target_quat = quat_from_axis_angle_degrees(target_axis, target_angle);
@@ -1148,8 +1148,8 @@ fn restore_body_state(rb: &mut crate::player::cast_member::HavokRigidBody) {
 // Helpers
 // ============================================================
 
-fn find_body_idx(state: &HavokPhysicsState, name: &str) -> Option<usize> {
-    state.rigid_bodies.iter().position(|rb| rb.name.eq_ignore_ascii_case(name))
+fn find_body_idx(state: &HavokPhysicsState, name: Symbol) -> Option<usize> {
+    state.rigid_bodies.iter().position(|rb| rb.name == name)
 }
 
 /// Transform a body-local point to world space.
@@ -1376,7 +1376,7 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                 for c in &contacts {
                     let body_a_name = state.rigid_bodies[c.body_a].name.clone();
                     let body_b_name = c.body_b.map(|i| state.rigid_bodies[i].name.clone())
-                        .unwrap_or_else(|| "ground".to_string());
+                        .unwrap_or_else(|| BuiltInSymbol::Ground.into());
                     state.collision_list_cache.push(crate::player::cast_member::HavokCollisionInfo {
                         body_a: body_a_name,
                         body_b: body_b_name,

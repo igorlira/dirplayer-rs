@@ -475,7 +475,7 @@ pub fn extrude_alpha_mask_to_mesh(
     }
 
     super::types::ClodDecodedMesh {
-        name: "Text".to_string(),
+        name: crate::player::symbols::symbol::Symbol::from_str("Text"),
         positions,
         normals,
         tex_coords: vec![tex_coords],
@@ -639,7 +639,7 @@ pub fn extrude_text_to_mesh(
     }
 
     super::types::ClodDecodedMesh {
-        name: "Text".to_string(),
+        name: crate::player::symbols::symbol::Symbol::from_str("Text"),
         positions: all_positions,
         normals: all_normals,
         tex_coords: Vec::new(),

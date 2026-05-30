@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -425,14 +425,14 @@ pub struct XmlDatumHandlers {}
 impl XmlDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "parseXML" => Self::parse_xml(datum, args),
-            "createElement" => Self::create_element(datum, args),
-            "appendChild" => Self::append_child(datum, args),
-            "toString" => Self::to_string(datum, args),
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::ParseXML => Self::parse_xml(datum, args),
+            BuiltInSymbol::CreateElement => Self::create_element(datum, args),
+            BuiltInSymbol::AppendChild => Self::append_child(datum, args),
+            BuiltInSymbol::ToString => Self::to_string(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for XML object"
             ))),
@@ -442,7 +442,7 @@ impl XmlDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let xml_id = match player.get_datum(datum) {
             Datum::XmlRef(id) => *id,
@@ -458,7 +458,7 @@ impl XmlDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let xml_id = match player.get_datum(datum) {
@@ -598,7 +598,7 @@ impl XmlDatumHandlers {
             // Get the element name from arguments
             let element_name = match player.get_datum(&args[0]) {
                 Datum::String(s) => s.clone(),
-                Datum::Symbol(s) => s.clone(),
+                Datum::Symbol(s) => s.to_string(),
                 _ => {
                     return Err(ScriptError::new(
                         "createElement requires string element name".to_string(),
@@ -861,10 +861,10 @@ impl XmlDatumHandlers {
     fn get_xml_property(
         player: &mut DirPlayer,
         xml_id: u32,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop {
-            "firstChild" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::FirstChild) => {
                 // Check if it's a document
                 if let Some(doc) = player.xml_documents.get(&xml_id) {
                     if let Some(root_id) = doc.root_element {
@@ -907,7 +907,7 @@ impl XmlDatumHandlers {
 
                 Ok(player.alloc_datum(Datum::Void))
             }
-            "lastChild" => {
+            Some(BuiltInSymbol::LastChild) => {
                 if let Some(node) = player.xml_nodes.get(&xml_id) {
                     let children = XmlHelper::get_node_children(player, xml_id);
                     if let Some(last_child) = children.last() {
@@ -916,7 +916,7 @@ impl XmlDatumHandlers {
                 }
                 Ok(player.alloc_datum(Datum::Void))
             }
-            // "childNodes" => {
+            // Some(BuiltInSymbol::ChildNodes) => {
             //     // If this is a document, return a list containing just the root element
             //     if let Some(doc) = player.xml_documents.get(&xml_id) {
             //         if let Some(root_id) = doc.root_element {
@@ -945,7 +945,7 @@ impl XmlDatumHandlers {
             //         false
             //     )))
             // },
-            "childNodes" => {
+            Some(BuiltInSymbol::ChildNodes) => {
                 // If this is a document, return a list containing just the root element
                 if let Some(doc) = player.xml_documents.get(&xml_id) {
                     if let Some(root_id) = doc.root_element {
@@ -980,14 +980,14 @@ impl XmlDatumHandlers {
                     false,
                 )))
             }
-            "nodeName" => {
+            Some(BuiltInSymbol::NodeName) => {
                 if let Some(node) = player.xml_nodes.get(&xml_id) {
                     Ok(player.alloc_datum(Datum::String(Self::clean_node_name(&node.name))))
                 } else {
                     Ok(player.alloc_datum(Datum::String("#document".to_string())))
                 }
             }
-            "nodeValue" => {
+            Some(BuiltInSymbol::NodeValue) => {
                 if let Some(node) = player.xml_nodes.get(&xml_id) {
                     if let Some(value) = &node.value {
                         Ok(player.alloc_datum(Datum::String(value.clone())))
@@ -998,11 +998,11 @@ impl XmlDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 }
             }
-            "attributes" => {
+            Some(BuiltInSymbol::Attributes) => {
                 let attr_id = xml_id + 10000;
                 Ok(player.alloc_datum(Datum::XmlRef(attr_id)))
             }
-            "ignoreWhite" => {
+            Some(BuiltInSymbol::IgnoreWhite) => {
                 let ignore = player
                     .xml_documents
                     .get(&xml_id)
@@ -1010,13 +1010,13 @@ impl XmlDatumHandlers {
                     .unwrap_or(false);
                 Ok(player.alloc_datum(Datum::Int(if ignore { 1 } else { 0 })))
             }
-            attr_name if xml_id > 10000 => {
+            Some(attr_name) if xml_id > 10000 => {
                 let node_id = xml_id - 10000;
 
                 if let Some(node) = player.xml_nodes.get(&node_id) {
                     let value = node
                         .attributes
-                        .get(&attr_name.to_lowercase())
+                        .get(&prop.as_str().to_lowercase())
                         .cloned()
                         .unwrap_or_default();
                     Ok(player.alloc_datum(Datum::String(value)))
@@ -1036,18 +1036,18 @@ impl XmlDatumHandlers {
     fn set_xml_property(
         player: &mut DirPlayer,
         xml_id: u32,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "ignoreWhite" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::IgnoreWhite) => {
                 let ignore_value = player.get_datum(value).int_value()? != 0;
                 if let Some(doc) = player.xml_documents.get_mut(&xml_id) {
                     doc.ignore_white = ignore_value;
                 }
                 Ok(())
             }
-            attr_name if xml_id > 10000 => {
+            Some(attr_name) if xml_id > 10000 => {
                 // Setting an attribute on an element
                 let node_id = xml_id - 10000;
                 let value_str = player.get_datum(value).string_value()?;

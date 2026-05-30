@@ -4,12 +4,12 @@ use fxhash::FxHashMap;
 use itertools::Itertools;
 use log::warn;
 
-use crate::director::{
+use crate::{director::{
     chunks::{handler::HandlerDef, script::ScriptChunk},
     enums::ScriptType,
     file::get_variable_multiplier,
     lingo::{datum::Datum, script::ScriptContext},
-};
+}, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
 
 use super::ci_string::{CiStr, CiString};
 
@@ -47,9 +47,10 @@ pub struct Script {
     pub name: String,
     pub chunk: ScriptChunk,
     pub script_type: ScriptType,
-    pub handlers: FxHashMap<CiString, Rc<HandlerDef>>,
-    pub handler_names: Vec<String>,
-    pub properties: RefCell<FxHashMap<CiString, DatumRef>>,
+    pub handlers: FxHashMap<Symbol, Rc<HandlerDef>>,
+    pub handler_names_raw: Vec<String>,
+    pub handler_names: Vec<Symbol>,
+    pub properties: RefCell<FxHashMap<Symbol, DatumRef>>,
 }
 
 pub type ScriptInstanceId = u32;
@@ -59,7 +60,7 @@ pub struct ScriptInstance {
     pub instance_id: ScriptInstanceId,
     pub script: CastMemberRef,
     pub ancestor: Option<ScriptInstanceRef>,
-    pub properties: FxHashMap<CiString, DatumRef>,
+    pub properties: FxHashMap<Symbol, DatumRef>,
     pub begin_sprite_called: bool,
 }
 
@@ -75,11 +76,14 @@ impl ScriptInstance {
         for prop_name_id in &script_def.chunk.property_name_ids {
             let prop_name = lctx
                 .names
-                .get(*prop_name_id as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("prop_{}", prop_name_id));
+                .get(*prop_name_id as usize);
 
-            properties.insert(CiString::from(prop_name), DatumRef::Void);
+            let prop_symbol = if let Some(prop_name) = prop_name {
+                Symbol::from_str(prop_name)
+            } else {
+                Symbol::from_str(&format!("prop_{}", prop_name_id))
+            };
+            properties.insert(prop_symbol, DatumRef::Void);
         }
 
         ScriptInstance {
@@ -97,39 +101,39 @@ impl Script {
         return self
             .handler_names
             .get(index)
-            .map(|x| (self.member_ref.clone(), x.clone()));
+            .map(|x| (self.member_ref.clone(), *x));
     }
 
-    pub fn get_own_handler(&self, name: &str) -> Option<&Rc<HandlerDef>> {
-        self.handlers.get(CiStr::new(name))
+    pub fn get_own_handler(&self, name: Symbol) -> Option<&Rc<HandlerDef>> {
+        self.handlers.get(&name)
     }
 
-    pub fn get_own_handler_by_name_id(&self, name_id: u16) -> Option<&Rc<HandlerDef>> {
+    pub fn get_own_handler_by_local_name_id(&self, name_id: u16) -> Option<&Rc<HandlerDef>> {
         self.handlers
             .iter()
             .find(|x| x.1.name_id == name_id)
             .map(|x| x.1)
     }
 
-    pub fn get_handler(&self, name: &str) -> Option<ScriptHandlerRefDef> {
+    pub fn get_handler(&self, name: Symbol) -> Option<ScriptHandlerRefDef> {
         return self
             .get_own_handler(name)
             .map(|x| (self.member_ref.clone(), x));
     }
 
-    pub fn get_own_handler_ref(&self, name: &str) -> Option<ScriptHandlerRef> {
+    pub fn get_own_handler_ref(&self, name: Symbol) -> Option<ScriptHandlerRef> {
         return self
             .get_own_handler(name)
-            .map(|_| (self.member_ref.clone(), name.to_owned()));
+            .map(|_| (self.member_ref.clone(), name));
     }
 }
 
-pub type ScriptHandlerRef = (CastMemberRef, String);
+pub type ScriptHandlerRef = (CastMemberRef, Symbol);
 
 pub fn script_get_prop_opt(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &str,
+    prop_name: Symbol,
 ) -> Option<DatumRef> {
     // Check virtual script handler first
     match super::virtual_scripts::VirtualScriptRegistry::try_get_instance_prop(player, script_instance_ref, prop_name) {
@@ -140,22 +144,22 @@ pub fn script_get_prop_opt(
     let script_instance = player.allocator.get_script_instance(&script_instance_ref);
 
     // Handle special "ancestor" property
-    if prop_name == "ancestor" {
+    if prop_name.eq_builtin(BuiltInSymbol::Ancestor) {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         if let Some(ancestor_id) = &script_instance.ancestor {
             return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
         } else {
             return Some(DatumRef::Void);
         }
-    } else if prop_name == "script" {
+    } else if prop_name.eq_builtin(BuiltInSymbol::Script) {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
-    } else if prop_name == "ilk" {
-        return Some(player.alloc_datum(Datum::Symbol("instance".to_string())));
+    } else if prop_name.eq_builtin(BuiltInSymbol::Ilk) {
+        return Some(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Instance))));
     }
 
     // Try to find the property on the current instance first
-    if let Some(prop) = script_instance.properties.get(CiStr::new(prop_name)) {
+    if let Some(prop) = script_instance.properties.get(&prop_name) {
         return Some(prop.clone());
     }
 
@@ -168,7 +172,7 @@ pub fn script_get_prop_opt(
     }
 
     // Fall back to built-in properties if not found in instance or ancestors
-    if prop_name == "class" || prop_name == "script" {
+    if prop_name.eq_builtin(BuiltInSymbol::Class) || prop_name.eq_builtin(BuiltInSymbol::Script) {
         let script_instance = player.allocator.get_script_instance(&script_instance_ref);
         return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
     }
@@ -179,7 +183,7 @@ pub fn script_get_prop_opt(
 pub fn script_get_static_prop(
     player: &mut DirPlayer,
     script_ref: &CastMemberRef,
-    prop_name: &str,
+    prop_name: Symbol,
 ) -> Result<DatumRef, ScriptError> {
     let script_rc = player
         .movie
@@ -188,7 +192,7 @@ pub fn script_get_static_prop(
         .unwrap();
     let script = script_rc.as_ref();
     let properties = script.properties.borrow();
-    if let Some(prop) = properties.get(CiStr::new(prop_name)) {
+    if let Some(prop) = properties.get(&prop_name) {
         Ok(prop.clone())
     } else {
         Err(ScriptError::new(format!(
@@ -201,7 +205,7 @@ pub fn script_get_static_prop(
 pub fn script_set_static_prop(
     player: &mut DirPlayer,
     script_ref: &CastMemberRef,
-    prop_name: &str,
+    prop_name: Symbol,
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
@@ -213,13 +217,13 @@ pub fn script_set_static_prop(
     let script = script_rc.as_ref();
     let mut properties = script.properties.borrow_mut();
 
-    if required && !properties.contains_key(CiStr::new(prop_name)) {
+    if required && !properties.contains_key(&prop_name) {
         return Err(ScriptError::new(format!(
             "Cannot set static property {} on script {}",
             prop_name, script.name
         )));
     } else {
-        properties.insert(CiString::from(prop_name.clone()), value_ref.clone());
+        properties.insert(prop_name.clone(), value_ref.clone());
         Ok(())
     }
 }
@@ -227,14 +231,14 @@ pub fn script_set_static_prop(
 pub fn script_get_prop(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &str,
+    prop_name: Symbol,
 ) -> Result<DatumRef, ScriptError> {
     if let Some(prop) = script_get_prop_opt(player, script_instance_ref, prop_name) {
         Ok(prop)
-    } else if prop_name.eq_ignore_ascii_case("count") {
+    } else if prop_name == Symbol::builtin(BuiltInSymbol::Count) {
         // In Director, .count on a non-list object returns 1
         Ok(player.alloc_datum(Datum::Int(1)))
-    } else if prop_name.eq_ignore_ascii_case("spriteNum") {
+    } else if prop_name == Symbol::builtin(BuiltInSymbol::SpriteNum) {
         // spriteNum is a built-in property for behaviors — if not explicitly set,
         // look up which sprite channel this instance belongs to.
         // Resolve sprite ownership from the live/cached scriptInstanceList.
@@ -289,7 +293,7 @@ pub fn script_get_prop(
 pub fn script_set_prop(
     player: &mut DirPlayer,
     script_instance_ref: &ScriptInstanceRef,
-    prop_name: &str,
+    prop_name: Symbol,
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
@@ -302,7 +306,7 @@ pub fn script_set_prop(
 
     // Try to set the property on the current instance
     let result = {
-        if prop_name == "ancestor" {
+        if prop_name == Symbol::builtin(BuiltInSymbol::Ancestor) {
             let ancestor_id = player
                 .allocator
                 .get_datum(value_ref)
@@ -317,7 +321,7 @@ pub fn script_set_prop(
             let script_instance = player
                 .allocator
                 .get_script_instance_mut(&script_instance_ref);
-            if let Some(prop) = script_instance.properties.get_mut(CiStr::new(prop_name)) {
+            if let Some(prop) = script_instance.properties.get_mut(&prop_name) {
                 *prop = value_ref.clone();
                 Ok(())
             } else {
@@ -355,7 +359,7 @@ pub fn script_set_prop(
                     .get_script_instance_mut(&script_instance_ref);
                 script_instance
                     .properties
-                    .insert(CiString::from(prop_name.to_owned()), value_ref.clone());
+                    .insert(prop_name, value_ref.clone());
                 Ok(())
             }
         }
@@ -431,21 +435,34 @@ pub fn get_lctx_for_script<'a>(
     return cast.lctx.as_ref();
 }
 
+pub fn get_name_symbols_for_script<'a>(
+    player: &'a DirPlayer,
+    script: &'a Script,
+) -> Option<&'a Vec<Symbol>> {
+    player
+        .movie
+        .cast_manager
+        .get_cast(script.member_ref.cast_lib as u32)
+        .ok()
+        .map(|cast| cast.name_symbols.as_ref())
+}
+
 pub fn get_name<'a>(
     player: &'a DirPlayer,
     ctx: &'a BytecodeHandlerContext,
     name_id: u16,
-) -> Option<&'a String> {
-    let lctx = get_lctx(player, ctx);
-    if let Some(lctx) = lctx {
-        return Some(&lctx.names[name_id as usize]);
+) -> Option<Symbol> {
+    let script = unsafe { &*ctx.script_ptr };
+    let name_symbols = get_name_symbols_for_script(player, script);
+    if let Some(name_symbols) = name_symbols {
+        return Some(name_symbols[name_id as usize]);
     }
     None
 }
 
 pub async fn player_set_obj_prop(
     obj_ref: &DatumRef,
-    prop_name: &str,
+    prop_name: Symbol,
     value_ref: &DatumRef,
 ) -> Result<(), ScriptError> {
     let (obj_clone, value_clone) = reserve_player_ref(|player| {
@@ -459,7 +476,7 @@ pub async fn player_set_obj_prop(
             Ok(())
         }
         Datum::ScriptInstanceRef(script_instance_ref) => reserve_player_mut(|player| {
-            script_set_prop(player, &script_instance_ref, &prop_name, value_ref, false)
+            script_set_prop(player, &script_instance_ref, prop_name, value_ref, false)
         }),
         Datum::SpriteRef(sprite_id) => {
             sprite_set_prop(sprite_id, prop_name, value_clone)
@@ -468,7 +485,7 @@ pub async fn player_set_obj_prop(
             // TODO should we really pass a clone of the value here?
             CastMemberRefHandlers::set_prop(&member_ref, prop_name, value_clone)
         }
-        Datum::Stage => reserve_player_mut(|player| set_stage_prop(player, &prop_name, value_ref)),
+        Datum::Stage => reserve_player_mut(|player| set_stage_prop(player, prop_name, value_ref)),
         Datum::BitmapRef(bitmap_ref) => reserve_player_mut(|player| {
             BitmapDatumHandlers::set_bitmap_ref_prop(player, bitmap_ref, prop_name, value_ref)
         }),
@@ -487,7 +504,7 @@ pub async fn player_set_obj_prop(
                 value_ref,
                 player,
                 false,
-                prop_name,
+                prop_name.as_str(),
             )
         }),
         Datum::Rect(..) => reserve_player_mut(|player| {
@@ -530,22 +547,22 @@ pub async fn player_set_obj_prop(
             let value_datum = reserve_player_ref(|player| {
                 player.get_datum(value_ref).clone()
             });
-            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::set_prop(obj_ref, prop_name, &value_datum)
         }
         Datum::Shockwave3dObjectRef(_) => {
             let value_datum = reserve_player_ref(|player| {
                 player.get_datum(value_ref).clone()
             });
-            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, &prop_name, &value_datum)
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), &value_datum)
         }
         Datum::Transform3d(_) => reserve_player_mut(|player| {
-            crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, &prop_name, value_ref)
+            crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
         Datum::HavokObjectRef(_) => {
-            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::set_prop(obj_ref, &prop_name, value_ref.clone())
+            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), value_ref.clone())
         }
         Datum::PhysXObjectRef(_) => {
-            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::set_prop(obj_ref, &prop_name, value_ref.clone())
+            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), value_ref.clone())
         }
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
@@ -572,37 +589,38 @@ pub async fn player_set_obj_prop(
 pub fn get_obj_prop(
     player: &mut DirPlayer,
     obj_ref: &DatumRef,
-    prop_name: &str,
+    prop_name: Symbol,
 ) -> Result<DatumRef, ScriptError> {
     let obj_clone = player.get_datum(obj_ref).clone();
+    let prop_name_builtin = prop_name.into_builtin();
 
     // Universal type-check properties (work on any datum type)
-    match prop_name {
-        "integerp" => {
+    match prop_name_builtin {
+        Some(BuiltInSymbol::Integerp) => {
             let is_int = matches!(obj_clone, Datum::Int(_));
             return Ok(player.alloc_datum(Datum::Int(if is_int { 1 } else { 0 })));
         }
-        "floatp" => {
+        Some(BuiltInSymbol::Floatp) => {
             let is_float = matches!(obj_clone, Datum::Float(_));
             return Ok(player.alloc_datum(Datum::Int(if is_float { 1 } else { 0 })));
         }
-        "stringp" => {
+        Some(BuiltInSymbol::Stringp) => {
             let is_string = matches!(obj_clone, Datum::String(_) | Datum::StringChunk(..));
             return Ok(player.alloc_datum(Datum::Int(if is_string { 1 } else { 0 })));
         }
-        "symbolp" => {
+        Some(BuiltInSymbol::Symbolp) => {
             let is_symbol = matches!(obj_clone, Datum::Symbol(_));
             return Ok(player.alloc_datum(Datum::Int(if is_symbol { 1 } else { 0 })));
         }
-        "listp" => {
+        Some(BuiltInSymbol::Listp) => {
             let is_list = matches!(obj_clone, Datum::List(..) | Datum::PropList(..));
             return Ok(player.alloc_datum(Datum::Int(if is_list { 1 } else { 0 })));
         }
-        "objectp" => {
+        Some(BuiltInSymbol::Objectp) => {
             let is_obj = matches!(obj_clone, Datum::ScriptInstanceRef(_));
             return Ok(player.alloc_datum(Datum::Int(if is_obj { 1 } else { 0 })));
         }
-        "voidp" => {
+        Some(BuiltInSymbol::Voidp) => {
             let is_void = matches!(obj_clone, Datum::Void);
             return Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })));
         }
@@ -619,26 +637,26 @@ pub fn get_obj_prop(
             Ok(player.alloc_datum(result))
         }
         Datum::ScriptInstanceRef(script_instance_id) => {
-            script_get_prop(player, &script_instance_id, &prop_name)
+            script_get_prop(player, &script_instance_id, prop_name)
         }
         Datum::ScriptRef(script_ref) => script_get_static_prop(player, &script_ref, prop_name),
         Datum::PropList(prop_list, ..) => {
-            PropListUtils::get_prop_or_built_in(player, &prop_list, &prop_name)
+            PropListUtils::get_prop_or_built_in(player, &prop_list, prop_name)
         }
         Datum::List(_, list, _) => Ok(player.alloc_datum(ListDatumUtils::get_prop(
             &list,
-            &prop_name,
+            prop_name,
             &player.allocator,
         )?)),
         Datum::Stage => {
-            let result = get_stage_prop(player, &prop_name)?;
+            let result = get_stage_prop(player, prop_name)?;
             Ok(player.alloc_datum(result))
         }
         Datum::Rect(..) => {
-            Ok(player.alloc_datum(RectDatumHandlers::get_prop(player, obj_ref, &prop_name)?))
+            Ok(player.alloc_datum(RectDatumHandlers::get_prop(player, obj_ref, prop_name)?))
         }
         Datum::Point(..) => {
-            Ok(player.alloc_datum(PointDatumHandlers::get_prop(player, obj_ref, &prop_name)?))
+            Ok(player.alloc_datum(PointDatumHandlers::get_prop(player, obj_ref, prop_name)?))
         }
         Datum::SpriteRef(sprite_id) => {
             let result = sprite_get_prop(player, sprite_id, prop_name)?;
@@ -647,11 +665,11 @@ pub fn get_obj_prop(
         }
         Datum::BitmapRef(_) => BitmapDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::String(s) => {
-            Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, &prop_name)?))
+            Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(&s, prop_name)?))
         }
         Datum::StringChunk(ref source, ref chunk_expr, ref _str_val) => {
-            match prop_name {
-                "count" => {
+            match prop_name_builtin {
+                Some(BuiltInSymbol::Count) => {
                     // Chunk count is `end - start + 1` over the chunk_expr.
                     // For the "whole collection" form produced by
                     // `string.line` etc. that becomes the line/word/item
@@ -660,11 +678,11 @@ pub fn get_obj_prop(
                     let n = (chunk_expr.end - chunk_expr.start + 1).max(0);
                     Ok(player.alloc_datum(Datum::Int(n)))
                 }
-                "ref" => {
+                Some(BuiltInSymbol::Ref) => {
                     // .ref returns the chunk reference itself (a StringChunk datum)
                     Ok(obj_ref.clone())
                 }
-                "range" => {
+                Some(BuiltInSymbol::Range) => {
                     // .range returns point(startCharPos, endCharPos) — 1-based char positions in the source
                     use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
                     use crate::director::lingo::datum::StringChunkType;
@@ -734,7 +752,7 @@ pub fn get_obj_prop(
 
                     Ok(player.alloc_datum(Datum::Point([char_start as f64, char_end as f64], 0)))
                 }
-                "charSpacing" => {
+                Some(BuiltInSymbol::CharSpacing) => {
                     // Read charSpacing from the source member's styled spans, walking the source chain
                     if let Datum::StringChunk(ref source, _, _) = obj_clone {
                         let mut current_source = source.clone();
@@ -761,10 +779,10 @@ pub fn get_obj_prop(
                     }
                     Ok(player.alloc_datum(Datum::Int(0)))
                 }
-                _ if matches!(prop_name.to_ascii_lowercase().as_str(),
-                    "fixedlinespace" | "topspacing" | "bottomspacing"
-                    | "font" | "fontsize" | "fontstyle"
-                    | "color" | "bgcolor" | "alignment") => {
+                _ if matches!(prop_name_builtin,
+                    Some(BuiltInSymbol::FixedLineSpace | BuiltInSymbol::TopSpacing | BuiltInSymbol::BottomSpacing
+                    | BuiltInSymbol::Font | BuiltInSymbol::FontSize | BuiltInSymbol::FontStyle
+                    | BuiltInSymbol::Color | BuiltInSymbol::BgColor | BuiltInSymbol::Alignment)) => {
                     // Per-chunk properties — walk to the source member and
                     // resolve the chunk's char range, then look up the
                     // active par_info / styled span. Director exposes
@@ -776,7 +794,7 @@ pub fn get_obj_prop(
                     let Some((member_ref, char_start, _char_end)) = resolved else {
                         return Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                             &obj_clone.string_value()?,
-                            &prop_name,
+                            Symbol::builtin(prop_name_builtin.unwrap())
                         )?));
                     };
                     let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
@@ -787,7 +805,7 @@ pub fn get_obj_prop(
                     if let Some(_field) = member.member_type.as_field() {
                         return Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                             &obj_clone.string_value()?,
-                            &prop_name,
+                            Symbol::builtin(prop_name_builtin.unwrap())
                         )?));
                     }
                     let Some(text) = member.member_type.as_text() else {
@@ -845,8 +863,8 @@ pub fn get_obj_prop(
                     // touching `player.alloc_datum` (which needs `&mut player`).
                     drop(member);
 
-                    match_ci!(prop_name, {
-                        "fixedLineSpace" => {
+                    match prop_name_builtin.unwrap() {
+                        BuiltInSymbol::FixedLineSpace => {
                             // Per-line line_spacing with the same "0 means
                             // inherit / use document default" fallback the
                             // renderer applies — Director's getter returns
@@ -866,46 +884,46 @@ pub fn get_obj_prop(
                                 .unwrap_or(0);
                             Ok(player.alloc_datum(Datum::Int(val)))
                         },
-                        "topSpacing" => {
+                        BuiltInSymbol::TopSpacing => {
                             let val = par_info.as_ref().map(|pi| pi.top_spacing).unwrap_or(0);
                             Ok(player.alloc_datum(Datum::Int(val)))
                         },
-                        "bottomSpacing" => {
+                        BuiltInSymbol::BottomSpacing => {
                             let val = par_info.as_ref().map(|pi| pi.bottom_spacing).unwrap_or(0);
                             Ok(player.alloc_datum(Datum::Int(val)))
                         },
-                        "alignment" => {
+                        BuiltInSymbol::Alignment => {
                             let val = par_info.as_ref().map(|pi| pi.justification).unwrap_or(0);
                             let s = match val {
-                                1 => "center".to_string(),
-                                2 => "right".to_string(),
-                                3 => "justify".to_string(),
+                                1 => BuiltInSymbol::Center,
+                                2 => BuiltInSymbol::Right,
+                                3 => BuiltInSymbol::Justify,
                                 _ => member_text_alignment,
                             };
-                            Ok(player.alloc_datum(Datum::String(s)))
+                            Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(s))))
                         },
-                        "font" => {
+                        BuiltInSymbol::Font => {
                             let val = span_font_face.unwrap_or(member_text_font);
                             Ok(player.alloc_datum(Datum::String(val)))
                         },
-                        "fontSize" => {
+                        BuiltInSymbol::FontSize => {
                             let val = span_font_size.unwrap_or(member_text_font_size);
                             Ok(player.alloc_datum(Datum::Int(val)))
                         },
-                        "fontStyle" => {
+                        BuiltInSymbol::FontStyle => {
                             let mut item_refs = std::collections::VecDeque::new();
                             if span_bold {
-                                item_refs.push_back(player.alloc_datum(Datum::Symbol("bold".to_string())));
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Bold))));
                             }
                             if span_italic {
-                                item_refs.push_back(player.alloc_datum(Datum::Symbol("italic".to_string())));
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Italic))));
                             }
                             if span_underline {
-                                item_refs.push_back(player.alloc_datum(Datum::Symbol("underline".to_string())));
+                                item_refs.push_back(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Underline))));
                             }
                             Ok(player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, item_refs, false)))
                         },
-                        "color" => {
+                        BuiltInSymbol::Color => {
                             let color_ref = if let Some(c) = span_color {
                                 crate::player::sprite::ColorRef::Rgb(
                                     ((c >> 16) & 0xFF) as u8,
@@ -917,30 +935,30 @@ pub fn get_obj_prop(
                             };
                             Ok(player.alloc_datum(Datum::ColorRef(color_ref)))
                         },
-                        "bgColor" => {
+                        BuiltInSymbol::BgColor => {
                             Ok(player.alloc_datum(Datum::ColorRef(member_bg_color)))
                         },
                         _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                             &obj_clone.string_value()?,
-                            &prop_name,
+                            Symbol::builtin(prop_name_builtin.unwrap()),
                         )?)),
-                    })
+                    }
                 }
                 _ => Ok(player.alloc_datum(StringDatumUtils::get_built_in_prop(
                     &obj_clone.string_value()?,
-                    &prop_name,
+                    crate::player::symbols::symbol::Symbol::builtin(prop_name_builtin.unwrap()),
                 )?)),
             }
         }
         Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory
-             => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, &prop_name)?),
-        Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, &prop_name),
-        Datum::Void => VoidDatumHandlers::get_prop(player, obj_ref, &prop_name),
-        Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, &prop_name),
-        Datum::Float(_) => FloatDatumHandlers::get_prop(player, obj_ref, &prop_name),
-        Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, &prop_name),
+             => Ok(TimeoutDatumHandlers::get_prop(player, obj_ref, prop_name)?),
+        Datum::Symbol(_) => SymbolDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::Void => VoidDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::Int(_) => IntDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::Float(_) => FloatDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::ColorRef(_) => ColorDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::PlayerRef => player.get_player_prop(prop_name),
-        Datum::MouseRef => player.get_mouse_prop(&prop_name),
+        Datum::MouseRef => player.get_mouse_prop(prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
@@ -948,29 +966,29 @@ pub fn get_obj_prop(
             Ok(player.alloc_datum(VectorDatumHandlers::get_prop(player, obj_ref, prop_name)?))
         }
         Datum::SoundChannel(_) => Ok(player.alloc_datum(SoundChannelDatumHandlers::get_prop(
-            player, obj_ref, &prop_name,
+            player, obj_ref, prop_name,
         )?)),
         Datum::MovieRef => player.get_movie_prop(prop_name),
         Datum::FlashObjectRef(_) => {
-            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         Datum::Shockwave3dObjectRef(_) => {
-            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+            crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         Datum::Transform3d(_) => {
-            let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, &prop_name)?;
+            let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, prop_name)?;
             Ok(player.alloc_datum(result))
         }
         Datum::HavokObjectRef(_) => {
-            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+            crate::player::handlers::datum_handlers::havok_object::HavokObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         Datum::PhysXObjectRef(_) => {
-            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::get_prop(obj_ref, &prop_name)
+            crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         _ => {
-            if prop_name == "ilk" {
+            if prop_name_builtin == Some(BuiltInSymbol::Ilk) {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;
-                Ok(player.alloc_datum(Datum::Symbol(ilk.to_string())))
+                Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(ilk))))
             } else {
                 Err(ScriptError::new(
                     format!(

@@ -1,3 +1,5 @@
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+
 use super::{
     cast_member::CastMemberType,
     events::{player_invoke_event_to_instances, player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts},
@@ -377,7 +379,7 @@ pub(crate) fn set_caret_at_screen(
                 font: String,
                 font_size: u16,
                 font_id: Option<u16>,
-                alignment: String,
+                alignment: crate::player::symbols::builtin::BuiltInSymbol,
                 fixed_line_space: u16,
                 top_spacing: i16,
                 word_wrap: bool,
@@ -460,7 +462,7 @@ pub(crate) fn set_caret_at_screen(
                 let scaled_width = ((sprite_width as f64) * stage_scale).round() as i32;
                 let line_h = effective_line_height(&f, *fixed_line_space);
                 crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, scaled_width, alignment, line_h, local_x, local_y,
+                    text, &f, scaled_width, alignment.as_str(), line_h, local_x, local_y,
                 )
             }
             MemberSnapshot::Text { text, font, font_size, fixed_line_space, top_spacing } => {
@@ -633,14 +635,14 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
     if let Some(ref instances) = instance_ids {
         if !instances.is_empty() {
             handled = player_invoke_event_to_instances(
-                &"keyDown".to_string(), &vec![], instances,
+                Symbol::builtin(BuiltInSymbol::KeyDown), &vec![], instances,
             ).await?;
         }
     }
     if !handled {
-        player_invoke_frame_and_movie_scripts(&"keyDown".to_string(), &vec![]).await?;
+        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyDown), &vec![]).await?;
     }
-    player_dispatch_movie_callback("keyDown").await?;
+    player_dispatch_movie_callback(BuiltInSymbol::KeyDown).await?;
 
     // Default text insertion / navigation: only if no script handled the event
     // and the focused sprite still points at the same editable member.
@@ -737,13 +739,13 @@ pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptErr
     if let Some(ref instances) = instance_ids {
         if !instances.is_empty() {
             handled = player_invoke_event_to_instances(
-                &"keyUp".to_string(), &vec![], instances,
+                Symbol::builtin(BuiltInSymbol::KeyUp), &vec![], instances,
             ).await?;
         }
     }
     if !handled {
-        player_invoke_frame_and_movie_scripts(&"keyUp".to_string(), &vec![]).await?;
+        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyUp), &vec![]).await?;
     }
-    player_dispatch_movie_callback("keyUp").await?;
+    player_dispatch_movie_callback(BuiltInSymbol::KeyUp).await?;
     Ok(DatumRef::Void)
 }

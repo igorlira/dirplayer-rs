@@ -11,7 +11,7 @@ use itertools::Itertools;
 use log::{debug, warn};
 use wasm_bindgen::{prelude::*, Clamped};
 
-use crate::{js_api::safe_js_string, player::reserve_player_mut};
+use crate::{js_api::safe_js_string, player::{reserve_player_mut, symbols::builtin::BuiltInSymbol}};
 use crate::{
     console_warn,
     js_api::JsApi,
@@ -65,7 +65,7 @@ fn draw_text_selection_rects(
     loc_h: i32,
     loc_v: i32,
     max_width: i32,
-    alignment: &str,
+    alignment: BuiltInSymbol,
     line_h: i32,
     top_spacing: i16,
     sel_lo: i32,
@@ -79,7 +79,6 @@ fn draw_text_selection_rects(
     let lo = sel_lo as usize;
     let hi = sel_hi as usize;
     let base_y = loc_v + top_spacing as i32;
-    let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
     for (i, line) in lines.iter().enumerate() {
         if hi <= line.start || lo >= line.end && line.start != line.end {
             continue;
@@ -101,9 +100,9 @@ fn draw_text_selection_rects(
             .map(|c| font.get_char_advance_for(c) as i32)
             .sum();
         let x_offset: i32 = if max_width > 0 {
-            match alignment_key.as_str() {
-                "center" => ((max_width - line_w) / 2).max(0),
-                "right" => (max_width - line_w).max(0),
+            match alignment {
+                BuiltInSymbol::Center => ((max_width - line_w) / 2).max(0),
+                BuiltInSymbol::Right => (max_width - line_w).max(0),
                 _ => 0,
             }
         } else {
@@ -2106,7 +2105,7 @@ pub fn render_score_to_bitmap_with_offset(
                             sprite.loc_h,
                             sprite.loc_v,
                             wrap_w,
-                            &field_member.alignment,
+                            field_member.alignment,
                             line_h,
                             field_member.top_spacing,
                             sel_lo,
@@ -2122,7 +2121,7 @@ pub fn render_score_to_bitmap_with_offset(
                         sprite.loc_h,
                         sprite.loc_v,
                         wrap_w,
-                        &field_member.alignment,
+                        field_member.alignment,
                         params,
                         &palettes,
                         field_member.fixed_line_space,
@@ -2134,7 +2133,7 @@ pub fn render_score_to_bitmap_with_offset(
                             &field_member.text,
                             &font,
                             wrap_w,
-                            &field_member.alignment,
+                            field_member.alignment,
                             line_h,
                             field_member.sel_end,
                         );
@@ -2301,7 +2300,7 @@ pub fn render_score_to_bitmap_with_offset(
                         text_area_x,
                         text_y,
                         wrap_w,
-                        &field.alignment,
+                        field.alignment,
                         text_params,
                         &palettes,
                         field.fixed_line_space,
@@ -2325,9 +2324,9 @@ pub fn render_score_to_bitmap_with_offset(
                         },
                     };
 
-                    let alignment = match field.alignment.to_lowercase().as_str() {
-                        "center" | "#center" => TextAlignment::Center,
-                        "right" | "#right" => TextAlignment::Right,
+                    let alignment = match field.alignment {
+                        BuiltInSymbol::Center => TextAlignment::Center,
+                        BuiltInSymbol::Right => TextAlignment::Right,
                         _ => TextAlignment::Left,
                     };
 
@@ -2606,10 +2605,10 @@ pub fn render_score_to_bitmap_with_offset(
                     let is_pfr_font = font.char_widths.is_some();
                     if !text_member.html_styled_spans.is_empty() && !is_pfr_font && player.font_manager.pfr_enabled {
                         // Parse alignment from text_member
-                        let alignment = match text_member.alignment.to_lowercase().as_str() {
-                            "center" | "#center" => TextAlignment::Center,
-                            "right" | "#right" => TextAlignment::Right,
-                            "justify" | "#justify" => TextAlignment::Justify,
+                        let alignment = match text_member.alignment {
+                            BuiltInSymbol::Center => TextAlignment::Center,
+                            BuiltInSymbol::Right => TextAlignment::Right,
+                            BuiltInSymbol::Justify => TextAlignment::Justify,
                             _ => TextAlignment::Left,
                         };
 
@@ -2659,9 +2658,9 @@ pub fn render_score_to_bitmap_with_offset(
 
                             // ALWAYS apply text_member's fontStyle (movie may have changed it)
                             if !text_member.font_style.is_empty() {
-                                style.bold = text_member.font_style.iter().any(|s| s == "bold");
-                                style.italic = text_member.font_style.iter().any(|s| s == "italic");
-                                style.underline = text_member.font_style.iter().any(|s| s == "underline");
+                                style.bold = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                                style.italic = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                                style.underline = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
                             }
 
                             StyledSpan {
@@ -2707,7 +2706,7 @@ pub fn render_score_to_bitmap_with_offset(
                                 draw_x,
                                 draw_y,
                                 0, // draw_text doesn't wrap; treat as unbounded
-                                "left",
+                                BuiltInSymbol::Left,
                                 line_h,
                                 text_member.top_spacing,
                                 sel_lo,
@@ -2733,7 +2732,7 @@ pub fn render_score_to_bitmap_with_offset(
                                 &text_member.text,
                                 &font,
                                 0,
-                                "left",
+                                BuiltInSymbol::Left,
                                 line_h,
                                 text_member.sel_end,
                             );

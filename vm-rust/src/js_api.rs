@@ -681,10 +681,10 @@ impl JsApi {
                             lm.str_set("value", &JsValue::from_f64(*v));
                         }
                         Datum::String(s) => {
-                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(&s)));
                         }
                         Datum::Symbol(s) => {
-                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(&s.to_string())));
                         }
                         Datum::JavaScript(data) => {
                             lm.str_set("size", &JsValue::from_f64(data.len() as f64));
@@ -1060,15 +1060,15 @@ impl JsApi {
             CastMemberType::Text(text_data) => {
                 member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
                 member_map.str_set("htmlSource", &ascii_safe(&text_data.html_source).to_js_value());
-                member_map.str_set("alignment", &ascii_safe(&text_data.alignment).to_js_value());
-                member_map.str_set("boxType", &ascii_safe(&text_data.box_type).to_js_value());
+                member_map.str_set("alignment", &ascii_safe(text_data.alignment.as_str()).to_js_value());
+                member_map.str_set("boxType", &ascii_safe(&text_data.box_type.to_string()).to_js_value());
                 member_map.str_set("wordWrap", &JsValue::from_bool(text_data.word_wrap));
                 member_map.str_set("antiAlias", &JsValue::from_bool(text_data.anti_alias));
                 member_map.str_set("font", &ascii_safe(&text_data.font).to_js_value());
                 // set fontStyle array of strings
                 let font_style_array = js_sys::Array::new();
                 for style in &text_data.font_style {
-                    font_style_array.push(&ascii_safe(style).to_js_value());
+                    font_style_array.push(&ascii_safe(&style.to_string()).to_js_value());
                 }
                 member_map.str_set("fontStyle", &font_style_array);
                 member_map.str_set("fixedLineSpace", &JsValue::from_f64(text_data.fixed_line_space as f64));
@@ -1962,7 +1962,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Symbol(val) => {
             map.str_set("type", &safe_js_string("symbol"));
-            map.str_set("value", &safe_js_string(val));
+            map.str_set("value", &safe_js_string(&val.to_string()));
         }
         Datum::List(_, item_refs, _) => {
             map.str_set("type", &safe_js_string("list"));
@@ -2022,7 +2022,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(k.as_str()), &v.unwrap().to_js_value());
+                props_map.set(&safe_js_string(&k.to_string()), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
         }
@@ -2237,7 +2237,7 @@ impl ToJsValue for i16 {
 impl ToJsValue for PaletteRef {
     fn to_js_value(&self) -> JsValue {
         match self {
-            PaletteRef::BuiltIn(id) => safe_js_string(&id.symbol_string()),
+            PaletteRef::BuiltIn(id) => safe_js_string(&id.symbol().to_string()),
             PaletteRef::Member(member_ref) => safe_js_string(
                 format!(
                     "(member {} of castLib {})",

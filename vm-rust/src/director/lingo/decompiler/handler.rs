@@ -736,7 +736,7 @@ impl<'a> DecompilerState<'a> {
                         crate::director::lingo::datum::Datum::String(s) => Datum::string(s.clone()),
                         crate::director::lingo::datum::Datum::Int(i) => Datum::int(*i),
                         crate::director::lingo::datum::Datum::Float(f) => Datum::float(*f as f64),
-                        crate::director::lingo::datum::Datum::Symbol(s) => Datum::symbol(s.clone()),
+                        crate::director::lingo::datum::Datum::Symbol(s) => Datum::symbol(s.to_string()),
                         _ => Datum::void(),
                     };
                     Some(Rc::new(AstNode::Literal(datum)))

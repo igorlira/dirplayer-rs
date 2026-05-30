@@ -10,7 +10,7 @@ use crate::{
     console_warn,
     director::lingo::datum::{Datum, TimeoutRef},
     js_api::JsApi,
-    player::PLAYER_OPT,
+    player::{PLAYER_OPT, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
     utils::ToHexString,
 };
 
@@ -56,19 +56,19 @@ pub enum PlayerVMCommand {
     // Flash-to-Lingo callback mechanism
     TriggerFlashCallback {
         sprite_num: i32,
-        handler_name: String,
+        handler_name: Symbol,
         args: Vec<DatumRef>,
     },
     TriggerLingoCallbackOnScript {
         cast_lib: i32,
         cast_member: i32,
-        handler_name: String,
+        handler_name: Symbol,
         args: Vec<DatumRef>,
     },
     SetLingoScriptProperty {
         cast_lib: i32,
         cast_member: i32,
-        prop_name: String,
+        prop_name: Symbol,
         value: DatumRef,
     },
     /// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
@@ -78,7 +78,7 @@ pub enum PlayerVMCommand {
     DispatchFlashEvent {
         cast_lib: i32,
         cast_member: i32,
-        handler_name: String,
+        handler_name: Symbol,
         args: Vec<DatumRef>,
     },
 }
@@ -296,7 +296,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                             false,
                             false,
                             DatumRef::Void,
-                            "".to_string(),
+                            Symbol::builtin(BuiltInSymbol::EmptyString),
                             "".to_string(),
                         )
                     }
@@ -313,9 +313,9 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
             let args = vec![ref_datum];
             if target_ref != DatumRef::Void {
-                player_dispatch_callback_event(target_ref, &handler_name, &args);
+                player_dispatch_callback_event(target_ref, handler_name, &args);
             } else {
-                player_dispatch_global_event(&handler_name, &args);
+                player_dispatch_global_event(handler_name, &args);
             }
         }
         PlayerVMCommand::PrintMemberBitmapHex(member_ref) => {
@@ -361,7 +361,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 for (_idx, actor_ref) in actor_snapshot.0.iter().enumerate() {
                     if actor_snapshot.1.contains(&actor_ref.unwrap()) {
                         let _ = player_call_datum_handler(
-                            actor_ref, &"stepFrame".to_string(), &vec![],
+                            actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![],
                         ).await;
                     }
                 }
@@ -600,13 +600,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             if let Some(sprite_num) = sprite_with_behaviors {
                 player_dispatch_event_to_sprite_targeted(
-                    &"mouseDown".to_string(),
+                    Symbol::builtin(BuiltInSymbol::MouseDown),
                     &vec![],
                     sprite_num,
                 ).await;
             } else {
                 player_invoke_frame_and_movie_scripts(
-                    &"mouseDown".to_string(),
+                    Symbol::builtin(BuiltInSymbol::MouseDown),
                     &vec![]
                 ).await?;
             }
@@ -629,7 +629,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     );
 
                     if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
-                        if let Some(handler) = script.get_own_handler_ref(&"mouseDown".to_string()) {
+                        if let Some(handler) = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseDown)) {
                             return Some((None, handler, vec![]));
                         }
                     }
@@ -659,7 +659,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     }
                 };
 
-                let handler = script.get_own_handler_ref(&"mouseDown".to_string())?;
+                let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseDown))?;
 
                 Some((None, handler, vec![]))
             });
@@ -674,7 +674,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // Dispatch mouseDownScript last as well (for cases where it was set
             // during sprite handler execution, e.g. not set at start of event)
             if handler_err.is_none() {
-                if let Err(e) = player_dispatch_movie_callback("mouseDown").await {
+                if let Err(e) = player_dispatch_movie_callback(BuiltInSymbol::MouseDown).await {
                     handler_err = Some(e);
                 }
             }
@@ -810,7 +810,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 debug!("[mouseUp] dispatching to sprite#{} (event={})", sprite_num, event_name);
                 if *sprite_num > 0 {
                     player_dispatch_event_to_sprite_targeted(
-                        &event_name.to_string(),
+                        Symbol::builtin(BuiltInSymbol::MouseUp),
                         &vec![],
                         *sprite_num as u16,
                     ).await;
@@ -825,7 +825,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             if !dispatched_to_sprite {
                 player_invoke_frame_and_movie_scripts(
-                    &event_name.to_string(),
+                    Symbol::builtin(BuiltInSymbol::MouseUp),
                     &vec![]
                 ).await;
             }
@@ -847,7 +847,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 // First check for member behavior script (stored in member_script_ref)
                 if let Some(script_ref) = member.get_member_script_ref() {
                     if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
-                        if let Some(handler) = script.get_own_handler_ref(&handler_name.to_string()) {
+                        if let Some(handler) = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseUp)) {
                             return Some((None, handler, vec![]));
                         }
                     }
@@ -862,10 +862,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 };
 
                 let script = script?;
-                let handler = script.get_own_handler_ref(&handler_name.to_lowercase())?;
+                let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseUp))?;
 
                 // Try to get the handler
-                let handler = script.get_own_handler_ref(&handler_name);
+                let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseUp));
                 
                 // ADD THIS CHECK:
                 if handler.is_none() {
@@ -886,7 +886,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
 
             if handler_err.is_none() {
-                if let Err(e) = player_dispatch_movie_callback("mouseUp").await {
+                if let Err(e) = player_dispatch_movie_callback(BuiltInSymbol::MouseUp).await {
                     handler_err = Some(e);
                 }
             }
@@ -978,19 +978,19 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     if prev_hover != sprite_num as i16 {
                         if prev_hover != -1 {
                             player_dispatch_event_to_sprite(
-                                &"mouseLeave".to_string(),
+                                Symbol::builtin(BuiltInSymbol::MouseLeave),
                                 &vec![],
                                 prev_hover as u16,
                             )
                         }
                         player_dispatch_event_to_sprite(
-                            &"mouseEnter".to_string(),
+                            Symbol::builtin(BuiltInSymbol::MouseEnter),
                             &vec![],
                             sprite_num as u16,
                         );
                     } else {
                         player_dispatch_event_to_sprite(
-                            &"mouseWithin".to_string(),
+                            Symbol::builtin(BuiltInSymbol::MouseWithin),
                             &vec![],
                             sprite_num as u16,
                         );
@@ -1003,7 +1003,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     // tooltip teardown, etc.).
                     if prev_hover != -1 {
                         player_dispatch_event_to_sprite(
-                            &"mouseLeave".to_string(),
+                            Symbol::builtin(BuiltInSymbol::MouseLeave),
                             &vec![],
                             prev_hover as u16,
                         )
@@ -1027,13 +1027,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
             if let Some(sprite_number) = scripted_sprite {
                 player_dispatch_event_to_sprite_targeted(
-                    &"rightMouseDown".to_string(),
+                    Symbol::builtin(BuiltInSymbol::RightMouseDown),
                     &vec![],
                     sprite_number as u16,
                 ).await;
             } else {
                 player_invoke_frame_and_movie_scripts(
-                    &"rightMouseDown".to_string(),
+                    Symbol::builtin(BuiltInSymbol::RightMouseDown),
                     &vec![],
                 ).await;
             }
@@ -1047,13 +1047,13 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
             if let Some(sprite_number) = scripted_sprite {
                 player_dispatch_event_to_sprite_targeted(
-                    &"rightMouseUp".to_string(),
+                    Symbol::builtin(BuiltInSymbol::RightMouseUp),
                     &vec![],
                     sprite_number as u16,
                 ).await;
             } else {
                 player_invoke_frame_and_movie_scripts(
-                    &"rightMouseUp".to_string(),
+                    Symbol::builtin(BuiltInSymbol::RightMouseUp),
                     &vec![],
                 ).await;
             }
@@ -1097,7 +1097,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                                 .cast_manager
                                 .get_script_by_ref(&script_instance.script)
                                 .unwrap();
-                            let handler = script.get_own_handler_ref(&"alertHook".to_string());
+                            let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::AlertHook));
                             if let Some(handler) = handler {
                                 Some((Some(instance_ref.clone()), handler, arg_list))
                             } else {
@@ -1110,7 +1110,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                                 .cast_manager
                                 .get_script_by_ref(&script_ref)
                                 .unwrap();
-                            let handler = script.get_own_handler_ref(&"alertHook".to_string());
+                            let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::AlertHook));
                             if let Some(handler) = handler {
                                 Some((None, handler, arg_list))
                             } else {
@@ -1157,7 +1157,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     for script_instance_ref in &sprite.script_instance_list {
                         let script_instance = player.allocator.get_script_instance(script_instance_ref);
                         if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_instance.script) {
-                            if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                            if let Some(handler_ref) = script.get_own_handler_ref(handler_name) {
                                 return Some((
                                     Some(script_instance_ref.clone()),
                                     handler_ref,
@@ -1185,7 +1185,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                        script_instance.script.cast_member == cast_member
                     {
                         if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_instance.script) {
-                            if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                            if let Some(handler_ref) = script.get_own_handler_ref(handler_name) {
                                 let script_instance_ref = ScriptInstanceRef::from_id(
                                     script_instance_id as u32,
                                     script_instance_entry.ref_count.get()
@@ -1206,7 +1206,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let receiver_datum = player_alloc_datum(Datum::ScriptInstanceRef(receiver));
                 let _ = ScriptInstanceDatumHandlers::call_async(
                     &receiver_datum,
-                    &handler.1,
+                    handler.1,
                     &args
                 ).await;
             }
@@ -1228,7 +1228,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
 
                 for instance_ref in matching_instances {
-                    let _ = script_set_prop(player, &instance_ref, &prop_name, &value, false);
+                    let _ = script_set_prop(player, &instance_ref, prop_name, &value, false);
                 }
             });
         }
@@ -1267,12 +1267,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 // (matches Director's behaviour of dispatching even when the
                 // Flash sprite has just been removed from the score).
                 use super::events::player_invoke_global_event;
-                let _ = player_invoke_global_event(&handler_name, &args).await;
+                let _ = player_invoke_global_event(handler_name, &args).await;
             } else {
                 use super::events::player_dispatch_event_to_sprite_targeted;
                 for sprite_num in sprite_nums {
                     player_dispatch_event_to_sprite_targeted(
-                        &handler_name,
+                        handler_name,
                         &args,
                         sprite_num,
                     )

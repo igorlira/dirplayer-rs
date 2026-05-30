@@ -115,6 +115,7 @@ impl CastManager {
                 lctx: cast_def.and_then(|x| x.lctx.clone()),
                 members: FxHashMap::default(),
                 scripts: FxHashMap::default(),
+                name_symbols: Vec::new(),
                 preload_mode: cast_entry.preload_settings,
                 capital_x: false,
                 dir_version: 0,

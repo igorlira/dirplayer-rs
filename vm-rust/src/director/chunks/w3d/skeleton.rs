@@ -1,6 +1,8 @@
 //! Skeleton evaluator: builds bone world matrices from skeleton + motion at a given time.
 //! Ported from SkeletonEvaluator.cs.
 
+use crate::player::symbols::symbol::Symbol;
+
 use super::types::*;
 use std::collections::HashMap;
 
@@ -76,7 +78,7 @@ pub fn build_bone_matrices_ex(
     // Build local matrices from motion tracks or rest pose
     for (bone_idx, bone) in skeleton.bones.iter().enumerate() {
         if let Some(mot) = motion {
-            if let Some(track) = mot.find_track_by_bone(&bone.name) {
+            if let Some(track) = mot.find_track_by_bone(bone.name) {
                 let kf = track.evaluate(time);
                 // Resolve translation: use parent bone length if displacement is zero
                 let (px, py, pz) = if root_lock && bone.parent_index < 0 {
@@ -128,11 +130,11 @@ pub fn build_inverse_bind_matrices(skeleton: &W3dSkeleton) -> Vec<[f32; 16]> {
 }
 
 /// Build world matrices for scene graph nodes using parent-name chaining.
-pub fn build_node_world_matrices(nodes: &[W3dNode]) -> HashMap<String, [f32; 16]> {
+pub fn build_node_world_matrices(nodes: &[W3dNode]) -> HashMap<Symbol, [f32; 16]> {
     fn build_node_world_matrix(
         node: &W3dNode,
-        node_map: &HashMap<String, &W3dNode>,
-        cache: &mut HashMap<String, [f32; 16]>,
+        node_map: &HashMap<Symbol, &W3dNode>,
+        cache: &mut HashMap<Symbol, [f32; 16]>,
     ) -> [f32; 16] {
         if let Some(world) = cache.get(&node.name) {
             return *world;
@@ -153,7 +155,7 @@ pub fn build_node_world_matrices(nodes: &[W3dNode]) -> HashMap<String, [f32; 16]
         world
     }
 
-    let node_map: HashMap<String, &W3dNode> = nodes.iter().map(|n| (n.name.clone(), n)).collect();
+    let node_map: HashMap<Symbol, &W3dNode> = nodes.iter().map(|n| (n.name.clone(), n)).collect();
     let mut cache = HashMap::new();
     for node in nodes {
         build_node_world_matrix(node, &node_map, &mut cache);

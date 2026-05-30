@@ -21,12 +21,10 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType, PhysXObjectRef},
     player::{
-        cast_lib::CastMemberRef,
-        cast_member::{
+        DatumRef, ScriptError, cast_lib::CastMemberRef, cast_member::{
             CastMemberType, PhysXBodyType, PhysXConstraintKind, PhysXRigidBody,
             PhysXShapeKind, PhysXSleepMode, PhysXTimeStepMode,
-        },
-        reserve_player_mut, DatumRef, ScriptError,
+        }, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -38,7 +36,7 @@ impl PhysXPhysicsMemberHandlers {
     pub fn get_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         // Scalar props first — no DatumRef alloc needed.
         {
@@ -50,34 +48,34 @@ impl PhysXPhysicsMemberHandlers {
             };
             let s = &physx.state;
 
-            let scalar = match_ci!(prop, {
-                "isInitialized" => Some(Datum::Int(if s.initialized { 1 } else { 0 })),
-                "gravity" => Some(Datum::Vector(s.gravity)),
-                "friction" => Some(Datum::Float(s.friction)),
-                "restitution" => Some(Datum::Float(s.restitution)),
-                "linearDamping" => Some(Datum::Float(s.linear_damping)),
-                "angularDamping" => Some(Datum::Float(s.angular_damping)),
-                "contactTolerance" => Some(Datum::Float(s.contact_tolerance)),
-                "sleepThreshold" => Some(Datum::Float(s.sleep_threshold)),
-                "sleepMode" => Some(Datum::Symbol(match s.sleep_mode {
-                    PhysXSleepMode::Energy => "energy",
-                    PhysXSleepMode::LinearVelocity => "linearvelocity",
-                }.to_string())),
-                "scalingFactor" => Some(Datum::Vector(s.scaling_factor)),
-                "timeStep" => Some(Datum::Float(s.time_step)),
-                "timeStepMode" => Some(Datum::Symbol(match s.time_step_mode {
-                    PhysXTimeStepMode::Equal => "equal",
-                    PhysXTimeStepMode::Automatic => "automatic",
-                }.to_string())),
-                "subSteps" => Some(Datum::Int(s.sub_steps as i32)),
-                "simulationTime" => Some(Datum::Float(s.sim_time)),
+            let scalar = match prop.into_builtin() {
+                Some(BuiltInSymbol::IsInitialized) => Some(Datum::Int(if s.initialized { 1 } else { 0 })),
+                Some(BuiltInSymbol::Gravity) => Some(Datum::Vector(s.gravity)),
+                Some(BuiltInSymbol::Friction) => Some(Datum::Float(s.friction)),
+                Some(BuiltInSymbol::Restitution) => Some(Datum::Float(s.restitution)),
+                Some(BuiltInSymbol::LinearDamping) => Some(Datum::Float(s.linear_damping)),
+                Some(BuiltInSymbol::AngularDamping) => Some(Datum::Float(s.angular_damping)),
+                Some(BuiltInSymbol::ContactTolerance) => Some(Datum::Float(s.contact_tolerance)),
+                Some(BuiltInSymbol::SleepThreshold) => Some(Datum::Float(s.sleep_threshold)),
+                Some(BuiltInSymbol::SleepMode) => Some(Datum::Symbol(Symbol::builtin(match s.sleep_mode {
+                    PhysXSleepMode::Energy => BuiltInSymbol::Energy,
+                    PhysXSleepMode::LinearVelocity => BuiltInSymbol::LinearVelocity,
+                }))),
+                Some(BuiltInSymbol::ScalingFactor) => Some(Datum::Vector(s.scaling_factor)),
+                Some(BuiltInSymbol::TimeStep) => Some(Datum::Float(s.time_step)),
+                Some(BuiltInSymbol::TimeStepMode) => Some(Datum::Symbol(Symbol::builtin(match s.time_step_mode {
+                    PhysXTimeStepMode::Equal => BuiltInSymbol::Equal,
+                    PhysXTimeStepMode::Automatic => BuiltInSymbol::Automatic,
+                }))),
+                Some(BuiltInSymbol::SubSteps) => Some(Datum::Int(s.sub_steps as i32)),
+                Some(BuiltInSymbol::SimulationTime) => Some(Datum::Float(s.sim_time)),
                 _ => None,
-            });
+            };
             if let Some(v) = scalar { return Ok(v); }
         }
 
         // List-valued props — collect names first, then alloc Vec of refs.
-        let (names, list_type): (Vec<String>, &str) = {
+        let (names, list_type): (Vec<Symbol>, BuiltInSymbol) = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
@@ -85,43 +83,43 @@ impl PhysXPhysicsMemberHandlers {
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
             let s = &physx.state;
-            match_ci!(prop, {
-                "rigidBody" => (s.bodies.iter().map(|b| b.name.clone()).collect(), "rigidBody"),
-                "spring" => (
+            match prop.into_builtin_or_error()? {
+                BuiltInSymbol::RigidBody => (s.bodies.iter().map(|b| b.name.clone()).collect(), BuiltInSymbol::RigidBody),
+                BuiltInSymbol::Spring => (
                     s.constraints.iter().filter(|c| matches!(c.kind, PhysXConstraintKind::Spring))
                         .map(|c| c.name.clone()).collect(),
-                    "spring",
+                    BuiltInSymbol::Spring,
                 ),
-                "linearJoint" => (
+                BuiltInSymbol::LinearJoint => (
                     s.constraints.iter().filter(|c| matches!(c.kind, PhysXConstraintKind::LinearJoint))
                         .map(|c| c.name.clone()).collect(),
-                    "linearJoint",
+                    BuiltInSymbol::LinearJoint,
                 ),
-                "angularJoint" => (
+                BuiltInSymbol::AngularJoint => (
                     s.constraints.iter().filter(|c| matches!(c.kind, PhysXConstraintKind::AngularJoint))
                         .map(|c| c.name.clone()).collect(),
-                    "angularJoint",
+                    BuiltInSymbol::AngularJoint,
                 ),
-                "d6Joint" => (
+                BuiltInSymbol::D6Joint => (
                     s.constraints.iter().filter(|c| matches!(c.kind, PhysXConstraintKind::D6Joint))
                         .map(|c| c.name.clone()).collect(),
-                    "d6Joint",
+                    BuiltInSymbol::D6Joint,
                 ),
-                "constraint" => (
+                BuiltInSymbol::Constraint => (
                     s.constraints.iter().map(|c| c.name.clone()).collect(),
-                    "constraint",
+                    BuiltInSymbol::Constraint,
                 ),
                 _ => return Err(ScriptError::new(format!(
                     "Cannot get PhysX member property: {}", prop
                 ))),
-            })
+            }
         };
 
         let items: VecDeque<DatumRef> = names.iter().map(|name| {
             player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,
-                object_type: list_type.to_string(),
+                object_type: list_type,
                 id: 0,
                 name: name.clone(),
             }))
@@ -159,11 +157,11 @@ impl PhysXPhysicsMemberHandlers {
                 "sleepThreshold" => { s.sleep_threshold = value.to_float()?; Ok(()) },
                 "sleepMode" => {
                     let sym = match &value {
-                        Datum::Symbol(s) => s.to_lowercase(),
-                        Datum::String(s) => s.to_lowercase(),
+                        Datum::Symbol(s) => *s,
+                        Datum::String(s) => Symbol::from_str(s),
                         _ => return Err(ScriptError::new("sleepMode expects #energy or #linearvelocity".to_string())),
                     };
-                    s.sleep_mode = if sym == "linearvelocity" { PhysXSleepMode::LinearVelocity } else { PhysXSleepMode::Energy };
+                    s.sleep_mode = if sym == Symbol::builtin(BuiltInSymbol::LinearVelocity) { PhysXSleepMode::LinearVelocity } else { PhysXSleepMode::Energy };
                     Ok(())
                 },
                 "timeStep" => {
@@ -173,11 +171,11 @@ impl PhysXPhysicsMemberHandlers {
                 },
                 "timeStepMode" => {
                     let sym = match &value {
-                        Datum::Symbol(s) => s.to_lowercase(),
-                        Datum::String(s) => s.to_lowercase(),
+                        Datum::Symbol(s) => *s,
+                        Datum::String(s) => Symbol::from_str(s),
                         _ => return Err(ScriptError::new("timeStepMode expects #equal or #automatic".to_string())),
                     };
-                    s.time_step_mode = if sym == "automatic" { PhysXTimeStepMode::Automatic } else { PhysXTimeStepMode::Equal };
+                    s.time_step_mode = if sym == Symbol::builtin(BuiltInSymbol::Automatic) { PhysXTimeStepMode::Automatic } else { PhysXTimeStepMode::Equal };
                     Ok(())
                 },
                 "subSteps" => {
@@ -194,7 +192,7 @@ impl PhysXPhysicsMemberHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -202,152 +200,153 @@ impl PhysXPhysicsMemberHandlers {
                 Datum::CastMember(r) => r.to_owned(),
                 _ => return Err(ScriptError::new("Cannot call PhysX handler on non-cast-member".to_string())),
             };
+            let handler_name_builtin = handler_name.into_builtin_or_error()?;
 
             // -- World lifecycle --
-            if handler_name.eq_ignore_ascii_case("init") || handler_name.eq_ignore_ascii_case("Initialize") {
+            if handler_name_builtin == BuiltInSymbol::Init || handler_name_builtin == BuiltInSymbol::Initialize {
                 return Self::init(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("destroy") {
+            if handler_name_builtin == BuiltInSymbol::Destroy {
                 return Self::destroy(player, &member_ref);
             }
-            if handler_name.eq_ignore_ascii_case("pauseSimulation") {
+            if handler_name_builtin == BuiltInSymbol::PauseSimulation {
                 return Self::pause_simulation(player, &member_ref);
             }
-            if handler_name.eq_ignore_ascii_case("resumeSimulation") {
+            if handler_name_builtin == BuiltInSymbol::ResumeSimulation {
                 return Self::resume_simulation(player, &member_ref);
             }
-            if handler_name.eq_ignore_ascii_case("simulate") {
+            if handler_name_builtin == BuiltInSymbol::Simulate {
                 return Self::simulate(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getSimulationTime") {
+            if handler_name_builtin == BuiltInSymbol::GetSimulationTime {
                 return Self::get_simulation_time(player, &member_ref);
             }
 
             // -- Body factories / lookups --
-            if handler_name.eq_ignore_ascii_case("createRigidBody") {
+            if handler_name_builtin == BuiltInSymbol::CreateRigidBody {
                 return Self::create_rigid_body(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("createRigidBodyFromProxy") {
+            if handler_name_builtin == BuiltInSymbol::CreateRigidBodyFromProxy {
                 return Self::create_rigid_body_from_proxy(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("deleteRigidBody") {
+            if handler_name_builtin == BuiltInSymbol::DeleteRigidBody {
                 return Self::delete_rigid_body(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getRigidBody") {
+            if handler_name_builtin == BuiltInSymbol::GetRigidBody {
                 return Self::get_rigid_body(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getRigidBodies") {
+            if handler_name_builtin == BuiltInSymbol::GetRigidBodies {
                 return Self::get_rigid_bodies(player, &member_ref, false);
             }
-            if handler_name.eq_ignore_ascii_case("getSleepingBodies") || handler_name.eq_ignore_ascii_case("getSleepingRigidBodies") {
+            if handler_name_builtin == BuiltInSymbol::GetSleepingBodies || handler_name_builtin == BuiltInSymbol::GetSleepingRigidBodies {
                 return Self::get_rigid_bodies(player, &member_ref, true);
             }
 
             // -- Proxy / mesh — Phase 1 stubs, return success / void --
-            if handler_name.eq_ignore_ascii_case("createProxyTemplate")
-                || handler_name.eq_ignore_ascii_case("addProxyTemplate")
-                || handler_name.eq_ignore_ascii_case("loadProxyTemplate")
+            if handler_name_builtin == BuiltInSymbol::CreateProxyTemplate
+                || handler_name_builtin == BuiltInSymbol::AddProxyTemplate
+                || handler_name_builtin == BuiltInSymbol::LoadProxyTemplate
             {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
 
             // -- Constraint factories --
-            if handler_name.eq_ignore_ascii_case("createSpring") {
+            if handler_name_builtin == BuiltInSymbol::CreateSpring {
                 return Self::create_constraint(player, &member_ref, args, PhysXConstraintKind::Spring);
             }
-            if handler_name.eq_ignore_ascii_case("createLinearJoint") {
+            if handler_name_builtin == BuiltInSymbol::CreateLinearJoint {
                 return Self::create_constraint(player, &member_ref, args, PhysXConstraintKind::LinearJoint);
             }
-            if handler_name.eq_ignore_ascii_case("createAngularJoint") {
+            if handler_name_builtin == BuiltInSymbol::CreateAngularJoint {
                 return Self::create_constraint(player, &member_ref, args, PhysXConstraintKind::AngularJoint);
             }
-            if handler_name.eq_ignore_ascii_case("createD6Joint") {
+            if handler_name_builtin == BuiltInSymbol::CreateD6Joint {
                 return Self::create_constraint(player, &member_ref, args, PhysXConstraintKind::D6Joint);
             }
-            if handler_name.eq_ignore_ascii_case("deleteSpring")
-                || handler_name.eq_ignore_ascii_case("deleteConstraint")
-                || handler_name.eq_ignore_ascii_case("deleteRigidBodyConstraints")
+            if handler_name_builtin == BuiltInSymbol::DeleteSpring
+                || handler_name_builtin == BuiltInSymbol::DeleteConstraint
+                || handler_name_builtin == BuiltInSymbol::DeleteRigidBodyConstraints
             {
                 return Self::delete_constraint(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getSpring") {
+            if handler_name_builtin == BuiltInSymbol::GetSpring {
                 return Self::get_constraint_named(player, &member_ref, args, Some(PhysXConstraintKind::Spring));
             }
-            if handler_name.eq_ignore_ascii_case("getConstraint") {
+            if handler_name_builtin == BuiltInSymbol::GetConstraint {
                 return Self::get_constraint_named(player, &member_ref, args, None);
             }
-            if handler_name.eq_ignore_ascii_case("getAllSprings") {
+            if handler_name_builtin == BuiltInSymbol::GetAllSprings {
                 return Self::get_all_constraints(player, &member_ref, Some(PhysXConstraintKind::Spring));
             }
-            if handler_name.eq_ignore_ascii_case("getAllConstraints") {
+            if handler_name_builtin == BuiltInSymbol::GetAllConstraints {
                 return Self::get_all_constraints(player, &member_ref, None);
             }
 
             // -- Cloth / controller — return -7 (feature unavailable),
             //    matching the AGEIA .o behaviour. --
-            if handler_name.eq_ignore_ascii_case("createCloth")
-                || handler_name.eq_ignore_ascii_case("deleteCloth")
-                || handler_name.eq_ignore_ascii_case("getCloth")
-                || handler_name.eq_ignore_ascii_case("getCloths")
-                || handler_name.eq_ignore_ascii_case("createClothResource")
-                || handler_name.eq_ignore_ascii_case("createController")
-                || handler_name.eq_ignore_ascii_case("deleteController")
-                || handler_name.eq_ignore_ascii_case("getController")
-                || handler_name.eq_ignore_ascii_case("getControllers")
+            if handler_name_builtin == BuiltInSymbol::CreateCloth
+                || handler_name_builtin == BuiltInSymbol::DeleteCloth
+                || handler_name_builtin == BuiltInSymbol::GetCloth
+                || handler_name_builtin == BuiltInSymbol::GetCloths
+                || handler_name_builtin == BuiltInSymbol::CreateClothResource
+                || handler_name_builtin == BuiltInSymbol::CreateController
+                || handler_name_builtin == BuiltInSymbol::DeleteController
+                || handler_name_builtin == BuiltInSymbol::GetController
+                || handler_name_builtin == BuiltInSymbol::GetControllers
             {
                 return Ok(player.alloc_datum(Datum::Int(-7)));
             }
 
             // -- Terrain (Director chapter 15: createTerrain/createTerrainDesc) --
-            if handler_name.eq_ignore_ascii_case("createTerrainDesc") {
+            if handler_name_builtin == BuiltInSymbol::CreateTerrainDesc {
                 return Self::create_terrain_desc(player, args);
             }
-            if handler_name.eq_ignore_ascii_case("createTerrain") {
+            if handler_name_builtin == BuiltInSymbol::CreateTerrain {
                 return Self::create_terrain(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("deleteTerrain") {
+            if handler_name_builtin == BuiltInSymbol::DeleteTerrain {
                 return Self::delete_terrain(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getTerrain") {
+            if handler_name_builtin == BuiltInSymbol::GetTerrain {
                 return Self::get_terrain(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("getTerrains") {
+            if handler_name_builtin == BuiltInSymbol::GetTerrains {
                 return Self::get_terrains(player, &member_ref);
             }
 
             // -- Collision callbacks (Director chapter 15) --
-            if handler_name.eq_ignore_ascii_case("enableCollision") {
+            if handler_name_builtin == BuiltInSymbol::EnableCollision {
                 return Self::set_collision_filter(player, &member_ref, args, /*enable*/ true, /*callback*/ false);
             }
-            if handler_name.eq_ignore_ascii_case("disableCollision") {
+            if handler_name_builtin == BuiltInSymbol::DisableCollision {
                 return Self::set_collision_filter(player, &member_ref, args, false, false);
             }
-            if handler_name.eq_ignore_ascii_case("enableCollisionCallback") {
+            if handler_name_builtin == BuiltInSymbol::EnableCollisionCallback {
                 return Self::set_collision_filter(player, &member_ref, args, true, true);
             }
-            if handler_name.eq_ignore_ascii_case("disableCollisionCallback") {
+            if handler_name_builtin == BuiltInSymbol::DisableCollisionCallback {
                 return Self::set_collision_filter(player, &member_ref, args, false, true);
             }
-            if handler_name.eq_ignore_ascii_case("getCollisionDisabledPairs") {
+            if handler_name_builtin == BuiltInSymbol::GetCollisionDisabledPairs {
                 return Self::get_disabled_pairs(player, &member_ref, /*callback*/ false);
             }
-            if handler_name.eq_ignore_ascii_case("getCollisionCallbackDisabledPairs") {
+            if handler_name_builtin == BuiltInSymbol::GetCollisionCallbackDisabledPairs {
                 return Self::get_disabled_pairs(player, &member_ref, true);
             }
-            if handler_name.eq_ignore_ascii_case("registerCollisionCallback")
-                || handler_name.eq_ignore_ascii_case("registerForCollisions")
+            if handler_name_builtin == BuiltInSymbol::RegisterCollisionCallback
+                || handler_name_builtin == BuiltInSymbol::RegisterForCollisions
             {
                 return Self::register_collision_callback(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("removeCollisionCallback")
-                || handler_name.eq_ignore_ascii_case("removeCallback")
+            if handler_name_builtin == BuiltInSymbol::RemoveCollisionCallback
+                || handler_name_builtin == BuiltInSymbol::RemoveCallback
             {
                 return Self::remove_collision_callback(player, &member_ref);
             }
-            if handler_name.eq_ignore_ascii_case("notifyCollisions") {
+            if handler_name_builtin == BuiltInSymbol::NotifyCollisions {
                 return Self::notify_collisions(player, &member_ref, args);
             }
-            if handler_name.eq_ignore_ascii_case("enableCollisionGroupFlag") {
+            if handler_name_builtin == BuiltInSymbol::EnableCollisionGroupFlag {
                 // Stub — Director only documents this as "enable group pair";
                 // the wrapper has no group state today. Returns 0 success.
                 return Ok(player.alloc_datum(Datum::Int(0)));
@@ -358,42 +357,42 @@ impl PhysXPhysicsMemberHandlers {
             // `rayCastAll`; the AGEIA dynamiks.x32 wrapper exposed them as
             // `getRayCastClosestShape` / `getRayCastAllShapes`. Accept both
             // so movies that follow either spelling work without churn.
-            if handler_name.eq_ignore_ascii_case("getRayCastClosestShape")
-                || handler_name.eq_ignore_ascii_case("rayCastClosest")
+            if handler_name_builtin == BuiltInSymbol::GetRayCastClosestShape
+                || handler_name_builtin == BuiltInSymbol::RayCastClosest
             {
                 return Self::raycast(player, &member_ref, args, /*all*/ false);
             }
-            if handler_name.eq_ignore_ascii_case("getRayCastAllShapes")
-                || handler_name.eq_ignore_ascii_case("rayCastAll")
+            if handler_name_builtin == BuiltInSymbol::GetRayCastAllShapes
+                || handler_name_builtin == BuiltInSymbol::RayCastAll
             {
                 return Self::raycast(player, &member_ref, args, true);
             }
 
             // -- Bounding queries --
-            if handler_name.eq_ignore_ascii_case("getBoundingBox") {
+            if handler_name_builtin == BuiltInSymbol::GetBoundingBox {
                 return Self::get_bounding_box(player, &member_ref);
             }
-            if handler_name.eq_ignore_ascii_case("getBoundingSphere") {
+            if handler_name_builtin == BuiltInSymbol::GetBoundingSphere {
                 return Self::get_bounding_sphere(player, &member_ref);
             }
 
             // -- Generic getProp / count / getAt -- mirror the Havok pattern --
-            if handler_name.eq_ignore_ascii_case("getProp") {
-                let prop = player.get_datum(&args[0]).string_value()?;
-                let result = Self::get_prop(player, &member_ref, &prop)?;
+            if handler_name_builtin == BuiltInSymbol::GetProp {
+                let prop = player.get_datum(&args[0]).symbol_value()?;
+                let result = Self::get_prop(player, &member_ref, prop)?;
                 return Ok(player.alloc_datum(result));
             }
-            if handler_name.eq_ignore_ascii_case("count") {
-                let prop = player.get_datum(&args[0]).string_value()?;
-                let list_datum = Self::get_prop(player, &member_ref, &prop)?;
+            if handler_name_builtin == BuiltInSymbol::Count {
+                let prop = player.get_datum(&args[0]).symbol_value()?;
+                let list_datum = Self::get_prop(player, &member_ref, prop)?;
                 if let Datum::List(_, items, _) = &list_datum {
                     return Ok(player.alloc_datum(Datum::Int(items.len() as i32)));
                 }
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
-            if handler_name.eq_ignore_ascii_case("getAt") || handler_name.eq_ignore_ascii_case("getPropRef") {
-                let prop = player.get_datum(&args[0]).string_value()?;
-                let list_datum = Self::get_prop(player, &member_ref, &prop)?;
+            if handler_name_builtin == BuiltInSymbol::GetAt || handler_name_builtin == BuiltInSymbol::GetPropRef {
+                let prop = player.get_datum(&args[0]).symbol_value()?;
+                let list_datum = Self::get_prop(player, &member_ref, prop)?;
                 if args.len() > 1 {
                     let index = player.get_datum(&args[1]).int_value()?;
                     if let Datum::List(_, items, _) = &list_datum {
@@ -443,10 +442,11 @@ impl PhysXPhysicsMemberHandlers {
         } else { [1.0, 1.0, 1.0] };
         let mode_sym = if args.len() > 2 {
             match player.get_datum(&args[2]) {
-                Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
-                _ => "equal".to_string(),
+                Datum::Symbol(s) => *s,
+                Datum::String(s) => Symbol::from_str(&s),
+                _ => Symbol::builtin(BuiltInSymbol::Equal),
             }
-        } else { "equal".to_string() };
+        } else { Symbol::builtin(BuiltInSymbol::Equal) };
         let time_step = if args.len() > 3 { player.get_datum(&args[3]).to_float().unwrap_or(1.0/60.0) } else { 1.0/60.0 };
         let sub_steps = if args.len() > 4 { player.get_datum(&args[4]).int_value().unwrap_or(1) as u32 } else { 1 };
 
@@ -459,7 +459,7 @@ impl PhysXPhysicsMemberHandlers {
         let s = &mut physx.state;
         s.three_d_member_name = three_d_name;
         s.scaling_factor = scaling;
-        s.time_step_mode = if mode_sym == "automatic" { PhysXTimeStepMode::Automatic } else { PhysXTimeStepMode::Equal };
+        s.time_step_mode = if mode_sym == Symbol::builtin(BuiltInSymbol::Automatic) { PhysXTimeStepMode::Automatic } else { PhysXTimeStepMode::Equal };
         if time_step > 0.0 { s.time_step = time_step; }
         s.sub_steps = if sub_steps == 0 { 1 } else { sub_steps };
         s.initialized = true;
@@ -569,14 +569,16 @@ impl PhysXPhysicsMemberHandlers {
         if args.len() < 4 {
             return Err(ScriptError::new("createRigidBody expects 4-5 arguments".to_string()));
         }
-        let name = player.get_datum(&args[0]).string_value()?;
+        let name = player.get_datum(&args[0]).symbol_value()?;
         let model_name = player.get_datum(&args[1]).string_value()?;
         let shape_sym = match player.get_datum(&args[2]) {
-            Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+            Datum::Symbol(s) => *s,
+            Datum::String(s) => Symbol::from_str(&s),
             _ => return Err(ScriptError::new("createRigidBody: shape must be a symbol".to_string())),
         };
         let type_sym = match player.get_datum(&args[3]) {
-            Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+            Datum::Symbol(s) => *s,
+            Datum::String(s) => Symbol::from_str(&s),
             _ => return Err(ScriptError::new("createRigidBody: type must be a symbol".to_string())),
         };
 
@@ -610,13 +612,13 @@ impl PhysXPhysicsMemberHandlers {
                 for (_, member) in &cast.members {
                     if let crate::player::cast_member::CastMemberType::Shockwave3d(w3d) = &member.member_type {
                         if let Some(scene) = &w3d.parsed_scene {
-                            if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&model_name)) {
+                            if let Some(node) = scene.nodes.iter().find(|n| n.name.as_str().eq_ignore_ascii_case(&model_name)) {
                                 let resource = if !node.model_resource_name.is_empty() {
                                     &node.model_resource_name
                                 } else {
                                     &node.resource_name
                                 };
-                                if let Some(res) = scene.model_resources.get(resource.as_str()) {
+                                if let Some(res) = scene.model_resources.get(resource) {
                                     let r = res.primitive_radius as f64;
                                     let w = res.primitive_width as f64;
                                     let h = res.primitive_height as f64;
@@ -650,7 +652,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
 
-        if physx.state.bodies.iter().any(|b| b.name.eq_ignore_ascii_case(&name)) {
+        if physx.state.bodies.iter().any(|b| b.name == name) {
             return Ok(player.alloc_datum(Datum::Void));
         }
 
@@ -676,7 +678,7 @@ impl PhysXPhysicsMemberHandlers {
         Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
             cast_lib: member_ref.cast_lib,
             cast_member: member_ref.cast_member,
-            object_type: "rigidBody".to_string(),
+            object_type: BuiltInSymbol::RigidBody,
             id,
             name,
         })))
@@ -692,10 +694,11 @@ impl PhysXPhysicsMemberHandlers {
         if args.len() < 3 {
             return Err(ScriptError::new("createRigidBodyFromProxy expects 3+ arguments".to_string()));
         }
-        let name = player.get_datum(&args[0]).string_value()?;
+        let name = player.get_datum(&args[0]).symbol_value()?;
         let model_name = player.get_datum(&args[1]).string_value()?;
         let type_sym = match player.get_datum(&args[2]) {
-            Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+            Datum::Symbol(s) => *s,
+            Datum::String(s) => Symbol::from_str(&s),
             _ => return Err(ScriptError::new("createRigidBodyFromProxy: type must be a symbol".to_string())),
         };
         let body_type = match type_sym.as_str() {
@@ -711,7 +714,7 @@ impl PhysXPhysicsMemberHandlers {
             CastMemberType::PhysXPhysics(p) => p,
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
-        if physx.state.bodies.iter().any(|b| b.name.eq_ignore_ascii_case(&name)) {
+        if physx.state.bodies.iter().any(|b| b.name == name) {
             return Ok(player.alloc_datum(Datum::Void));
         }
 
@@ -733,7 +736,7 @@ impl PhysXPhysicsMemberHandlers {
         Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
             cast_lib: member_ref.cast_lib,
             cast_member: member_ref.cast_member,
-            object_type: "rigidBody".to_string(),
+            object_type: BuiltInSymbol::RigidBody,
             id,
             name,
         })))
@@ -746,7 +749,8 @@ impl PhysXPhysicsMemberHandlers {
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() { return Ok(player.alloc_datum(Datum::Int(-4))); }
         let name = match player.get_datum(&args[0]) {
-            Datum::String(s) => s.clone(),
+            Datum::String(s) => Symbol::from_str(&s),
+            Datum::Symbol(s) => *s,
             Datum::PhysXObjectRef(r) => r.name.clone(),
             _ => return Ok(player.alloc_datum(Datum::Int(-4))),
         };
@@ -757,7 +761,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
         let before = physx.state.bodies.len();
-        physx.state.bodies.retain(|b| !b.name.eq_ignore_ascii_case(&name));
+        physx.state.bodies.retain(|b| b.name != name);
         let after = physx.state.bodies.len();
         Ok(player.alloc_datum(Datum::Int(if before != after { 0 } else { -8 })))
     }
@@ -768,7 +772,7 @@ impl PhysXPhysicsMemberHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() { return Ok(player.alloc_datum(Datum::Void)); }
-        let name = player.get_datum(&args[0]).string_value()?;
+        let name = player.get_datum(&args[0]).symbol_value()?;
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &member.member_type {
@@ -776,14 +780,14 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
         let body = physx.state.bodies.iter()
-            .find(|b| b.name.eq_ignore_ascii_case(&name));
+            .find(|b| b.name == name);
         let id = body.map(|b| b.id);
         let real_name = body.map(|b| b.name.clone());
         match (id, real_name) {
             (Some(id), Some(real_name)) => Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,
-                object_type: "rigidBody".to_string(),
+                object_type: BuiltInSymbol::RigidBody,
                 id,
                 name: real_name,
             }))),
@@ -796,7 +800,7 @@ impl PhysXPhysicsMemberHandlers {
         member_ref: &CastMemberRef,
         only_sleeping: bool,
     ) -> Result<DatumRef, ScriptError> {
-        let entries: Vec<(u32, String)> = {
+        let entries: Vec<(u32, Symbol)> = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
@@ -812,7 +816,7 @@ impl PhysXPhysicsMemberHandlers {
             player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,
-                object_type: "rigidBody".to_string(),
+                object_type: BuiltInSymbol::RigidBody,
                 id,
                 name,
             }))
@@ -832,8 +836,8 @@ impl PhysXPhysicsMemberHandlers {
         match d {
             Datum::List(_, items, _) if items.len() >= 7 => {
                 let name = match player.get_datum(&items[0]) {
-                    Datum::String(s) => s.clone(),
-                    Datum::Symbol(s) => s.clone(),
+                    Datum::String(s) => Symbol::from_str(&s),
+                    Datum::Symbol(s) => *s,
                     _ => return None,
                 };
                 let body_a = match player.get_datum(&items[1]) {
@@ -854,7 +858,7 @@ impl PhysXPhysicsMemberHandlers {
                 Some(ConstraintDescDecoded { name, body_a, body_b, pt_a, pt_b, stiffness, damping })
             }
             Datum::PropList(items, _) => {
-                let mut name = String::new();
+                let mut name = Symbol::default();
                 let mut body_a: Option<u32> = None;
                 let mut body_b: Option<u32> = None;
                 let mut pt_a = [0.0; 3];
@@ -863,26 +867,27 @@ impl PhysXPhysicsMemberHandlers {
                 let mut damping = 0.0;
                 for (k, v) in items.iter() {
                     let key = match player.get_datum(k) {
-                        Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+                        Datum::Symbol(s) => *s,
+                        Datum::String(s) => Symbol::from_str(&s),
                         _ => continue,
                     };
                     let val = player.get_datum(v);
-                    match key.as_str() {
-                        "name" => if let Datum::String(s) = val { name = s.clone(); },
-                        "objecta" | "bodya" | "rigidbodya" => {
+                    match key.into_builtin() {
+                        Some(BuiltInSymbol::Name) => if let Datum::String(s) = val { name = Symbol::from_str(&s); },
+                        Some(BuiltInSymbol::ObjectA) | Some(BuiltInSymbol::BodyA) | Some(BuiltInSymbol::RigidBodyA) => {
                             if let Datum::PhysXObjectRef(r) = val { body_a = Some(r.id); }
                         }
-                        "objectb" | "bodyb" | "rigidbodyb" => {
+                        Some(BuiltInSymbol::ObjectB) | Some(BuiltInSymbol::BodyB) | Some(BuiltInSymbol::RigidBodyB) => {
                             if let Datum::PhysXObjectRef(r) = val { body_b = Some(r.id); }
                         }
-                        "pointa" | "pca" | "poca" => {
+                        Some(BuiltInSymbol::PointA) | Some(BuiltInSymbol::Pca) | Some(BuiltInSymbol::Poca) => {
                             if let Datum::Vector(v) = val { pt_a = *v; }
                         }
-                        "pointb" | "pcb" | "pocb" => {
+                        Some(BuiltInSymbol::PointB) | Some(BuiltInSymbol::Pcb) | Some(BuiltInSymbol::Pocb) => {
                             if let Datum::Vector(v) = val { pt_b = *v; }
                         }
-                        "stiffness" => { stiffness = val.to_float().unwrap_or(0.0); }
-                        "damping" => { damping = val.to_float().unwrap_or(0.0); }
+                        Some(BuiltInSymbol::Stiffness) => { stiffness = val.to_float().unwrap_or(0.0); }
+                        Some(BuiltInSymbol::Damping) => { damping = val.to_float().unwrap_or(0.0); }
                         _ => {}
                     }
                 }
@@ -912,7 +917,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
 
-        if physx.state.constraints.iter().any(|c| c.name.eq_ignore_ascii_case(&desc.name)) {
+        if physx.state.constraints.iter().any(|c| c.name != desc.name) {
             return Ok(player.alloc_datum(Datum::Int(-4)));
         }
 
@@ -932,15 +937,15 @@ impl PhysXPhysicsMemberHandlers {
         physx.state.constraints.push(c);
 
         let object_type = match kind {
-            PhysXConstraintKind::Spring => "spring",
-            PhysXConstraintKind::LinearJoint => "linearJoint",
-            PhysXConstraintKind::AngularJoint => "angularJoint",
-            PhysXConstraintKind::D6Joint => "d6Joint",
+            PhysXConstraintKind::Spring => BuiltInSymbol::Spring,
+            PhysXConstraintKind::LinearJoint => BuiltInSymbol::LinearJoint,
+            PhysXConstraintKind::AngularJoint => BuiltInSymbol::AngularJoint,
+            PhysXConstraintKind::D6Joint => BuiltInSymbol::D6Joint,
         };
         Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
             cast_lib: member_ref.cast_lib,
             cast_member: member_ref.cast_member,
-            object_type: object_type.to_string(),
+            object_type: object_type,
             id,
             name: desc.name,
         })))
@@ -953,7 +958,7 @@ impl PhysXPhysicsMemberHandlers {
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() { return Ok(player.alloc_datum(Datum::Int(-4))); }
         let name = match player.get_datum(&args[0]) {
-            Datum::String(s) => s.clone(),
+            Datum::String(s) => Symbol::from_str(s),
             Datum::PhysXObjectRef(r) => r.name.clone(),
             _ => return Ok(player.alloc_datum(Datum::Int(-4))),
         };
@@ -964,7 +969,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
         let before = physx.state.constraints.len();
-        physx.state.constraints.retain(|c| !c.name.eq_ignore_ascii_case(&name));
+        physx.state.constraints.retain(|c| c.name != name);
         let after = physx.state.constraints.len();
         Ok(player.alloc_datum(Datum::Int(if before != after { 0 } else { -1 })))
     }
@@ -976,8 +981,8 @@ impl PhysXPhysicsMemberHandlers {
         kind_filter: Option<PhysXConstraintKind>,
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() { return Ok(player.alloc_datum(Datum::Void)); }
-        let name = player.get_datum(&args[0]).string_value()?;
-        let entry: Option<(u32, String, PhysXConstraintKind)> = {
+        let name = player.get_datum(&args[0]).symbol_value()?;
+        let entry: Option<(u32, Symbol, PhysXConstraintKind)> = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
@@ -985,21 +990,21 @@ impl PhysXPhysicsMemberHandlers {
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
             physx.state.constraints.iter()
-                .find(|c| c.name.eq_ignore_ascii_case(&name) && kind_filter.map_or(true, |k| c.kind == k))
-                .map(|c| (c.id, c.name.clone(), c.kind))
+                .find(|c| c.name == name && kind_filter.map_or(true, |k| c.kind == k))
+                .map(|c| (c.id, c.name, c.kind))
         };
         match entry {
             Some((id, real, kind)) => {
                 let object_type = match kind {
-                    PhysXConstraintKind::Spring => "spring",
-                    PhysXConstraintKind::LinearJoint => "linearJoint",
-                    PhysXConstraintKind::AngularJoint => "angularJoint",
-                    PhysXConstraintKind::D6Joint => "d6Joint",
+                    PhysXConstraintKind::Spring => BuiltInSymbol::Spring,
+                    PhysXConstraintKind::LinearJoint => BuiltInSymbol::LinearJoint,
+                    PhysXConstraintKind::AngularJoint => BuiltInSymbol::AngularJoint,
+                    PhysXConstraintKind::D6Joint => BuiltInSymbol::D6Joint,
                 };
                 Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                     cast_lib: member_ref.cast_lib,
                     cast_member: member_ref.cast_member,
-                    object_type: object_type.to_string(),
+                    object_type: object_type,
                     id,
                     name: real,
                 })))
@@ -1013,7 +1018,7 @@ impl PhysXPhysicsMemberHandlers {
         member_ref: &CastMemberRef,
         kind_filter: Option<PhysXConstraintKind>,
     ) -> Result<DatumRef, ScriptError> {
-        let entries: Vec<(u32, String, PhysXConstraintKind)> = {
+        let entries: Vec<(u32, Symbol, PhysXConstraintKind)> = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
@@ -1027,15 +1032,15 @@ impl PhysXPhysicsMemberHandlers {
         };
         let items: VecDeque<DatumRef> = entries.into_iter().map(|(id, name, kind)| {
             let object_type = match kind {
-                PhysXConstraintKind::Spring => "spring",
-                PhysXConstraintKind::LinearJoint => "linearJoint",
-                PhysXConstraintKind::AngularJoint => "angularJoint",
-                PhysXConstraintKind::D6Joint => "d6Joint",
+                PhysXConstraintKind::Spring => BuiltInSymbol::Spring,
+                PhysXConstraintKind::LinearJoint => BuiltInSymbol::LinearJoint,
+                PhysXConstraintKind::AngularJoint => BuiltInSymbol::AngularJoint,
+                PhysXConstraintKind::D6Joint => BuiltInSymbol::D6Joint,
             };
             player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,
-                object_type: object_type.to_string(),
+                object_type,
                 id,
                 name,
             }))
@@ -1248,7 +1253,7 @@ impl PhysXPhysicsMemberHandlers {
         let body_ref = name.map(|n| player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
             cast_lib: member_ref.cast_lib,
             cast_member: member_ref.cast_member,
-            object_type: "rigidBody".to_string(),
+            object_type: BuiltInSymbol::RigidBody,
             id: *rb_id,
             name: n,
         }))).unwrap_or(DatumRef::Void);
@@ -1283,11 +1288,11 @@ impl PhysXPhysicsMemberHandlers {
         callback: bool,
     ) -> Result<DatumRef, ScriptError> {
         // Decode 0, 1, or 2 PhysXObjectRef body args.
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<Symbol> = Vec::new();
         for a in args.iter().take(2) {
             match player.get_datum(a) {
                 Datum::PhysXObjectRef(r) => names.push(r.name.clone()),
-                Datum::String(s) => names.push(s.clone()),
+                Datum::String(s) => names.push(Symbol::from_str(s)),
                 Datum::Void => {} // skip
                 _ => {}
             }
@@ -1311,7 +1316,7 @@ impl PhysXPhysicsMemberHandlers {
             (1, false, true ) => { physx.state.body_callback_disabled.insert(names[0].clone()); }
             // Two args → pair toggle.
             (_, e, cb) => {
-                let key = if names[0] < names[1] { (names[0].clone(), names[1].clone()) } else { (names[1].clone(), names[0].clone()) };
+                let key = if names[0].as_str() < names[1].as_str() { (names[0].clone(), names[1].clone()) } else { (names[1].clone(), names[0].clone()) };
                 if !cb {
                     if e { physx.state.disabled_collision_pairs.remove(&key); }
                     else { physx.state.disabled_collision_pairs.insert(key.clone()); physx.state.disabled_callback_pairs.insert(key); }
@@ -1325,7 +1330,7 @@ impl PhysXPhysicsMemberHandlers {
     }
 
     fn get_disabled_pairs(player: &mut crate::player::DirPlayer, member_ref: &CastMemberRef, callback: bool) -> Result<DatumRef, ScriptError> {
-        let pairs: Vec<(String, String)> = {
+        let pairs: Vec<(Symbol, Symbol)> = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
@@ -1337,8 +1342,8 @@ impl PhysXPhysicsMemberHandlers {
         };
         let mut items = VecDeque::new();
         for (a, b) in pairs {
-            let a_ref = player.alloc_datum(Datum::String(a));
-            let b_ref = player.alloc_datum(Datum::String(b));
+            let a_ref = player.alloc_datum(Datum::String(a.to_string()));
+            let b_ref = player.alloc_datum(Datum::String(b.to_string()));
             let pair = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from([a_ref, b_ref]), false));
             items.push_back(pair);
         }
@@ -1352,7 +1357,7 @@ impl PhysXPhysicsMemberHandlers {
         if args.is_empty() { return Ok(player.alloc_datum(Datum::Int(-4))); }
         let handler = match player.get_datum(&args[0]) {
             Datum::Symbol(s) => s.clone(),
-            Datum::String(s) => s.clone(),
+            Datum::String(s) => Symbol::from_str(s),
             _ => return Ok(player.alloc_datum(Datum::Int(-4))),
         };
         let script_ref: Option<DatumRef> = if args.len() >= 2 { Some(args[1].clone()) } else { None };
@@ -1419,10 +1424,10 @@ impl PhysXPhysicsMemberHandlers {
                 (na, nb)
             };
             let a_ref = name_a.map(|n| player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
-                cast_lib, cast_member, object_type: "rigidBody".to_string(), id: a_id, name: n,
+                cast_lib, cast_member, object_type: BuiltInSymbol::RigidBody, id: a_id, name: n,
             }))).unwrap_or(DatumRef::Void);
             let b_ref = name_b.map(|n| player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
-                cast_lib, cast_member, object_type: "rigidBody".to_string(), id: b_id, name: n,
+                cast_lib, cast_member, object_type: BuiltInSymbol::RigidBody, id: b_id, name: n,
             }))).unwrap_or(DatumRef::Void);
             let mut pts = VecDeque::new();
             for p in points { pts.push_back(player.alloc_datum(Datum::Vector(p))); }
@@ -1430,10 +1435,10 @@ impl PhysXPhysicsMemberHandlers {
             let mut nms = VecDeque::new();
             for n in normals { nms.push_back(player.alloc_datum(Datum::Vector(n))); }
             let nms_list = player.alloc_datum(Datum::List(DatumType::List, nms, false));
-            let key_a = player.alloc_datum(Datum::Symbol("objectA".to_string()));
-            let key_b = player.alloc_datum(Datum::Symbol("objectB".to_string()));
-            let key_pts = player.alloc_datum(Datum::Symbol("contactPoints".to_string()));
-            let key_nms = player.alloc_datum(Datum::Symbol("contactNormals".to_string()));
+            let key_a = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ObjectA)));
+            let key_b = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ObjectB)));
+            let key_pts = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ContactPoints)));
+            let key_nms = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ContactNormals)));
             let mut props = VecDeque::new();
             props.push_back((key_a, a_ref));
             props.push_back((key_b, b_ref));
@@ -1474,9 +1479,9 @@ impl PhysXPhysicsMemberHandlers {
             player.get_datum(&args[2]).float_value().unwrap_or(0.0) as f64
         } else { 0.0 };
 
-        let key_matrix = player.alloc_datum(Datum::Symbol("elevationMatrix".to_string()));
-        let key_friction = player.alloc_datum(Datum::Symbol("friction".to_string()));
-        let key_rest = player.alloc_datum(Datum::Symbol("restitution".to_string()));
+        let key_matrix = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ElevationMatrix)));
+        let key_friction = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Friction)));
+        let key_rest = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Restitution)));
         let val_friction = player.alloc_datum(Datum::Float(friction));
         let val_rest = player.alloc_datum(Datum::Float(restitution));
         let mut props = VecDeque::new();
@@ -1497,7 +1502,7 @@ impl PhysXPhysicsMemberHandlers {
         if args.len() < 7 {
             return Ok(player.alloc_datum(Datum::Int(-1)));
         }
-        let name = player.get_datum(&args[0]).string_value()?;
+        let name = player.get_datum(&args[0]).symbol_value()?;
 
         // Decode descriptor.
         let (matrix_ref, friction, restitution) = match player.get_datum(&args[1]) {
@@ -1585,7 +1590,7 @@ impl PhysXPhysicsMemberHandlers {
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
             // Reject duplicates.
-            if physx.state.terrains.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
+            if physx.state.terrains.iter().any(|t| t.name == name) {
                 return Ok(player.alloc_datum(Datum::Int(-1)));
             }
             let id = physx.state.next_terrain_id;
@@ -1601,7 +1606,7 @@ impl PhysXPhysicsMemberHandlers {
 
         Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
             cast_lib, cast_member,
-            object_type: "terrain".to_string(),
+            object_type: BuiltInSymbol::Terrain,
             id: terrain_id,
             name,
         })))
@@ -1615,10 +1620,10 @@ impl PhysXPhysicsMemberHandlers {
         if args.is_empty() {
             return Ok(player.alloc_datum(Datum::Int(-1)));
         }
-        let target_name: String = match player.get_datum(&args[0]) {
-            Datum::String(s) => s.clone(),
-            Datum::Symbol(s) => s.clone(),
-            Datum::PhysXObjectRef(r) if r.object_type == "terrain" => r.name.clone(),
+        let target_name: Symbol = match player.get_datum(&args[0]) {
+            Datum::String(s) => Symbol::from_str(&s),
+            Datum::Symbol(s) => *s,
+            Datum::PhysXObjectRef(r) if r.object_type == BuiltInSymbol::Terrain => r.name,
             _ => return Ok(player.alloc_datum(Datum::Int(-1))),
         };
         let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
@@ -1628,7 +1633,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
         let n_before = physx.state.terrains.len();
-        physx.state.terrains.retain(|t| !t.name.eq_ignore_ascii_case(&target_name));
+        physx.state.terrains.retain(|t| t.name != target_name);
         let removed = n_before - physx.state.terrains.len();
         Ok(player.alloc_datum(Datum::Int(if removed > 0 { 0 } else { -1 })))
     }
@@ -1641,7 +1646,12 @@ impl PhysXPhysicsMemberHandlers {
         if args.is_empty() {
             return Ok(player.alloc_datum(Datum::Int(-1)));
         }
-        let target_name = player.get_datum(&args[0]).string_value()?;
+        let target_name = match player.get_datum(&args[0]) {
+            Datum::String(s) => Symbol::from_str(&s),
+            Datum::Symbol(s) => *s,
+            Datum::PhysXObjectRef(r) if r.object_type == BuiltInSymbol::Terrain => r.name,
+            _ => return Ok(player.alloc_datum(Datum::Int(-1))),
+        };
         let cast_lib = member_ref.cast_lib;
         let cast_member = member_ref.cast_member;
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
@@ -1650,12 +1660,12 @@ impl PhysXPhysicsMemberHandlers {
             CastMemberType::PhysXPhysics(p) => p,
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
-        let found = physx.state.terrains.iter().find(|t| t.name.eq_ignore_ascii_case(&target_name));
+        let found = physx.state.terrains.iter().find(|t| t.name == target_name);
         match found {
             Some(t) => Ok(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib, cast_member,
-                object_type: "terrain".to_string(),
-                id: t.id, name: t.name.clone(),
+                object_type: BuiltInSymbol::Terrain,
+                id: t.id, name: t.name,
             }))),
             None => Ok(player.alloc_datum(Datum::Int(-1))),
         }
@@ -1667,20 +1677,20 @@ impl PhysXPhysicsMemberHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let cast_lib = member_ref.cast_lib;
         let cast_member = member_ref.cast_member;
-        let names_ids: Vec<(String, u32)> = {
+        let names_ids: Vec<(Symbol, u32)> = {
             let member = player.movie.cast_manager.find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
                 CastMemberType::PhysXPhysics(p) => p,
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
-            physx.state.terrains.iter().map(|t| (t.name.clone(), t.id)).collect()
+            physx.state.terrains.iter().map(|t| (t.name, t.id)).collect()
         };
         let mut items = VecDeque::new();
         for (name, id) in names_ids {
             items.push_back(player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                 cast_lib, cast_member,
-                object_type: "terrain".to_string(),
+                object_type: BuiltInSymbol::Terrain,
                 id, name,
             })));
         }
@@ -1689,7 +1699,7 @@ impl PhysXPhysicsMemberHandlers {
 }
 
 struct ConstraintDescDecoded {
-    name: String,
+    name: Symbol,
     body_a: Option<u32>,
     body_b: Option<u32>,
     pt_a: [f64; 3],

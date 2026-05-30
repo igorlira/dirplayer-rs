@@ -127,6 +127,7 @@ pub fn log_test_action_live(msg: &str) -> LogHandle {
 }
 
 use crate::director::static_datum::StaticDatum;
+use crate::player::symbols::symbol::Symbol;
 use crate::player::{
     commands::{run_player_command, PlayerVMCommand},
     datum_ref::DatumRef,
@@ -195,7 +196,7 @@ pub trait TestHarness {
     }
 
     fn get_global_ref(&self, name: &str) -> Option<DatumRef> {
-        reserve_player_ref(|player| player.globals.get(name).cloned())
+        reserve_player_ref(|player| player.globals.get(&Symbol::from_str(name)).cloned())
     }
 
     /// Resolve a sprite query to a sprite number.

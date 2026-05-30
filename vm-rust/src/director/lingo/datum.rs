@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}
+    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
 };
 
 #[allow(dead_code)]
@@ -69,23 +69,23 @@ pub enum StringChunkType {
     Line,
 }
 
-impl From<&str> for StringChunkType {
-    fn from(s: &str) -> Self {
-        match s {
-            "item" | "items"  => StringChunkType::Item,
-            "word" | "words"  => StringChunkType::Word,
-            "char" | "chars" => StringChunkType::Char,
-            "line" | "lines" => StringChunkType::Line,
+impl From<Symbol> for StringChunkType {
+    fn from(s: Symbol) -> Self {
+        match s.into_builtin_or_error().unwrap() {
+            BuiltInSymbol::Item | BuiltInSymbol::Items => StringChunkType::Item,
+            BuiltInSymbol::Word | BuiltInSymbol::Words => StringChunkType::Word,
+            BuiltInSymbol::Char | BuiltInSymbol::Chars => StringChunkType::Char,
+            BuiltInSymbol::Line | BuiltInSymbol::Lines => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
     }
 }
 
-impl From<&String> for StringChunkType {
-    fn from(s: &String) -> Self {
-        StringChunkType::from(s.as_str())
-    }
-}
+// impl From<&String> for StringChunkType {
+//     fn from(s: &String) -> Self {
+//         StringChunkType::from(s.as_str())
+//     }
+// }
 
 impl From<&i32> for StringChunkType {
     fn from(n: &i32) -> Self {
@@ -101,6 +101,18 @@ impl From<&i32> for StringChunkType {
     }
 }
 
+impl From<BuiltInSymbol> for StringChunkType {
+    fn from(symbol: BuiltInSymbol) -> Self {
+        match symbol {
+            BuiltInSymbol::Item => StringChunkType::Item,
+            BuiltInSymbol::Word => StringChunkType::Word,
+            BuiltInSymbol::Char => StringChunkType::Char,
+            BuiltInSymbol::Line => StringChunkType::Line,
+            _ => panic!("Invalid builtin symbol for string chunk type"),
+        }
+    }
+}
+
 impl Into<String> for StringChunkType {
     fn into(self) -> String {
         match self {
@@ -108,6 +120,17 @@ impl Into<String> for StringChunkType {
             StringChunkType::Word => "word".to_string(),
             StringChunkType::Char => "char".to_string(),
             StringChunkType::Line => "line".to_string(),
+        }
+    }
+}
+
+impl Into<BuiltInSymbol> for StringChunkType {
+    fn into(self) -> BuiltInSymbol {
+        match self {
+            StringChunkType::Item => BuiltInSymbol::Item,
+            StringChunkType::Word => BuiltInSymbol::Word,
+            StringChunkType::Char => BuiltInSymbol::Char,
+            StringChunkType::Line => BuiltInSymbol::Line,
         }
     }
 }
@@ -140,9 +163,9 @@ pub struct Shockwave3dObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// Object type: "model", "shader", "texture", "camera", "light", "group", "motion", "modelResource"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object name within the scene
-    pub name: String,
+    pub name: Symbol,
 }
 
 /// Reference to a Havok physics object (rigidBody, spring, linearDashpot, angularDashpot, corrector).
@@ -151,9 +174,9 @@ pub struct HavokObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// "rigidBody", "spring", "linearDashpot", "angularDashpot", "corrector"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object name within the Havok scene
-    pub name: String,
+    pub name: Symbol,
 }
 
 /// Reference to a PhysX (AGEIA) physics object (rigidBody, spring, joint).
@@ -164,11 +187,11 @@ pub struct PhysXObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// "rigidBody", "spring", "linearJoint", "angularJoint", "d6Joint", "constraint"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object ID within the PhysX world (matches `PhysXRigidBody.id` / `PhysXConstraint.id`).
     pub id: u32,
     /// Object name (cached for getName / display).
-    pub name: String,
+    pub name: Symbol,
 }
 
 impl FlashObjectRef {
@@ -208,7 +231,7 @@ pub enum Datum {
     VarRef(VarRef),
     List(DatumType, VecDeque<DatumRef>, bool), // bool is for whether the list is sorted
     PropList(VecDeque<PropListPair>, bool),    // bool is for whether the map is sorted
-    Symbol(String),
+    Symbol(Symbol),
     CastLib(u32),
     Stage,
     ScriptRef(CastMemberRef),
@@ -372,7 +395,7 @@ impl Datum {
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
             Datum::Float(n) => Ok(n.to_string()),
-            Datum::Symbol(s) => Ok(s.clone()),
+            Datum::Symbol(s) => Ok(s.to_string()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -393,12 +416,23 @@ impl Datum {
         }
     }
 
+    // pub fn spur_value(&self) -> Result<lasso::Spur, ScriptError> {
+    //     match self {
+    //         Datum::Symbol(s) => Ok(*s),
+    //         Datum::String(s) => Ok(get_symbol_spur(s)),
+    //         _ => Err(ScriptError::new(format!(
+    //             "Cannot convert datum type {} to symbol",
+    //             self.type_str()
+    //         ))),
+    //     }
+    // }
+
     pub fn string_value_cow(&self) -> Result<Cow<'_, str>, ScriptError> {
         match self {
             Datum::String(s) => Ok(Cow::Borrowed(s)),
             Datum::StringChunk(_, _, str_value) => Ok(Cow::Borrowed(str_value)),
             Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
-            Datum::Symbol(s) => Ok(Cow::Borrowed(s)),
+            Datum::Symbol(s) => Ok(Cow::Owned(s.to_string())),
             Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -415,9 +449,10 @@ impl Datum {
         }
     }
 
-    pub fn symbol_value(&self) -> Result<String, ScriptError> {
+    pub fn symbol_value(&self) -> Result<Symbol, ScriptError> {
         match self {
-            Datum::Symbol(s) => Ok(s.clone()),
+            Datum::Symbol(s) => Ok(*s),
+            Datum::String(s) => Ok(Symbol::from_str(s)),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to symbol",
                 self.type_str()
@@ -556,8 +591,7 @@ impl Datum {
             Datum::String(s) => Ok(!s.is_empty()),
             Datum::Void | Datum::Null => Ok(false),
             Datum::Symbol(s) => {
-                let lower = s.to_lowercase();
-                Ok(lower != "false")
+                Ok(!s.eq_builtin(BuiltInSymbol::False))
             },
             _ => Err(ScriptError::new("Cannot convert datum to bool".to_string())),
         }

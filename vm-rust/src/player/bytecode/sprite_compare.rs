@@ -5,13 +5,7 @@ use log::{debug, warn};
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        bitmap::manager::BitmapRef,
-        bitmap::mask::BitmapMask,
-        reserve_player_mut,
-        score::sprite_get_prop,
-        DirPlayer,
-        HandlerExecutionResult, ScriptError,
-        datum_formatting::format_concrete_datum,
+        DirPlayer, HandlerExecutionResult, ScriptError, bitmap::{manager::BitmapRef, mask::BitmapMask}, datum_formatting::format_concrete_datum, reserve_player_mut, score::sprite_get_prop, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -165,7 +159,7 @@ impl SpriteCompareBytecodeHandler {
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, sprite_num, "rect")?;
+                let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
                 debug!("  sprite {} rect datum: {}", sprite_num, format_concrete_datum(&rect_datum, player));
 
@@ -347,7 +341,7 @@ impl SpriteCompareBytecodeHandler {
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, sprite_num, "rect")?;
+                let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
                 match rect_datum {
                     Datum::Rect(vals, _flags) => {

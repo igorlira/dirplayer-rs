@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 pub struct VectorDatumHandlers {}
@@ -28,17 +28,17 @@ impl VectorDatumHandlers {
     /// Call a handler by name
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
-            "duplicate" => reserve_player_mut(|player| {
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::GetAt => Self::get_at(datum, args),
+            BuiltInSymbol::SetAt => Self::set_at(datum, args),
+            BuiltInSymbol::Duplicate => reserve_player_mut(|player| {
                 let vec = Self::datum_to_vec(player, player.get_datum(datum))?;
                 Ok(player.alloc_datum(Datum::Vector(vec)))
             }),
-            "distanceTo" => reserve_player_mut(|player| {
+            BuiltInSymbol::DistanceTo => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 let dx = a[0] - b[0];
@@ -46,7 +46,7 @@ impl VectorDatumHandlers {
                 let dz = a[2] - b[2];
                 Ok(player.alloc_datum(Datum::Float((dx*dx + dy*dy + dz*dz).sqrt())))
             }),
-            "getNormalized" => reserve_player_mut(|player| {
+            BuiltInSymbol::GetNormalized => reserve_player_mut(|player| {
                 let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let len = (x*x + y*y + z*z).sqrt();
                 if len > 1e-10 {
@@ -55,7 +55,7 @@ impl VectorDatumHandlers {
                     Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
                 }
             }),
-            "normalize" => reserve_player_mut(|player| {
+            BuiltInSymbol::Normalize => reserve_player_mut(|player| {
                 let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let len = (x*x + y*y + z*z).sqrt();
                 if len > 1e-10 {
@@ -63,7 +63,7 @@ impl VectorDatumHandlers {
                 }
                 Ok(DatumRef::Void)
             }),
-            "crossProduct" | "cross" => reserve_player_mut(|player| {
+            BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 Ok(player.alloc_datum(Datum::Vector([
@@ -72,12 +72,12 @@ impl VectorDatumHandlers {
                     a[0]*b[1] - a[1]*b[0],
                 ])))
             }),
-            "dotProduct" | "dot" => reserve_player_mut(|player| {
+            BuiltInSymbol::DotProduct | BuiltInSymbol::Dot => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 Ok(player.alloc_datum(Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2])))
             }),
-            "angleBetween" => reserve_player_mut(|player| {
+            BuiltInSymbol::AngleBetween => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 let len_a = (a[0]*a[0] + a[1]*a[1] + a[2]*a[2]).sqrt();
@@ -90,9 +90,7 @@ impl VectorDatumHandlers {
                 };
                 Ok(player.alloc_datum(Datum::Float(angle)))
             }),
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for vector"
-            ))),
+            _ => Err(ScriptError::new(format!("No handler {handler_name} for vector"))),
         }
     }
 
@@ -141,15 +139,15 @@ impl VectorDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         let [x, y, z] = Self::datum_to_vec(player, player.get_datum(datum))?;
-        match prop {
-            "x" => Ok(Datum::Float(x)),
-            "y" => Ok(Datum::Float(y)),
-            "z" => Ok(Datum::Float(z)),
-            "magnitude" | "length" => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
-            "ilk" => Ok(Datum::Symbol("vector".to_string())),
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::X => Ok(Datum::Float(x)),
+            BuiltInSymbol::Y => Ok(Datum::Float(y)),
+            BuiltInSymbol::Z => Ok(Datum::Float(z)),
+            BuiltInSymbol::Magnitude | BuiltInSymbol::Length => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
+            BuiltInSymbol::Ilk => Ok(Datum::Symbol(BuiltInSymbol::Vector.into())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get vector property {}",
                 prop
@@ -161,7 +159,7 @@ impl VectorDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         let mut vec = match player.get_datum_mut(datum) {
@@ -175,10 +173,10 @@ impl VectorDatumHandlers {
 
         let value = player.get_datum(value_ref).float_value()? as f64;
 
-        match prop {
-            "x" => vec[0] = value,
-            "y" => vec[1] = value,
-            "z" => vec[2] = value,
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::X => vec[0] = value,
+            BuiltInSymbol::Y => vec[1] = value,
+            BuiltInSymbol::Z => vec[2] = value,
             _ => {
                 return Err(ScriptError::new(format!(
                     "Cannot set vector property {}",

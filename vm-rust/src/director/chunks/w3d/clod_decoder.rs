@@ -5,6 +5,8 @@
 
 use log::debug;
 
+use crate::player::symbols::symbol::Symbol;
+
 use super::bitstream::IFXBitStreamCompressed;
 use super::clod_types::*;
 use super::types::*;
@@ -653,7 +655,7 @@ impl ClodMeshDecoder {
             .enumerate()
             .map(|(i, mesh)| {
                 ClodDecodedMesh {
-                    name: format!("mesh_{}", i),
+                    name: Symbol::from_str(&format!("mesh_{}", i)),
                     positions: mesh.positions.clone(),
                     normals: mesh.normals.clone(),
                     tex_coords: mesh.tex_coords.clone(),
@@ -676,7 +678,7 @@ impl ClodMeshDecoder {
                 let total_steps = mesh.step_records.len();
                 if total_steps == 0 {
                     return ClodDecodedMesh {
-                        name: format!("mesh_{}", i),
+                        name: Symbol::from_str(&format!("mesh_{}", i)),
                         positions: mesh.positions.clone(),
                         normals: mesh.normals.clone(),
                         tex_coords: mesh.tex_coords.clone(),
@@ -736,7 +738,7 @@ impl ClodMeshDecoder {
                 }).collect();
 
                 ClodDecodedMesh {
-                    name: format!("mesh_{}", i),
+                    name: Symbol::from_str(&format!("mesh_{}", i)),
                     positions: mesh.positions[..vert_count].to_vec(),
                     normals: mesh.normals[..vert_count.min(mesh.normals.len())].to_vec(),
                     tex_coords: tc,
@@ -767,7 +769,7 @@ impl ClodMeshDecoder {
                 }
 
                 ClodDecodedMesh {
-                    name: format!("mesh_{}", i),
+                    name: Symbol::from_str(&format!("mesh_{}", i)),
                     positions: mesh.positions.clone(),
                     normals: mesh.normals.clone(),
                     tex_coords: mesh.tex_coords.clone(),

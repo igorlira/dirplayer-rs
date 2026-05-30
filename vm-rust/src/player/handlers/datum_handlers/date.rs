@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 pub struct DateObject {
@@ -28,7 +28,7 @@ pub struct DateDatumHandlers;
 impl DateDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -42,14 +42,13 @@ impl DateDatumHandlers {
                 date_obj.timestamp_ms as f64,
             ));
 
-            let handler_name_lower = handler_name.to_lowercase();
-            match handler_name_lower.as_str() {
-                "gettime" => {
+            match handler_name.into_builtin_or_error()? {
+                BuiltInSymbol::GetTime => {
                     // Return as Float — current epoch ms (~1.7e12) overflows i32.
                     // f64 holds integer ms exactly up to 2^53, well past the year 285,000.
                     Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64)))
                 }
-                "settime" => {
+                BuiltInSymbol::SetTime => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setTime requires a time argument".to_string(),
@@ -63,36 +62,36 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = time;
                     Ok(DatumRef::Void)
                 }
-                "getfullyear" => {
+                BuiltInSymbol::GetFullYear => {
                     let year = js_date.get_full_year() as i32;
                     Ok(player.alloc_datum(Datum::Int(year)))
                 }
-                "getyear" => {
+                BuiltInSymbol::GetYear => {
                     // Legacy AS/JS Date.getYear() returns year - 1900.
                     let year = js_date.get_full_year() as i32 - 1900;
                     Ok(player.alloc_datum(Datum::Int(year)))
                 }
-                "getmonth" => {
+                BuiltInSymbol::GetMonth => {
                     let month = js_date.get_month() as i32;
                     Ok(player.alloc_datum(Datum::Int(month)))
                 }
-                "getdate" => {
+                BuiltInSymbol::GetDate => {
                     let date = js_date.get_date() as i32;
                     Ok(player.alloc_datum(Datum::Int(date)))
                 }
-                "gethours" => {
+                BuiltInSymbol::GetHours => {
                     let hours = js_date.get_hours() as i32;
                     Ok(player.alloc_datum(Datum::Int(hours)))
                 }
-                "getminutes" => {
+                BuiltInSymbol::GetMinutes => {
                     let minutes = js_date.get_minutes() as i32;
                     Ok(player.alloc_datum(Datum::Int(minutes)))
                 }
-                "getseconds" => {
+                BuiltInSymbol::GetSeconds => {
                     let seconds = js_date.get_seconds() as i32;
                     Ok(player.alloc_datum(Datum::Int(seconds)))
                 }
-                "setfullyear" => {
+                BuiltInSymbol::SetFullYear => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setFullYear requires a year argument".to_string(),
@@ -108,7 +107,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setyear" => {
+                BuiltInSymbol::SetYear => {
                     // Legacy AS/JS Date.setYear(): arg is offset from 1900.
                     if args.is_empty() {
                         return Err(ScriptError::new(
@@ -125,7 +124,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setmonth" => {
+                BuiltInSymbol::SetMonth => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setMonth requires a month argument".to_string(),
@@ -141,7 +140,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setdate" => {
+                BuiltInSymbol::SetDate => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setDate requires a date argument".to_string(),
@@ -157,7 +156,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "sethours" => {
+                BuiltInSymbol::SetHours => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setHours requires an hours argument".to_string(),
@@ -173,7 +172,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setminutes" => {
+                BuiltInSymbol::SetMinutes => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setMinutes requires a minutes argument".to_string(),
@@ -189,7 +188,7 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
-                "setseconds" => {
+                BuiltInSymbol::SetSeconds => {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "setSeconds requires a seconds argument".to_string(),
@@ -216,10 +215,10 @@ impl DateDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        if prop.eq_ignore_ascii_case("ilk") {
-            return Ok(player.alloc_datum(Datum::Symbol("date".to_owned())));
+        if prop == BuiltInSymbol::Ilk {
+            return Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Date))));
         }
 
         let date_id = player.get_datum(datum).to_date_ref()?;
@@ -235,30 +234,30 @@ impl DateDatumHandlers {
         // expose the common time-of-day properties so the JavaScript-style
         // members (`hour`, `minute`, `seconds`) work alongside the existing
         // method accessors (`getHours`, …).
-        match_ci!(prop, {
-            "day" => Ok(player.alloc_datum(Datum::Int(js_date.get_date() as i32))),
-            "month" => Ok(player.alloc_datum(Datum::Int(js_date.get_month() as i32 + 1))),
-            "year" => Ok(player.alloc_datum(Datum::Int(js_date.get_full_year() as i32))),
-            "hour" | "hours" => Ok(player.alloc_datum(Datum::Int(js_date.get_hours() as i32))),
-            "minute" | "minutes" => Ok(player.alloc_datum(Datum::Int(js_date.get_minutes() as i32))),
-            "second" | "seconds" => Ok(player.alloc_datum(Datum::Int(js_date.get_seconds() as i32))),
-            "milliseconds" => Ok(player.alloc_datum(Datum::Int(js_date.get_milliseconds() as i32))),
-            "weekDay" => {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Day => Ok(player.alloc_datum(Datum::Int(js_date.get_date() as i32))),
+            BuiltInSymbol::Month => Ok(player.alloc_datum(Datum::Int(js_date.get_month() as i32 + 1))),
+            BuiltInSymbol::Year => Ok(player.alloc_datum(Datum::Int(js_date.get_full_year() as i32))),
+            BuiltInSymbol::Hour | BuiltInSymbol::Hours => Ok(player.alloc_datum(Datum::Int(js_date.get_hours() as i32))),
+            BuiltInSymbol::Minute | BuiltInSymbol::Minutes => Ok(player.alloc_datum(Datum::Int(js_date.get_minutes() as i32))),
+            BuiltInSymbol::Second | BuiltInSymbol::Seconds => Ok(player.alloc_datum(Datum::Int(js_date.get_seconds() as i32))),
+            BuiltInSymbol::MilliSeconds => Ok(player.alloc_datum(Datum::Int(js_date.get_milliseconds() as i32))),
+            BuiltInSymbol::WeekDay => {
                 // Lingo's `the weekday of date()` is 1=Sunday … 7=Saturday.
                 Ok(player.alloc_datum(Datum::Int(js_date.get_day() as i32 + 1)))
             },
-            "time" => Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64))),
+            BuiltInSymbol::Time => Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get date property {}",
                 prop
             ))),
-        })
+        }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let date_id = player.get_datum(datum).to_date_ref()?;
@@ -271,26 +270,26 @@ impl DateDatumHandlers {
         ));
         let value_datum = player.get_datum(value);
 
-        match_ci!(prop, {
-            "day" => { js_date.set_date(value_datum.int_value()? as u32); Ok(()) },
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Day => { js_date.set_date(value_datum.int_value()? as u32); }
             // Lingo months are 1-based; JS months are 0-based.
-            "month" => { js_date.set_month((value_datum.int_value()? - 1).max(0) as u32); Ok(()) },
-            "year" => { js_date.set_full_year(value_datum.int_value()? as u32); Ok(()) },
-            "hour" | "hours" => { js_date.set_hours(value_datum.int_value()? as u32); Ok(()) },
-            "minute" | "minutes" => { js_date.set_minutes(value_datum.int_value()? as u32); Ok(()) },
-            "second" | "seconds" => { js_date.set_seconds(value_datum.int_value()? as u32); Ok(()) },
-            "milliseconds" => { js_date.set_milliseconds(value_datum.int_value()? as u32); Ok(()) },
-            "time" => {
+            BuiltInSymbol::Month => { js_date.set_month((value_datum.int_value()? - 1).max(0) as u32); }
+            BuiltInSymbol::Year => { js_date.set_full_year(value_datum.int_value()? as u32); }
+            BuiltInSymbol::Hour | BuiltInSymbol::Hours => { js_date.set_hours(value_datum.int_value()? as u32); }
+            BuiltInSymbol::Minute | BuiltInSymbol::Minutes => { js_date.set_minutes(value_datum.int_value()? as u32); }
+            BuiltInSymbol::Second | BuiltInSymbol::Seconds => { js_date.set_seconds(value_datum.int_value()? as u32); }
+            BuiltInSymbol::MilliSeconds => { js_date.set_milliseconds(value_datum.int_value()? as u32); }
+            BuiltInSymbol::Time => {
                 let new_ms = value_datum.float_value()? as i64;
                 let obj = player.date_objects.get_mut(&date_id).unwrap();
                 obj.timestamp_ms = new_ms;
                 return Ok(());
-            },
+            }
             _ => return Err(ScriptError::new(format!(
                 "Cannot set date property {}",
                 prop
             ))),
-        })?;
+        };
 
         let obj = player.date_objects.get_mut(&date_id).unwrap();
         obj.timestamp_ms = js_date.get_time() as i64;
