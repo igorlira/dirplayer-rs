@@ -2651,8 +2651,8 @@ pub async fn player_call_global_handler(
     // Xtra static async handlers (e.g. Curl's exec/execAsync). These would
     // otherwise be eaten by BuiltInHandlerManager::call_handler and reported
     // as "No built-in handler".
-    if xtra::manager::has_xtra_static_async_handler(handler_name) {
-        return xtra::manager::call_xtra_static_async_handler(handler_name, args).await;
+    if xtra::manager::has_xtra_static_async_handler(handler_name.into()) {
+        return xtra::manager::call_xtra_static_async_handler(handler_name.into(), args).await;
     }
     BuiltInHandlerManager::call_handler(handler_name, args)
 }

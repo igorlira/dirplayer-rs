@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use futures::channel::oneshot;
 
 use crate::director::lingo::datum::{Datum, XtraInstanceId, datum_bool};
-use crate::player::{DatumRef, ScriptError, reserve_player_mut};
+use crate::player::{DatumRef, ScriptError, reserve_player_mut, symbols::symbol::Symbol};
 
 use xtra_sdk::Datum as XDatum;
 use xtra_sdk::wire;
@@ -521,7 +521,7 @@ fn host_datum_to_xdatum(d: &Datum, _player: &crate::player::DirPlayer) -> XDatum
         Datum::Int(i) => XDatum::Int(*i),
         Datum::Float(f) => XDatum::Float(*f),
         Datum::String(s) => XDatum::String(s.clone()),
-        Datum::Symbol(s) => XDatum::Symbol(s.clone()),
+        Datum::Symbol(s) => XDatum::Symbol(s.to_string()),
         _ => XDatum::Void,
     }
 }
@@ -541,7 +541,7 @@ fn xdatum_to_host_datum(d: &XDatum) -> Datum {
         XDatum::Int(i) => Datum::Int(*i),
         XDatum::Float(f) => Datum::Float(*f),
         XDatum::String(s) => Datum::String(s.clone()),
-        XDatum::Symbol(s) => Datum::Symbol(s.clone()),
+        XDatum::Symbol(s) => Datum::Symbol(Symbol::from_str(s)),
         // Director booleans are Int(0)/Int(1). Use the helper so a future
         // change to the bool representation only touches one place.
         XDatum::Bool(b) => datum_bool(*b),
