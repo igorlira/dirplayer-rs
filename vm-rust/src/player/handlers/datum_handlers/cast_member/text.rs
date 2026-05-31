@@ -1028,10 +1028,21 @@ impl TextMemberHandlers {
                 };
                 let is_pfr_font = font.char_widths.is_some();
 
-                // For PFR OUTLINE fonts (no bitmap strikes), grab the parsed
-                // outlines so the renderer can compose text from sub-pixel glyph
-                // outlines instead of the atlas-copy path (which quantizes side
-                // bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                // For SMOOTH PFR OUTLINE fonts (no bitmap strikes), grab the
+                // parsed outlines so the renderer can compose text from sub-pixel
+                // glyph outlines instead of the atlas-copy path (which quantizes
+                // side bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                //
+                // PFR carries NO "pixel font" flag (its physical-font flags are
+                // only proportional / vertical / charcode width — confirmed
+                // against FreeType's pfr driver), and the member's anti-alias bit
+                // doesn't separate them either (Habbo authors both Volter AND
+                // CS-Verdana with anti_alias=false). So we classify by glyph
+                // GEOMETRY (`is_pixel_font`): pixel fonts (Volter, FFF Reaction)
+                // are drawn as axis-aligned rectangles (~0% béziers, ~100% H/V
+                // edges) and must render crisp via atlas-copy; smooth fonts
+                // (Verdana, Arial) are curve-heavy and need sub-pixel composition.
+                //
                 // Cloned once (consistent with `text_data` above); .image is not
                 // a per-frame call for cached members.
                 let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> = if is_pfr_font {
@@ -1054,9 +1065,14 @@ impl TextMemberHandlers {
                                                 || FontManager::canonical_font_name(&m.name) == canon));
                                     if matches {
                                         if let Some(p) = &fd.pfr_parsed {
-                                            // Outline-only fonts: bitmap-strike fonts
-                                            // stay on the atlas path (pixel-perfect).
-                                            if !p.glyphs.is_empty() && p.bitmap_glyphs.is_empty() {
+                                            // Smooth outline-only fonts only.
+                                            // Bitmap-strike fonts AND pixel fonts
+                                            // (rectilinear, e.g. Volter) stay on
+                                            // the atlas path for crisp pixels.
+                                            if !p.glyphs.is_empty()
+                                                && p.bitmap_glyphs.is_empty()
+                                                && !p.is_pixel_font
+                                            {
                                                 found = Some(p.clone());
                                                 break 'find_outline;
                                             }
