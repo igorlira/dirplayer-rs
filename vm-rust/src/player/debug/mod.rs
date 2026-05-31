@@ -60,6 +60,14 @@ impl BreakpointManager {
         handler_name: String,
         bytecode_index: usize,
     ) {
+        // Dedup: adding an already-present breakpoint is a no-op. Without this,
+        // replaying the persisted breakpoint list on every (re)load (VMProvider
+        // boot + onBreakpointListChanged saving it back) doubled the list each
+        // time, eventually ballooning localStorage to thousands of duplicate
+        // entries and stalling startup.
+        if self.has_breakpoint(&script_name, &handler_name, bytecode_index) {
+            return;
+        }
         self.breakpoints.push(Breakpoint {
             script_name,
             handler_name,
