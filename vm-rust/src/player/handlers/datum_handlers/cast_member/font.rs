@@ -1562,14 +1562,13 @@ impl FontMemberHandlers {
                     let code = glyph_byte_for(c);
                     let st = style_at(idx);
                     let adv = advance_of(code);
-                    // Snap the glyph's draw origin to the pixel grid (like the
-                    // FontinatorFINAL/Director reference's per-glyph 16.16
-                    // rounding). The cursor `x` keeps accumulating the *float*
-                    // advance so inter-letter spacing stays exact, but drawing
-                    // at an integer origin keeps each glyph's vertical stems
-                    // from straddling two columns and smearing — the thin "!"
-                    // and "I" stems in particular.
-                    let draw_x = x.round();
+                    // Draw at the *fractional* cursor (not x.round()). The 5×
+                    // supersample buffer has the sub-pixel resolution to place
+                    // each glyph exactly, so inter-letter spacing matches the
+                    // accumulated advance (and the underline). Per-glyph integer
+                    // snapping added ±1px jitter that read as uneven gaps —
+                    // "You" → "Y o", "create" → "cre ate", "here" → "he re".
+                    let draw_x = x;
                     if c != ' ' {
                         if let Some(glyph) = parsed.glyphs.get(&code) {
                             if !glyph.contours.is_empty() {
