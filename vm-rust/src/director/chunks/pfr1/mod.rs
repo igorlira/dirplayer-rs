@@ -407,6 +407,11 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
         }
     }
 
+    // Classify pixel (rectilinear) vs smooth (curvy) from the parsed glyph
+    // geometry, so the renderer can route pixel fonts to the crisp atlas path
+    // and smooth fonts to sub-pixel outline composition.
+    font.classify_pixel_font();
+
     Ok(font)
 }
 
