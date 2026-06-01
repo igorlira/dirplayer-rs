@@ -383,13 +383,14 @@ void main() {
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
 
-    // Director ink 41 (Darken): a foreColor/bgColor brightness duotone, NOT a
-    // multiply. Map the source's luminance through the foreColor..bgColor
-    // range — dark areas take foreColor, light areas take bgColor. Habbo's
-    // camera renders the grayscale photo this way (color=dark, bgColor=light)
-    // to get its sepia look. Then alpha-blend the result normally.
-    float lum = dot(src.rgb, vec3(0.299, 0.587, 0.114));
-    vec3 duotone = mix(u_fg_color.rgb, u_bg_color.rgb, lum);
+    // Director ink 41 (Darken): a foreColor/bgColor remap applied PER CHANNEL,
+    // result.c = mix(fg.c, bg.c, src.c). For the common case (foreColor black,
+    // bgColor white) this is the identity, so COLOR bitmaps keep their colors
+    // (e.g. the Habbo catalogue's palette-swapped wall/floor decorations).
+    // For a grayscale source (r==g==b) it is identical to a luminance duotone,
+    // so Habbo's camera photo (color=dark, bgColor=light) still maps to its
+    // sepia look. Using luminance here instead collapsed COLOR bitmaps to gray.
+    vec3 duotone = mix(u_fg_color.rgb, u_bg_color.rgb, src.rgb);
 
     float alpha = src.a * u_blend;
     fragColor = vec4(duotone, alpha);
