@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        DatumRef, HandlerExecutionResult, PLAYER_OPT, ScriptError, context_vars::player_get_context_var, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name}, symbols::builtin::BuiltInSymbol
+        DatumRef, HandlerExecutionResult, PLAYER_OPT, ScriptError, context_vars::player_get_context_var, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_handler_def, get_current_script, get_name}, symbols::builtin::BuiltInSymbol
     },
 };
 
@@ -106,7 +106,7 @@ impl StackBytecodeHandler {
             let script = get_current_script(&player, &ctx).unwrap();
 
             let literal_id = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, &ctx);
+                / ctx.multiplier;
             let literal = &script.chunk.literals[literal_id as usize];
             let datum_ref = player.alloc_datum(literal.clone());
 

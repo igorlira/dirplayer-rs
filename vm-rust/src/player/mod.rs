@@ -105,7 +105,7 @@ use crate::{
             datum::{Datum, DatumType, VarRef, datum_bool},
         },
     }, js_api::JsApi, player::{
-        bytecode::handler_manager::{BytecodeHandlerContext, player_execute_bytecode}, datum_formatting::format_datum, events::{dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_event_to_instances, player_invoke_frame_and_movie_scripts, player_invoke_targeted_event}, geometry::IntRect, profiling::get_profiler_report, scope::Scope, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::init_symbol_table}
+        bytecode::handler_manager::{BytecodeHandlerContext, player_execute_bytecode, try_execute_bytecode_sync}, datum_formatting::format_datum, events::{dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_event_to_instances, player_invoke_frame_and_movie_scripts, player_invoke_targeted_event}, geometry::IntRect, profiling::{get_profiler_report, ProfileScope}, scope::Scope, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::init_symbol_table}
     }, rendering::with_renderer_mut, utils::{get_base_url, get_elapsed_ticks}
 };
 use url::Url;
@@ -2762,6 +2762,18 @@ pub async fn player_call_script_handler_raw_args(
         }
     }
 
+    // Speedscope profiling: open a frame for this handler that spans setup, the
+    // bytecode loop and teardown. The RAII guard closes the frame on every exit
+    // path (including the early-return error branches inside the loop below).
+    // No-op unless profiling recording is active.
+    //
+    // Granularity is intentionally handler + opcode only. Per-opcode phase
+    // frames ([setup]/[iter]/[op:read]) were removed: at ~6 stack transitions
+    // per opcode their own overhead dominated the sample and masked the real
+    // VM cost. Keeping just the opcode frame (in player_execute_bytecode) plus
+    // this handler frame is ~2 transitions/op — far less measurement distortion.
+    let _handler_scope = ProfileScope::new(handler_name.as_str());
+
     // Check if this is a frame script handler
     let is_frame_script = reserve_player_ref(|player| {
         let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
@@ -2783,7 +2795,7 @@ pub async fn player_call_script_handler_raw_args(
         }
     });
 
-    let (scope_ref, handler_ptr, script_ptr, names_ptr) = reserve_player_mut(|player| {
+    let (scope_ref, handler_ptr, script_ptr, names_ptr, variable_multiplier) = reserve_player_mut(|player| {
         let (script_ptr, handler_ptr, handler_name_id, script_type, names_ptr) = {
             let script_rc = player
                 .movie
@@ -2843,13 +2855,26 @@ pub async fn player_call_script_handler_raw_args(
         let scope = player.scopes.get_mut(scope_ref).unwrap();
         scope.args.extend_from_slice(arg_list);
 
-        Ok((scope_ref, handler_ptr, script_ptr, names_ptr))
+        // Cache the variable-index multiplier once (constant per script) so the
+        // per-opcode variable handlers don't re-derive it via a cast lookup.
+        let variable_multiplier = {
+            let script = unsafe { &*script_ptr };
+            player
+                .movie
+                .cast_manager
+                .get_cast(script.member_ref.cast_lib as u32)
+                .map(|cast| crate::director::file::get_variable_multiplier(cast.capital_x, cast.dir_version))
+                .unwrap_or(1)
+        };
+
+        Ok((scope_ref, handler_ptr, script_ptr, names_ptr, variable_multiplier))
     })?;
 
     let ctx = BytecodeHandlerContext {
         scope_ref,
         handler_def_ptr: handler_ptr,
         script_ptr,
+        multiplier: variable_multiplier,
         names_ptr,
     };
 
@@ -2889,13 +2914,13 @@ pub async fn player_call_script_handler_raw_args(
             break;
         }
 
-        // Single player access to read bytecode_index and debugger state
-        let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
-            let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
-            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
-                || !matches!(player.step_mode, StepMode::None);
-            (bi, debugging)
-        });
+        // NOTE: the per-opcode breakpoint/step-mode check below is currently
+        // disabled (commented out). Reading `bytecode_index` + debugger state
+        // here was pure per-opcode overhead — a global player access, a scope
+        // lookup, and a breakpoint-list scan on EVERY opcode — feeding only the
+        // dead block, so it has been removed from the hot path. When re-enabling
+        // the debugger, restore the reads inside the `if debugger_active { ... }`
+        // block (each branch already does its own `reserve_player_ref`).
 
         // Only check breakpoints and step mode if the debugger is actually active
         // if debugger_active {
@@ -2950,7 +2975,14 @@ pub async fn player_call_script_handler_raw_args(
         //     }
         // }
 
-        let result = match player_execute_bytecode(&ctx).await {
+        // Synchronous fast path: execute non-async opcodes directly, avoiding
+        // the per-op async future/poll cost. Only the handful of genuinely-async
+        // opcodes (calls, NewObj, SetObjProp) fall back to the awaited path.
+        let exec_result = match try_execute_bytecode_sync(&ctx) {
+            Some(r) => r,
+            None => player_execute_bytecode(&ctx).await,
+        };
+        let result = match exec_result {
             Ok(result) => result,
             Err(err) => {
                 // abort is flow control, not a real error - skip break-on-error
@@ -3904,6 +3936,21 @@ fn tick_sound_manager(delta: f64) {
     }
 }
 
+/// TEMP perf diagnostic: accounts frame-loop work vs inter-frame wait, to
+/// confirm whether movie load is bound by per-frame tempo pacing rather than
+/// CPU. Logged to the browser console every N frames. Remove before commit.
+#[derive(Default)]
+struct FrameLoopDiag {
+    frames: u64,
+    work_ms: f64,
+    wait_ms: f64,
+    start_ms: f64,
+}
+thread_local! {
+    static FRAME_LOOP_DIAG: std::cell::RefCell<FrameLoopDiag> =
+        std::cell::RefCell::new(FrameLoopDiag::default());
+}
+
 pub async fn run_frame_loop() {
     unsafe {
         let player = PLAYER_OPT.as_ref().unwrap();
@@ -3965,7 +4012,9 @@ pub async fn run_frame_loop() {
         }
 
         // Run one frame cycle (scripts + advance)
+        let __diag_work_start = bench_now_ms();
         let (playing, _) = run_single_frame().await;
+        let __diag_work_ms = bench_now_ms() - __diag_work_start;
         is_playing = playing;
 
         if !is_playing {
@@ -4002,22 +4051,67 @@ pub async fn run_frame_loop() {
         }
 
         // Get the target frame delay based on cached tempo for current frame
-        let target_delay_ms = reserve_player_ref(|player| {
+        let (target_delay_ms, current_tempo_for_diag) = reserve_player_ref(|player| {
             let tempo = player.current_frame_tempo;
-            if tempo == 0 {
+            let delay = if tempo == 0 {
                 1000.0 / 30.0  // Default to 30fps if tempo is 0
             } else {
                 1000.0 / tempo as f64
-            }
+            };
+            (delay, tempo)
         });
 
-        // Wait for the frame delay using the tempo-based timing
+        // Phase-aware pacing. While the movie is still loading assets (pending
+        // net tasks or casts mid-load), run frames back-to-back using a 1ms
+        // macrotask yield (which still lets async I/O / network / rendering
+        // progress) instead of idling to the display tempo. Habbo's preloader
+        // spins many low-fps frames waiting on loads, and pacing those to tempo
+        // (66.7ms/frame at tempo 15) was ~60% of total load time. Once loading
+        // is done we honor the tempo so playback animates at the authored rate.
+        let still_loading = reserve_player_ref(|player| {
+            player.net_manager.has_pending_tasks()
+                || player.movie.cast_manager.any_cast_loading()
+        });
+        let effective_delay_ms = if still_loading { 1.0 } else { target_delay_ms };
+
+        let __diag_wait_start = bench_now_ms();
         timeout(
-            Duration::from_millis(target_delay_ms.ceil() as u64),
+            Duration::from_millis(effective_delay_ms.ceil() as u64),
             future::pending::<()>(),
         )
         .await
         .unwrap_err();
+        let __diag_wait_ms = bench_now_ms() - __diag_wait_start;
+
+        // TEMP perf diagnostic — log work vs wait per ~250 frames.
+        FRAME_LOOP_DIAG.with(|d| {
+            let mut d = d.borrow_mut();
+            if d.frames == 0 {
+                d.start_ms = __diag_work_start;
+            }
+            d.frames += 1;
+            d.work_ms += __diag_work_ms;
+            d.wait_ms += __diag_wait_ms;
+            if d.frames % 250 == 0 {
+                let wall = (bench_now_ms() - d.start_ms) / 1000.0;
+                let fps = if wall > 0.0 { d.frames as f64 / wall } else { 0.0 };
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let (net, parse, apply, casts) =
+                        CAST_LOAD_DIAG.with(|c| *c.borrow());
+                    let lingo = (d.work_ms - net - parse - apply).max(0.0);
+                    web_sys::console::log_1(
+                        &format!(
+                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
+                            d.frames, current_tempo_for_diag, target_delay_ms,
+                            wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
+                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
+                        )
+                        .into(),
+                    );
+                }
+            }
+        });
         player_wait_available().await;
     }
 }
@@ -4312,4 +4406,266 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
     };
     let new_datum_ref = player_alloc_datum(new_datum);
     new_datum_ref
+}
+
+// ---------------------------------------------------------------------------
+// Interpreter throughput benchmark (shared by the native unit test and the
+// `bench_bytecode_throughput` wasm export, so we measure the SAME thing on the
+// real target — the browser — not just native).
+// ---------------------------------------------------------------------------
+
+/// Monotonic clock in fractional milliseconds for the benchmark.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn bench_now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn bench_now_ms() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+// TEMP perf diagnostic: cumulative time (ms) and counts for the cast-load
+// pipeline stages, so we can split the per-frame "work" into net-await vs
+// file-parse (decompress + chunk parse) vs apply (member creation) vs the
+// remaining Lingo-bytecode CPU. Remove before commit.
+thread_local! {
+    pub(crate) static CAST_LOAD_DIAG: std::cell::RefCell<(f64, f64, f64, u32)> =
+        std::cell::RefCell::new((0.0, 0.0, 0.0, 0));
+}
+pub(crate) fn cast_diag_add_net(ms: f64) {
+    CAST_LOAD_DIAG.with(|d| d.borrow_mut().0 += ms);
+}
+pub(crate) fn cast_diag_add_parse(ms: f64) {
+    CAST_LOAD_DIAG.with(|d| { let mut d = d.borrow_mut(); d.1 += ms; d.3 += 1; });
+}
+pub(crate) fn cast_diag_add_apply(ms: f64) {
+    CAST_LOAD_DIAG.with(|d| d.borrow_mut().2 += ms);
+}
+
+/// A minimal valid Script. `player_execute_bytecode`/`try_execute_bytecode_sync`
+/// dereference `ctx.script_ptr` unconditionally (even though the ops used here
+/// never read its contents), so we point at a real, empty Script.
+fn bench_minimal_script() -> crate::player::script::Script {
+    use crate::director::chunks::script::ScriptChunk;
+    use crate::director::enums::ScriptType;
+    use crate::player::cast_lib::CastMemberRef;
+    use crate::player::script::Script;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    Script {
+        member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+        name: String::new(),
+        chunk: ScriptChunk {
+            script_number: 0,
+            literals: vec![],
+            handlers: vec![],
+            property_name_ids: vec![],
+            property_defaults: HashMap::new(),
+        },
+        script_type: ScriptType::Movie,
+        handlers: fxhash::FxHashMap::default(),
+        handler_names_raw: vec![],
+        handler_names: vec![],
+        properties: RefCell::new(fxhash::FxHashMap::default()),
+    }
+}
+
+/// Run a synthetic bytecode-throughput benchmark against the live interpreter
+/// and return a human-readable report. Requires an initialized player
+/// (`PLAYER_OPT`). All ops used are synchronous, so this drives the real
+/// `try_execute_bytecode_sync` fast path + advance loop without async.
+pub fn run_bytecode_benchmark() -> String {
+    use crate::director::chunks::handler::{Bytecode, HandlerDef};
+    use crate::director::lingo::opcode::OpCode;
+    use crate::player::bytecode::handler_manager::{
+        try_execute_bytecode_sync, BytecodeHandlerContext,
+    };
+    use crate::player::symbols::symbol::Symbol;
+
+    fn run(bytecode: Vec<Bytecode>) -> (usize, f64) {
+        let total_ops = bytecode.len();
+        let handler = HandlerDef {
+            name_id: 0,
+            bytecode_array: bytecode,
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+        };
+        let names: Vec<Symbol> = Vec::new();
+        let script = bench_minimal_script();
+        let scope_ref = reserve_player_mut(|player| player.push_scope());
+        let ctx = BytecodeHandlerContext {
+            scope_ref,
+            handler_def_ptr: &handler as *const HandlerDef,
+            script_ptr: &script as *const crate::player::script::Script,
+            names_ptr: &names as *const Vec<Symbol>,
+            multiplier: 1,
+        };
+
+        let start = bench_now_ms();
+        loop {
+            match try_execute_bytecode_sync(&ctx) {
+                Some(Ok(HandlerExecutionResult::Advance)) => {
+                    let done = reserve_player_mut(|player| {
+                        let scope = player.scopes.get_mut(scope_ref).unwrap();
+                        if scope.bytecode_index + 1 >= total_ops {
+                            true
+                        } else {
+                            scope.bytecode_index += 1;
+                            false
+                        }
+                    });
+                    if done {
+                        break;
+                    }
+                }
+                // Stop / Jump / Err / async-op(None) — none expected mid-run for
+                // this synchronous flat handler; stop the loop.
+                _ => break,
+            }
+        }
+        let elapsed_ms = bench_now_ms() - start;
+        reserve_player_mut(|player| player.pop_scope());
+        (total_ops, elapsed_ms)
+    }
+
+    // Variable-op runner: getlocal + pop. Exercises the cached `ctx.multiplier`
+    // and the locals lookup (representative of the preloader's hot variable ops).
+    fn run_getlocal(n_pairs: usize) -> (usize, f64) {
+        let mut bc = Vec::with_capacity(n_pairs * 2);
+        for i in 0..n_pairs {
+            bc.push(Bytecode::new(OpCode::GetLocal, 0, i * 2)); // slot 0 (obj/mult = 0)
+            bc.push(Bytecode::new(OpCode::Pop, 1, i * 2 + 1));
+        }
+        let total_ops = bc.len();
+        let handler = HandlerDef {
+            name_id: 0,
+            bytecode_array: bc,
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![0], // one local: slot 0 -> name_id 0
+            global_name_ids: vec![],
+        };
+        let names: Vec<Symbol> = Vec::new();
+        let script = bench_minimal_script();
+        let scope_ref = reserve_player_mut(|player| {
+            let s = player.push_scope();
+            let d = player.alloc_datum(crate::director::lingo::datum::Datum::Int(1));
+            player.scopes.get_mut(s).unwrap().locals.insert(0u16, d);
+            s
+        });
+        let ctx = BytecodeHandlerContext {
+            scope_ref,
+            handler_def_ptr: &handler as *const HandlerDef,
+            script_ptr: &script as *const crate::player::script::Script,
+            names_ptr: &names as *const Vec<Symbol>,
+            multiplier: 1,
+        };
+        let start = bench_now_ms();
+        loop {
+            match try_execute_bytecode_sync(&ctx) {
+                Some(Ok(HandlerExecutionResult::Advance)) => {
+                    let done = reserve_player_mut(|player| {
+                        let scope = player.scopes.get_mut(scope_ref).unwrap();
+                        if scope.bytecode_index + 1 >= total_ops {
+                            true
+                        } else {
+                            scope.bytecode_index += 1;
+                            false
+                        }
+                    });
+                    if done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let elapsed_ms = bench_now_ms() - start;
+        reserve_player_mut(|player| player.pop_scope());
+        (total_ops, elapsed_ms)
+    }
+
+    fn line(name: &str, ops: usize, ms: f64) -> String {
+        let ops_per_sec = if ms > 0.0 { ops as f64 / (ms / 1000.0) } else { 0.0 };
+        let ns_per_op = if ops > 0 { ms * 1_000_000.0 / ops as f64 } else { 0.0 };
+        format!(
+            "{name:<22} {ops:>9} ops in {ms:>7.1}ms  =>  {ops_per_sec:>10.0} ops/sec  ({ns_per_op:>6.1} ns/op)"
+        )
+    }
+
+    // Warm up (codegen, pool init) so the timed runs are steady.
+    {
+        let mut warm = Vec::with_capacity(4000);
+        for i in 0..2000 {
+            warm.push(Bytecode::new(OpCode::PushInt8, 1, i * 2));
+            warm.push(Bytecode::new(OpCode::Pop, 1, i * 2 + 1));
+        }
+        let _ = run(warm);
+    }
+
+    let mut out = String::from("[interp bench]\n");
+
+    // A) baseline dispatch floor: pooled int push + pop.
+    const PAIRS: usize = 500_000;
+    let mut a = Vec::with_capacity(PAIRS * 2);
+    for i in 0..PAIRS {
+        a.push(Bytecode::new(OpCode::PushInt8, 1, i * 2));
+        a.push(Bytecode::new(OpCode::Pop, 1, i * 2 + 1));
+    }
+    let (ops, ms) = run(a);
+    out.push_str(&line("pushint8+pop", ops, ms));
+    out.push('\n');
+
+    // B) heaviest preloader op: build a 4-arg arglist then drop it.
+    const CYCLES: usize = 150_000;
+    let mut b = Vec::with_capacity(CYCLES * 6);
+    let mut pos = 0usize;
+    for _ in 0..CYCLES {
+        for _ in 0..4 {
+            b.push(Bytecode::new(OpCode::PushInt8, 1, pos));
+            pos += 1;
+        }
+        b.push(Bytecode::new(OpCode::PushArgList, 4, pos));
+        pos += 1;
+        b.push(Bytecode::new(OpCode::Pop, 1, pos));
+        pos += 1;
+    }
+    let (ops, ms) = run(b);
+    out.push_str(&line("pusharglist(4)+pop", ops, ms));
+    out.push('\n');
+
+    // C) variable op: getlocal + pop (uses cached ctx.multiplier + locals lookup).
+    let (ops, ms) = run_getlocal(500_000);
+    out.push_str(&line("getlocal+pop", ops, ms));
+    out.push('\n');
+
+    out
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod interp_bench {
+    //! Native runner for the shared interpreter throughput benchmark. Run with:
+    //!   cargo test --lib --manifest-path vm-rust/Cargo.toml interp_bench -- --nocapture
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn bytecode_throughput() {
+        // Symbol table must exist before DirPlayer::new (builtin symbols).
+        init_symbol_table();
+        run_test(async {
+            let _player = TestPlayer::new();
+            let report = crate::player::run_bytecode_benchmark();
+            println!("{report}");
+            assert!(report.contains("ops/sec"));
+        });
+    }
 }

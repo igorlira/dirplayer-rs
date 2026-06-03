@@ -191,6 +191,47 @@ pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
     });
 }
 
+/// Run a synthetic Lingo bytecode-throughput benchmark in the live (browser)
+/// interpreter and return a human-readable report (ops/sec, ns/op). Call from
+/// the DevTools console after a movie has loaded to measure real WASM per-op
+/// cost. Requires an initialized player.
+#[wasm_bindgen]
+pub fn bench_bytecode_throughput() -> String {
+    player::run_bytecode_benchmark()
+}
+
+/// Begin recording a speedscope profile of Lingo VM execution (handlers +
+/// bytecode ops). Clears any previously recorded events.
+#[wasm_bindgen]
+pub fn start_profiling_recording() {
+    player::profiling::start_recording();
+}
+
+/// Stop recording. Buffered events stay available for `export_profiling_speedscope`.
+#[wasm_bindgen]
+pub fn stop_profiling_recording() {
+    player::profiling::stop_recording();
+}
+
+/// True while a profiling recording is active.
+#[wasm_bindgen]
+pub fn is_profiling_recording() -> bool {
+    player::profiling::is_recording()
+}
+
+/// Discard all buffered profiling events.
+#[wasm_bindgen]
+pub fn clear_profiling_recording() {
+    player::profiling::clear_recording();
+}
+
+/// Serialise the recorded events to a speedscope "evented" profile JSON string,
+/// ready to be saved as a `.speedscope.json` file and opened in speedscope.
+#[wasm_bindgen]
+pub fn export_profiling_speedscope() -> String {
+    player::profiling::export_speedscope_json()
+}
+
 #[wasm_bindgen]
 pub fn set_break_on_error(enabled: bool) {
     reserve_player_mut(|player| {

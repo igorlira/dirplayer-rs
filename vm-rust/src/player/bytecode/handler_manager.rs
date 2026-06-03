@@ -168,6 +168,11 @@ pub struct BytecodeHandlerContext {
     pub handler_def_ptr: *const HandlerDef,
     pub script_ptr: *const Script,
     pub names_ptr: *const Vec<Symbol>,
+    /// Variable-index multiplier for this script (constant for the whole
+    /// handler). Cached here so per-opcode variable handlers (getlocal/
+    /// setlocal/getparam/getglobal/pushcons/...) don't re-derive it via a
+    /// cast lookup on every op — that was pure per-op overhead in tight loops.
+    pub multiplier: u32,
 }
 
 impl BytecodeHandlerContext {
@@ -296,6 +301,51 @@ impl StaticBytecodeHandlerManager {
     }
 }
 
+/// Synchronous fast path for bytecode dispatch.
+///
+/// The vast majority of opcodes (pushes, gets/sets, arithmetic, jumps) are
+/// synchronous, yet routing every one of them through the `async`
+/// `player_execute_bytecode` + `.await` makes each op build and poll a future
+/// state machine. That fixed per-op cost dominates the interpreter (the
+/// throughput benchmark shows ~78 ns/op with the work itself being a small
+/// fraction).
+///
+/// This reads the current opcode and, when it is NOT one of the handful of
+/// genuinely-async opcodes (calls / NewObj / SetObjProp), executes it directly
+/// and returns the result — no future, no await. It returns `None` when the
+/// opcode needs the async path, so the caller falls back to
+/// `player_execute_bytecode(&ctx).await`.
+#[inline]
+pub fn try_execute_bytecode_sync(
+    ctx: &BytecodeHandlerContext,
+) -> Option<Result<HandlerExecutionResult, ScriptError>> {
+    let opcode = {
+        let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        let scope = player.scopes.get(ctx.scope_ref).unwrap();
+        let handler = unsafe { &*ctx.handler_def_ptr };
+        if scope.bytecode_index >= handler.bytecode_array.len() {
+            return Some(Ok(HandlerExecutionResult::Stop));
+        }
+        handler.bytecode_array[scope.bytecode_index].opcode
+    };
+    if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
+        None
+    } else {
+        // Per-opcode profiling frame, but only build it when actually recording.
+        // `get_opcode_name` is a HashMap lookup, so computing the frame name
+        // eagerly would tax every op even in production. Gate on `is_recording`
+        // so the non-recording fast path stays a single atomic load.
+        let _op_scope = if crate::player::profiling::is_recording() {
+            Some(crate::player::profiling::ProfileScope::new(
+                crate::director::lingo::constants::get_opcode_name(opcode),
+            ))
+        } else {
+            None
+        };
+        Some(StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx))
+    }
+}
+
 #[inline(always)]
 pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
@@ -392,11 +442,21 @@ pub async fn player_execute_bytecode<'a>(
     //     };
     // }
 
-    // Execute the bytecode
-    let result = if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
-        StaticBytecodeHandlerManager::call_async_handler(opcode, ctx).await
-    } else {
-        StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx)
+    // Execute the bytecode (profiled under the opcode's name, lazily — the
+    // name lookup is a HashMap hit, so only pay it while recording).
+    let result = {
+        let _op_scope = if crate::player::profiling::is_recording() {
+            Some(crate::player::profiling::ProfileScope::new(
+                crate::director::lingo::constants::get_opcode_name(opcode),
+            ))
+        } else {
+            None
+        };
+        if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
+            StaticBytecodeHandlerManager::call_async_handler(opcode, ctx).await
+        } else {
+            StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx)
+        }
     };
 
     // Trace assignment results after execution (for specific opcodes)

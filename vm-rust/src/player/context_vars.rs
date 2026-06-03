@@ -2,7 +2,7 @@ use log::{debug, error};
 use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
     scope::ScopeRef,
-    script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name, script_get_prop, script_set_prop},
+    script::{get_current_handler_def, get_current_script, get_name, script_get_prop, script_set_prop},
     DatumRef, DirPlayer, ScriptError,
 };
 use crate::director::lingo::datum::Datum;
@@ -33,7 +33,7 @@ pub fn player_get_context_var(
     var_type: u32,
     ctx: &BytecodeHandlerContext,
 ) -> Result<DatumRef, ScriptError> {
-    let variable_multiplier = get_current_variable_multiplier(player, ctx);
+    let variable_multiplier = ctx.multiplier;
     let id = player.get_datum(id_ref);
     let handler = get_current_handler_def(player, &ctx);
 
@@ -139,7 +139,7 @@ pub fn player_set_context_var(
     put_type: PutType,
     ctx: &BytecodeHandlerContext,
 ) -> Result<(), ScriptError> {
-    let variable_multiplier = get_current_variable_multiplier(player, ctx);
+    let variable_multiplier = ctx.multiplier;
     let handler = get_current_handler_def(player, ctx);
     let id_datum = player.get_datum(id_ref);
 

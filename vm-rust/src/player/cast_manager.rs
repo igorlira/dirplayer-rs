@@ -120,6 +120,7 @@ impl CastManager {
                 capital_x: false,
                 dir_version: 0,
                 palette_id_offset: cast_def.map_or(0, |x| x.palette_id_offset),
+                name_index: RefCell::new(None),
             };
             if let Some(cast_def) = cast_def {
                 cast.apply_cast_def(dir, cast_def, bitmap_manager, &dir.font_table);
@@ -366,11 +367,17 @@ impl CastManager {
             self.member_name_cache.replace(Some(cache));
         }
 
-        let lookup_name = name.to_ascii_lowercase();
+        // Avoid allocating a lowercased copy when the name is already lowercase
+        // (the common case) — only allocate if there's an uppercase byte.
+        let lookup: std::borrow::Cow<str> = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(name.to_ascii_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(name)
+        };
         self.member_name_cache
             .borrow()
             .as_ref()
-            .and_then(|cache| cache.get(&lookup_name).cloned())
+            .and_then(|cache| cache.get(lookup.as_ref()).cloned())
     }
 
     pub fn find_member_ref_by_identifiers(
@@ -646,8 +653,21 @@ impl CastManager {
         *cache = None;
     }
 
+    /// True if any cast library is mid-load. The frame loop uses this (with
+    /// pending net tasks) to run preload frames fast instead of idling to tempo.
+    pub fn any_cast_loading(&self) -> bool {
+        self.casts.iter().any(|c| c.state == CastLibState::Loading)
+    }
+
     pub fn invalidate_member_name_cache(&self) {
         self.member_name_cache.replace(None);
+        // Also drop each cast's per-cast name index. This is the single
+        // authoritative invalidation point hit on every member/name mutation,
+        // so it keeps the per-cast indexes (used by `CastLib::find_member_by_name`)
+        // correct for name-only changes that don't insert/remove members.
+        for cast in &self.casts {
+            cast.invalidate_name_index();
+        }
     }
 
     pub fn get_movie_scripts(&self) -> Ref<Option<Vec<Rc<Script>>>> {

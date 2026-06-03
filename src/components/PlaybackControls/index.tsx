@@ -1,10 +1,48 @@
 import { useState } from 'react'
-import { faPlay, faStop, faRotateBack } from '@fortawesome/free-solid-svg-icons'
+import { faPlay, faStop, faRotateBack, faStopwatch, faCircleDot } from '@fortawesome/free-solid-svg-icons'
 import IconButton from '../IconButton'
 import styles from './styles.module.css'
-import { play, stop, reset } from 'vm-rust'
+import { play, stop, reset, start_profiling_recording, stop_profiling_recording, export_profiling_speedscope } from 'vm-rust'
 import { isElectron } from '../../utils/electron'
 import { isMcpEnabled, setMcpEnabled, getMcpPort, setMcpPort, getMcpUrl } from '../../mcp'
+
+// Save the recorded speedscope profile to a downloadable file. Open the result
+// at https://www.speedscope.app/ (or `speedscope <file>`).
+function downloadSpeedscopeProfile() {
+  const json = export_profiling_speedscope();
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  a.download = `dirplayer-${ts}.speedscope.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function ProfileToggle() {
+  const [recording, setRecording] = useState(false);
+  return (
+    <IconButton
+      icon={recording ? faCircleDot : faStopwatch}
+      onClick={() => {
+        if (!recording) {
+          start_profiling_recording();
+          setRecording(true);
+        } else {
+          stop_profiling_recording();
+          downloadSpeedscopeProfile();
+          setRecording(false);
+        }
+      }}
+      title={recording
+        ? 'Recording Lingo VM profile — click to stop and download .speedscope.json'
+        : 'Record a Lingo VM profile (open in speedscope)'}
+    />
+  );
+}
 
 function McpToggle() {
   const [enabled, setEnabled] = useState(() => isMcpEnabled());
@@ -66,6 +104,7 @@ export default function PlaybackControls() {
     <IconButton icon={faPlay} onClick={() => { play() }} />
     <IconButton icon={faStop} onClick={() => { stop() }} />
     <IconButton icon={faRotateBack} onClick={() => { reset() }} />
+    <ProfileToggle />
     {isElectron() && <>
       <div className={styles.spacer} />
       <McpToggle />

@@ -12,7 +12,7 @@ use crate::{
             cast_member_ref::CastMemberRefHandlers,
             string_chunk::StringChunkUtils,
         }, reserve_player_mut, score::{sprite_get_prop, sprite_set_prop}, script::{
-            get_current_handler_def, get_current_variable_multiplier, get_obj_prop,
+            get_current_handler_def, get_obj_prop,
             player_set_obj_prop, script_get_prop, script_get_static_prop, script_set_prop,
             script_set_static_prop,
         }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
@@ -484,7 +484,7 @@ impl GetSetBytecodeHandler {
     pub fn get_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, &ctx);
+                / ctx.multiplier;
             let handler = get_current_handler_def(player, &ctx);
             let name_id = handler.local_name_ids[name_int as usize];
 
@@ -504,7 +504,7 @@ impl GetSetBytecodeHandler {
     pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, &ctx);
+                / ctx.multiplier;
             let handler = get_current_handler_def(player, &ctx);
             let name_id = handler.local_name_ids[name_int as usize];
 
@@ -529,7 +529,7 @@ impl GetSetBytecodeHandler {
     pub fn get_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let param_number = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, ctx);
+                / ctx.multiplier;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let result = scope
                 .args
@@ -544,7 +544,7 @@ impl GetSetBytecodeHandler {
     pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, ctx);
+                / ctx.multiplier;
             let (arg_count, arg_index, value_ref) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let arg_count = scope.args.len();

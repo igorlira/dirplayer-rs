@@ -33,11 +33,13 @@ pub struct ScopeResult {
 
 impl Scope {
     pub fn pop_n(&mut self, n: usize) -> Vec<DatumRef> {
-        let result = self.stack[self.stack.len() - n..].to_vec();
-        for _ in 0..n {
-            self.stack.pop();
-        }
-        result
+        // Move the top `n` entries out of the stack rather than clone-then-pop.
+        // `split_off` transfers ownership of the tail with zero ref-count churn,
+        // where the old `to_vec()` + pop loop did 2n ref-count ops plus an extra
+        // allocation. `pusharglist`/`pusharglistnoret` (the heaviest opcodes in
+        // the Habbo preloader) call this on every Lingo call.
+        let split_at = self.stack.len() - n;
+        self.stack.split_off(split_at)
     }
 
     pub fn default(scope_ref: ScopeRef) -> Scope {
