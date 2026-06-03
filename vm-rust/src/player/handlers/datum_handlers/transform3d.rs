@@ -36,7 +36,7 @@ pub struct Transform3dDatumHandlers;
 impl Transform3dDatumHandlers {
     pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
         let m = match player.get_datum(datum) {
-            Datum::Transform3d(m) => *m,
+            Datum::Transform3d(m) => **m,
             _ => return Err(ScriptError::new("Expected Transform3d".into())),
         };
 
@@ -250,7 +250,7 @@ impl Transform3dDatumHandlers {
     fn identity(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
-            *player.get_datum_mut(datum) = Datum::Transform3d(IDENTITY);
+            *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
             Ok(DatumRef::Void)
         })
     }
@@ -260,7 +260,7 @@ impl Transform3dDatumHandlers {
             mark_transform_dirty(datum);
             let (dx, dy, dz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -272,7 +272,7 @@ impl Transform3dDatumHandlers {
             ];
 
             let result = if pre { mat4_mul(&t, &m) } else { mat4_mul(&m, &t) };
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -281,7 +281,7 @@ impl Transform3dDatumHandlers {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -321,7 +321,7 @@ impl Transform3dDatumHandlers {
                 if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) }
             };
 
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -331,7 +331,7 @@ impl Transform3dDatumHandlers {
             mark_transform_dirty(datum);
             let (sx, sy, sz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -343,7 +343,7 @@ impl Transform3dDatumHandlers {
             ];
 
             let result = if pre { mat4_mul(&s, &m) } else { mat4_mul(&m, &s) };
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -351,47 +351,47 @@ impl Transform3dDatumHandlers {
     fn inverse(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let inv = mat4_invert_affine(&m);
-            Ok(player.alloc_datum(Datum::Transform3d(inv)))
+            Ok(player.alloc_datum(Datum::transform3d(inv)))
         })
     }
 
     fn duplicate(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            Ok(player.alloc_datum(Datum::Transform3d(m)))
+            Ok(player.alloc_datum(Datum::transform3d(m)))
         })
     }
 
     fn multiply(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let other = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let result = mat4_mul(&m, &other);
-            Ok(player.alloc_datum(Datum::Transform3d(result)))
+            Ok(player.alloc_datum(Datum::transform3d(result)))
         })
     }
 
     fn interpolate(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0; // percent → 0-1
@@ -400,7 +400,7 @@ impl Transform3dDatumHandlers {
             for i in 0..16 {
                 result[i] = m[i] + (target[i] - m[i]) * t;
             }
-            Ok(player.alloc_datum(Datum::Transform3d(result)))
+            Ok(player.alloc_datum(Datum::transform3d(result)))
         })
     }
 
@@ -408,11 +408,11 @@ impl Transform3dDatumHandlers {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0;
@@ -421,7 +421,7 @@ impl Transform3dDatumHandlers {
             for i in 0..16 {
                 result[i] = m[i] + (target[i] - m[i]) * t;
             }
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -429,7 +429,7 @@ impl Transform3dDatumHandlers {
     fn get_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;

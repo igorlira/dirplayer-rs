@@ -263,7 +263,7 @@ impl ScriptInstanceDatumHandlers {
             if let Some(ancestor_ref) = Self::find_non_script_ancestor(datum, player) {
                 let ancestor_datum = player.get_datum(&ancestor_ref);
                 // For TimeoutInstance, check if the method is a timeout method
-                if let Datum::TimeoutInstance { .. } = ancestor_datum {
+                if let Datum::TimeoutInstance(_) = ancestor_datum {
                     if name.eq_builtin(BuiltInSymbol::Forget) || name.eq_builtin(BuiltInSymbol::New) {
                         return Ok(true);
                     }

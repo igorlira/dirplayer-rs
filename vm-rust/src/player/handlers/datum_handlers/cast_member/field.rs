@@ -327,7 +327,7 @@ impl FieldMemberHandlers {
                     _ => unreachable!(),
                 }
             }
-            "media" => Ok(Datum::Media(Media::Field(field.clone()))),
+            "media" => Ok(Datum::media(Media::Field(field.clone()))),
             // Chunk count shortcuts — computed from text string.
             "charCount" => {
                 let delimiter = player.movie.item_delimiter;

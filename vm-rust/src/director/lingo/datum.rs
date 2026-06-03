@@ -246,14 +246,8 @@ pub enum Datum {
     CursorRef(CursorRef),
     TimeoutRef(TimeoutRef),
     TimeoutFactory,
-    TimeoutInstance {
-        name: String,
-        duration: i32,
-        callback: DatumRef,
-        target: DatumRef,
-        /// For script-based timeouts (like _TIMER_), this holds the script instance
-        script_instance: Option<DatumRef>,
-    },
+    /// Boxed (~100B of fields) to keep `Datum` small.
+    TimeoutInstance(Box<TimeoutInstanceData>),
     ColorRef(ColorRef),
     BitmapRef(BitmapRef),
     PaletteRef(PaletteRef),
@@ -268,13 +262,16 @@ pub enum Datum {
     DateRef(u32),
     MathRef(u32),
     Vector([f64; 3]),
-    Media(Media),
+    /// Boxed: `Media` is large (~160B); boxing keeps `Datum` small so every
+    /// alloc/clone of the common variants (Int/Symbol/etc.) stays cheap.
+    Media(Box<Media>),
     Null,
     JavaScript(Vec<u8>),
     FlashObjectRef(FlashObjectRef),
     Shockwave3dObjectRef(Shockwave3dObjectRef),
-    /// 4x4 row-major transform matrix for Shockwave 3D
-    Transform3d([f64; 16]),
+    /// 4x4 row-major transform matrix for Shockwave 3D.
+    /// Boxed (128B array) to keep `Datum` small — 3D transforms are rare.
+    Transform3d(Box<[f64; 16]>),
     HavokObjectRef(HavokObjectRef),
     PhysXObjectRef(PhysXObjectRef),
 }
@@ -359,7 +356,7 @@ impl Datum {
             Datum::CursorRef(_) => DatumType::CursorRef,
             Datum::TimeoutRef(_) => DatumType::TimeoutRef,
             Datum::TimeoutFactory => DatumType::TimeoutRef,
-            Datum::TimeoutInstance { .. } => DatumType::TimeoutRef,
+            Datum::TimeoutInstance(_) => DatumType::TimeoutRef,
             Datum::ColorRef(_) => DatumType::ColorRef,
             Datum::BitmapRef(_) => DatumType::BitmapRef,
             Datum::PaletteRef(_) => DatumType::PaletteRef,
@@ -510,7 +507,7 @@ impl Datum {
 
     pub fn media_value(&self) -> Result<Media, ScriptError> {
         match self {
-            Datum::Media(media) => Ok(media.clone()),
+            Datum::Media(media) => Ok((**media).clone()),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum of type {} to media",
                 self.type_str()
@@ -859,6 +856,37 @@ impl Datum {
         }
     }
 
+    /// Construct a boxed `Media` datum (the variant payload is boxed to keep
+    /// `Datum` small). Use at construction sites instead of `Datum::Media(..)`.
+    #[inline]
+    pub fn media(m: Media) -> Datum {
+        Datum::Media(Box::new(m))
+    }
+
+    /// Construct a boxed `Transform3d` datum.
+    #[inline]
+    pub fn transform3d(m: [f64; 16]) -> Datum {
+        Datum::Transform3d(Box::new(m))
+    }
+
+    /// Construct a boxed `TimeoutInstance` datum.
+    #[inline]
+    pub fn timeout_instance(
+        name: String,
+        duration: i32,
+        callback: DatumRef,
+        target: DatumRef,
+        script_instance: Option<DatumRef>,
+    ) -> Datum {
+        Datum::TimeoutInstance(Box::new(TimeoutInstanceData {
+            name,
+            duration,
+            callback,
+            target,
+            script_instance,
+        }))
+    }
+
     pub fn from_f64(value: f64) -> Datum {
         if value.fract() == 0.0 {
             Datum::Int(value as i32)
@@ -940,4 +968,15 @@ pub const DATUM_FALSE: Datum = Datum::Int(0);
 pub enum VarRef {
     Script(CastMemberRef),
     ScriptInstance(ScriptInstanceRef),
+}
+
+/// Payload for `Datum::TimeoutInstance` (boxed inside `Datum` to keep it small).
+#[derive(Clone)]
+pub struct TimeoutInstanceData {
+    pub name: String,
+    pub duration: i32,
+    pub callback: DatumRef,
+    pub target: DatumRef,
+    /// For script-based timeouts (like _TIMER_), this holds the script instance.
+    pub script_instance: Option<DatumRef>,
 }

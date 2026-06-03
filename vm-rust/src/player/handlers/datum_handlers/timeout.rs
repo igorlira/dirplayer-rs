@@ -158,13 +158,13 @@ impl TimeoutDatumHandlers {
                     // Wrap the script instance in a TimeoutInstance so that timeout operations
                     // like forget() work correctly
                     return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::TimeoutInstance {
-                            name: timeout_name,
-                            duration: 0, // Script-based timeouts manage their own duration
-                            callback: DatumRef::Void,
-                            target: DatumRef::Void,
-                            script_instance: Some(script_instance),
-                        }))
+                        Ok(player.alloc_datum(Datum::timeout_instance(
+                            timeout_name,
+                            0, // Script-based timeouts manage their own duration
+                            DatumRef::Void,
+                            DatumRef::Void,
+                            Some(script_instance),
+                        )))
                     });
                 }
             }
@@ -207,13 +207,13 @@ impl TimeoutDatumHandlers {
             player.timeout_manager.add_timeout(timeout);
             
             // Return a TimeoutInstance
-            Ok(player.alloc_datum(Datum::TimeoutInstance {
-                name: timeout_name,
-                duration: timeout_period,
-                callback: args[handler_arg].clone(),
-                target: target_ref,
-                script_instance: None,
-            }))
+            Ok(player.alloc_datum(Datum::timeout_instance(
+                timeout_name,
+                timeout_period,
+                args[handler_arg].clone(),
+                target_ref,
+                None,
+            )))
         })
     }
 
@@ -221,7 +221,7 @@ impl TimeoutDatumHandlers {
         reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(datum);
             match timeout_datum {
-                Datum::TimeoutInstance { script_instance: Some(_), .. } => true,
+                Datum::TimeoutInstance(ti) => ti.script_instance.is_some(),
                 _ => false,
             }
         })
@@ -232,7 +232,7 @@ impl TimeoutDatumHandlers {
         let script_instance_ref = reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(datum);
             match timeout_datum {
-                Datum::TimeoutInstance { script_instance: Some(si), .. } => Some(si.clone()),
+                Datum::TimeoutInstance(ti) => ti.script_instance.clone(),
                 _ => None,
             }
         });
@@ -255,7 +255,7 @@ impl TimeoutDatumHandlers {
                 let timeout_ref = player.get_datum(datum);
                 match timeout_ref {
                     Datum::TimeoutRef(timeout_name) => Some(timeout_name.to_owned()),
-                    Datum::TimeoutInstance { name, .. } => Some(name.to_owned()),
+                    Datum::TimeoutInstance(ti) => Some(ti.name.to_owned()),
                     _ => None,
                 }
             };
@@ -272,7 +272,7 @@ impl TimeoutDatumHandlers {
                 let timeout_ref = player.get_datum(datum);
                 match timeout_ref {
                     Datum::TimeoutRef(timeout_name) => Ok(timeout_name.to_owned()),
-                    Datum::TimeoutInstance { name, .. } => Ok(name.to_owned()),
+                    Datum::TimeoutInstance(ti) => Ok(ti.name.to_owned()),
                     _ => Err(ScriptError::new("Cannot forget non-timeout".to_string())),
                 }?
             };
@@ -299,10 +299,10 @@ impl TimeoutDatumHandlers {
                     ))),
                 }
             }
-            Datum::TimeoutInstance { name, target, .. } => {
+            Datum::TimeoutInstance(ti) => {
                 match prop.as_str() {
-                    "name" => Ok(player.alloc_datum(Datum::String(name.to_owned()))),
-                    "target" => Ok(target.clone()),
+                    "name" => Ok(player.alloc_datum(Datum::String(ti.name.to_owned()))),
+                    "target" => Ok(ti.target.clone()),
                     _ => Err(ScriptError::new(format!(
                         "Cannot get timeout property {}",
                         prop
@@ -324,7 +324,7 @@ impl TimeoutDatumHandlers {
         let timeout_datum = player.get_datum(datum);
         let timeout_name = match timeout_datum {
             Datum::TimeoutRef(timeout_name) => timeout_name.clone(),
-            Datum::TimeoutInstance { name, .. } => name.clone(),
+            Datum::TimeoutInstance(ti) => ti.name.clone(),
             _ => return Err(ScriptError::new(
                 "Cannot set prop of non-timeout".to_string(),
             )),

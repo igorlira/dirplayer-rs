@@ -255,7 +255,15 @@ pub struct DatumAllocator {
     pub int_dealloc_count: usize,
     pub snapshot_max_id: usize,
     int_pool_ids: [DatumId; INT_POOL_SIZE],
-    symbol_pool: FxHashMap<Symbol, DatumId>,
+    /// Cached ref_count pointers for the pooled ints, parallel to
+    /// `int_pool_ids`. Pooled entries are immortal and never move in the arena,
+    /// so caching the pointer lets `alloc_datum` build the `DatumRef` without an
+    /// arena `datums.get(id)` lookup — that lookup is cheap natively but a large
+    /// fraction of per-push cost under WASM.
+    int_pool_refs: [*mut u32; INT_POOL_SIZE],
+    /// Symbol -> (datum id, ref_count pointer). Same idea as the int pool: skip
+    /// the arena lookup when re-pushing an already-interned symbol.
+    symbol_pool: FxHashMap<Symbol, (DatumId, *mut u32)>,
 }
 
 const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;
@@ -271,6 +279,7 @@ impl DatumAllocator {
             int_dealloc_count: 0,
             snapshot_max_id: 0,
             int_pool_ids: [0; INT_POOL_SIZE],
+            int_pool_refs: [std::ptr::null_mut(); INT_POOL_SIZE],
             symbol_pool: FxHashMap::default(),
         };
         alloc.init_int_pool();
@@ -286,8 +295,10 @@ impl DatumAllocator {
                 datum: Datum::Int(n),
             };
             let id = self.datums.alloc(entry);
-            self.datums.get_mut(id).unwrap().id = id;
+            let entry = self.datums.get_mut(id).unwrap();
+            entry.id = id;
             self.int_pool_ids[i] = id;
+            self.int_pool_refs[i] = entry.ref_count.get();
         }
     }
 
@@ -480,23 +491,22 @@ impl DatumAllocatorTrait for DatumAllocator {
             return Ok(DatumRef::Void);
         }
 
-        // Return pooled entry for common int values
+        // Return pooled entry for common int values (no arena lookup — the
+        // ref_count pointer is cached and stable for immortal pooled entries).
         if let Datum::Int(n) = &datum {
             if *n >= INT_POOL_MIN && *n <= INT_POOL_MAX {
                 let pool_idx = (*n - INT_POOL_MIN) as usize;
-                let id = self.int_pool_ids[pool_idx];
-                let entry = self.datums.get(id).unwrap();
-                return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+                return Ok(DatumRef::Ref(self.int_pool_ids[pool_idx], self.int_pool_refs[pool_idx]));
             }
         }
 
-        // Intern symbols: same symbol string returns the same pooled entry
+        // Intern symbols: same symbol returns the same pooled entry (cached
+        // ref_count pointer avoids the arena lookup on re-push).
         if let Datum::Symbol(s) = &datum {
-            if let Some(&id) = self.symbol_pool.get(s) {
-                let entry = self.datums.get(id).unwrap();
-                return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+            if let Some(&(id, rc)) = self.symbol_pool.get(s) {
+                return Ok(DatumRef::Ref(id, rc));
             }
-            // First time seeing this symbol — allocate and register
+            // First time seeing this symbol — allocate and register.
             let key = s.clone();
             let entry = DatumRefEntry {
                 id: 0,
@@ -504,10 +514,11 @@ impl DatumAllocatorTrait for DatumAllocator {
                 datum,
             };
             let id = self.datums.alloc(entry);
-            self.datums.get_mut(id).unwrap().id = id;
-            self.symbol_pool.insert(key, id);
-            let entry = self.datums.get(id).unwrap();
-            return Ok(DatumRef::Ref(id, entry.ref_count.get()));
+            let entry = self.datums.get_mut(id).unwrap();
+            entry.id = id;
+            let rc = entry.ref_count.get();
+            self.symbol_pool.insert(key, (id, rc));
+            return Ok(DatumRef::Ref(id, rc));
         }
 
         let is_int = matches!(&datum, Datum::Int(_));

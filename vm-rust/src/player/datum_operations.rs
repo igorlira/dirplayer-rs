@@ -716,7 +716,7 @@ pub fn multiply_datums(
                     r[row * 4 + col] = a[row*4]*b[col] + a[row*4+1]*b[4+col] + a[row*4+2]*b[8+col] + a[row*4+3]*b[12+col];
                 }
             }
-            Datum::Transform3d(r)
+            Datum::transform3d(r)
         }
         _ => {
             return Err(ScriptError::new(format!(

@@ -1387,7 +1387,7 @@ impl BuiltInHandlerManager {
                     Datum::Symbol(s) => Ok(player.alloc_datum(Datum::Symbol(s.clone()))),
                     Datum::ColorRef(c) => Ok(player.alloc_datum(Datum::ColorRef(c.clone()))),
                     Datum::Vector(v) => Ok(player.alloc_datum(Datum::Vector(*v))),
-                    Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::Transform3d(*t))),
+                    Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::transform3d(**t))),
                     Datum::CastMember(r) => Ok(player.alloc_datum(Datum::CastMember(r.clone()))),
                     Datum::BitmapRef(bitmap_ref) => {
                         // `duplicate(image)` returns an independent copy of the

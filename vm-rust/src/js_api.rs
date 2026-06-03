@@ -2084,9 +2084,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::TimeoutFactory => {
             map.str_set("type", &safe_js_string("timeoutFactory"));
         }
-        Datum::TimeoutInstance { name, .. } => {
+        Datum::TimeoutInstance(ti) => {
             map.str_set("type", &safe_js_string("timeoutInstance"));
-            map.str_set("name", &safe_js_string(name));
+            map.str_set("name", &safe_js_string(&ti.name));
         }
         Datum::ColorRef(color_ref) => {
             map.str_set("type", &safe_js_string("colorRef"));

@@ -1234,7 +1234,7 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             // transform() with no args returns identity matrix
             if args.is_empty() {
-                return Ok(player.alloc_datum(Datum::Transform3d([
+                return Ok(player.alloc_datum(Datum::transform3d([
                     1.0, 0.0, 0.0, 0.0,
                     0.0, 1.0, 0.0, 0.0,
                     0.0, 0.0, 1.0, 0.0,

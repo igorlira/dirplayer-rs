@@ -180,7 +180,7 @@ pub fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocat
             let mut reader = BinaryReader::from_u8(bytes);
             reader.set_endian(binary_reader::Endian::Big);
             match reader.read_media() {
-                Ok(media) => allocator.alloc_datum(Datum::Media(media)).unwrap(),
+                Ok(media) => allocator.alloc_datum(Datum::media(media)).unwrap(),
                 Err(e) => {
                     web_sys::console::warn_1(&format!("Failed to parse media from StaticDatum: {}", e).into());
                     DatumRef::Void

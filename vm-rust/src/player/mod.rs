@@ -4647,6 +4647,48 @@ pub fn run_bytecode_benchmark() -> String {
     out.push_str(&line("getlocal+pop", ops, ms));
     out.push('\n');
 
+    // ---- Datum-inlining feasibility (step 0) ----
+    // D) Isolated cost of the datum machinery for a primitive: alloc_datum(Int)
+    //    (pooled fast path) + DatumRef drop, with NO dispatch/scope/advance.
+    //    This is the upper bound on what inlining primitives onto the operand
+    //    stack could remove per push.
+    {
+        use crate::director::lingo::datum::Datum;
+        let n = 1_000_000usize;
+        let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+        let mut sink = 0usize;
+        let start = bench_now_ms();
+        for i in 0..n {
+            // small ints are pooled (ref_count = MAX) -> drop is a no-op and does
+            // NOT re-enter PLAYER_OPT, so holding `player` across it is safe.
+            let r = player.alloc_datum(Datum::Int((i % 200) as i32));
+            sink = sink.wrapping_add(r.unwrap());
+            drop(r);
+        }
+        let ms = bench_now_ms() - start;
+        out.push_str(&line("alloc_datum(Int)+drop", n, ms));
+        out.push_str(&format!("   [sink={}]\n", sink & 1));
+    }
+
+    // E) Inline baseline: push/pop a primitive held INLINE on a Vec (what the
+    //    redesign would do). Delta (D - E) ~= per-push saving from inlining.
+    {
+        enum Sv { Int(i32) }
+        let n = 1_000_000usize;
+        let mut stack: Vec<Sv> = Vec::with_capacity(64);
+        let mut sink = 0i64;
+        let start = bench_now_ms();
+        for i in 0..n {
+            stack.push(Sv::Int(i as i32));
+            if let Some(Sv::Int(v)) = stack.pop() {
+                sink = sink.wrapping_add(v as i64);
+            }
+        }
+        let ms = bench_now_ms() - start;
+        out.push_str(&line("inline push/pop", n, ms));
+        out.push_str(&format!("   [sink={}]\n", sink & 1));
+    }
+
     out
 }
 

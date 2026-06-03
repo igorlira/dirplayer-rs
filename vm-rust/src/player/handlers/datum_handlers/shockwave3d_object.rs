@@ -256,7 +256,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 m[8] as f64, m[9] as f64, m[10] as f64, m[11] as f64,
                                 m[12] as f64, m[13] as f64, m[14] as f64, m[15] as f64,
                             ];
-                            Ok(player.alloc_datum(Datum::Transform3d(m64)))
+                            Ok(player.alloc_datum(Datum::transform3d(m64)))
                         } else {
                             Ok(get_persistent_node_transform(player, member_ref, model_name))
                         }
@@ -290,7 +290,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let model_world = get_node_transform(player, member_ref, model_name);
                             let combined = mat4_mul_f32(&model_world, &bone_m);
                             let m64: [f64; 16] = combined.map(|v| v as f64);
-                            Ok(player.alloc_datum(Datum::Transform3d(m64)))
+                            Ok(player.alloc_datum(Datum::transform3d(m64)))
                         } else {
                             Ok(get_persistent_node_transform(player, member_ref, model_name))
                         }
@@ -1743,7 +1743,7 @@ impl Shockwave3dObjectDatumHandlers {
                     } else {
                         get_node_transform(player, &member_ref, s3d_ref.name)
                     };
-                    Ok(player.alloc_datum(Datum::Transform3d(world_t.map(|v| v as f64))))
+                    Ok(player.alloc_datum(Datum::transform3d(world_t.map(|v| v as f64))))
                 },
                 // ─── Bones player / animation methods ───
                 // play(motionName {, looped, startTime, endTime, scale, offset})
@@ -3078,7 +3078,7 @@ impl Shockwave3dObjectDatumHandlers {
                                             if let Datum::List(_, items, _) = d { items.len() } else { 0 }
                                         };
                                         for _ in current_len..=idx {
-                                            new_refs.push(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)));
+                                            new_refs.push(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)));
                                         }
                                         if let Ok((_, list_vec, _)) = player.get_datum_mut(&list_ref).to_list_mut() {
                                             list_vec.extend(new_refs);
@@ -3089,17 +3089,17 @@ impl Shockwave3dObjectDatumHandlers {
                                         if idx < items.len() {
                                             Some(items[idx].clone())
                                         } else {
-                                            Some(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)))
+                                            Some(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)))
                                         }
                                     } else {
-                                        Some(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)))
+                                        Some(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)))
                                     }
                                 } else {
                                     // Create persistent list and store it
-                                    let transform_ref = player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX));
+                                    let transform_ref = player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX));
                                     let mut items = VecDeque::new();
                                     for _ in 0..idx {
-                                        items.push_back(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)));
+                                        items.push_back(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)));
                                     }
                                     items.push_back(transform_ref.clone());
                                     let list_ref = player.alloc_datum(Datum::List(
@@ -4578,10 +4578,10 @@ impl Shockwave3dObjectDatumHandlers {
                     if !items.is_empty() {
                         Ok(items[0].clone())
                     } else {
-                        Ok(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)))
+                        Ok(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)))
                     }
                 } else {
-                    Ok(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)))
+                    Ok(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)))
                 }
             },
             _ => {
@@ -4613,7 +4613,7 @@ impl Shockwave3dObjectDatumHandlers {
                 .unwrap_or(1);
             let mut items = VecDeque::new();
             for _ in 0..layer_count {
-                items.push_back(player.alloc_datum(Datum::Transform3d(IDENTITY_MATRIX)));
+                items.push_back(player.alloc_datum(Datum::transform3d(IDENTITY_MATRIX)));
             }
             let list_ref = player.alloc_datum(Datum::List(
                 crate::director::lingo::datum::DatumType::List, items, false,
@@ -5304,7 +5304,7 @@ pub fn set_node_transform(
     // Update the persistent datum if it exists
     if let Some(datum_ref) = &persistent_ref {
         let m64: [f64; 16] = m.map(|v| v as f64);
-        *player.get_datum_mut(datum_ref) = Datum::Transform3d(m64);
+        *player.get_datum_mut(datum_ref) = Datum::transform3d(m64);
     }
 
     // Update node_transforms using canonical key
@@ -5351,7 +5351,7 @@ fn get_persistent_node_transform(
     // Create new persistent datum from current transform
     let m = get_node_transform(player, member_ref, key);
     let m64: [f64; 16] = m.map(|v| v as f64);
-    let datum_ref = player.alloc_datum(Datum::Transform3d(m64));
+    let datum_ref = player.alloc_datum(Datum::transform3d(m64));
 
     // Store in runtime state using canonical key
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {

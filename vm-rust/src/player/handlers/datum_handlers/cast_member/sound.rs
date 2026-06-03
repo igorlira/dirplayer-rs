@@ -24,7 +24,7 @@ impl SoundMemberHandlers {
             // idiom is `member(dst).media = member(src).media` to copy content
             // between members — Habbo's Dynamic Downloader uses it to clone a
             // downloaded sound into a bin member.
-            BuiltInSymbol::Media => Ok(Datum::Media(Media::Sound(sound.clone()))),
+            BuiltInSymbol::Media => Ok(Datum::media(Media::Sound(sound.clone()))),
             BuiltInSymbol::Duration => Ok(Datum::Int(sound.info.duration as i32)),
             BuiltInSymbol::SampleRate => Ok(Datum::Int(sound.info.sample_rate as i32)),
             BuiltInSymbol::SampleSize => Ok(Datum::Int(sound.info.sample_size as i32)),

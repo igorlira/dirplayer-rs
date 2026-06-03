@@ -101,8 +101,8 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::TimeoutFactory => {
             format!("<timeoutFactory>")
         }
-        Datum::TimeoutInstance { name, .. } => {
-            format!("timeoutInstance(\"{0}\")", name)
+        Datum::TimeoutInstance(ti) => {
+            format!("timeoutInstance(\"{0}\")", ti.name)
         }
         Datum::ColorRef(color_ref) => match color_ref {
             ColorRef::PaletteIndex(i) => {

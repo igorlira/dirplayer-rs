@@ -32,7 +32,7 @@ impl BitmapMemberHandlers {
             BuiltInSymbol::Width => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
             BuiltInSymbol::Height => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
             BuiltInSymbol::Image | BuiltInSymbol::Picture => Ok(Datum::BitmapRef(bitmap_ref)),
-            BuiltInSymbol::Media => Ok(Datum::Media(Media::Bitmap {
+            BuiltInSymbol::Media => Ok(Datum::media(Media::Bitmap {
                 bitmap: bitmap.unwrap().clone(),
                 reg_point: bitmap_member.reg_point,
             })),
