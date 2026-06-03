@@ -117,16 +117,17 @@ impl FlowControlBytecodeHandler {
             }
             Ok((handler_ref, is_no_ret, args, receiver))
         })?;
-        let scope = player_call_script_handler_raw_args(receiver, handler_ref, &args, true).await?;
-        player_handle_scope_return(&scope);
-        let result = scope.return_value;
-        if !is_no_ret {
-            reserve_player_mut(|player| {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.push(result);
-            });
-        }
-        Ok(HandlerExecutionResult::Advance)
+        // Hand the call to the trampoline driver instead of recursively awaiting
+        // (which would box a future). `use_raw_arg_list: true` matches the old
+        // `player_call_script_handler_raw_args(.., true)` call; the driver does
+        // `player_handle_scope_return` + the result push on the callee's return.
+        Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
+            receiver,
+            handler_ref,
+            args,
+            use_raw_arg_list: true,
+            push_return: !is_no_ret,
+        }))
     }
 
     pub fn jmp_if_zero(
@@ -225,6 +226,38 @@ impl FlowControlBytecodeHandler {
 
             Ok((obj, target_handler_name, args, is_no_ret))
         })?;
+
+        // Trampoline fast path: if the receiver is a script instance whose script
+        // (or an ancestor) defines this handler as a plain user handler (not a
+        // virtual handler), hand the call to the driver instead of awaiting — and
+        // boxing — player_call_datum_handler. Everything else (datum methods,
+        // virtual handlers, system-event no-ops, ancestor delegation) falls
+        // through to the existing, known-correct path below.
+        let lingo_target = reserve_player_ref(|player| -> Result<Option<(crate::player::script_ref::ScriptInstanceRef, crate::player::script::ScriptHandlerRef)>, ScriptError> {
+            if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj_ref) {
+                let instance_ref = instance_ref.clone();
+                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, &instance_ref, handler_name) {
+                    return Ok(None);
+                }
+                let handler_ref = ScriptInstanceUtils::get_handler(handler_name, &obj_ref, player)?;
+                Ok(handler_ref.map(|hr| (instance_ref, hr)))
+            } else {
+                Ok(None)
+            }
+        })?;
+        if let Some((instance_ref, handler_ref)) = lingo_target {
+            // `use_raw_arg_list: false` matches the old
+            // `player_call_script_handler(Some(instance), handler_ref, args)`
+            // (prepends `me`); the driver does player_handle_scope_return + push.
+            return Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
+                receiver: Some(instance_ref),
+                handler_ref,
+                args,
+                use_raw_arg_list: false,
+                push_return: !is_no_ret,
+            }));
+        }
+
         // end_profiling(token);
         // let token = start_profiling(handler_name.clone());
         let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;

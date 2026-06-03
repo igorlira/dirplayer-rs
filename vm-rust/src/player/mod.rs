@@ -182,6 +182,27 @@ pub enum HandlerExecutionResult {
     Stop,
     Jump,
     Error(ScriptError),
+    /// A Lingo-handler call intercepted by the trampoline driver. The call
+    /// opcode returns this instead of recursively `await`ing
+    /// `player_call_script_handler_raw_args` (which boxes a future per call via
+    /// `#[async_recursion]`). The driver pushes a frame onto the explicit scope
+    /// stack, advances the caller past the call opcode, and on the callee's
+    /// return pushes the return value back (unless `push_return` is false).
+    Call(PendingCall),
+}
+
+/// A pending Lingo-handler call produced by a call opcode for the trampoline
+/// driver (see [`HandlerExecutionResult::Call`]).
+pub struct PendingCall {
+    pub receiver: Option<ScriptInstanceRef>,
+    pub handler_ref: ScriptHandlerRef,
+    pub args: Vec<DatumRef>,
+    /// Same meaning as `player_call_script_handler_raw_args`'s
+    /// `use_raw_arg_list`: when false, `me` is prepended during scope setup.
+    pub use_raw_arg_list: bool,
+    /// Whether the caller wants the return value pushed onto its stack
+    /// (i.e. `!is_no_ret`).
+    pub push_return: bool,
 }
 
 pub struct HandlerExecutionResultContext {
@@ -2726,106 +2747,93 @@ pub enum ScriptReceiver {
     ScriptText(String),
 }
 
-pub async fn player_call_script_handler(
-    receiver: Option<ScriptInstanceRef>,
-    handler_ref: ScriptHandlerRef,
-    arg_list: &Vec<DatumRef>,
-) -> Result<ScopeResult, ScriptError> {
-    player_call_script_handler_raw_args(receiver, handler_ref, arg_list, false).await
+/// One active handler invocation on the trampoline's explicit scope stack.
+/// Holds everything the opcode loop needs for that frame, so the driver can
+/// suspend a caller (push a callee frame) and resume it without recursion or a
+/// boxed future. `_profile` keeps the handler's profiling frame open for the
+/// frame's lifetime (dropped on teardown).
+struct HandlerFrame {
+    ctx: BytecodeHandlerContext,
+    scope_ref: ScopeRef,
+    scope_generation: u64,
+    is_frame_script: bool,
+    script_member_ref: CastMemberRef,
+    handler_name: Symbol,
+    push_return: bool,
+    _profile: ProfileScope,
 }
 
-#[async_recursion(?Send)]
-pub async fn player_call_script_handler_raw_args(
+enum FrameSetup {
+    /// A virtual/JS handler answered synchronously — no frame was pushed.
+    Early(ScopeResult),
+    Frame(HandlerFrame),
+}
+
+enum FrameTransfer {
+    /// The frame finished (Ret/Stop/end-of-array/scope reuse).
+    Done,
+    /// The frame hit a Lingo-handler call; the driver should push a callee frame.
+    Call(PendingCall),
+}
+
+/// Set up a handler call's scope: virtual/JS early-outs, profiling frame,
+/// is_frame_script, handler-depth++, push_scope + args, ctx, and trace entry.
+/// Returns a ready [`HandlerFrame`] for the driver, or an `Early` result when a
+/// virtual/JS handler answered synchronously. This is the setup half of the old
+/// inline body of `player_call_script_handler_raw_args`, made reusable so the
+/// driver can set up nested frames without recursion.
+fn setup_handler_frame(
     receiver: Option<ScriptInstanceRef>,
     handler_ref: ScriptHandlerRef,
     arg_list: &Vec<DatumRef>,
     use_raw_arg_list: bool,
-) -> Result<ScopeResult, ScriptError> {
+    push_return: bool,
+) -> Result<FrameSetup, ScriptError> {
     let (script_member_ref, handler_name) = handler_ref;
     diag_count_handler_call();
 
-    // Check for virtual script handler before running bytecode
+    // Virtual script handler.
     let virtual_result = reserve_player_mut(|player| {
         virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_member_ref, receiver.as_ref(), handler_name, arg_list)
     });
     match virtual_result {
-        Ok(Some(return_value)) => {
-            return Ok(ScopeResult {
-                return_value,
-                passed: false,
-            });
-        }
+        Ok(Some(return_value)) => return Ok(FrameSetup::Early(ScopeResult { return_value, passed: false })),
         Ok(None) => {}
         Err(e) => return Err(e),
     }
 
-    // JS Lingo handlers: if the script's literal area was an XDR JSScript
-    // (recorded at cast-load time), route the call through the interpreter
-    // instead of walking Lingo bytecode. `receiver` is Some when the call
-    // came in as `script(X).handler(...)` -- Director's calling convention
-    // makes `me` an implicit slot-0 arg in that case.
+    // JS Lingo handler (XDR JSScript literal area).
     if let Some(js_result) = js_lingo_loader::try_invoke_js_handler(
-        &script_member_ref,
-        handler_name.as_str(),
-        arg_list,
-        receiver.is_some(),
+        &script_member_ref, handler_name.as_str(), arg_list, receiver.is_some(),
     ) {
         match js_result {
-            Ok(return_value) => return Ok(ScopeResult { return_value, passed: false }),
+            Ok(return_value) => return Ok(FrameSetup::Early(ScopeResult { return_value, passed: false })),
             Err(msg) => return Err(ScriptError::new(format!("JS handler {} threw: {}", handler_name, msg))),
         }
     }
 
-    // Speedscope profiling: open a frame for this handler that spans setup, the
-    // bytecode loop and teardown. The RAII guard closes the frame on every exit
-    // path (including the early-return error branches inside the loop below).
-    // No-op unless profiling recording is active.
-    //
-    // Granularity is intentionally handler + opcode only. Per-opcode phase
-    // frames ([setup]/[iter]/[op:read]) were removed: at ~6 stack transitions
-    // per opcode their own overhead dominated the sample and masked the real
-    // VM cost. Keeping just the opcode frame (in player_execute_bytecode) plus
-    // this handler frame is ~2 transitions/op — far less measurement distortion.
     let _handler_scope = ProfileScope::new(handler_name.as_str());
 
-    // Check if this is a frame script handler
     let is_frame_script = reserve_player_ref(|player| {
         let frame_script = player.movie.score.get_script_in_frame(player.movie.current_frame);
         if let Some(fs) = frame_script {
-            let frame_script_ref = CastMemberRef {
-                cast_lib: fs.cast_lib.into(),
-                cast_member: fs.cast_member.into(),
-            };
+            let frame_script_ref = CastMemberRef { cast_lib: fs.cast_lib.into(), cast_member: fs.cast_member.into() };
             script_member_ref == frame_script_ref
-        } else {
-            false
-        }
+        } else { false }
     });
 
     reserve_player_mut(|player| {
         player.handler_stack_depth += 1;
-        if is_frame_script {
-            player.in_frame_script = true;
-        }
+        if is_frame_script { player.in_frame_script = true; }
     });
 
     let (scope_ref, handler_ptr, script_ptr, names_ptr, variable_multiplier) = reserve_player_mut(|player| {
         let (script_ptr, handler_ptr, handler_name_id, script_type, names_ptr) = {
-            let script_rc = player
-                .movie
-                .cast_manager
-                .get_script_by_ref(&script_member_ref)
-                .unwrap();
+            let script_rc = player.movie.cast_manager.get_script_by_ref(&script_member_ref).unwrap();
             let script = script_rc.as_ref();
             let script_ptr = script as *const Script;
-            let names_ptr = &player
-                .movie
-                .cast_manager
-                .get_cast(script.member_ref.cast_lib as u32)
-                .unwrap()
-                .name_symbols as *const Vec<Symbol>;
+            let names_ptr = &player.movie.cast_manager.get_cast(script.member_ref.cast_lib as u32).unwrap().name_symbols as *const Vec<Symbol>;
             let handler = script.get_own_handler(handler_name);
-
             if let Some(handler_rc) = handler {
                 let handler_name_id = handler_rc.name_id;
                 let handler_ptr: *const HandlerDef = handler_rc.as_ref();
@@ -2833,10 +2841,7 @@ pub async fn player_call_script_handler_raw_args(
             } else {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
-                    format!(
-                        "Handler {handler_name} not found for script {}",
-                        script.name
-                    ),
+                    format!("Handler {handler_name} not found for script {}", script.name),
                 ))
             }
         }?;
@@ -2844,11 +2849,8 @@ pub async fn player_call_script_handler_raw_args(
         let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
             Some(Datum::ScriptInstanceRef(script_instance_ref.clone()))
         } else if script_type != ScriptType::Movie {
-            // TODO: check if this is right
             Some(Datum::ScriptRef(handler_ref.0.clone()))
-        } else {
-            None
-        };
+        } else { None };
 
         let scope_ref = player.push_scope();
         {
@@ -2869,14 +2871,9 @@ pub async fn player_call_script_handler_raw_args(
         let scope = player.scopes.get_mut(scope_ref).unwrap();
         scope.args.extend_from_slice(arg_list);
 
-        // Cache the variable-index multiplier once (constant per script) so the
-        // per-opcode variable handlers don't re-derive it via a cast lookup.
         let variable_multiplier = {
             let script = unsafe { &*script_ptr };
-            player
-                .movie
-                .cast_manager
-                .get_cast(script.member_ref.cast_lib as u32)
+            player.movie.cast_manager.get_cast(script.member_ref.cast_lib as u32)
                 .map(|cast| crate::director::file::get_variable_multiplier(cast.capital_x, cast.dir_version))
                 .unwrap_or(1)
         };
@@ -2892,34 +2889,65 @@ pub async fn player_call_script_handler_raw_args(
         names_ptr,
     };
 
-    // Trace handler entry if traceScript is enabled
+    // Trace handler entry if traceScript is enabled.
     reserve_player_ref(|player| {
         if player.movie.trace_script {
-            let trace_file = player.movie.trace_log_file.clone();
-            let (cast_lib, cast_member) = (
-                script_member_ref.cast_lib,
-                script_member_ref.cast_member
-            );
-            let msg = format!(
-                "== Script: (member {} of castLib {}) Handler: {}",
-                cast_member, cast_lib, handler_name
-            );
+            let (cast_lib, cast_member) = (script_member_ref.cast_lib, script_member_ref.cast_member);
+            let msg = format!("== Script: (member {} of castLib {}) Handler: {}", cast_member, cast_lib, handler_name);
             trace_output(player, &msg);
-            
-            // ADD THIS BLOCK HERE - Clear expression tracker for new handler
             use crate::player::bytecode::handler_manager::EXPRESSION_TRACKER;
-            EXPRESSION_TRACKER.with(|tracker| {
-                tracker.borrow_mut().clear();
-            });
+            EXPRESSION_TRACKER.with(|tracker| { tracker.borrow_mut().clear(); });
         }
     });
 
-    let mut should_return = false;
-    let scope_generation = reserve_player_ref(|player| {
-        player.scopes.get(scope_ref).unwrap().generation
-    });
+    let scope_generation = reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().generation);
 
-    loop {
+    Ok(FrameSetup::Frame(HandlerFrame {
+        ctx, scope_ref, scope_generation, is_frame_script,
+        script_member_ref, handler_name, push_return, _profile: _handler_scope,
+    }))
+}
+
+pub async fn player_call_script_handler(
+    receiver: Option<ScriptInstanceRef>,
+    handler_ref: ScriptHandlerRef,
+    arg_list: &Vec<DatumRef>,
+) -> Result<ScopeResult, ScriptError> {
+    player_call_script_handler_raw_args(receiver, handler_ref, arg_list, false).await
+}
+
+#[async_recursion(?Send)]
+pub async fn player_call_script_handler_raw_args(
+    receiver: Option<ScriptInstanceRef>,
+    handler_ref: ScriptHandlerRef,
+    arg_list: &Vec<DatumRef>,
+    use_raw_arg_list: bool,
+) -> Result<ScopeResult, ScriptError> {
+    // Trampoline driver: set up the entry frame, then run an explicit stack of
+    // frames. A Lingo-handler call opcode returns `HandlerExecutionResult::Call`
+    // (instead of recursively awaiting this function and boxing a future per
+    // call); the driver pushes a callee frame and resumes the caller after the
+    // callee returns. Only genuinely-async leaf ops (NewObj/SetObjProp/async
+    // builtins) still take the awaited path inside the inner loop.
+    let entry = match setup_handler_frame(receiver, handler_ref, arg_list, use_raw_arg_list, false)? {
+        FrameSetup::Early(r) => return Ok(r),
+        FrameSetup::Frame(f) => f,
+    };
+    // "Current frame" locals (so the inner opcode loop below is unchanged) plus
+    // a stack of suspended caller frames.
+    let mut ctx = entry.ctx;
+    let mut scope_ref = entry.scope_ref;
+    let mut scope_generation = entry.scope_generation;
+    let mut is_frame_script = entry.is_frame_script;
+    let mut script_member_ref = entry.script_member_ref;
+    let mut handler_name = entry.handler_name;
+    let mut _handler_scope = entry._profile;
+    let mut cur_push_return = entry.push_return; // unused for entry (returned to caller)
+    let mut parents: Vec<HandlerFrame> = Vec::new();
+
+    'driver: loop {
+    let mut should_return = false;
+    let transfer: FrameTransfer = loop {
         // NOTE: the previous top-of-loop scope-generation re-read was removed as
         // redundant. `scope_generation` is read fresh immediately before the loop,
         // and the `post_gen` check at the END of every iteration already breaks on
@@ -3021,7 +3049,8 @@ pub async fn player_call_script_handler_raw_args(
                         ).await;
                     }
                 }
-                // Cleanup on error
+                // Cleanup on error: unwind the current frame and all suspended
+                // caller frames, then propagate.
                 reserve_player_mut(|player| {
                     player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
@@ -3029,6 +3058,13 @@ pub async fn player_call_script_handler_raw_args(
                     }
                     player.pop_scope();
                 });
+                while let Some(p) = parents.pop() {
+                    reserve_player_mut(|player| {
+                        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                        if p.is_frame_script { player.in_frame_script = false; }
+                        player.pop_scope();
+                    });
+                }
                 return Err(err);
             }
         };
@@ -3042,7 +3078,7 @@ pub async fn player_call_script_handler_raw_args(
                 player.scopes.get(scope_ref).unwrap().generation
             });
             if post_gen != scope_generation {
-                break;
+                break FrameTransfer::Done;
             }
         }
 
@@ -3078,7 +3114,8 @@ pub async fn player_call_script_handler_raw_args(
                         ).await;
                     }
                 }
-                // Cleanup on error
+                // Cleanup on error: unwind the current frame and all suspended
+                // caller frames, then propagate.
                 reserve_player_mut(|player| {
                     player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
                     if is_frame_script {
@@ -3086,7 +3123,24 @@ pub async fn player_call_script_handler_raw_args(
                     }
                     player.pop_scope();
                 });
+                while let Some(p) = parents.pop() {
+                    reserve_player_mut(|player| {
+                        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                        if p.is_frame_script { player.in_frame_script = false; }
+                        player.pop_scope();
+                    });
+                }
                 return Err(err);
+            }
+            HandlerExecutionResult::Call(pending) => {
+                // A Lingo-handler call: advance past the call opcode (so this
+                // frame resumes after it once the callee returns) and hand the
+                // call to the driver, which pushes a callee frame.
+                reserve_player_mut(|player| {
+                    let scope = player.scopes.get_mut(scope_ref).unwrap();
+                    scope.bytecode_index += 1;
+                });
+                break FrameTransfer::Call(pending);
             }
             HandlerExecutionResult::Jump => {}
         }
@@ -3094,38 +3148,116 @@ pub async fn player_call_script_handler_raw_args(
         // end_profiling(profile_token);
 
         if should_return {
-            break;
+            break FrameTransfer::Done;
+        }
+    };
+
+    // ---- Trampoline driver: handle the frame transfer ----
+    match transfer {
+        FrameTransfer::Done => {
+            // Teardown the current frame (trace exit, record result, pop scope,
+            // handler-depth--/in_frame_script reset).
+            let result = reserve_player_mut(|player| {
+                if player.movie.trace_script {
+                    trace_output(player, "--> end");
+                }
+                let result = {
+                    let scope = player.scopes.get(scope_ref).unwrap();
+                    player.last_handler_result = scope.return_value.clone();
+                    ScopeResult {
+                        passed: scope.passed,
+                        return_value: scope.return_value.clone(),
+                    }
+                };
+                player.pop_scope();
+                player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                if is_frame_script {
+                    player.in_frame_script = false;
+                }
+                result
+            });
+
+            match parents.pop() {
+                // Entry frame finished: return its result to the caller.
+                None => return Ok(result),
+                // A caller is suspended: deliver the return value and resume it.
+                Some(p) => {
+                    // `pop_scope` above made the caller the current scope, so
+                    // `player_handle_scope_return` propagates `passed` correctly.
+                    player_handle_scope_return(&result);
+                    if cur_push_return {
+                        let rv = result.return_value.clone();
+                        reserve_player_mut(|player| {
+                            player.scopes.get_mut(p.scope_ref).unwrap().stack.push(rv);
+                        });
+                    }
+                    // Restore the caller frame's locals (drops the callee's
+                    // profiling guard via reassignment).
+                    ctx = p.ctx;
+                    scope_ref = p.scope_ref;
+                    scope_generation = p.scope_generation;
+                    is_frame_script = p.is_frame_script;
+                    script_member_ref = p.script_member_ref;
+                    handler_name = p.handler_name;
+                    _handler_scope = p._profile;
+                    cur_push_return = p.push_return;
+                }
+            }
+        }
+        FrameTransfer::Call(pending) => {
+            let push_return = pending.push_return;
+            match setup_handler_frame(
+                pending.receiver, pending.handler_ref, &pending.args,
+                pending.use_raw_arg_list, push_return,
+            ) {
+                // Virtual/JS handler answered synchronously: deliver to the
+                // current frame, no new frame pushed.
+                Ok(FrameSetup::Early(r)) => {
+                    player_handle_scope_return(&r);
+                    if push_return {
+                        let rv = r.return_value.clone();
+                        reserve_player_mut(|player| {
+                            player.scopes.get_mut(scope_ref).unwrap().stack.push(rv);
+                        });
+                    }
+                }
+                // Suspend the current frame, switch to the callee.
+                Ok(FrameSetup::Frame(f)) => {
+                    parents.push(HandlerFrame {
+                        ctx, scope_ref, scope_generation, is_frame_script,
+                        script_member_ref, handler_name,
+                        push_return: cur_push_return, _profile: _handler_scope,
+                    });
+                    ctx = f.ctx;
+                    scope_ref = f.scope_ref;
+                    scope_generation = f.scope_generation;
+                    is_frame_script = f.is_frame_script;
+                    script_member_ref = f.script_member_ref;
+                    handler_name = f.handler_name;
+                    _handler_scope = f._profile;
+                    cur_push_return = f.push_return;
+                }
+                // Callee setup failed (e.g. HandlerNotFound) before pushing a
+                // scope: unwind the current frame and all callers, then propagate.
+                Err(err) => {
+                    reserve_player_mut(|player| {
+                        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                        if is_frame_script { player.in_frame_script = false; }
+                        player.pop_scope();
+                    });
+                    while let Some(p) = parents.pop() {
+                        reserve_player_mut(|player| {
+                            player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                            if p.is_frame_script { player.in_frame_script = false; }
+                            player.pop_scope();
+                        });
+                    }
+                    return Err(err);
+                }
+            }
         }
     }
-
-    let scope = reserve_player_mut(|player| {
-        // Trace handler exit
-        if player.movie.trace_script {
-            trace_output(player, "--> end");
-        }
-
-        let result = {
-            let scope = player.scopes.get(scope_ref).unwrap();
-            player.last_handler_result = scope.return_value.clone();
-
-            ScopeResult {
-                passed: scope.passed,
-                return_value: scope.return_value.clone(),
-            }
-        };
-        player.pop_scope();
-        result
-    });
-
-    // Cleanup after successful execution
-    reserve_player_mut(|player| {
-        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
-        if is_frame_script {
-            player.in_frame_script = false;
-        }
-    });
-
-    return Ok(scope);
+    } // 'driver loop
 }
 
 /// Dispatch stopMovie events and end all sprites. Used by both `run_frame_loop`
