@@ -102,13 +102,19 @@ impl StackBytecodeHandler {
 
     pub fn push_cons(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            // let (member_ref, handler_def) = get_current_handler_def(&player, ctx.to_owned()).unwrap();
-            let script = get_current_script(&player, &ctx).unwrap();
-
-            let literal_id = player.get_ctx_current_bytecode(ctx).obj as u32
-                / ctx.multiplier;
-            let literal = &script.chunk.literals[literal_id as usize];
-            let datum_ref = player.alloc_datum(literal.clone());
+            let literal_id = (player.get_ctx_current_bytecode(ctx).obj as u32 / ctx.multiplier) as usize;
+            // SAFETY: script_ptr is valid for the whole handler (same assumption
+            // as get_current_script). Tying the borrow to ctx rather than player
+            // lets us call the &mut player fast-path allocators below.
+            let script = unsafe { &*ctx.script_ptr };
+            let literal = &script.chunk.literals[literal_id];
+            // Fast paths: int/symbol literals build the DatumRef directly (no
+            // 64-byte Datum clone + move). Other literal types clone as before.
+            let datum_ref = match literal {
+                Datum::Int(n) => player.alloc_int(*n),
+                Datum::Symbol(s) => player.alloc_symbol(*s),
+                other => player.alloc_datum(other.clone()),
+            };
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(datum_ref);
