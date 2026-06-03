@@ -1097,6 +1097,19 @@ impl DirPlayer {
         return self.allocator.alloc_datum(datum).unwrap();
     }
 
+    /// Fast path: push an int without constructing a 64-byte `Datum` (pooled
+    /// values return a cached immortal ref). Hot path for pushint*/pushzero.
+    #[inline]
+    pub fn alloc_int(&mut self, n: i32) -> DatumRef {
+        self.allocator.alloc_int(n)
+    }
+
+    /// Fast path: push an interned symbol without constructing a `Datum`.
+    #[inline]
+    pub fn alloc_symbol(&mut self, sym: crate::player::symbols::symbol::Symbol) -> DatumRef {
+        self.allocator.alloc_symbol(sym)
+    }
+
     /// Sync cached scriptInstanceList back to sprite's Vec for a given sprite.
     /// Call this before reading script_instance_list on sprites that may have been
     /// modified via .add() on the cached Datum::List.

@@ -13,8 +13,8 @@ pub struct StackBytecodeHandler {}
 impl StackBytecodeHandler {
     pub fn push_int(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_ref =
-                player.alloc_datum(Datum::Int(player.get_ctx_current_bytecode(ctx).obj as i32));
+            let n = player.get_ctx_current_bytecode(ctx).obj as i32;
+            let datum_ref = player.alloc_int(n);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(datum_ref);
         });
@@ -82,7 +82,7 @@ impl StackBytecodeHandler {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
+        let datum_ref = player.alloc_symbol(symbol_name);
 
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push(datum_ref);
@@ -93,7 +93,7 @@ impl StackBytecodeHandler {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
+        let datum_ref = player.alloc_symbol(symbol_name);
 
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push(datum_ref);
@@ -118,7 +118,7 @@ impl StackBytecodeHandler {
 
     pub fn push_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_ref = player.alloc_datum(Datum::Int(0));
+            let datum_ref = player.alloc_int(0);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(datum_ref);
             Ok(HandlerExecutionResult::Advance)

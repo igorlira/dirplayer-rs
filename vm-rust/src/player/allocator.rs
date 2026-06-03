@@ -302,6 +302,29 @@ impl DatumAllocator {
         }
     }
 
+    /// Fast path for pushing an int. Pooled values (the common case) return the
+    /// cached immortal ref directly, with NO `Datum` enum constructed or moved —
+    /// `Datum` is 64 bytes, so building one just to hand to `alloc_datum` is pure
+    /// per-push cost under WASM that this avoids.
+    #[inline]
+    pub fn alloc_int(&mut self, n: i32) -> DatumRef {
+        if n >= INT_POOL_MIN && n <= INT_POOL_MAX {
+            let idx = (n - INT_POOL_MIN) as usize;
+            return DatumRef::Ref(self.int_pool_ids[idx], self.int_pool_refs[idx]);
+        }
+        self.alloc_datum(Datum::Int(n)).unwrap()
+    }
+
+    /// Fast path for pushing a symbol: interned symbols return the cached
+    /// immortal ref directly (no `Datum` construction).
+    #[inline]
+    pub fn alloc_symbol(&mut self, sym: Symbol) -> DatumRef {
+        if let Some(&(id, rc)) = self.symbol_pool.get(&sym) {
+            return DatumRef::Ref(id, rc);
+        }
+        self.alloc_datum(Datum::Symbol(sym)).unwrap()
+    }
+
     pub fn contains_datum(&self, id: DatumId) -> bool {
         self.datums.contains(id)
     }
