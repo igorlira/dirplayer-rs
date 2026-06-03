@@ -105,6 +105,13 @@ pub struct ScoreSpriteSpan {
 pub struct Score {
     pub channels: Vec<SpriteChannel>,
     pub sprite_spans: Vec<ScoreSpriteSpan>,
+    /// Memoized `get_script_in_frame` result, keyed by frame. The frame-script
+    /// lookup is a linear scan over `sprite_spans` + a clone, and it runs on
+    /// EVERY Lingo handler call (to set `in_frame_script`). During the Habbo
+    /// preloader that's millions of calls on a constant frame, so cache the
+    /// result and recompute only when the frame changes. Cleared whenever
+    /// `sprite_spans` is rebuilt.
+    frame_script_cache: std::cell::RefCell<Option<(u32, Option<ScoreBehaviorReference>)>>,
     pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
@@ -234,6 +241,7 @@ impl Score {
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
             sprite_spans: vec![],
+            frame_script_cache: std::cell::RefCell::new(None),
             sound_channel_triggered: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
@@ -278,13 +286,21 @@ impl Score {
     }
 
     pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
-        return self
+        // Fast path: reuse the cached result if it was computed for this frame.
+        if let Some((cached_frame, ref cached)) = *self.frame_script_cache.borrow() {
+            if cached_frame == frame {
+                return cached.clone();
+            }
+        }
+        let result = self
             .sprite_spans
             .iter()
             .find(|span| {
                 span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame
             })
             .and_then(|span| span.scripts.first().cloned());
+        *self.frame_script_cache.borrow_mut() = Some((frame, result.clone()));
+        result
     }
 
     /// Create a behavior script instance.
@@ -2527,6 +2543,7 @@ impl Score {
 
         // Clear previous sprite_spans so they don't accumulate across movie transitions
         self.sprite_spans.clear();
+        self.frame_script_cache.replace(None);
         self.sprite_details.clear();
         self.invalidate_span_channel_cache();
 
@@ -2617,6 +2634,7 @@ impl Score {
     /// but do have frame_channel_data with sprite and frame script information.
     fn generate_sprite_spans_from_channel_data(&mut self, dir_version: u16) {
         use std::collections::HashMap;
+        self.frame_script_cache.replace(None);
 
         // Group by channel: find min/max frame for each channel with data
         let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
@@ -2728,6 +2746,7 @@ impl Score {
     /// isn't covered by any existing sprite_span for that channel.
     fn extend_sprite_spans_from_channel_data(&mut self) {
         use std::collections::HashMap;
+        self.frame_script_cache.replace(None);
 
         // Build a map of channel -> list of (start_frame, end_frame) from existing sprite_spans
         let mut channel_spans: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();

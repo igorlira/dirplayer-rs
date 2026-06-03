@@ -3,7 +3,7 @@ use crate::{
     player::{
         HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::{
             player_call_datum_handler, script_instance::ScriptInstanceUtils,
-        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}, symbols::symbol::Symbol
+        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, scope::StackDatum, script::{get_current_handler_def, get_current_script, get_name}, symbols::symbol::Symbol
     },
 };
 
@@ -133,11 +133,20 @@ impl FlowControlBytecodeHandler {
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let value_id = {
+            // Inline-aware: an int/void condition (the overwhelming common case
+            // for loop/if guards) is tested directly without materializing a
+            // DatumRef or touching the arena.
+            let is_zero = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.stack.pop() {
-                    Some(v) => v,
+                match scope.stack.pop_value() {
+                    Some(StackDatum::Int(n)) => n == 0,
+                    Some(StackDatum::Void) => true,
+                    Some(other) => {
+                        let value_id = other.into_ref();
+                        datum_is_zero(player.get_datum(&value_id), &player.allocator)?
+                    }
                     None => {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                         let current_handler_name = ctx.get_name(scope.handler_name_id);
                         return Err(ScriptError::new(format!(
                             "jmp_if_zero: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
@@ -147,12 +156,11 @@ impl FlowControlBytecodeHandler {
                 }
             };
 
-            let datum = player.get_datum(&value_id);
             let bytecode = player.get_ctx_current_bytecode(&ctx);
             let position = bytecode.pos as i32;
             let offset = bytecode.obj as i32;
 
-            if datum_is_zero(datum, &player.allocator)? {
+            if is_zero {
                 let new_bytecode_index = {
                     let handler = get_current_handler_def(player, &ctx);
                     let dest_pos = (position as i32 + offset) as usize;

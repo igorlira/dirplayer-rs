@@ -188,11 +188,18 @@ impl CastLib {
         }
 
         let number = {
-            let lookup = name.to_ascii_lowercase();
-            self.name_index
-                .borrow()
-                .as_ref()
-                .and_then(|idx| idx.get(&lookup).copied())
+            let idx_ref = self.name_index.borrow();
+            let idx = idx_ref.as_ref().unwrap();
+            // Avoid allocating a lowercased key on every lookup: most callers
+            // (Habbo's normalizeCastName output) already pass a lowercase name,
+            // so probe the index directly with `&str` and only allocate when the
+            // name actually contains uppercase ASCII.
+            if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                let lookup = name.to_ascii_lowercase();
+                idx.get(lookup.as_str()).copied()
+            } else {
+                idx.get(name).copied()
+            }
         };
         number.and_then(|n| self.members.get(&n))
     }

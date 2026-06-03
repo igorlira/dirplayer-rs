@@ -1,12 +1,218 @@
 use fxhash::FxHashMap;
 
+use crate::director::lingo::datum::Datum;
+
 use super::{
     cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
+    symbols::symbol::Symbol,
     script_ref::ScriptInstanceRef,
-    DatumRef,
+    DatumRef, PLAYER_OPT,
 };
 
 pub type ScopeRef = usize;
+
+/// A value on the Lingo operand stack.
+///
+/// Primitive values (int/float/symbol/void) are stored INLINE, so pushing them
+/// constructs neither a 64-byte `Datum` nor a `DatumRef` and never touches the
+/// arena. A value is materialized into a real `DatumRef` only when something
+/// actually needs one (popped/peeked by a consumer that works on `DatumRef`),
+/// using the pooled fast paths (`alloc_int`/`alloc_symbol`) which return cached
+/// immortal refs. Consumers that understand inline values (arithmetic, compare)
+/// can read the primitive directly and skip materialization entirely.
+#[derive(Clone)]
+pub enum StackDatum {
+    Int(i32),
+    Float(f64),
+    Symbol(Symbol),
+    Void,
+    Ref(DatumRef),
+}
+
+impl StackDatum {
+    /// Materialize this value into a `DatumRef` (pooled fast path for
+    /// int/symbol). Requires the global player to be initialized.
+    #[inline]
+    pub fn into_ref(self) -> DatumRef {
+        match self {
+            StackDatum::Ref(dr) => dr,
+            StackDatum::Void => DatumRef::Void,
+            StackDatum::Int(n) => {
+                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                player.allocator.alloc_int(n)
+            }
+            StackDatum::Symbol(s) => {
+                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                player.allocator.alloc_symbol(s)
+            }
+            StackDatum::Float(f) => {
+                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                player.alloc_datum(Datum::Float(f))
+            }
+        }
+    }
+}
+
+/// The Lingo operand stack. Stores `StackDatum` (inline primitives or refs) in
+/// `UnsafeCell`s so inline entries can be materialized to a `DatumRef` lazily
+/// in place even behind a shared `&` (sound: the stack is only reached through
+/// the globally-mutable `PLAYER_OPT`, same pattern as the arena's ref-counts).
+/// It presents the same `DatumRef`-based API the interpreter already used, so
+/// the hundreds of existing push/pop/len/last/index call sites are unchanged.
+#[derive(Default)]
+pub struct OperandStack {
+    items: Vec<std::cell::UnsafeCell<StackDatum>>,
+}
+
+impl Clone for OperandStack {
+    fn clone(&self) -> Self {
+        OperandStack {
+            items: self
+                .items
+                .iter()
+                .map(|c| std::cell::UnsafeCell::new(unsafe { (*c.get()).clone() }))
+                .collect(),
+        }
+    }
+}
+
+impl OperandStack {
+    #[inline]
+    pub fn new() -> Self {
+        OperandStack { items: Vec::new() }
+    }
+
+    // --- DatumRef-facing API (unchanged for existing call sites) ---
+    #[inline]
+    pub fn push(&mut self, dr: DatumRef) {
+        self.items.push(std::cell::UnsafeCell::new(StackDatum::Ref(dr)));
+    }
+    #[inline]
+    pub fn pop(&mut self) -> Option<DatumRef> {
+        self.items.pop().map(|c| c.into_inner().into_ref())
+    }
+    /// Pop the top entry as a raw `StackDatum` (inline value or ref) WITHOUT
+    /// materializing. Inline-aware consumers (arithmetic, compare, jmpifz) use
+    /// this so an inline int/float never round-trips through the arena.
+    #[inline]
+    pub fn pop_value(&mut self) -> Option<StackDatum> {
+        self.items.pop().map(|c| c.into_inner())
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    #[inline]
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+    #[inline]
+    pub fn truncate(&mut self, n: usize) {
+        self.items.truncate(n);
+    }
+    #[inline]
+    pub fn swap(&mut self, a: usize, b: usize) {
+        self.items.swap(a, b);
+    }
+    #[inline]
+    pub fn last(&self) -> Option<&DatumRef> {
+        if self.items.is_empty() {
+            return None;
+        }
+        Some(self.ensure_ref(self.items.len() - 1))
+    }
+    #[inline]
+    pub fn last_mut(&mut self) -> Option<&mut DatumRef> {
+        if self.items.is_empty() {
+            return None;
+        }
+        let i = self.items.len() - 1;
+        self.ensure_ref(i);
+        match self.items[i].get_mut() {
+            StackDatum::Ref(dr) => Some(dr),
+            _ => unreachable!("ensure_ref guarantees Ref"),
+        }
+    }
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<&DatumRef> {
+        if i >= self.items.len() {
+            return None;
+        }
+        Some(self.ensure_ref(i))
+    }
+    /// Discard the top `n` entries without materializing them. Dropping a
+    /// `Ref` entry decrements its arena refcount exactly as moving it out and
+    /// dropping the `DatumRef` would, but inline primitives (the common case
+    /// for a discarded expression result) are dropped for free — no `alloc_int`
+    /// round-trip just to throw the value away. Used by the `Pop` opcode.
+    #[inline]
+    pub fn discard(&mut self, n: usize) {
+        let new_len = self.items.len().saturating_sub(n);
+        self.items.truncate(new_len);
+    }
+    /// Move the top `n` entries out as owned `DatumRef`s (used by pop_n).
+    #[inline]
+    pub fn split_off_refs(&mut self, at: usize) -> Vec<DatumRef> {
+        self.items
+            .split_off(at)
+            .into_iter()
+            .map(|c| c.into_inner().into_ref())
+            .collect()
+    }
+    /// Iterate the stack as `&DatumRef` (bottom to top). Materializes inline
+    /// entries in place first.
+    pub fn iter(&self) -> impl Iterator<Item = &DatumRef> {
+        (0..self.items.len()).map(move |i| self.ensure_ref(i))
+    }
+
+    // --- Inline push fast paths (no Datum/arena) ---
+    #[inline]
+    pub fn push_int(&mut self, n: i32) {
+        self.items.push(std::cell::UnsafeCell::new(StackDatum::Int(n)));
+    }
+    #[inline]
+    pub fn push_float(&mut self, f: f64) {
+        self.items.push(std::cell::UnsafeCell::new(StackDatum::Float(f)));
+    }
+    #[inline]
+    pub fn push_symbol(&mut self, s: Symbol) {
+        self.items.push(std::cell::UnsafeCell::new(StackDatum::Symbol(s)));
+    }
+    #[inline]
+    pub fn push_void(&mut self) {
+        self.items.push(std::cell::UnsafeCell::new(StackDatum::Void));
+    }
+
+    /// Materialize the inline entry at `i` into a `Ref` in place and return it.
+    /// The `UnsafeCell` makes the in-place mutation through `&self` sound.
+    #[inline]
+    fn ensure_ref(&self, i: usize) -> &DatumRef {
+        let cell = &self.items[i];
+        unsafe {
+            let sd = &mut *cell.get();
+            if !matches!(sd, StackDatum::Ref(_)) {
+                let dr = std::mem::replace(sd, StackDatum::Void).into_ref();
+                *sd = StackDatum::Ref(dr);
+            }
+            match &*cell.get() {
+                StackDatum::Ref(dr) => dr,
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+impl std::ops::Index<usize> for OperandStack {
+    type Output = DatumRef;
+    #[inline]
+    fn index(&self, i: usize) -> &DatumRef {
+        self.ensure_ref(i)
+    }
+}
 
 // #[derive(Clone)]
 pub struct Scope {
@@ -19,7 +225,7 @@ pub struct Scope {
     pub locals: FxHashMap<u16, DatumRef>,
     pub loop_return_indices: Vec<usize>,
     pub return_value: DatumRef,
-    pub stack: Vec<DatumRef>,
+    pub stack: OperandStack,
     pub passed: bool,
     pub generation: u64,
     /// Cached handler-level instance for get_prop/set_prop (avoids ancestor chain walk per access)
@@ -39,7 +245,7 @@ impl Scope {
         // allocation. `pusharglist`/`pusharglistnoret` (the heaviest opcodes in
         // the Habbo preloader) call this on every Lingo call.
         let split_at = self.stack.len() - n;
-        self.stack.split_off(split_at)
+        self.stack.split_off_refs(split_at)
     }
 
     pub fn default(scope_ref: ScopeRef) -> Scope {
@@ -53,7 +259,7 @@ impl Scope {
             locals: FxHashMap::default(),
             loop_return_indices: vec![],
             return_value: DatumRef::Void,
-            stack: vec![],
+            stack: OperandStack::new(),
             passed: false,
             generation: 0,
             cached_handler_instance: None,

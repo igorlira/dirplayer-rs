@@ -1560,7 +1560,7 @@ impl DirPlayer {
         for i in 0..self.scopes.len() {
             let scope = &self.scopes[i];
             let pfx = if i >= self.scope_count as usize { "STALE" } else { "active" };
-            for r in &scope.stack {
+            for r in scope.stack.iter() {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     *other_roots.entry(format!("{}[{}].stack", pfx, i)).or_insert(0) += 1;
                     accounted.insert(id);
@@ -2742,6 +2742,7 @@ pub async fn player_call_script_handler_raw_args(
     use_raw_arg_list: bool,
 ) -> Result<ScopeResult, ScriptError> {
     let (script_member_ref, handler_name) = handler_ref;
+    diag_count_handler_call();
 
     // Check for virtual script handler before running bytecode
     let virtual_result = reserve_player_mut(|player| {
@@ -2919,13 +2920,14 @@ pub async fn player_call_script_handler_raw_args(
     });
 
     loop {
-        // Check if scope was reused (generation changed = scope was popped and re-pushed)
-        let current_gen = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).unwrap().generation
-        });
-        if current_gen != scope_generation {
-            break;
-        }
+        // NOTE: the previous top-of-loop scope-generation re-read was removed as
+        // redundant. `scope_generation` is read fresh immediately before the loop,
+        // and the `post_gen` check at the END of every iteration already breaks on
+        // scope reuse. Nothing between one iteration's post_gen check and the next
+        // iteration's start mutates the generation (only the bytecode_index bump),
+        // so the top-of-loop check always passed — it was a pure per-opcode global
+        // access (RefCell borrow + scope HashMap lookup) feeding a branch that could
+        // never be taken.
 
         // NOTE: the per-opcode breakpoint/step-mode check below is currently
         // disabled (commented out). Reading `bytecode_index` + debugger state
@@ -2991,9 +2993,14 @@ pub async fn player_call_script_handler_raw_args(
         // Synchronous fast path: execute non-async opcodes directly, avoiding
         // the per-op async future/poll cost. Only the handful of genuinely-async
         // opcodes (calls, NewObj, SetObjProp) fall back to the awaited path.
+        diag_count_opcode();
+        let mut took_async_path = false;
         let exec_result = match try_execute_bytecode_sync(&ctx) {
             Some(r) => r,
-            None => player_execute_bytecode(&ctx).await,
+            None => {
+                took_async_path = true;
+                player_execute_bytecode(&ctx).await
+            }
         };
         let result = match exec_result {
             Ok(result) => result,
@@ -3026,12 +3033,17 @@ pub async fn player_call_script_handler_raw_args(
             }
         };
 
-        // Check if scope was reused after an async yield point
-        let post_gen = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).unwrap().generation
-        });
-        if post_gen != scope_generation {
-            break;
+        // Check if scope was reused after an async yield point. This can only
+        // happen if we actually awaited (the sync fast path has no await point,
+        // so the scope cannot have been popped/re-pushed underneath us) — gate
+        // the per-opcode global read on it to keep the sync path lean.
+        if took_async_path {
+            let post_gen = reserve_player_ref(|player| {
+                player.scopes.get(scope_ref).unwrap().generation
+            });
+            if post_gen != scope_generation {
+                break;
+            }
         }
 
         match result {
@@ -3962,6 +3974,20 @@ struct FrameLoopDiag {
 thread_local! {
     static FRAME_LOOP_DIAG: std::cell::RefCell<FrameLoopDiag> =
         std::cell::RefCell::new(FrameLoopDiag::default());
+    // TEMP diagnostics: count Lingo handler calls and executed opcodes so we can
+    // compute real per-call vs per-opcode time and decide whether load is
+    // call-overhead-bound or opcode-bound. Strip before committing.
+    static DIAG_HANDLER_CALLS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static DIAG_OPCODES: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+#[inline(always)]
+pub fn diag_count_handler_call() {
+    DIAG_HANDLER_CALLS.with(|c| c.set(c.get() + 1));
+}
+#[inline(always)]
+pub fn diag_count_opcode() {
+    DIAG_OPCODES.with(|c| c.set(c.get() + 1));
 }
 
 pub async fn run_frame_loop() {
@@ -4113,12 +4139,17 @@ pub async fn run_frame_loop() {
                     let (net, parse, apply, casts) =
                         CAST_LOAD_DIAG.with(|c| *c.borrow());
                     let lingo = (d.work_ms - net - parse - apply).max(0.0);
+                    let calls = DIAG_HANDLER_CALLS.with(|c| c.get());
+                    let ops = DIAG_OPCODES.with(|c| c.get());
+                    let ns_per_call = if calls > 0 { lingo * 1_000_000.0 / calls as f64 } else { 0.0 };
+                    let ns_per_op = if ops > 0 { lingo * 1_000_000.0 / ops as f64 } else { 0.0 };
                     web_sys::console::log_1(
                         &format!(
-                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
+                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s || calls={} ({:.0}ns/call) ops={} ({:.0}ns/op)",
                             d.frames, current_tempo_for_diag, target_delay_ms,
                             wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
-                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
+                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0,
+                            calls, ns_per_call, ops, ns_per_op
                         )
                         .into(),
                     );
@@ -4658,6 +4689,36 @@ pub fn run_bytecode_benchmark() -> String {
     // C) variable op: getlocal + pop (uses cached ctx.multiplier + locals lookup).
     let (ops, ms) = run_getlocal(500_000);
     out.push_str(&line("getlocal+pop", ops, ms));
+    out.push('\n');
+
+    // C2) inline arithmetic: push,push,add,pop. With inline-aware `add` the two
+    //     operands and the sum never touch the arena — only the final pop
+    //     materializes (pooled). Compare against the pre-inline cost (3 allocs +
+    //     2 get_datum + add_datums per cycle).
+    const ARITH: usize = 150_000;
+    let mut c2 = Vec::with_capacity(ARITH * 4);
+    let mut pos = 0usize;
+    for _ in 0..ARITH {
+        c2.push(Bytecode::new(OpCode::PushInt8, 3, pos)); pos += 1;
+        c2.push(Bytecode::new(OpCode::PushInt8, 4, pos)); pos += 1;
+        c2.push(Bytecode::new(OpCode::Add, 0, pos)); pos += 1;
+        c2.push(Bytecode::new(OpCode::Pop, 1, pos)); pos += 1;
+    }
+    let (ops, ms) = run(c2);
+    out.push_str(&line("push+push+add+pop", ops, ms));
+    out.push('\n');
+
+    // C3) inline compare: push,push,lt,pop (the canonical loop-guard shape).
+    let mut c3 = Vec::with_capacity(ARITH * 4);
+    let mut pos = 0usize;
+    for _ in 0..ARITH {
+        c3.push(Bytecode::new(OpCode::PushInt8, 1, pos)); pos += 1;
+        c3.push(Bytecode::new(OpCode::PushInt8, 9, pos)); pos += 1;
+        c3.push(Bytecode::new(OpCode::Lt, 0, pos)); pos += 1;
+        c3.push(Bytecode::new(OpCode::Pop, 1, pos)); pos += 1;
+    }
+    let (ops, ms) = run(c3);
+    out.push_str(&line("push+push+lt+pop", ops, ms));
     out.push('\n');
 
     // ---- Datum-inlining feasibility (step 0) ----

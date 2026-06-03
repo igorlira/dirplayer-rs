@@ -14,9 +14,9 @@ impl StackBytecodeHandler {
     pub fn push_int(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let n = player.get_ctx_current_bytecode(ctx).obj as i32;
-            let datum_ref = player.alloc_int(n);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            // Inline: store the int directly on the stack — no Datum, no DatumRef,
+            // no arena. Materialized to a DatumRef only if/when a consumer needs one.
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(n);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -29,9 +29,7 @@ impl StackBytecodeHandler {
             let float_f32 = f32::from_bits(obj_value);
             let float_f64 = float_f32 as f64;
             
-            let datum_ref = player.alloc_datum(Datum::Float(float_f64));
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_float(float_f64);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -82,10 +80,8 @@ impl StackBytecodeHandler {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_symbol(symbol_name);
-
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(datum_ref);
+        scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
     }
 
@@ -93,10 +89,8 @@ impl StackBytecodeHandler {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_symbol(symbol_name);
-
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(datum_ref);
+        scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
     }
 
@@ -110,23 +104,25 @@ impl StackBytecodeHandler {
             let literal = &script.chunk.literals[literal_id];
             // Fast paths: int/symbol literals build the DatumRef directly (no
             // 64-byte Datum clone + move). Other literal types clone as before.
-            let datum_ref = match literal {
-                Datum::Int(n) => player.alloc_int(*n),
-                Datum::Symbol(s) => player.alloc_symbol(*s),
-                other => player.alloc_datum(other.clone()),
-            };
-
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            // Inline primitive literals (no Datum clone/alloc); other literal
+            // types allocate and push a ref as before.
+            match literal {
+                Datum::Int(n) => { let n = *n; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(n); }
+                Datum::Float(f) => { let f = *f; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_float(f); }
+                Datum::Symbol(s) => { let s = *s; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_symbol(s); }
+                Datum::Void => { player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_void(); }
+                other => {
+                    let dr = player.alloc_datum(other.clone());
+                    player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(dr);
+                }
+            }
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
     pub fn push_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_ref = player.alloc_int(0);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(0);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -188,7 +184,9 @@ impl StackBytecodeHandler {
         reserve_player_mut(|player| {
             let count = player.get_ctx_current_bytecode(ctx).obj;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.pop_n(count as usize);
+            // The Pop opcode throws the values away — discard inline entries
+            // without an alloc_int materialization round-trip.
+            scope.stack.discard(count as usize);
         });
         Ok(HandlerExecutionResult::Advance)
     }

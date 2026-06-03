@@ -1773,7 +1773,7 @@ impl JsApi {
                                 (name, v.clone())
                             })
                             .collect(),
-                        stack: scope.stack.clone(),
+                        stack: scope.stack.iter().cloned().collect(),
                         args: scope.args.clone(),
                     };
                     let scope_js: js_sys::Map = scope.into();
