@@ -36,14 +36,26 @@ impl SymbolTable {
     }
 }
 
+static SYMBOL_TABLE_INIT: std::sync::Once = std::sync::Once::new();
+
 pub fn init_symbol_table() {
-    unsafe {
-        SYMBOL_TABLE = Some(SymbolTable::new());
-    }
-    crate::player::symbols::builtin::init_builtin_symbols();
+    // Idempotent: the interner is global and monotonic — it never needs
+    // resetting between players/movies, so guard the one-time setup with a
+    // `Once`. This makes the function safe to call repeatedly (e.g. on every
+    // `init_player`) and from unit tests that exercise symbol-interning code
+    // paths (the Lingo parser interns chunk-type symbols) without standing up
+    // a full player. The `Once` also makes init safe under the parallel test
+    // runner, which shares the `static mut SYMBOL_TABLE` across threads.
+    SYMBOL_TABLE_INIT.call_once(|| {
+        unsafe {
+            SYMBOL_TABLE = Some(SymbolTable::new());
+        }
+        crate::player::symbols::builtin::init_builtin_symbols();
+    });
 }
 
 pub fn get_symbol_spur(string: &str) -> Spur {
+    init_symbol_table();
     unsafe {
         SYMBOL_TABLE
             .as_mut()

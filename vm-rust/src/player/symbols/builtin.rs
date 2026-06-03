@@ -1,8 +1,7 @@
 use core::fmt;
-use lasso::Spur;
 use std::fmt::Display;
 
-use crate::player::{handlers::datum_handlers::symbol, symbols::symbol_table::{SYMBOL_TABLE, SymbolTable, get_symbol_spur}};
+use crate::player::{handlers::datum_handlers::symbol, symbols::symbol_table::{SYMBOL_TABLE, SymbolTable}};
 
 macro_rules! define_builtin_symbols {
     ( $( $keyword:literal => $variant:ident ),* $(,)? ) => {
@@ -13,15 +12,19 @@ macro_rules! define_builtin_symbols {
         }
 
         pub fn init_builtin_symbols() {
-            let entries: Vec<(Spur, BuiltInSymbol)> = [
-                $( ($keyword, BuiltInSymbol::$variant), )*
-            ].iter().map(|(k, v)| (get_symbol_spur(k), *v)).collect();
+            // Intern directly against the table rather than via
+            // `get_symbol_spur`. `get_symbol_spur` now lazily calls
+            // `init_symbol_table`, and this function runs *inside* that
+            // one-time init — going back through `get_symbol_spur` would
+            // re-enter the `Once` and panic. The table is already set when
+            // this is called.
             unsafe {
                 let table = SYMBOL_TABLE.as_mut().unwrap();
-                for (spur, builtin) in entries {
-                    table.spur_to_builtin.insert(spur, builtin);
-                    table.builtin_to_spur.insert(builtin, spur);
-                }
+                $(
+                    let spur = table.intern($keyword);
+                    table.spur_to_builtin.insert(spur, BuiltInSymbol::$variant);
+                    table.builtin_to_spur.insert(BuiltInSymbol::$variant, spur);
+                )*
             }
         }
     };
