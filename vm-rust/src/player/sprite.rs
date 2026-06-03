@@ -9,11 +9,21 @@ pub enum ColorRef {
 
 impl ColorRef {
     pub fn from_hex(hex: &str) -> ColorRef {
-        let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-        ColorRef::Rgb(r, g, b)
+        // Tolerate stray whitespace around the value and the '#'. Habbo data
+        // contains e.g. `rgb(" #000000")` (leading space); Director parses such
+        // strings leniently to the intended color. Without trimming, the '#'
+        // isn't stripped, the slice `" #"` fails to parse, and the old
+        // `unwrap_or(255)` defaulted to bright red (255,0,0) — so every
+        // `struct.font.bold`-colored header (Navigator nav_roominfo / roomlist)
+        // rendered red instead of black. Also guards the slicing against
+        // short/odd strings (no panic, no red fallback).
+        let hex = hex.trim().trim_start_matches('#').trim();
+        let byte = |start: usize| -> u8 {
+            hex.get(start..start + 2)
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+                .unwrap_or(0)
+        };
+        ColorRef::Rgb(byte(0), byte(2), byte(4))
     }
     // Convert a ColorRef to a palette index using a palette slice.
     pub fn to_index(&self, palette: &[(u8, u8, u8)]) -> u8 {
