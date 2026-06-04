@@ -43,20 +43,21 @@ impl FlowControlBytecodeHandler {
                     )));
                 }
             };
-            let arg_list_datum = player.get_datum(&arg_list_datum_ref);
-
-            if let Datum::List(list_type, list, _) = arg_list_datum {
-                let is_no_ret = match list_type {
-                    DatumType::ArgListNoRet => true,
-                    _ => false,
-                };
-                (name, Vec::from(list.to_owned()), is_no_ret)
-            } else {
-                return Err(ScriptError::new(format!(
-                    "ext_call '{}': expected arg list on stack",
-                    name
-                )));
-            }
+            let is_no_ret = match player.get_datum(&arg_list_datum_ref) {
+                Datum::List(DatumType::ArgListNoRet, _, _) => true,
+                Datum::List(_, _, _) => false,
+                _ => {
+                    return Err(ScriptError::new(format!(
+                        "ext_call '{}': expected arg list on stack",
+                        name
+                    )));
+                }
+            };
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let args = Vec::from(std::mem::take(
+                player.get_datum_mut(&arg_list_datum_ref).to_list_mut()?.1,
+            ));
+            (name, args, is_no_ret)
         };
 
         let (result_ctx, return_value) =
@@ -87,15 +88,17 @@ impl FlowControlBytecodeHandler {
                     }
                 }
             };
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_id),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move args out of the consumed ArgList instead of cloning (see
+            // obj_call). Done before borrowing `script` so the &mut doesn't
+            // overlap the immutable script borrow.
+            let args: Vec<DatumRef> =
+                std::mem::take(player.get_datum_mut(&arg_list_id).to_list_mut()?.1).into();
+
             let script = get_current_script(&player, &ctx).unwrap();
-
-            let arg_list_datum = player.get_datum(&arg_list_id);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let args: Vec<DatumRef> = arg_list_datum.to_list()?.iter().cloned().collect();
-
             let mut handler_ref = script
                 .get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize)
                 .unwrap();
@@ -220,14 +223,17 @@ impl FlowControlBytecodeHandler {
                     }
                 }
             };
-            let arg_list_datum = player.get_datum(&arg_list_id);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let arg_list = arg_list_datum.to_list()?;
-            let obj = arg_list[0].clone();
-            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_id),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move the args out of the immediately-consumed ArgList datum instead
+            // of cloning them into a fresh Vec — avoids a per-call heap allocation
+            // and the refcount churn. The List is left empty and freed when
+            // arg_list_id drops.
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_id).to_list_mut()?.1);
+            let obj = arg_vd.pop_front().unwrap();
+            let args: Vec<DatumRef> = arg_vd.into();
 
             let lingo_target = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj) {
                 let instance_ref = instance_ref.clone();
@@ -289,14 +295,14 @@ impl FlowControlBytecodeHandler {
 
             let handler_name = player.get_datum(&handler_name_ref).symbol_value()?;
 
-            let arg_list_datum = player.get_datum(&arg_list_ref);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let arg_list = arg_list_datum.to_list()?;
-            let mut obj = arg_list[0].clone();
-            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_ref),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_ref).to_list_mut()?.1);
+            let mut obj = arg_vd.pop_front().unwrap();
+            let args: Vec<DatumRef> = arg_vd.into();
 
             // In Director 4 calling convention, the receiver is often passed as a
             // symbol (e.g. #oTrackControl). Resolve it by looking up the symbol

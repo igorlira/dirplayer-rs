@@ -256,13 +256,15 @@ impl StackBytecodeHandler {
                     obj_type
                 )));
             }
-            let arg_list = {
+            let arg_list_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            let arg_list = player.get_datum(&arg_list).to_list()?;
-            let script_arg = player.get_datum(&arg_list[0]);
-            let extra_args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_ref).to_list_mut()?.1);
+            let script_arg_ref = arg_vd.pop_front().unwrap();
+            let extra_args: Vec<DatumRef> = arg_vd.into();
+            let script_arg = player.get_datum(&script_arg_ref);
             let script_ref = match script_arg {
                 Datum::String(script_name) => {
                     if let Some(script_ref) = player
