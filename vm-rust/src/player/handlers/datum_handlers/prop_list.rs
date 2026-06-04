@@ -88,9 +88,17 @@ impl PropListUtils {
         allocator: &DatumAllocator,
     ) -> Result<bool, ScriptError> {
         let result = match (left, right) {
-            (Datum::String(l), Datum::String(r)) => l == r, // exact (case-sensitive for keys)
-            (Datum::String(l), Datum::Symbol(r)) => l == r.as_str(),
-            (Datum::Symbol(l), Datum::String(r)) => l.as_str() == r,
+            // Director propList key lookup is CASE-INSENSITIVE. This matters
+            // especially now that Symbols are interned: `as_str()` returns the
+            // FIRST-seen casing of a spur, so `#nodename` can stringify as
+            // "nodeName" if that camelCase form was interned first elsewhere. A
+            // case-sensitive compare then makes `getaProp("nodename")` miss the
+            // `#nodename` key and return VOID (v31 catalogue: "Malformed node
+            // data nodeName"). Compare ASCII-case-insensitively for string and
+            // symbol keys to match Director.
+            (Datum::String(l), Datum::String(r)) => l.eq_ignore_ascii_case(r),
+            (Datum::String(l), Datum::Symbol(r)) => l.eq_ignore_ascii_case(r.as_str()),
+            (Datum::Symbol(l), Datum::String(r)) => l.as_str().eq_ignore_ascii_case(r),
 
             // Handle symbol-to-int comparison (e.g., #2 should match key 2)
             (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
