@@ -195,7 +195,15 @@ impl FlowControlBytecodeHandler {
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         // let token = start_profiling("_obj_call_prepare".to_string());
-        let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
+        // Resolve args AND the trampoline target in one player borrow. The
+        // trampoline fast path: if the receiver is a script instance whose script
+        // (or an ancestor) defines this handler as a plain user handler (not a
+        // virtual handler), hand the call to the driver instead of awaiting — and
+        // boxing — player_call_datum_handler. Everything else (datum methods like
+        // `string.char[..]`/`delete`, virtual handlers, system-event no-ops,
+        // ancestor delegation) falls through to the existing path below. Folded
+        // into this block so a datum-method objcall pays only one get_datum.
+        let (obj_ref, handler_name, args, is_no_ret, lingo_target) = reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(&ctx);
             // ctx.get_name indexes ctx.names_ptr directly (no per-op get_cast).
             let target_handler_name = ctx.get_name(bytecode.obj as u16);
@@ -221,27 +229,21 @@ impl FlowControlBytecodeHandler {
             let obj = arg_list[0].clone();
             let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
 
-            Ok((obj, target_handler_name, args, is_no_ret))
+            let lingo_target = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj) {
+                let instance_ref = instance_ref.clone();
+                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, &instance_ref, target_handler_name) {
+                    None
+                } else {
+                    ScriptInstanceUtils::get_handler(target_handler_name, &obj, player)?
+                        .map(|hr| (instance_ref, hr))
+                }
+            } else {
+                None
+            };
+
+            Ok((obj, target_handler_name, args, is_no_ret, lingo_target))
         })?;
 
-        // Trampoline fast path: if the receiver is a script instance whose script
-        // (or an ancestor) defines this handler as a plain user handler (not a
-        // virtual handler), hand the call to the driver instead of awaiting — and
-        // boxing — player_call_datum_handler. Everything else (datum methods,
-        // virtual handlers, system-event no-ops, ancestor delegation) falls
-        // through to the existing, known-correct path below.
-        let lingo_target = reserve_player_ref(|player| -> Result<Option<(crate::player::script_ref::ScriptInstanceRef, crate::player::script::ScriptHandlerRef)>, ScriptError> {
-            if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj_ref) {
-                let instance_ref = instance_ref.clone();
-                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, &instance_ref, handler_name) {
-                    return Ok(None);
-                }
-                let handler_ref = ScriptInstanceUtils::get_handler(handler_name, &obj_ref, player)?;
-                Ok(handler_ref.map(|hr| (instance_ref, hr)))
-            } else {
-                Ok(None)
-            }
-        })?;
         if let Some((instance_ref, handler_ref)) = lingo_target {
             // `use_raw_arg_list: false` matches the old
             // `player_call_script_handler(Some(instance), handler_ref, args)`
