@@ -3010,14 +3010,24 @@ pub async fn player_call_script_handler_raw_args(
     'driver: loop {
     let mut should_return = false;
     let transfer: FrameTransfer = loop {
-        // NOTE: the previous top-of-loop scope-generation re-read was removed as
-        // redundant. `scope_generation` is read fresh immediately before the loop,
-        // and the `post_gen` check at the END of every iteration already breaks on
-        // scope reuse. Nothing between one iteration's post_gen check and the next
-        // iteration's start mutates the generation (only the bytecode_index bump),
-        // so the top-of-loop check always passed — it was a pure per-opcode global
-        // access (RefCell borrow + scope HashMap lookup) feeding a branch that could
-        // never be taken.
+        // Re-validate the scope's generation before every opcode. A movie change
+        // resets every scope in place (bumping `generation`, clearing
+        // `script_ref` to the -1:-1 sentinel) and can be triggered DEEP in a
+        // sub-call. When that callee returns, this frame resumes — and its next
+        // opcode might be a plain SYNC op (e.g. `set homeScore`) that the
+        // end-of-iteration `post_gen` check never sees (that check is gated on
+        // `took_async_path`). Without this guard the resumed handler runs against
+        // the reset scope and errors ("script not found (-1:-1)"). The check is a
+        // single scope generation read; per our profiling the per-op cost is
+        // negligible (reserve_player + Vec index aren't the hot cost). On a
+        // mismatch the frame is stale — unwind it via the normal Done teardown
+        // (pop_scope is underflow-safe for exactly this stale-resume case).
+        let cur_gen = reserve_player_ref(|player| {
+            player.scopes.get(scope_ref).map(|s| s.generation)
+        });
+        if cur_gen != Some(scope_generation) {
+            break FrameTransfer::Done;
+        }
 
         // NOTE: the per-opcode breakpoint/step-mode check below is currently
         // disabled (commented out). Reading `bytecode_index` + debugger state
@@ -4645,14 +4655,11 @@ pub async fn run_frame_loop() {
                     let (net, parse, apply, casts) =
                         CAST_LOAD_DIAG.with(|c| *c.borrow());
                     let lingo = (d.work_ms - net - parse - apply).max(0.0);
-                    web_sys::console::log_1(
-                        &format!(
-                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
-                            d.frames, current_tempo_for_diag, target_delay_ms,
-                            wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
-                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
-                        )
-                        .into(),
+                    log::debug!(
+                        "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
+                        d.frames, current_tempo_for_diag, target_delay_ms,
+                        wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
+                        casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
                     );
                 }
             }

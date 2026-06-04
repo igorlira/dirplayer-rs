@@ -287,6 +287,16 @@ impl Scope {
     }
 
     pub fn reset(&mut self) {
+        // Bump the generation so the trampoline's stale-scope guard
+        // (`post_gen != scope_generation`) trips for any handler still
+        // suspended on this slot. The movie-change transition resets every
+        // scope while a handler from the old movie can be parked across the
+        // `go to movie` await; without this bump that handler would resume
+        // against a reset (sentinel `script_ref`) scope and run opcodes like
+        // `set homeScore` on a non-existent script (-1:-1). `push_scope`
+        // overwrites the generation explicitly right after calling reset(),
+        // so this is harmless on the allocation path.
+        self.generation = self.generation.wrapping_add(1);
         self.script_ref = INVALID_CAST_MEMBER_REF;
         self.receiver = None;
         self.cached_handler_instance = None;
