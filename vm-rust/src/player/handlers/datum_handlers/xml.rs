@@ -863,6 +863,27 @@ impl XmlDatumHandlers {
         xml_id: u32,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
+        // An xml_id offset by +10000 is the "attributes view" of a node (see the
+        // `Attributes` arm below, which returns `XmlRef(xml_id + 10000)`). Director
+        // exposes `node.attributes` as a property list, so `node.attributes.rows`
+        // is an attribute lookup BY NAME. Resolve it here before the builtin-symbol
+        // dispatch: an attribute name need not be a Director keyword (`rows`,
+        // `cols`, ...), and a name that happens to collide with one (`name`,
+        // `text`) must still resolve to the attribute, not the node metadata.
+        if xml_id > 10000 {
+            let node_id = xml_id - 10000;
+            if let Some(node) = player.xml_nodes.get(&node_id) {
+                let value = node
+                    .attributes
+                    .get(&prop.as_str().to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
+                return Ok(player.alloc_datum(Datum::String(value)));
+            } else {
+                warn!("🔧 ⚠️ Node {} not found", node_id);
+                return Ok(player.alloc_datum(Datum::String("".to_string())));
+            }
+        }
         match prop.into_builtin() {
             Some(BuiltInSymbol::FirstChild) => {
                 // Check if it's a document
@@ -1010,21 +1031,6 @@ impl XmlDatumHandlers {
                     .unwrap_or(false);
                 Ok(player.alloc_datum(Datum::Int(if ignore { 1 } else { 0 })))
             }
-            Some(attr_name) if xml_id > 10000 => {
-                let node_id = xml_id - 10000;
-
-                if let Some(node) = player.xml_nodes.get(&node_id) {
-                    let value = node
-                        .attributes
-                        .get(&prop.as_str().to_lowercase())
-                        .cloned()
-                        .unwrap_or_default();
-                    Ok(player.alloc_datum(Datum::String(value)))
-                } else {
-                    warn!("🔧 ⚠️ Node {} not found", node_id);
-                    Ok(player.alloc_datum(Datum::String("".to_string())))
-                }
-            }
             _ => Err(ScriptError::new(format!("Unknown XML property: {}", prop))),
         }
     }
@@ -1039,6 +1045,21 @@ impl XmlDatumHandlers {
         prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
+        // Mirror get_xml_property: an xml_id > 10000 is a node's attributes view, so
+        // any property set on it writes an attribute BY NAME — regardless of whether
+        // the name is a Director keyword. Key by the lowercased name to match the
+        // parser (convert_attributes lowercases) and the getter's lookup.
+        if xml_id > 10000 {
+            let node_id = xml_id - 10000;
+            let value_str = player.get_datum(value).string_value()?;
+            let attr_key = prop.as_str().to_lowercase();
+            if let Some(node) = player.xml_nodes.get_mut(&node_id) {
+                node.attributes.insert(attr_key, value_str);
+                return Ok(());
+            } else {
+                return Err(ScriptError::new(format!("Node {} not found", node_id)));
+            }
+        }
         match prop.into_builtin() {
             Some(BuiltInSymbol::IgnoreWhite) => {
                 let ignore_value = player.get_datum(value).int_value()? != 0;
@@ -1046,26 +1067,6 @@ impl XmlDatumHandlers {
                     doc.ignore_white = ignore_value;
                 }
                 Ok(())
-            }
-            Some(attr_name) if xml_id > 10000 => {
-                // Setting an attribute on an element
-                let node_id = xml_id - 10000;
-                let value_str = player.get_datum(value).string_value()?;
-
-                web_sys::console::log_1(
-                    &format!(
-                        "🔧 Set attribute '{}' = '{}' on node {}",
-                        attr_name, value_str, node_id
-                    )
-                    .into(),
-                );
-
-                if let Some(node) = player.xml_nodes.get_mut(&node_id) {
-                    node.attributes.insert(attr_name.to_string(), value_str);
-                    Ok(())
-                } else {
-                    Err(ScriptError::new(format!("Node {} not found", node_id)))
-                }
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set XML property: {}",
