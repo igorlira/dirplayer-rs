@@ -45,7 +45,9 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
+            let items = scope
+                .stack
+                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgList, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -66,7 +68,9 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
+            let items = scope
+                .stack
+                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgListNoRet, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();

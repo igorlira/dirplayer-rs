@@ -163,6 +163,26 @@ impl OperandStack {
             .map(|c| c.into_inner().into_ref())
             .collect()
     }
+    /// Drain the top `n` entries directly into `buf` (materializing inline values),
+    /// removing them from the stack in place. Unlike `split_off_refs`, `drain` does
+    /// NOT allocate a transient `Vec` for the removed tail — the arg list is built in
+    /// one pass straight into the deque the call opcode consumes. `push_arglist` runs
+    /// once per Lingo call (8.1M times in the Habbo preloader), so dropping that extra
+    /// per-call allocation matters. `buf` is a (typically pooled) deque, cleared first.
+    #[inline]
+    pub fn drain_top_into_deque(
+        &mut self,
+        n: usize,
+        mut buf: std::collections::VecDeque<DatumRef>,
+    ) -> std::collections::VecDeque<DatumRef> {
+        let at = self.items.len() - n;
+        buf.clear();
+        buf.reserve(n);
+        for c in self.items.drain(at..) {
+            buf.push_back(c.into_inner().into_ref());
+        }
+        buf
+    }
     /// Iterate the stack as `&DatumRef` (bottom to top). Materializes inline
     /// entries in place first.
     pub fn iter(&self) -> impl Iterator<Item = &DatumRef> {
