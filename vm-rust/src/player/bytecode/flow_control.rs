@@ -31,7 +31,8 @@ impl FlowControlBytecodeHandler {
 
             let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
 
-            let name = get_name(player_cell, &ctx, name_id).unwrap();
+            let _ = player_cell;
+            let name = ctx.get_name(name_id);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let arg_list_datum_ref = match scope.stack.pop() {
                 Some(datum_ref) => datum_ref,
@@ -196,12 +197,8 @@ impl FlowControlBytecodeHandler {
         // let token = start_profiling("_obj_call_prepare".to_string());
         let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(&ctx);
-            let target_handler_name = get_name(
-                &player,
-                &ctx,
-                bytecode.obj as u16,
-            ) // TODO(perf): cache this conversion
-            .unwrap_or_else(|| Symbol::from_str("?"));
+            // ctx.get_name indexes ctx.names_ptr directly (no per-op get_cast).
+            let target_handler_name = ctx.get_name(bytecode.obj as u16);
             let arg_list_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 match scope.stack.pop() {

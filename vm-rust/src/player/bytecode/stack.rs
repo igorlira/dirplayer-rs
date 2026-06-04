@@ -79,7 +79,9 @@ impl StackBytecodeHandler {
     pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
-        let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
+        // ctx.get_name indexes ctx.names_ptr directly — no per-op get_cast lookup
+        // (the free get_name() re-resolves the cast's name table every call).
+        let symbol_name = ctx.get_name(name_id as u16);
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
@@ -88,7 +90,7 @@ impl StackBytecodeHandler {
     pub fn push_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
-        let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
+        let symbol_name = ctx.get_name(name_id as u16);
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
         scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
