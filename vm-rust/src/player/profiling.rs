@@ -243,13 +243,9 @@ impl SpeedscopeRecorder {
             if !self.capped {
                 self.capped = true;
                 RECORDING.store(false, Ordering::Relaxed);
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::warn_1(
-                    &format!(
-                        "[dirplayer profiler] sample cap ({}) reached — recording auto-stopped.",
-                        MAX_SAMPLES
-                    )
-                    .into(),
+                log::warn!(
+                    "[dirplayer profiler] sample cap ({}) reached — recording auto-stopped.",
+                    MAX_SAMPLES
                 );
             }
             return;

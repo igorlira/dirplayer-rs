@@ -875,7 +875,11 @@ impl JsApi {
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
             onCastLibNameChanged(cast_number, &cast.name);
         });
@@ -883,7 +887,11 @@ impl JsApi {
 
     pub fn dispatch_cast_list_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let names = player
                 .movie
                 .cast_manager
@@ -903,7 +911,11 @@ impl JsApi {
 
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -922,7 +934,11 @@ impl JsApi {
 
     pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let subscribed_members = &player.subscribed_member_refs;
             if !subscribed_members.contains(&member_ref) {
                 return;
@@ -948,7 +964,11 @@ impl JsApi {
 
     pub fn on_cast_member_name_changed(slot_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             if player.is_subscribed_to_channel_names {
                 for channel in player.movie.score.channels.iter() {
@@ -972,7 +992,13 @@ impl JsApi {
 
     pub fn dispatch_score_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // This runs on a later tick, by which point the player may already
+            // be gone (torn down between movies / at shutdown). No player means
+            // no score to snapshot — bail rather than unwrap a None.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             onScoreChanged(snapshot.to_js_object());
@@ -996,7 +1022,11 @@ impl JsApi {
 
         if selected_channel == Some(channel) {
             async_std::task::spawn_local(async move {
-                let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+                // Deferred task — the player may be gone by the time it runs.
+                let player = match unsafe { PLAYER_OPT.as_ref() } {
+                    Some(player) => player,
+                    None => return,
+                };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 onChannelChanged(channel, snapshot.to_js_object());
             });
@@ -1406,7 +1436,11 @@ impl JsApi {
 
     pub fn dispatch_channel_name_changed(channel: i16) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             if player.is_subscribed_to_channel_names {
                 let display_name =
@@ -1809,23 +1843,24 @@ impl JsApi {
 
         let data: js_sys::Map =
             if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
-                let cast_lib = player
+                // Best-effort handler-name resolution: this is error-reporting
+                // code, so it must not itself panic. The erroring scope can have
+                // an invalid script_ref (cast_lib = u32::MAX sentinel), no lctx,
+                // or an out-of-range handler id — in any of those cases just
+                // report the error without a handler name.
+                let current_handler_name = player
                     .movie
                     .cast_manager
                     .get_cast(current_scope.script_ref.cast_lib as u32)
-                    .unwrap();
-                let current_handler_name = cast_lib
-                    .lctx
-                    .as_ref()
-                    .unwrap()
-                    .names
-                    .get(current_scope.handler_name_id as usize)
-                    .unwrap();
+                    .ok()
+                    .and_then(|cast_lib| cast_lib.lctx.as_ref())
+                    .and_then(|lctx| lctx.names.get(current_scope.handler_name_id as usize))
+                    .cloned();
 
                 OnScriptErrorCallbackData {
                     message: err.message.to_owned(),
                     script_member_ref: Some(current_scope.script_ref.to_js()),
-                    handler_name: Some(current_handler_name.to_owned()),
+                    handler_name: current_handler_name,
                     is_paused,
                 }
                 .into()
@@ -1844,7 +1879,11 @@ impl JsApi {
 
     pub fn dispatch_breakpoint_list_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let breakpoints = player
                 .breakpoint_manager
                 .breakpoints

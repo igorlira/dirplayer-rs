@@ -185,11 +185,15 @@ pub fn script_get_static_prop(
     script_ref: &CastMemberRef,
     prop_name: Symbol,
 ) -> Result<DatumRef, ScriptError> {
-    let script_rc = player
-        .movie
-        .cast_manager
-        .get_script_by_ref(&script_ref)
-        .unwrap();
+    let script_rc = match player.movie.cast_manager.get_script_by_ref(&script_ref) {
+        Some(script_rc) => script_rc,
+        None => {
+            return Err(ScriptError::new(format!(
+                "Cannot get static property {} — script not found ({}:{})",
+                prop_name, script_ref.cast_lib, script_ref.cast_member
+            )))
+        }
+    };
     let script = script_rc.as_ref();
     let properties = script.properties.borrow();
     if let Some(prop) = properties.get(&prop_name) {
@@ -209,11 +213,20 @@ pub fn script_set_static_prop(
     value_ref: &DatumRef,
     required: bool,
 ) -> Result<(), ScriptError> {
-    let script_rc = player
-        .movie
-        .cast_manager
-        .get_script_by_ref(&script_ref)
-        .unwrap();
+    let script_rc = match player.movie.cast_manager.get_script_by_ref(&script_ref) {
+        Some(script_rc) => script_rc,
+        None => {
+            // A real movie should never reach here: the trampoline's per-opcode
+            // generation guard aborts a handler whose scope was reset by a movie
+            // change before it can run an op like this. If it does fire, surface
+            // it (don't panic as the old code did) so the underlying cause is
+            // visible rather than masked.
+            return Err(ScriptError::new(format!(
+                "Cannot set static property {} — script not found ({}:{})",
+                prop_name, script_ref.cast_lib, script_ref.cast_member
+            )));
+        }
+    };
     let script = script_rc.as_ref();
     let mut properties = script.properties.borrow_mut();
 

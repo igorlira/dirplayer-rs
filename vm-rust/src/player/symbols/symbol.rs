@@ -68,6 +68,13 @@ impl Symbol {
     }
 
     pub fn builtin(builtin: BuiltInSymbol) -> Self {
+        // Ensure the global symbol table exists. Unlike `from_str` (which goes
+        // through `get_symbol_spur` → `init_symbol_table`), constructing a
+        // builtin needs no interning, so it could be the very first symbol op
+        // in a fresh context and would otherwise unwrap a `None` table. The
+        // `Once` makes this idempotent and it can't re-enter init
+        // (`init_builtin_symbols` interns directly, never via `builtin`).
+        crate::player::symbols::symbol_table::init_symbol_table();
         let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
         let spur = symbol_table.builtin_to_spur.get(&builtin).copied().unwrap();
         Self { spur }
