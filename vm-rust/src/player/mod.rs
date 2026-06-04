@@ -2628,6 +2628,18 @@ pub async fn player_call_global_handler(
             // where firstArg is a script or script instance
             receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
 
+            // Cached movie-handler resolution: singleton accessors like
+            // getObjectManager / getStringServices (called millions of times via
+            // the preloader's replaceChunks chain) resolve here in O(1) instead
+            // of rebuilding + scanning the active-script list every call.
+            if receiver_handler.is_none() {
+                if let Some(handler_ref) = player.movie.cast_manager.movie_handler_ref(handler_name) {
+                    receiver_handler = Some((None, handler_ref));
+                }
+            }
+
+            // Remaining static scripts (frame script + global script vars) — only
+            // reached for names a movie script doesn't define.
             if receiver_handler.is_none() {
                 receiver_handler =
                     get_active_static_script_refs(player)

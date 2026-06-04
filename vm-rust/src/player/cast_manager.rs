@@ -39,6 +39,13 @@ pub struct CastManager {
     /// anywhere defines it, so resolution goes straight to the builtin. Built
     /// lazily; invalidated (with movie_script_cache) on any cast/script change.
     pub all_handler_names: RefCell<Option<FxHashSet<crate::player::symbols::symbol::Symbol>>>,
+    /// Cached resolution of a global handler name to the MOVIE script that
+    /// defines it (lowest member wins, matching get_active_static_script_refs's
+    /// movie-scripts-first order). Lets `ext_call` to singleton accessors
+    /// (getObjectManager / getStringServices / getObject — called millions of
+    /// times via the preloader's replaceChunks chain) skip the per-call script
+    /// scan. Built lazily; invalidated with movie_script_cache on cast load.
+    pub movie_handler_refs: RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, crate::player::script::ScriptHandlerRef>>>,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
@@ -64,6 +71,7 @@ impl CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
             all_handler_names: RefCell::new(None),
+            movie_handler_refs: RefCell::new(None),
             member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
@@ -658,8 +666,40 @@ impl CastManager {
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
-        // The handler-name superset is derived from the same scripts.
+        // The handler-name superset + movie-handler resolution are derived from
+        // the same scripts.
         self.all_handler_names.replace(None);
+        self.movie_handler_refs.replace(None);
+    }
+
+    /// Resolve a global handler name to the movie script that defines it (or
+    /// None). Cached; mirrors get_active_static_script_refs's movie-scripts-first
+    /// precedence (lowest member number wins on duplicate names).
+    pub fn movie_handler_ref(
+        &self,
+        name: crate::player::symbols::symbol::Symbol,
+    ) -> Option<crate::player::script::ScriptHandlerRef> {
+        if self.movie_handler_refs.borrow().is_none() {
+            let mut map: FxHashMap<
+                crate::player::symbols::symbol::Symbol,
+                crate::player::script::ScriptHandlerRef,
+            > = FxHashMap::default();
+            // Build in the same order get_movie_scripts produces (cast/member
+            // order); first writer wins so the lowest-numbered script holding a
+            // duplicate name takes precedence.
+            for cast in &self.casts {
+                for script in cast.scripts.values() {
+                    if let ScriptType::Movie = script.script_type {
+                        for handler_name in script.handlers.keys() {
+                            map.entry(*handler_name)
+                                .or_insert_with(|| (script.member_ref.clone(), *handler_name));
+                        }
+                    }
+                }
+            }
+            self.movie_handler_refs.replace(Some(map));
+        }
+        self.movie_handler_refs.borrow().as_ref().unwrap().get(&name).cloned()
     }
 
     /// True if ANY script in ANY cast defines a handler named `name`. Used by
