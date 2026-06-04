@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, warn};
 use url::Url;
 
@@ -33,6 +33,12 @@ use super::{
 pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+    /// Superset of every handler name defined by ANY script in ANY cast. Lets
+    /// `ext_call` skip the active-script scan for builtin names (voidp/offset/
+    /// length, millions in the preloader): if a name is absent here, no script
+    /// anywhere defines it, so resolution goes straight to the builtin. Built
+    /// lazily; invalidated (with movie_script_cache) on any cast/script change.
+    pub all_handler_names: RefCell<Option<FxHashSet<crate::player::symbols::symbol::Symbol>>>,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
@@ -57,6 +63,7 @@ impl CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
+            all_handler_names: RefCell::new(None),
             member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
@@ -651,6 +658,27 @@ impl CastManager {
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
+        // The handler-name superset is derived from the same scripts.
+        self.all_handler_names.replace(None);
+    }
+
+    /// True if ANY script in ANY cast defines a handler named `name`. Used by
+    /// `ext_call` to skip the active-script resolution scan for builtin names.
+    /// Conservative superset: a `true` still does the full scan; only a `false`
+    /// (no script anywhere defines it) lets the caller jump to the builtin.
+    pub fn any_script_defines_handler(&self, name: crate::player::symbols::symbol::Symbol) -> bool {
+        if self.all_handler_names.borrow().is_none() {
+            let mut set: FxHashSet<crate::player::symbols::symbol::Symbol> = FxHashSet::default();
+            for cast in &self.casts {
+                for script in cast.scripts.values() {
+                    for handler_name in script.handlers.keys() {
+                        set.insert(*handler_name);
+                    }
+                }
+            }
+            self.all_handler_names.replace(Some(set));
+        }
+        self.all_handler_names.borrow().as_ref().unwrap().contains(&name)
     }
 
     /// True if any cast library is mid-load. The frame loop uses this (with

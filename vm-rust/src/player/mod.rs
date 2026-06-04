@@ -2615,8 +2615,15 @@ pub async fn player_call_global_handler(
 
         let mut receiver_handler = None;
 
-        // "new" invocations should always go through the built-in handler
-        if handler_name != Symbol::builtin(BuiltInSymbol::New) {
+        // "new" invocations should always go through the built-in handler.
+        // Fast path: if NO script anywhere defines this name (the case for
+        // builtins like voidp/offset/length — millions of these in the
+        // preloader), skip the whole active-script + stage-instance scan and
+        // fall straight to the builtin. `any_script_defines_handler` is an O(1)
+        // set lookup against a superset rebuilt only on cast load.
+        if handler_name != Symbol::builtin(BuiltInSymbol::New)
+            && player.movie.cast_manager.any_script_defines_handler(handler_name)
+        {
             // Director appears to support customFunc(firstArg, ..) invocations
             // where firstArg is a script or script instance
             receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
