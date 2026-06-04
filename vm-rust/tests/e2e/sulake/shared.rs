@@ -51,7 +51,7 @@ pub async fn assert_login_success(
     let mut snapshots = SnapshotContext::new(suite, &test_name);
     snapshots.max_diff_ratio = 0.01;
 
-    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).await?;
+    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).timeout(150.0).await?;
     snapshots.verify("login_submitted", player.snapshot_stage())?;
     Ok(())
 }

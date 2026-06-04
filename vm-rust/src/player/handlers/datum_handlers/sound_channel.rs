@@ -487,7 +487,13 @@ impl SoundChannelDatumHandlers {
 
     pub fn handle_stop(player: &mut DirPlayer, datum: &DatumRef) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
+        let channel_num = channel.borrow().channel_num;
         channel.borrow_mut().stop();
+        // Release the audio-time sync anchor when sound 1 stops — the score
+        // frame loop returns to its normal tempo'd advance.
+        if channel_num == 0 {
+            player.audio_sync_anchor = None;
+        }
         Ok(())
     }
 
@@ -1138,6 +1144,12 @@ pub struct SoundChannel {
     pub decode_generation: Rc<RefCell<u32>>, // Incremented each time a new decode starts
     pub playback_start_context_time: f64, // AudioContext.currentTime when playback started
 
+    /// Index of the next cue point in `sound_member.cue_point_times` that
+    /// hasn't yet fired this segment. Advanced as the playhead crosses each
+    /// entry. Reset on `start_segment_playback` (and skips entries that
+    /// fall before `start_time`, so a `[#startTime: N]` seek doesn't
+    /// re-fire cues already behind the playhead).
+    pub next_cue_index: usize,
 }
 
 impl SoundChannel {
@@ -1356,6 +1368,7 @@ impl SoundChannel {
             is_decoding: Rc::new(RefCell::new(false)),
             decode_generation: Rc::new(RefCell::new(0)),
             playback_start_context_time: 0.0,
+            next_cue_index: 0,
         }
     }
 
@@ -1772,6 +1785,14 @@ impl SoundChannel {
                 this.sample_count = sound_member.info.sample_count;
                 this.channel_count = sound_member.info.channels;
             }
+            // Stash sound_member + cue cursor are set further below, inside
+            // the async resampling completion block — at the exact moment we
+            // also reset `playback_start_context_time` so the cue-detection
+            // math in `update()` lines up with the real audio source clock.
+            // Setting them here in the sync prelude instead would mean
+            // `update()` starts comparing the cue list against a playhead
+            // that's been running for the entire decode/resample window
+            // (24MB ADPCM resample takes ~20s) and fires every cue at once.
 
             // Load audio data
             let audio_data = match Self::load_director_audio_data(
@@ -1798,6 +1819,12 @@ impl SoundChannel {
 
                 let self_rc_clone = self_rc.clone();
                 let mp3_data = mp3_bytes.clone();
+                // Pass the resolved sound member through to the MP3 decode
+                // task so the channel can stash it next to
+                // `playback_start_context_time` once the source actually
+                // starts — that's the moment the cue-detection clock
+                // resets, so cue list + clock have to land together.
+                let mp3_sound_member = sound_member.clone();
 
                 debug!("🚀 About to spawn MP3 decode task (start_sound)");
                 wasm_bindgen_futures::spawn_local(async move {
@@ -1806,9 +1833,9 @@ impl SoundChannel {
                         ch.status = SoundStatus::Loading;
                     }
 
-                    if let Err(e) = Self::start_sound_mp3_async(self_rc_clone.clone(), mp3_data.clone()).await {
+                    if let Err(e) = Self::start_sound_mp3_async(self_rc_clone.clone(), mp3_data.clone(), mp3_sound_member).await {
                         error!("❌ MP3 playback failed: {:?}", e);
-                        debug!("📊 MP3 data size: {} bytes, first bytes: {:02X?}", 
+                        debug!("📊 MP3 data size: {} bytes, first bytes: {:02X?}",
                             mp3_data.len(), &mp3_data[0..32.min(mp3_data.len())]);
                         {
                             let mut ch = self_rc_clone.borrow_mut();
@@ -1885,7 +1912,12 @@ impl SoundChannel {
                 let gen_ = *ch.decode_generation.borrow();
                 gen_  // Return the copied value
             };
-            
+
+            // Clone the resolved sound member so the async closure can stash
+            // it on the channel at the exact moment the source node starts —
+            // see the matching site further down.
+            let sound_member_for_cues = sound_member.clone();
+
             wasm_bindgen_futures::spawn_local(async move {
 
                 {
@@ -1967,7 +1999,37 @@ impl SoundChannel {
                 ch.elapsed_time = 0.0;
                 *ch.is_decoding.borrow_mut() = false;
 
+                // Cue-point state: must be set NOW, alongside
+                // `playback_start_context_time`. Setting it earlier (during
+                // the sync prelude of start_sound) would let `update()`
+                // compare the cue list against a wall-clock that's been
+                // accruing the entire ADPCM/MP3 decode + resample window
+                // (often 15-25s for a 24MB ADPCM track), and the first
+                // tick after sound_member became visible would dump every
+                // cue before the (fake) playhead in one shot. With this
+                // moved here, both clocks reset together at true start.
+                let seek_ms = ch.start_time as i64;
+                ch.next_cue_index = sound_member_for_cues
+                    .cue_point_times
+                    .iter()
+                    .position(|t| (*t as i64) >= seek_ms)
+                    .unwrap_or(sound_member_for_cues.cue_point_times.len());
+                ch.sound_member = Some(sound_member_for_cues);
+
+                let pcm_channel_num = ch.channel_num;
+                let pcm_anchor_ctx_time = ch.playback_start_context_time;
                 drop(ch);
+
+                // Mirror of the MP3-path audio-sync anchor — see comment there.
+                if pcm_channel_num == 0 {
+                    let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+                    if let Some(player) = player_opt {
+                        player.audio_sync_anchor = Some((
+                            player.movie.current_frame,
+                            pcm_anchor_ctx_time,
+                        ));
+                    }
+                }
 
                 // Set up ended callback. Generation guard: when a previous
                 // source was explicitly stopped via `stop_with_when(0.0)`
@@ -2099,6 +2161,7 @@ impl SoundChannel {
     async fn start_sound_mp3_async(
         self_rc: Rc<RefCell<SoundChannel>>,
         mp3_bytes: Vec<u8>,
+        sound_member: SoundMember,
     ) -> Result<(), JsValue> {
         use web_sys::console;
 
@@ -2359,7 +2422,7 @@ impl SoundChannel {
         debug!("▶️ MP3 source.start() called");
 
         // Store nodes in channel state AFTER starting (only once!)
-        {
+        let (anchor_channel_num, anchor_ctx_time) = {
             let mut ch = self_rc.borrow_mut();
             ch.source_node = Some(Rc::new(source));
             ch.gain_node = Some(Rc::new(gain));
@@ -2367,6 +2430,34 @@ impl SoundChannel {
             ch.playback_start_context_time = ch.context_time();
             ch.elapsed_time = 0.0;
             *ch.is_decoding.borrow_mut() = false;
+
+            // Cue-point state must reset alongside `playback_start_context_time`,
+            // not in the synchronous prelude of start_sound — see the matching
+            // comment on the PCM resampling completion path.
+            let seek_ms = ch.start_time as i64;
+            ch.next_cue_index = sound_member
+                .cue_point_times
+                .iter()
+                .position(|t| (*t as i64) >= seek_ms)
+                .unwrap_or(sound_member.cue_point_times.len());
+            ch.sound_member = Some(sound_member);
+
+            (ch.channel_num, ch.playback_start_context_time)
+        };
+
+        // Anchor the score-frame ↔ audio-time sync on channel 1 (Lingo
+        // `sound(1)`, internal channel_num=0). The frame loop uses this
+        // anchor to keep score-driven sprites (Fugue No.4's Cross 1-4 path
+        // tweens) locked to audio playback instead of drifting on wall-clock.
+        // See run_frame_loop. Cleared when sound stops.
+        if anchor_channel_num == 0 {
+            let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+            if let Some(player) = player_opt {
+                player.audio_sync_anchor = Some((
+                    player.movie.current_frame,
+                    anchor_ctx_time,
+                ));
+            }
         }
 
         debug!("✅ Channel {} MP3 playback started", channel_num);
@@ -3566,6 +3657,19 @@ impl SoundChannel {
             1
         };
 
+        // `#startTime` seeks into the queued audio in milliseconds.
+        // Director's Fugue No.4 movie uses it heavily — every Commence call
+        // queues [#member: m, #startTime: line[4][cm]] so the audio starts
+        // exactly at the time of cue #cm. Without honouring this, playback
+        // restarts at 0ms after every user click, re-firing the whole cue
+        // list from the top. Accept Int or Float (Director is lax here).
+        let start_time_ms = match SoundChannel::get_proplist_prop(player, &datum, Symbol::from_str("startTime")) {
+            Some(Datum::Int(v)) => v as f64,
+            Some(Datum::Float(v)) => v,
+            _ => 0.0,
+        };
+        self.start_time = start_time_ms.max(0.0);
+
         if loop_count <= 0 {
             console::log_1(
                 &format!(
@@ -3726,6 +3830,36 @@ impl SoundChannel {
 
         self.elapsed_time += delta_time;
 
+        // Fire any cue points the playhead has just crossed. Playhead is
+        // measured against the audio-context clock for accuracy (matches
+        // the `currentTime` getter math at line 282-284); falls back to
+        // accumulated `elapsed_time` if the context handle isn't set up.
+        // `next_cue_index` is initialised on segment start, so this loop
+        // is a no-op for sounds without cue points.
+        if let Some(member) = self.sound_member.as_ref() {
+            if self.next_cue_index < member.cue_point_times.len() {
+                let playhead_ms = if let Some(ctx) = self.audio_context.as_ref() {
+                    self.start_time + (ctx.current_time() - self.playback_start_context_time) * 1000.0
+                } else {
+                    self.start_time + self.elapsed_time * 1000.0
+                };
+                while self.next_cue_index < member.cue_point_times.len()
+                    && (member.cue_point_times[self.next_cue_index] as f64) <= playhead_ms
+                {
+                    let number = (self.next_cue_index + 1) as i32;
+                    let name = member
+                        .cue_point_names
+                        .get(self.next_cue_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Channels are 1-based in Director's Lingo surface; our
+                    // internal `channel_num` starts at 0 (channel 1 is index 0).
+                    player.pending_cue_events.push((self.channel_num + 1, number, name));
+                    self.next_cue_index += 1;
+                }
+            }
+        }
+
         // Note: previously had a "safety net" here that forced status to
         // Idle when `elapsed_time > sample_count/sample_rate + 0.1s`.
         // That heuristic used Director's authored duration (from the cast
@@ -3787,6 +3921,21 @@ impl SoundChannel {
         self.sample_rate = sound_member.info.sample_rate;
         self.sample_count = sound_member.info.sample_count;
         self.channel_count = sound_member.info.channels;
+
+        // Reset the cue cursor for this segment. Cues strictly before
+        // `start_time` (Lingo `[#startTime: ms]` seek) are already behind
+        // the playhead — skip them so a seek-into-audio doesn't spam
+        // cuePassed for every cue prior to the seek point. A cue whose
+        // time exactly equals the seek point still fires (Director's
+        // observed behaviour and what the Fugue movie relies on:
+        // `[#startTime: line[4][cm]]` seeks to the time of cue#cm so that
+        // cue fires almost immediately after play() starts).
+        let seek_ms = self.start_time as i64;
+        self.next_cue_index = sound_member
+            .cue_point_times
+            .iter()
+            .position(|t| (*t as i64) >= seek_ms)
+            .unwrap_or(sound_member.cue_point_times.len());
 
         self.expected_sample_rate = Some(sound_member.info.sample_rate);
 

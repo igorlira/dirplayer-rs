@@ -107,6 +107,14 @@ export function setXtraMovieBase(base: string | null | undefined): void;
 export function setXtraHostBase(base: string | null | undefined): void;
 
 /**
+ * Current host base, or `null` if none set. Nested host bootstraps
+ * (polyfill / extension that mount the React app whose VMProvider
+ * would otherwise re-run its own setXtraHostBase) check this before
+ * setting so the outer host's configuration isn't clobbered.
+ */
+export function getXtraHostBase(): string | null;
+
+/**
  * Register or merge a name→URL map for movie-driven xtra resolution.
  * Keys are normalized (lowercased, ".x32" stripped); values follow
  * the same URL resolver rules as loadExternalXtra. Repeated calls

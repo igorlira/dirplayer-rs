@@ -1468,18 +1468,79 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             // "Invalid string built-in property line".
             if let LingoExpr::ObjProp(obj_expr, prop_name) = list_expr.as_ref() {
                 let prop_lower = prop_name.to_ascii_lowercase();
-                if prop_lower == "line" || prop_lower == "item" || prop_lower == "word" {
+                if prop_lower == "line" || prop_lower == "item" || prop_lower == "word"
+                    || prop_lower == "char"
+                {
                     let obj_ref = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
                     let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
                     let chunk_datum = reserve_player_mut(|player| {
-                        if !matches!(player.get_datum(&obj_ref), Datum::String(_)) {
-                            return Ok(None);
-                        }
+                        use crate::director::lingo::datum::{
+                            StringChunkExpr, StringChunkSource, StringChunkType,
+                        };
                         let index = player.get_datum(&index_ref).int_value()?;
-                        let d = crate::player::handlers::datum_handlers::string::StringDatumUtils::get_prop_ref(
-                            player, &obj_ref, Symbol::from_str(&prop_lower), index, index,
-                        )?;
-                        Ok(Some(d))
+                        let source_datum = player.get_datum(&obj_ref).clone();
+                        match source_datum {
+                            // `string.line[N]` etc. — build a StringChunk
+                            // whose source is the originating string datum.
+                            Datum::String(_) => {
+                                let d = crate::player::handlers::datum_handlers::string::StringDatumUtils::get_prop_ref(
+                                    player, &obj_ref, Symbol::from_str(&prop_lower), index, index,
+                                )?;
+                                Ok(Some(d))
+                            }
+                            // `member.line[N]` — build a StringChunk whose
+                            // source is the underlying member, so downstream
+                            // `.fontStyle` / `.font` / `.color` can walk back
+                            // to STXT formatting_runs. Without this the AST
+                            // path returned a plain String (via the field
+                            // `.line` getter returning a List<String>) and
+                            // every per-chunk style read errored with
+                            // "Invalid string built-in property fontStyle".
+                            Datum::CastMember(member_ref) => {
+                                let member = player.movie.cast_manager
+                                    .find_member_by_ref(&member_ref);
+                                let text = match member {
+                                    Some(m) => match &m.member_type {
+                                        crate::player::cast_member::CastMemberType::Field(f) => f.text.clone(),
+                                        crate::player::cast_member::CastMemberType::Text(t) => t.text.clone(),
+                                        _ => return Ok(None),
+                                    },
+                                    None => return Ok(None),
+                                };
+                                let chunk_expr = StringChunkExpr {
+                                    chunk_type: StringChunkType::from(Symbol::from_str(&prop_lower)),
+                                    start: index,
+                                    end: index,
+                                    item_delimiter: player.movie.item_delimiter,
+                                };
+                                let resolved =
+                                    StringChunkUtils::resolve_chunk_expr_string(&text, &chunk_expr)?;
+                                Ok(Some(Datum::StringChunk(
+                                    StringChunkSource::Member(member_ref),
+                                    chunk_expr,
+                                    resolved,
+                                )))
+                            }
+                            // Nested chunk: chain via Datum source so the
+                            // walk back to the member preserves both ranges.
+                            Datum::StringChunk(..) => {
+                                let parent_str = player.get_datum(&obj_ref).string_value()?;
+                                let chunk_expr = StringChunkExpr {
+                                    chunk_type: StringChunkType::from(Symbol::from_str(&prop_lower)),
+                                    start: index,
+                                    end: index,
+                                    item_delimiter: player.movie.item_delimiter,
+                                };
+                                let resolved =
+                                    StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
+                                Ok(Some(Datum::StringChunk(
+                                    StringChunkSource::Datum(obj_ref.clone()),
+                                    chunk_expr,
+                                    resolved,
+                                )))
+                            }
+                            _ => Ok(None),
+                        }
                     })?;
                     if let Some(d) = chunk_datum {
                         return reserve_player_mut(|player| Ok(player.alloc_datum(d)));
@@ -2060,12 +2121,38 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                     item_delimiter: player.movie.item_delimiter,
                 })
             })?;
-            
-            // Extract the chunk
-            let result_string = StringChunkUtils::resolve_chunk_expr_string(&source_string, &chunk_expr)?;
-            
+
+            // Extract the chunk. When the source is a `CastMember` or another
+            // `StringChunk`, return a chained `StringChunk` so subsequent
+            // `.fontStyle` / `.font` / `.color` reads can walk back to the
+            // member's STXT runs (parallel to the bytecode `get_chunk`
+            // handler in bytecode/string.rs). Plain `String` sources have
+            // no member to chain to, so they keep the original flatten
+            // behaviour. This is the path the interactive message-window
+            // evaluator uses; without it `put member.line[5].word[1].fontStyle`
+            // would error with "Invalid string built-in property fontStyle"
+            // because `word[1]` would have already collapsed to a String.
+            let result_string =
+                StringChunkUtils::resolve_chunk_expr_string(&source_string, &chunk_expr)?;
+
             reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::String(result_string)))
+                use crate::director::lingo::datum::StringChunkSource;
+                let source_datum = player.get_datum(&source_ref).clone();
+                let chunk_source = match source_datum {
+                    Datum::CastMember(member_ref) => {
+                        Some(StringChunkSource::Member(member_ref))
+                    }
+                    Datum::StringChunk(..) => Some(StringChunkSource::Datum(source_ref.clone())),
+                    _ => None,
+                };
+                Ok(match chunk_source {
+                    Some(src) => player.alloc_datum(Datum::StringChunk(
+                        src,
+                        chunk_expr,
+                        result_string,
+                    )),
+                    None => player.alloc_datum(Datum::String(result_string)),
+                })
             })
         }
         LingoExpr::Eq(left, right) => {

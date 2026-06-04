@@ -10,7 +10,7 @@ use crate::{
             bitmap::{Bitmap, PaletteRef, get_system_default_palette},
             drawing::CopyPixelsParams,
         }, cast_lib::CastMemberRef, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
-            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, StyledSpan, TextAlignment},
+            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
@@ -18,6 +18,41 @@ use crate::{
 
 pub struct TextMemberHandlers {}
 const DEBUG_TEXT_IMAGE: bool = true;
+
+/// Per-line vertical step in pixels for `linePosToLocV` / `locVToLinePos`.
+/// Matches what `charPosToLoc` in [handlers/manager.rs] uses: explicit
+/// `fixed_line_space` when set, otherwise font_size as the implicit line
+/// height. Field members behave identically.
+pub(crate) fn line_step_px(fixed_line_space: u16, font_size: u16) -> i32 {
+    if fixed_line_space > 0 { fixed_line_space as i32 } else { font_size as i32 }
+}
+
+/// Count the lines of a Director-style string. Director uses bare `\r` as
+/// its line separator; `str::lines()` only handles `\n` and `\r\n`, so a
+/// `\r`-separated text reads as a single line. We treat each `\r`, `\n`, or
+/// `\r\n` as one separator and return `separator_count + 1` (minimum 1).
+pub(crate) fn count_director_lines(text: &str) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    let bytes = text.as_bytes();
+    let mut lines = 1usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\r' {
+            lines += 1;
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                i += 2;
+                continue;
+            }
+        } else if c == b'\n' {
+            lines += 1;
+        }
+        i += 1;
+    }
+    lines
+}
 
 /// Result of parsing a Director-style RTF document back into the
 /// fields a TextMember holds. Symmetric counterpart to the data
@@ -103,10 +138,46 @@ impl TextMemberHandlers {
                     top_spacing: text.top_spacing,
                     char_spacing: 0,
                     member_width: None,
+                    min_space_advance: None,
+                    per_char_advances: None,
                 };
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
+            }
+            // Director 11.5 Scripting Dictionary p.443 / p.449.
+            //
+            // Director returns the BASELINE Y of the line, not its top edge.
+            // Hover-highlight idiom in scripts (e.g. spineworld_dcr's
+            // pDropList) is `rect(..., tPosV - 9, ..., tPosV + 5)` —
+            // asymmetric around tPosV (9 above, 5 below). The numbers
+            // -9/+5 are tuned for a 12pt font where the baseline sits
+            // ~9px from the line top (ascent ≈ 0.75 × font_size). With
+            // that convention the highlight top aligns with the line's
+            // top and the rect covers ~14px down, matching Director's
+            // natural line height. Returning line top or line center
+            // shifts the highlight off the line bucket (one line above
+            // the cursor; or overlapping into the previous line's
+            // click bucket).
+            "linePosToLocV" => {
+                let line_num = player.get_datum(&args[0]).int_value()?.max(1);
+                let line_step = line_step_px(text.fixed_line_space, text.font_size);
+                let baseline_offset = (line_step * 3) / 4;
+                let y = text.top_spacing as i32 + (line_num - 1) * line_step + baseline_offset;
+                Ok(player.alloc_datum(Datum::Int(y)))
+            }
+            "locVToLinePos" => {
+                let loc_v = player.get_datum(&args[0]).int_value()?;
+                let line_step = line_step_px(text.fixed_line_space, text.font_size).max(1);
+                // Director uses bare \r as its line separator. Rust's
+                // `str::lines()` only splits on \n / \r\n, so a \r-separated
+                // Director text reads as one line and the line-count clamp
+                // forces every locVToLinePos result back to 1 (spineworld_dcr's
+                // pDropList country list selected Afghanistan no matter where
+                // you clicked). Count any of \r, \n, or \r\n as a separator.
+                let line_count = count_director_lines(&text.text) as i32;
+                let line = ((loc_v - text.top_spacing as i32) / line_step) + 1;
+                Ok(player.alloc_datum(Datum::Int(line.clamp(1, line_count))))
             }
             "setProp" => {
                 // setProp(#line, index, value) or setProp(#word, index, value) etc.
@@ -952,6 +1023,65 @@ impl TextMemberHandlers {
                 };
                 let is_pfr_font = font.char_widths.is_some();
 
+                // For SMOOTH PFR OUTLINE fonts (no bitmap strikes), grab the
+                // parsed outlines so the renderer can compose text from sub-pixel
+                // glyph outlines instead of the atlas-copy path (which quantizes
+                // side bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                //
+                // PFR carries NO "pixel font" flag (its physical-font flags are
+                // only proportional / vertical / charcode width — confirmed
+                // against FreeType's pfr driver), and the member's anti-alias bit
+                // doesn't separate them either (Habbo authors both Volter AND
+                // CS-Verdana with anti_alias=false). So we classify by glyph
+                // GEOMETRY (`is_pixel_font`): pixel fonts (Volter, FFF Reaction)
+                // are drawn as axis-aligned rectangles (~0% béziers, ~100% H/V
+                // edges) and must render crisp via atlas-copy; smooth fonts
+                // (Verdana, Arial) are curve-heavy and need sub-pixel composition.
+                //
+                // Cloned once (consistent with `text_data` above); .image is not
+                // a per-frame call for cached members.
+                let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> = if is_pfr_font {
+                    let name = preferred_font_name.as_deref().unwrap_or("");
+                    if name.is_empty() {
+                        None
+                    } else {
+                        use crate::player::cast_member::CastMemberType;
+                        use crate::player::font::FontManager;
+                        let lc = name.to_ascii_lowercase();
+                        let canon = FontManager::canonical_font_name(name);
+                        let mut found = None;
+                        'find_outline: for cast in &player.movie.cast_manager.casts {
+                            for m in cast.members.values() {
+                                if let CastMemberType::Font(fd) = &m.member_type {
+                                    let matches = fd.font_info.name.to_lowercase() == lc
+                                        || m.name.to_lowercase() == lc
+                                        || (!canon.is_empty()
+                                            && (FontManager::canonical_font_name(&fd.font_info.name) == canon
+                                                || FontManager::canonical_font_name(&m.name) == canon));
+                                    if matches {
+                                        if let Some(p) = &fd.pfr_parsed {
+                                            // Smooth outline-only fonts only.
+                                            // Bitmap-strike fonts AND pixel fonts
+                                            // (rectilinear, e.g. Volter) stay on
+                                            // the atlas path for crisp pixels.
+                                            if !p.glyphs.is_empty()
+                                                && p.bitmap_glyphs.is_empty()
+                                                && !p.is_pixel_font
+                                            {
+                                                found = Some(p.clone());
+                                                break 'find_outline;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    }
+                } else {
+                    None
+                };
+
                 // Compute the authored box width (used as max_width for word wrap).
                 // Doing this BEFORE measuring so PFR measurement can wrap correctly.
                 let explicit_box_width = if text_data.width > 0 {
@@ -1160,6 +1290,12 @@ impl TextMemberHandlers {
                     }
                 };
 
+                // Set when the PFR outline compositor handled this member, so
+                // the binary anti-alias threshold below is skipped — outline
+                // output is already crisp anti-aliased text matching Shockwave,
+                // and binarizing it would shred the thin strokes.
+                let mut rendered_via_outline = false;
+
                 if use_native && !is_pfr_font {
                     // Native Canvas2D rendering for standard fonts
                     let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
@@ -1243,6 +1379,68 @@ impl TextMemberHandlers {
                         warn!("[text.image] Native render error: {:?}", e);
                     }
                 } else {
+                    // Sub-pixel outline composition for OUTLINE PFR fonts —
+                    // preserves side bearings at small sizes (Verdana 10px in
+                    // the Coke Studios Navigator). Falls through to the
+                    // atlas-copy path below when there's no outline data or the
+                    // Canvas2D render errors.
+                    if let Some(ref parsed) = pfr_outline {
+                        let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                        let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                        let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                        let (dr, dg, db) = {
+                            use crate::player::bitmap::bitmap::resolve_color_ref;
+                            let palettes = player.movie.cast_manager.palettes();
+                            resolve_color_ref(&palettes, &member.color, &bitmap.palette_ref, bitmap.original_bit_depth)
+                        };
+                        let default_style = OutlineCharStyle {
+                            color: (dr, dg, db),
+                            bold: default_bold,
+                            italic: default_italic,
+                            underline: default_underline,
+                        };
+                        // Per-char styles aligned to CRLF-normalised text (same
+                        // convention the renderer uses to index `per_char`).
+                        let mut per_char: Vec<OutlineCharStyle> = Vec::new();
+                        if text_data.html_styled_spans.len() >= 2 {
+                            let mut prev_was_cr = false;
+                            for span in &text_data.html_styled_spans {
+                                let col = span.style.color
+                                    .map(|c| (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+                                    .unwrap_or((dr, dg, db));
+                                let entry = OutlineCharStyle {
+                                    color: col,
+                                    bold: span.style.bold,
+                                    italic: span.style.italic,
+                                    underline: span.style.underline,
+                                };
+                                for c in span.text.chars() {
+                                    if prev_was_cr && c == '\n' { prev_was_cr = false; continue; }
+                                    prev_was_cr = c == '\r';
+                                    per_char.push(entry);
+                                }
+                            }
+                        }
+                        let cs_px: i32 = text_data.html_styled_spans.first()
+                            .map(|s| s.style.char_spacing)
+                            .unwrap_or(0);
+                        let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
+                        match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
+                            &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
+                            // start_y = 0: the renderer applies `top_spacing`
+                            // internally (y_top starts at top_spacing), matching
+                            // the atlas-copy path. Passing it here too would
+                            // double the top inset.
+                            0, 0, box_width as i32, box_height as i32,
+                            text_alignment, box_width as i32, text_data.word_wrap,
+                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                            cs_px, &text_data.tab_stops,
+                        ) {
+                            Ok(()) => rendered_via_outline = true,
+                            Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),
+                        }
+                    }
+                    if !rendered_via_outline {
                     // Bitmap glyph rendering using PFR rasterizer font
                     let font_bitmap = player
                         .bitmap_manager
@@ -1592,6 +1790,7 @@ impl TextMemberHandlers {
                         y += line_step;
                         char_offset += line.chars().count() + 1; // +1 for the line break
                     }
+                    } // end !rendered_via_outline (atlas-copy fallback)
 
                 } // end bitmap glyph else branch
 
@@ -1604,11 +1803,22 @@ impl TextMemberHandlers {
                 // AA explicitly (see cataloglist script line 85) and expects
                 // sharp text — without the threshold the catalog list looks
                 // washed out compared to Shockwave.
-                if !text_data.anti_alias && bitmap.bit_depth == 32 {
+                if !text_data.anti_alias && bitmap.bit_depth == 32 && !rendered_via_outline {
+                    // Director with `anti_alias=false` rasterises text as 1-bit
+                    // — no coverage to threshold. Our pipeline renders via
+                    // Canvas2D (always AA) and then thresholds the alpha to
+                    // simulate the 1-bit effect. The file's
+                    // `anti_alias_threshold` is often 0 for these members
+                    // (spineworld_dcr txt_droplist authored at 0); honouring
+                    // that value lets every halo pixel through and produces a
+                    // thick / double-struck appearance. Floor at 128 — the
+                    // midpoint of the coverage scale, which empirically
+                    // matches Director's crispness for non-AA text (Coke
+                    // Studios jukebox catalog and others).
                     let threshold = text_data.info.as_ref()
                         .map(|i| i.anti_alias_threshold as u8)
                         .unwrap_or(128)
-                        .max(1);
+                        .max(128);
                     for i in (3..bitmap.data.len()).step_by(4) {
                         bitmap.data[i] = if bitmap.data[i] >= threshold { 255 } else { 0 };
                     }
@@ -1669,6 +1879,14 @@ impl TextMemberHandlers {
             // Runtime selection state
             "selstart" => Ok(Datum::Int(text_data.sel_start)),
             "selend" => Ok(Datum::Int(text_data.sel_end)),
+            // Director 11.5 Scripting Dictionary p.1164. Returns a two-element
+            // linear list `[start, end]` so scripts can test for an active
+            // selection via `selection[1] <> selection[2]`.
+            "selection" => {
+                let start = player.alloc_datum(Datum::Int(text_data.sel_start));
+                let end = player.alloc_datum(Datum::Int(text_data.sel_end));
+                Ok(Datum::List(DatumType::List, VecDeque::from(vec![start, end]), false))
+            }
             "selectedtext" => {
                 let len = text_data.text.len() as i32;
                 let lo = text_data.sel_start.min(text_data.sel_end).clamp(0, len);

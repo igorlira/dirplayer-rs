@@ -26,6 +26,7 @@ pub mod xmedia;
 pub mod xtra_list;
 pub mod w3d;
 pub mod xmedia_styled_text;
+pub mod cue_points;
 
 use std::collections::HashMap;
 
@@ -44,6 +45,7 @@ use self::{
     script_names::ScriptNamesChunk, text::TextChunk,
 };
 use self::{cast_info::CastInfoChunk, effect::EffectChunk, thum::ThumChunk, xmedia::XMediaChunk, xtra_list::XtraListChunk};
+use self::cue_points::CuePointsChunk;
 use super::{
     guid::MoaID,
     rifx::RIFXReaderContext,
@@ -82,6 +84,7 @@ pub enum Chunk {
     Effect(EffectChunk),
     Thum(ThumChunk),
     XtraList(XtraListChunk),
+    CuePoints(CuePointsChunk),
     Raw(Vec<u8>),
 }
 
@@ -270,6 +273,7 @@ pub fn make_chunk(
         "FXmp" => return Ok(Chunk::Effect(EffectChunk::from_reader(&mut chunk_reader)?)),
         "Thum" => return Ok(Chunk::Thum(ThumChunk::from_reader(&mut chunk_reader)?)),
         "XTRl" => return Ok(Chunk::XtraList(XtraListChunk::from_reader(&mut chunk_reader)?)),
+        "cupt" => return Ok(Chunk::CuePoints(CuePointsChunk::from_reader(&mut chunk_reader)?)),
         "CLUT" => Ok(Chunk::Palette(palette::PaletteChunk::from_reader(
             &mut chunk_reader,
             version,

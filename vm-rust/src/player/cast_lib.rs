@@ -60,6 +60,15 @@ pub struct CastLib {
     /// (see `invalidate_name_index`). Replaces an O(members) linear scan per call —
     /// the Habbo preloader's `FindCastNumber` hammers name lookups in tight loops.
     pub name_index: RefCell<Option<FxHashMap<String, u32>>>,
+    /// Director Fmap/VWFM font-table snapshot: font_id → font name (e.g.
+    /// "Arial", "Arial Bold", "Arial Italic"). Kept on the cast lib so
+    /// per-run `font_id`s from STXT can be resolved to actual names at
+    /// runtime — `.font` and `.fontStyle` chunk getters need this to
+    /// distinguish bold variants from italic variants. Bit-flag heuristics
+    /// (e.g. `font_id & 0x8000 = bold`) don't generalise — different movies
+    /// pack the table differently and the only authoritative mapping is
+    /// the file's own font table.
+    pub font_table: HashMap<u16, String>,
 }
 
 impl CastLib {
@@ -349,6 +358,7 @@ impl CastLib {
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;
         self.palette_id_offset = cast_def.palette_id_offset;
+        self.font_table = font_table.clone();
         self.state = CastLibState::Loaded;
         for (id, member_def) in &cast_def.members {
             self.insert_member(
@@ -472,6 +482,8 @@ impl CastLib {
                 CastMemberType::Sound(SoundMember {
                     info: SoundInfo::default(),
                     sound: SoundChunk::default(),
+                    cue_point_times: Vec::new(),
+                    cue_point_names: Vec::new(),
                 }),
             )),
             "script" => Ok(CastMember::new(
@@ -493,7 +505,28 @@ impl CastLib {
     }
 
     pub fn get_script_for_member(&self, number: u32) -> Option<&Rc<Script>> {
-        self.scripts.get(&number)
+        // Direct path: `number` is a cast-member slot that holds a Script
+        // member — this is how scripts authored as standalone behaviors are
+        // registered (see `insert_member`, which inserts `scripts[number]`).
+        if let Some(script) = self.scripts.get(&number) {
+            return Some(script);
+        }
+
+        // Fallback: `number` is an lctx-script-id (the value stored in
+        // `member_info.header.script_id` for non-Script members like Field
+        // and Text). In D11+ movies this id may NOT equal the cast-member
+        // slot — e.g. a field with `header.script_id=10` may have its
+        // actual script cast member elsewhere. Walk the cast looking for
+        // a Script-type member whose own `script_id` matches, then return
+        // its registered script.
+        for (slot, member) in &self.members {
+            if let CastMemberType::Script(script_member) = &member.member_type {
+                if script_member.script_id == number {
+                    return self.scripts.get(slot);
+                }
+            }
+        }
+        None
     }
 
     pub fn get_behavior_script_from_lctx(&mut self, script_id: u32) -> Option<Rc<Script>> {
@@ -639,6 +672,7 @@ mod name_index_tests {
             dir_version: 0,
             palette_id_offset: 0,
             name_index: RefCell::new(None),
+            font_table: HashMap::new(),
         }
     }
 

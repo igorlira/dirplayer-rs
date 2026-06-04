@@ -108,6 +108,26 @@ pub struct DrawTextParams<'a> {
     pub top_spacing: i16,
     pub char_spacing: i16,
     pub member_width: Option<i16>,
+    /// Minimum advance for the space character. When > 0, any stored
+    /// space advance below this is clamped up to this value during both
+    /// wrap measurement AND char-index calculation. Mirrors the renderer's
+    /// `space_min_advance` clamp so hit-testing and drawing agree on
+    /// which char is at a given pixel position. Without this, fields
+    /// drawn with widened spaces but measured with raw narrow spaces
+    /// would have `the mouseChar` return positions in the wrong run
+    /// (clicks on "Christ's passion" hitting "the sign of the cross").
+    pub min_space_advance: Option<i16>,
+    /// Pre-computed per-character advances (one entry per char of the
+    /// text, including newlines — those entries are ignored). When
+    /// `Some`, these are used instead of `font.get_char_advance(c)` —
+    /// callers can plug in run-aware advances (e.g. Arial Bold widths
+    /// for an underlined run on top of an otherwise-Arial field) so
+    /// the hit-test wraps with the same per-run metrics the renderer
+    /// draws with. Length must equal `text.chars().count()`; out-of-range
+    /// lookups fall back to the font's advance. The space-min clamp and
+    /// `char_spacing` are NOT re-applied on top of these — the caller
+    /// must bake them in if needed.
+    pub per_char_advances: Option<&'a [i32]>,
 }
 
 impl FontManager {
@@ -176,26 +196,80 @@ impl FontManager {
 
         let font_name_lc = font_name.to_lowercase();
         let font_name_canon = Self::canonical_font_name(font_name);
+        // Match priority — needed because PFR1 internal `font_info.name`
+        // uses the convention `<FamilyName>_<Weight>_<Other>` (e.g.
+        // "Arial_700_000" for Bold, "Arial_400_000" for Regular). Our
+        // canonical_font_name strips trailing digit-only tokens, so
+        // ALL Arial variants canonicalize via info_name to plain
+        // "arial" — meaning a request for "Arial *" used to match
+        // whichever variant iterated first (often Bold), and the body
+        // of every field rendered bold. Member names ("Arial *",
+        // "Arial Bold *", "Arial Italic *") DO preserve the variant
+        // distinction after canonicalization, so we match on those
+        // first and only fall back to info_name canonical when no
+        // member-name match exists.
+        //   tier 0: exact lowercase match on member.name or info_name
+        //   tier 1: canonical member.name match
+        //   tier 2: canonical info_name match (fallback)
+        let mut best_tier: Option<u8> = None;
+        let mut best: Option<(u32, u32, u32)> = None; // (cast_lib_num, member_id, tier)
         for cast_lib in &cast_manager.casts {
-            for member in cast_lib.members.values() {
+            for (&member_id, member) in cast_lib.members.iter() {
                 if let CastMemberType::Font(font_data) = &member.member_type {
                     let info_name_canon = Self::canonical_font_name(&font_data.font_info.name);
                     let member_name_canon = Self::canonical_font_name(&member.name);
-                    let name_matches =
-                        font_data.font_info.name.to_lowercase() == font_name_lc
-                            || member.name.to_lowercase() == font_name_lc
-                            || (!font_name_canon.is_empty()
-                                && (info_name_canon == font_name_canon
-                                    || member_name_canon == font_name_canon));
-                    if !name_matches {
-                        continue;
+                    let exact_match = font_data.font_info.name.to_lowercase() == font_name_lc
+                        || member.name.to_lowercase() == font_name_lc;
+                    let member_canon_match = !font_name_canon.is_empty()
+                        && member_name_canon == font_name_canon;
+                    let info_canon_match = !font_name_canon.is_empty()
+                        && info_name_canon == font_name_canon;
+                    let tier: Option<u8> = if exact_match {
+                        Some(0)
+                    } else if member_canon_match {
+                        Some(1)
+                    } else if info_canon_match {
+                        Some(2)
+                    } else {
+                        None
+                    };
+                    if let Some(t) = tier {
+                        if best_tier.map_or(true, |bt| t < bt) {
+                            best_tier = Some(t);
+                            best = Some((cast_lib.number, member_id, t as u32));
+                        }
                     }
-
+                }
+            }
+        }
+        // Walk the loop again only when we have a winner, to actually
+        // rasterize and cache it. (Re-borrows are fine; the priority
+        // pass above is read-only.)
+        let winner = best;
+        for cast_lib in &cast_manager.casts {
+            for (&member_id, member) in cast_lib.members.iter() {
+                if winner.map_or(true, |(cl, mid, _)| cl != cast_lib.number || mid != member_id) {
+                    continue;
+                }
+                if let CastMemberType::Font(font_data) = &member.member_type {
                     if let Some(ref parsed) = font_data.pfr_parsed {
                         use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
 
+                        // Match FontinatorFINAL's working approach: parse with
+                        // target_em_px = outline_resolution rather than 0 or
+                        // the small render size. Hinting still fires, but at
+                        // ~unity scale (the multiplier `target/outline_res` is
+                        // 1), so it doesn't try to snap stems into a 12-pixel
+                        // box and fragment glyphs. The rasterizer then handles
+                        // the actual downscale to the displayed size via
+                        // `scale = target_height / target_em_px` in the
+                        // coords_scaled branch. Fontinator's 9px atlas output
+                        // for fugue_arial / fugue_arial_italic verifies this
+                        // produces complete, thin glyphs.
+                        let outline_res = parsed.physical_font.outline_resolution as i32;
+                        let parse_target = if outline_res > 0 { outline_res } else { 0 };
                         let parsed_for_size = if let Some(ref raw) = font_data.pfr_data {
-                            match parse_pfr1_font_with_target(raw, 0) {
+                            match parse_pfr1_font_with_target(raw, parse_target) {
                                 Ok(p) => p,
                                 Err(_) => parsed.clone(),
                             }
@@ -203,7 +277,24 @@ impl FontManager {
                             parsed.clone()
                         };
 
-                        let rasterized = rasterizer::rasterize_pfr1_font(&parsed_for_size, requested_size as usize, font_data.font_info.size as usize);
+                        // Enable the thin-stem alpha boost only for italic
+                        // variants. Italic glyphs concentrate the 1-orus-
+                        // wide vertical stems (lowercase l, i, uppercase I)
+                        // whose AA coverage at small sizes is too faint
+                        // without the sqrt() gamma lift. Regular and bold
+                        // atlases have wider strokes — the boost would
+                        // thicken their AA edges and make the whole atlas
+                        // look bolder than Shockwave's reference render.
+                        let font_info_lc = font_data.font_info.name.to_ascii_lowercase();
+                        let member_name_lc = member.name.to_ascii_lowercase();
+                        let thin_stem_boost = font_info_lc.contains("italic")
+                            || member_name_lc.contains("italic");
+                        let rasterized = rasterizer::rasterize_pfr1_font_with_options(
+                            &parsed_for_size,
+                            requested_size as usize,
+                            font_data.font_info.size as usize,
+                            thin_stem_boost,
+                        );
 
                         let bitmap_width = rasterized.bitmap_width as u16;
                         let bitmap_height = rasterized.bitmap_height as u16;
@@ -287,7 +378,20 @@ impl FontManager {
                 if let Some(pfr_bytes) = self.default_pfr_data.get(&key) {
                     use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
 
-                    match parse_pfr1_font_with_target(pfr_bytes, 0) {
+                    // Match the cast-member PFR re-parse path above:
+                    // parse with target_em_px = outline_resolution so hinting
+                    // fires at unity scale, then let the rasterizer downscale.
+                    // First parse with target=0 to learn outline_res, then
+                    // re-parse with that as target.
+                    let parsed_for_res = match parse_pfr1_font_with_target(pfr_bytes, 0) {
+                        Ok(p) => Some(p),
+                        Err(_) => None,
+                    };
+                    let parse_target = parsed_for_res.as_ref()
+                        .map(|p| p.physical_font.outline_resolution as i32)
+                        .filter(|&v| v > 0)
+                        .unwrap_or(0);
+                    match parse_pfr1_font_with_target(pfr_bytes, parse_target) {
                         Ok(parsed) => {
                             let rasterized = rasterizer::rasterize_pfr1_font(&parsed, requested_size as usize, 0);
 
@@ -740,45 +844,107 @@ pub async fn player_load_system_font(path: &str) {
 
     match result {
         Ok(result) => {
-            let result = if let Some(blob) = result.dyn_ref::<web_sys::Blob>() {
-                web_sys::Response::new_with_opt_blob(Some(blob)).unwrap()
-            } else {
-                result.dyn_into::<web_sys::Response>().unwrap()
-            };
-            let blob = JsFuture::from(result.blob().unwrap()).await.unwrap();
-            let blob = blob.dyn_into::<web_sys::Blob>().unwrap();
-            let image_data = window.create_image_bitmap_with_blob(&blob).unwrap();
-            let image_data = JsFuture::from(image_data).await.unwrap();
-            let image_bitmap = image_data.dyn_into::<web_sys::ImageBitmap>().unwrap();
+            // Helper: log a warning and bail. A missing / invalid system-font
+            // asset must NOT panic — this runs inside DirPlayer::reset() at
+            // startup, so an unwrap here takes down the whole WASM module.
+            macro_rules! bail {
+                ($($arg:tt)*) => {{
+                    warn!($($arg)*);
+                    return;
+                }};
+            }
 
-            let canvas = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
+            let response = if let Some(blob) = result.dyn_ref::<web_sys::Blob>() {
+                match web_sys::Response::new_with_opt_blob(Some(blob)) {
+                    Ok(r) => r,
+                    Err(e) => bail!("System font: failed to wrap blob in Response: {:?}", e),
+                }
+            } else {
+                match result.dyn_into::<web_sys::Response>() {
+                    Ok(r) => r,
+                    Err(e) => bail!("System font: fetch result is neither Blob nor Response: {:?}", e),
+                }
+            };
+
+            // fetch() resolves even for 404/500 responses — the body is then an
+            // HTML error page, not an image, and createImageBitmap below would
+            // reject (the original `JsValue(Response)` panic). Detect it early.
+            if !response.ok() {
+                bail!(
+                    "System font not loaded: HTTP {} for {} — check the font asset path",
+                    response.status(),
+                    path
+                );
+            }
+
+            let blob_promise = match response.blob() {
+                Ok(p) => p,
+                Err(e) => bail!("System font: response.blob() failed: {:?}", e),
+            };
+            let blob = match JsFuture::from(blob_promise).await {
+                Ok(b) => b,
+                Err(e) => bail!("System font: reading blob failed: {:?}", e),
+            };
+            let blob = match blob.dyn_into::<web_sys::Blob>() {
+                Ok(b) => b,
+                Err(e) => bail!("System font: response body is not a Blob: {:?}", e),
+            };
+            let image_promise = match window.create_image_bitmap_with_blob(&blob) {
+                Ok(p) => p,
+                Err(e) => bail!("System font: createImageBitmap() rejected: {:?}", e),
+            };
+            let image_data = match JsFuture::from(image_promise).await {
+                Ok(img) => img,
+                Err(e) => bail!(
+                    "System font: could not decode {} as an image (asset missing or not an image?): {:?}",
+                    path, e
+                ),
+            };
+            let image_bitmap = match image_data.dyn_into::<web_sys::ImageBitmap>() {
+                Ok(b) => b,
+                Err(e) => bail!("System font: decoded value is not an ImageBitmap: {:?}", e),
+            };
+
+            let document = match web_sys::window().and_then(|w| w.document()) {
+                Some(d) => d,
+                None => bail!("System font: no document available"),
+            };
+            let canvas = match document
                 .create_element("canvas")
-                .unwrap();
-            let canvas = canvas.dyn_into::<web_sys::HtmlCanvasElement>().unwrap();
+                .ok()
+                .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            {
+                Some(c) => c,
+                None => bail!("System font: failed to create canvas element"),
+            };
             canvas.set_width(image_bitmap.width());
             canvas.set_height(image_bitmap.height());
-            let context = canvas
+            let context = match canvas
                 .get_context("2d")
-                .unwrap()
-                .unwrap()
-                .dyn_into::<web_sys::CanvasRenderingContext2d>()
-                .unwrap();
+                .ok()
+                .flatten()
+                .and_then(|ctx| ctx.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
+            {
+                Some(ctx) => ctx,
+                None => bail!("System font: failed to get 2d canvas context"),
+            };
 
-            context
-                .draw_image_with_image_bitmap(&image_bitmap, 0.0, 0.0)
-                .unwrap();
+            if let Err(e) = context.draw_image_with_image_bitmap(&image_bitmap, 0.0, 0.0) {
+                bail!("System font: drawImage failed: {:?}", e);
+            }
 
-            let image_data = context
-                .get_image_data(
-                    0.0,
-                    0.0,
-                    image_bitmap.width() as f64,
-                    image_bitmap.height() as f64,
-                )
-                .unwrap();
+            // getImageData throws a SecurityError on a tainted (cross-origin,
+            // non-CORS) canvas — guard it so a CORS misconfig degrades to the
+            // built-in font path instead of crashing.
+            let image_data = match context.get_image_data(
+                0.0,
+                0.0,
+                image_bitmap.width() as f64,
+                image_bitmap.height() as f64,
+            ) {
+                Ok(d) => d,
+                Err(e) => bail!("System font: getImageData failed (tainted canvas / CORS?): {:?}", e),
+            };
 
             let bitmap = Bitmap {
                 width: image_data.width() as u16,
@@ -1356,8 +1522,17 @@ pub fn measure_text(
     } else {
         (line_height as i16).max(effective_lh)
     };
-    let mut height = (top_spacing + first_line_h) as u16;
-    let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
+    // Guard against negative top_spacing (set by the field renderer to
+    // implement scrollTop via a negative offset). The original formulas
+    // `(top_spacing + first_line_h) as u16` and
+    // `(effective_lh + bottom_spacing + top_spacing) as u16` underflow
+    // when top_spacing is negative, producing huge line_step values that
+    // cause `(num_lines-1) * line_step` to balloon to ~50M for paged
+    // fields — and the resulting bitmap allocation either fails or hangs,
+    // leaving the field stuck at whatever the last successful scroll
+    // position was. Clamp via i32 arithmetic and saturate at the bottom.
+    let mut height = ((top_spacing as i32) + (first_line_h as i32)).max(0) as u16;
+    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32)).max(1) as u16;
     let mut index = 0;
     let mut last_was_newline = false;
     for c in text.chars() {
@@ -1440,7 +1615,10 @@ pub fn measure_text_wrapped(
         line_spacing
     };
     let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
-    let line_step = (effective_lh + bottom_spacing + top_spacing) as u16;
+    // Mirror the i32-clamped formula in measure_text — negative top_spacing
+    // (used by the field renderer for scrollTop) would otherwise underflow
+    // here and break paged-field rendering past ~font_size px.
+    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32)).max(1) as u16;
 
     // Per-character advance including char_spacing — matches the renderer at
     // text.rs's flush_line loop which does `x += adv + char_spacing` for every char.
@@ -1516,8 +1694,10 @@ pub fn measure_text_wrapped(
     let num_lines = visual_lines.len().max(1);
     let max_width_found = visual_lines.iter().copied().max().unwrap_or(0).max(0) as u16;
     let first_line_h = (effective_line_h as i16).max(effective_lh);
-    let height = (top_spacing + first_line_h) as u16
-        + (num_lines as u16 - 1) * line_step;
+    // Same i32-clamp as measure_text — protects against scrollTop's
+    // negative top_spacing pushing bitmap height into the u16 wrap.
+    let height_first = ((top_spacing as i32) + (first_line_h as i32)).max(0) as u16;
+    let height = height_first + (num_lines as u16 - 1) * line_step;
 
     (max_width_found, height)
 }
@@ -1528,34 +1708,138 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
     let mut line_width: i16 = 0;
     let mut line_index = 0;
     let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    // Match the renderer's line_step (no +1) — see comment in
+    // get_text_index_at_pos for the line-by-line drift it causes.
     let line_step = params.line_height.unwrap_or(eff_lh) as i16
-        + params.line_spacing as i16
-        + 1;
+        + params.line_spacing as i16;
+    let wrap_w = params.member_width.unwrap_or(0) as i32;
+    let wrap_enabled = wrap_w > 0;
 
+    // Pre-scan wrap-break positions so the y returned reflects the
+    // VISUAL line layout (matches the renderer + locToCharPos), not
+    // source-line indices. Critical for AdvanceScroll's
+    // `charPosToLoc(member, selStart+1)` — without wrap awareness the
+    // returned y misses the visible target line by the number of
+    // wrapped visual lines preceding it in long paragraphs.
+    // No +1 — matches measure_text_wrapped / get_text_index_at_pos so
+    // wrap points line up with the renderer's layout.
+    let char_adv_i32 = |c: char, char_idx: usize| -> i32 {
+        if let Some(v) = params.per_char_advances {
+            if let Some(adv) = v.get(char_idx) {
+                return *adv;
+            }
+        }
+        let raw = params.font.get_char_advance(c as u8) as i32;
+        let clamped = if c == ' ' {
+            raw.max(params.min_space_advance.unwrap_or(0) as i32)
+        } else {
+            raw
+        };
+        clamped + params.char_spacing as i32
+    };
+    let mut wrap_starts: Vec<usize> = Vec::new();
+    if wrap_enabled {
+        let mut line_w: i32 = 0;
+        let mut line_start_byte: usize = 0;
+        let mut last_space_after_byte: Option<usize> = None;
+        let mut last_space_w: i32 = 0;
+        let mut char_idx_pre: usize = 0;
+        for (byte_pos, c) in text.char_indices() {
+            if c == '\r' || c == '\n' {
+                wrap_starts.push(byte_pos + c.len_utf8());
+                line_start_byte = byte_pos + c.len_utf8();
+                last_space_after_byte = None;
+                last_space_w = 0;
+                line_w = 0;
+                char_idx_pre += 1;
+                continue;
+            }
+            let cw = char_adv_i32(c, char_idx_pre);
+            char_idx_pre += 1;
+            if line_w + cw > wrap_w && byte_pos > line_start_byte {
+                if let Some(sp_after) = last_space_after_byte
+                    .filter(|&sp| sp > line_start_byte)
+                {
+                    wrap_starts.push(sp_after);
+                    line_start_byte = sp_after;
+                    last_space_after_byte = None;
+                    line_w -= last_space_w;
+                    last_space_w = 0;
+                }
+            }
+            line_w += cw;
+            if c == ' ' {
+                last_space_after_byte = Some(byte_pos + 1);
+                last_space_w = line_w;
+            }
+        }
+    }
+
+    let mut visual_line_idx = 0usize;
+    let mut next_wrap = wrap_starts.first().copied();
+    let mut byte_pos = 0usize;
     let mut prev_was_cr = false;
     for c in text.chars() {
+        let c_bytes = c.len_utf8();
+        // Apply pending wrap-break BEFORE checking char_index for this char
+        // so visual line advances when the next char actually crosses a wrap.
+        while let Some(wp) = next_wrap {
+            if wp == byte_pos && byte_pos != 0 {
+                line_width = 0;
+                y += line_step;
+                visual_line_idx += 1;
+                next_wrap = wrap_starts.get(visual_line_idx).copied();
+            } else {
+                break;
+            }
+        }
         if c == '\r' || c == '\n' {
             if line_index == char_index {
                 return (line_width, y);
             }
-            // Treat \r\n as a single line break
             if c == '\n' && prev_was_cr {
                 prev_was_cr = false;
                 line_index += 1;
+                byte_pos += c_bytes;
                 continue;
             }
             prev_was_cr = c == '\r';
             line_width = 0;
             y += line_step;
+            // Source \r/\n advances a visual line; skip a matching
+            // wrap_starts entry if it points to the next byte.
+            if let Some(wp) = next_wrap {
+                if wp == byte_pos + c_bytes {
+                    visual_line_idx += 1;
+                    next_wrap = wrap_starts.get(visual_line_idx).copied();
+                }
+            }
         } else {
             prev_was_cr = false;
-            let char_advance = params.font.get_char_advance(c as u8) as i16 + 1 + params.char_spacing;
+            // Honor per_char_advances if provided (caller pre-computed
+            // run-aware widths), otherwise fall back to font lookup
+            // with the same space-min clamp the renderer uses.
+            let char_advance: i16 = if let Some(v) = params
+                .per_char_advances
+                .and_then(|v| v.get(line_index))
+            {
+                (*v as i16).max(0)
+            } else {
+                let raw_adv = params.font.get_char_advance(c as u8) as i16;
+                let clamped_adv = if c == ' ' {
+                    raw_adv.max(params.min_space_advance.unwrap_or(0))
+                } else {
+                    raw_adv
+                };
+                clamped_adv + params.char_spacing
+            };
             if line_index == char_index {
                 return (line_width, y);
             }
             line_width += char_advance;
         }
         line_index += 1;
+        byte_pos += c_bytes;
     }
     if line_width > x {
         x = line_width;
@@ -1566,29 +1850,162 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
 pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32) -> usize {
     let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
     let line_h = params.line_height.unwrap_or(eff_lh) as i32;
-    let mut index = 0;
-    let mut line_width = 0;
-    let mut line_y = params.top_spacing as i32;
-    for c in text.chars() {
-        if c == '\r' || c == '\n' {
-            if y >= line_y && y < line_y + line_h {
-                if x < line_width {
-                    return index;
-                }
+    // line_step must match the renderer's per-line vertical advance
+    // (measure_text_wrapped uses `effective_lh + line_spacing` with no
+    // extra +1). Diverging by 1px per line accumulates over wrapped text
+    // and shifts hit-test results by an entire line by the time the user
+    // clicks on the body of a paragraph — visible as clicks on "Christ's
+    // passion" landing on "three motives" or "a crown" instead.
+    let line_step = line_h + params.line_spacing as i32;
+    let wrap_w = params.member_width.unwrap_or(0) as i32;
+    let wrap_enabled = wrap_w > 0;
+    // Pre-scan word-wrap break positions so the y-mapping reflects the
+    // VISUAL line layout, not the source `\r\n` layout. Without this,
+    // a Narrative-style field whose 26k-char body has only a handful of
+    // paragraph breaks renders into dozens of wrapped lines, but the
+    // hit-test would treat them as one giant single line and clamp y
+    // past the bottom — producing `text.length` and breaking the
+    // PageNext animation precondition (`locToCharPos(point(1, pageHeight))
+    // < text.length`).
+    //
+    // Each entry is the byte-position of the FIRST char of a visual
+    // line. Index 0 is implicit (start of text).
+    //
+    // Char advance matches measure_text_wrapped (no +1) so wrap points
+    // line up with the renderer's actual layout — diverging would cause
+    // charPosToLoc and locToCharPos to disagree on which line a char is
+    // on, throwing AdvanceScroll off-target by several visual lines.
+    let char_adv = |c: char, char_idx: usize| -> i32 {
+        if let Some(v) = params.per_char_advances {
+            if let Some(adv) = v.get(char_idx) {
+                return *adv;
             }
-            if line_width > x {
-                line_width = 0;
-            }
-            line_y += line_h + params.line_spacing as i32 + 1;
+        }
+        let raw = params.font.get_char_advance(c as u8) as i32;
+        let clamped = if c == ' ' {
+            raw.max(params.min_space_advance.unwrap_or(0) as i32)
         } else {
-            if y >= line_y && y < line_y + line_h {
-                if x < line_width {
-                    return index;
+            raw
+        };
+        clamped + params.char_spacing as i32
+    };
+    let mut wrap_starts: Vec<usize> = Vec::new();
+    if wrap_enabled {
+        // Iterate CHARS not bytes — multi-byte chars (ñ, á, ç in
+        // Narrative's Spanish/Portuguese top header) would otherwise be
+        // counted twice with garbage char_adv per UTF-8 byte, miscounting
+        // line widths and producing wrap_starts at wrong byte positions.
+        // The main loop matches by byte_pos, so wrong positions cause
+        // visual-line jumps in scattered y ranges (the symptom: 271 OK,
+        // 272..285 broken, 286 OK).
+        let mut line_w: i32 = 0;
+        let mut line_start_byte: usize = 0;
+        let mut last_space_after_byte: Option<usize> = None; // byte index AFTER the space
+        let mut last_space_w: i32 = 0; // line_w at the space (so we can split cleanly)
+        let mut char_idx_pre: usize = 0;
+        for (byte_pos, c) in text.char_indices() {
+            if c == '\r' || c == '\n' {
+                wrap_starts.push(byte_pos + c.len_utf8());
+                line_start_byte = byte_pos + c.len_utf8();
+                last_space_after_byte = None;
+                last_space_w = 0;
+                line_w = 0;
+                char_idx_pre += 1;
+                continue;
+            }
+            let cw = char_adv(c, char_idx_pre);
+            char_idx_pre += 1;
+            if line_w + cw > wrap_w && byte_pos > line_start_byte {
+                if let Some(sp_after) = last_space_after_byte
+                    .filter(|&sp| sp > line_start_byte)
+                {
+                    wrap_starts.push(sp_after);
+                    line_start_byte = sp_after;
+                    last_space_after_byte = None;
+                    // Remaining width = line_w (current) - last_space_w
+                    line_w = line_w - last_space_w;
+                    last_space_w = 0;
                 }
             }
-            line_width += params.font.get_char_advance(c as u8) as i32 + 1;
+            line_w += cw;
+            if c == ' ' {
+                last_space_after_byte = Some(byte_pos + 1);
+                last_space_w = line_w;
+            }
+        }
+    }
+
+    let mut index = 0usize;
+    let mut line_width = 0i32;
+    let mut line_y = params.top_spacing as i32;
+    let mut visual_line_idx = 0usize;
+    let mut next_wrap = wrap_starts.first().copied();
+    let mut byte_pos = 0usize;
+
+    for c in text.chars() {
+        let c_bytes = c.len_utf8();
+
+        // Visual-line break triggered by word-wrap (byte_pos matches a
+        // wrap-start). Behaves like a soft \r/\n: check y range first,
+        // then advance line_y and reset line_width.
+        while let Some(wp) = next_wrap {
+            if wp == byte_pos && byte_pos != 0 {
+                if y >= line_y && y < line_y + line_h && x < line_width {
+                    return index;
+                }
+                line_width = 0;
+                line_y += line_step;
+                visual_line_idx += 1;
+                next_wrap = wrap_starts.get(visual_line_idx).copied();
+            } else {
+                break;
+            }
+        }
+
+        if c == '\r' || c == '\n' {
+            // Match against the full line_step so y values that fall in
+            // the 1-px gap between consecutive lines (line_h+1 .. line_step)
+            // still resolve to a valid char index. Without this, y exactly
+            // at a line boundary (e.g. y=259 with line_step=13) falls
+            // through the whole loop and the function returns total-1 =
+            // text.length-1, which becomes text.length after 1-based
+            // conversion — making `locToCharPos < text.length` FALSE and
+            // breaking PageNext's "is there more content below?" probe at
+            // scrollTop=0.
+            if y >= line_y && y < line_y + line_step && x < line_width {
+                return index;
+            }
+            line_width = 0;
+            line_y += line_step;
+            // Source \r/\n always advances visual lines; skip the
+            // matching wrap_starts entry (already pre-recorded).
+            if let Some(wp) = next_wrap {
+                if wp == byte_pos + 1 {
+                    visual_line_idx += 1;
+                    next_wrap = wrap_starts.get(visual_line_idx).copied();
+                }
+            }
+        } else {
+            // Match against the full line_step so y values that fall in
+            // the 1-px gap between consecutive lines (line_h+1 .. line_step)
+            // still resolve to a valid char index. Without this, y exactly
+            // at a line boundary (e.g. y=259 with line_step=13) falls
+            // through the whole loop and the function returns total-1 =
+            // text.length-1, which becomes text.length after 1-based
+            // conversion — making `locToCharPos < text.length` FALSE and
+            // breaking PageNext's "is there more content below?" probe at
+            // scrollTop=0.
+            if y >= line_y && y < line_y + line_step && x < line_width {
+                return index;
+            }
+            line_width += char_adv(c, index);
         }
         index += 1;
+        byte_pos += c_bytes;
     }
-    return index;
+    // Past the last visual line: report the last valid char index
+    // (text.chars().count() - 1, clamped to 0) so the caller can read
+    // `member.char[y..y+8]` without overflowing past text.length.
+    let total = text.chars().count();
+    if total == 0 { 0 } else { total - 1 }
 }

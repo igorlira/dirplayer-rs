@@ -120,6 +120,8 @@ impl SpriteDatumUtils {
             top_spacing,
             char_spacing: 0,
             member_width: None,
+            min_space_advance: None,
+            per_char_advances: None,
         };
 
         let char_index = get_text_index_at_pos(&text, &params, local_x, local_y);

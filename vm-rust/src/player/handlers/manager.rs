@@ -1441,6 +1441,21 @@ impl BuiltInHandlerManager {
             BuiltInSymbol::Alert => Self::alert(args),
             BuiltInSymbol::Objectp => Self::object_p(args),
             BuiltInSymbol::SoundBusy => TypeHandlers::sound_busy(args),
+            // `stopSound` (Director 11.5 Scripting Dictionary p.872) —
+            // legacy command that stops the sound currently playing on
+            // sound channel 1 (the implicit puppetSound channel). Fugue
+            // No.4 Narrative mouseUp calls it inside `if soundBusy(1)
+            // then stopSound()` to interrupt playback before checking
+            // for clicked underline targets — without it, soundBusy(1)
+            // stays true forever and the underline branch never runs.
+            BuiltInSymbol::StopSound => {
+                reserve_player_mut(|player| {
+                    if let Some(ch) = player.sound_manager.get_channel(0) {
+                        ch.borrow_mut().stop_sound();
+                    }
+                });
+                Ok(DatumRef::Void)
+            }
             BuiltInSymbol::Delay => MovieHandlers::delay(args),
             BuiltInSymbol::Halt => MovieHandlers::halt(args),
             BuiltInSymbol::StartTimer => Self::start_timer(args),
@@ -1514,15 +1529,15 @@ impl BuiltInHandlerManager {
                         .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
 
-                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, alignment, tab_stops) = match &member.member_type {
+                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, alignment, tab_stops, word_wrap) = match &member.member_type {
                         crate::player::cast_member::CastMemberType::Text(t) => {
-                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, t.alignment.clone(), t.tab_stops.clone())
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, t.alignment.clone(), t.tab_stops.clone(), t.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Field(f) => {
-                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, f.alignment.clone(), Vec::new())
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, f.alignment.clone(), Vec::new(), f.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Button(b) => {
-                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, b.field.alignment.clone(), Vec::new())
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, b.field.alignment.clone(), Vec::new(), b.field.word_wrap)
                         }
                         _ => {
                             return Err(ScriptError::new(
@@ -1530,6 +1545,17 @@ impl BuiltInHandlerManager {
                             ))
                         }
                     };
+                    // Effective wrap width: only honour the member's authored
+                    // width when the member ACTUALLY wraps (word_wrap = true).
+                    // For non-wrapping members (Habbo's Text Wrapper Class
+                    // composer creates `new(#text)` members whose word_wrap
+                    // defaults differ from field defaults), charPosToLoc must
+                    // return single-line absolute positions even when the
+                    // text would visually overflow `member.width` — the
+                    // composer's `pTextMem.charPosToLoc(char.count).locH + 16`
+                    // formula depends on this to compute the final bitmap
+                    // width BEFORE growing the rect.
+                    let effective_wrap_width: i16 = if word_wrap { member_width } else { 0 };
 
                     let align_kind: u8 = if alignment == BuiltInSymbol::Center {
                         1
@@ -1563,61 +1589,132 @@ impl BuiltInHandlerManager {
                     if !is_pfr && !font_name.is_empty() {
                         // Native Canvas2D path: measure the substring up to `index` using the
                         // member's font so the returned x matches the rasterised image width.
-                        // Handle multi-line text by tracking which line `index` falls on.
+                        // Honours explicit `\r`/`\n` line breaks AND `word_wrap` + `member.width`
+                        // greedy word-wrap, so the returned y advances per wrapped line. Without
+                        // wrap awareness the script-side `getBubbleSize` pattern (which calls
+                        // `charPosToLoc(textLength)` to get bubble height) returns single-line
+                        // height for multi-line wrapped text and the resulting copyPixels src
+                        // rect is too short — only the first wrapped line gets copied.
                         let display_font_name = if font_name.is_empty() { "Arial".to_string() } else { font_name.clone() };
                         let display_font_size = if font_size > 0 { font_size } else { 12 };
 
-                        let mut consumed = 0usize;
-                        let mut line_idx = 0usize;
-                        let mut line_start: Option<&str> = None;
-                        let mut prefix_chars = 0usize;
                         let chars_vec: Vec<char> = text.chars().collect();
                         let target = index.min(chars_vec.len());
 
-                        // Split on \r / \n; treat \r\n as single break.
-                        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
-                        for (li, line) in normalised.split('\n').enumerate() {
-                            let line_len = line.chars().count();
-                            if target <= consumed + line_len {
-                                line_idx = li;
-                                line_start = Some(line);
-                                prefix_chars = target - consumed;
-                                break;
-                            }
-                            consumed += line_len + 1; // +1 for the line break
-                        }
-                        let (line_ref, prefix_len) = match line_start {
-                            Some(l) => (l, prefix_chars),
-                            None => {
-                                // target was beyond end-of-text: use last line, full length.
-                                let lines: Vec<&str> = normalised.split('\n').collect();
-                                let last = lines.last().copied().unwrap_or("");
-                                line_idx = lines.len().saturating_sub(1);
-                                (last, last.chars().count())
-                            }
-                        };
-                        let prefix: String = line_ref.chars().take(prefix_len).collect();
-
-                        // Measure prefix width AND full line width via Canvas2D.
-                        // Full-line width is needed to apply alignment offset (center/right)
-                        // so the returned x matches the rasterised image's pixel position.
-                        let (prefix_w, line_w) = {
+                        // Build the measurement context once and reuse it for all
+                        // word-wrap probes below.
+                        let measure_ctx = {
                             use wasm_bindgen::JsCast;
-                            let font_str_for_log = format!("{}px {}", display_font_size, display_font_name);
+                            let font_str = format!("{}px {}", display_font_size, display_font_name);
                             web_sys::window()
                                 .and_then(|w| w.document())
                                 .and_then(|d| d.create_element("canvas").ok())
                                 .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
                                 .and_then(|c| c.get_context("2d").ok().flatten())
                                 .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
-                                .map(|ctx| {
-                                    ctx.set_font(&font_str_for_log);
-                                    let p = ctx.measure_text(&prefix).ok().map(|m| m.width()).unwrap_or(0.0);
-                                    let l = ctx.measure_text(line_ref).ok().map(|m| m.width()).unwrap_or(0.0);
-                                    (p, l)
-                                })
-                                .unwrap_or((0.0, 0.0))
+                                .map(|ctx| { ctx.set_font(&font_str); ctx })
                         };
+                        let measure = |s: &str| -> f64 {
+                            measure_ctx.as_ref()
+                                .and_then(|ctx| ctx.measure_text(s).ok())
+                                .map(|m| m.width()).unwrap_or(0.0)
+                        };
+
+                        // Greedy word-wrap: returns the (start_char, end_char_exclusive)
+                        // bounds in `line` of each sub-line after wrapping at `wrap_w`
+                        // pixels. Whitespace-only break preferred; falls back to hard
+                        // break when a single token already exceeds `wrap_w`.
+                        let wrap_sub_lines = |line: &str, wrap_w: f64| -> Vec<(usize, usize)> {
+                            let chars: Vec<char> = line.chars().collect();
+                            if chars.is_empty() { return vec![(0, 0)]; }
+                            if wrap_w <= 0.0 || wrap_w == f64::INFINITY {
+                                return vec![(0, chars.len())];
+                            }
+                            let mut subs = Vec::new();
+                            let mut start = 0usize;
+                            let mut last_space: Option<usize> = None;
+                            let mut i = 0usize;
+                            while i < chars.len() {
+                                let c = chars[i];
+                                if c == ' ' || c == '\t' { last_space = Some(i); }
+                                let probe: String = chars[start..=i].iter().collect();
+                                if measure(&probe) > wrap_w && i > start {
+                                    let break_at = match last_space {
+                                        Some(lb) if lb > start => lb,
+                                        _ => i,
+                                    };
+                                    subs.push((start, break_at));
+                                    let mut next = break_at;
+                                    if next < chars.len() && (chars[next] == ' ' || chars[next] == '\t') {
+                                        next += 1;
+                                    }
+                                    start = next;
+                                    last_space = None;
+                                    i = start;
+                                    continue;
+                                }
+                                i += 1;
+                            }
+                            subs.push((start, chars.len()));
+                            subs
+                        };
+
+                        let want_wrap = word_wrap && member_width > 0;
+                        let wrap_w = if want_wrap { member_width as f64 } else { f64::INFINITY };
+
+                        // Locate the natural line (split on \r/\n) containing `target`,
+                        // then locate the sub-line within it.
+                        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+                        let natural_lines: Vec<&str> = normalised.split('\n').collect();
+                        let mut consumed = 0usize;
+                        let mut natural_idx = 0usize;
+                        let mut pos_in_natural = 0usize;
+                        let mut found = false;
+                        for (li, line) in natural_lines.iter().enumerate() {
+                            let line_len = line.chars().count();
+                            if target <= consumed + line_len {
+                                natural_idx = li;
+                                pos_in_natural = target - consumed;
+                                found = true;
+                                break;
+                            }
+                            consumed += line_len + 1;
+                        }
+                        if !found {
+                            natural_idx = natural_lines.len().saturating_sub(1);
+                            pos_in_natural = natural_lines.last().map_or(0, |l| l.chars().count());
+                        }
+
+                        // Sum sub-line counts of natural lines preceding the target's.
+                        let mut total_line_idx = 0usize;
+                        for li in 0..natural_idx {
+                            let subs = wrap_sub_lines(natural_lines[li], wrap_w);
+                            total_line_idx += subs.len().max(1);
+                        }
+
+                        // Within the target's natural line, find which sub-line owns `pos_in_natural`.
+                        let target_line = natural_lines[natural_idx];
+                        let subs = wrap_sub_lines(target_line, wrap_w);
+                        let mut sub_idx = 0usize;
+                        let mut sub_start = 0usize;
+                        let mut sub_end = target_line.chars().count();
+                        for (idx, (s, e)) in subs.iter().enumerate() {
+                            if pos_in_natural <= *e {
+                                sub_idx = idx;
+                                sub_start = *s;
+                                sub_end = *e;
+                                break;
+                            }
+                        }
+                        let target_chars: Vec<char> = target_line.chars().collect();
+                        let prefix: String = target_chars[sub_start..pos_in_natural.min(target_chars.len())]
+                            .iter().collect();
+                        let sub_line_text: String = target_chars[sub_start..sub_end.min(target_chars.len())]
+                            .iter().collect();
+                        let prefix_w = measure(&prefix);
+                        let line_w = measure(&sub_line_text);
+                        let line_idx = total_line_idx + sub_idx;
+
                         let start_x = match align_kind {
                             1 if member_width > 0 => ((member_width as f64 - line_w) / 2.0).max(0.0),
                             2 if member_width > 0 => (member_width as f64 - line_w).max(0.0),
@@ -1625,12 +1722,49 @@ impl BuiltInHandlerManager {
                         };
                         let width = (start_x + prefix_w).round() as i32;
 
+                        // Use the renderer's actual wrap function
+                        // `wrap_lines_with_spans` to count the visual line
+                        // that contains the target char. Anything else
+                        // (per-char measureText, bitmap-font advance sums)
+                        // diverges from the rendered layout by a few px
+                        // per line — drift of 30-40 lines accumulates over
+                        // a 26k-char field and lands AdvanceScroll several
+                        // sections away from the intended header.
                         let line_step = if fixed_line_space > 0 {
                             fixed_line_space as i32
                         } else {
                             display_font_size as i32
                         };
-                        let y = top_spacing as i32 + line_idx as i32 * line_step;
+                        // Convert char_pos (1-based) to byte position.
+                        let target_byte: usize = text
+                            .char_indices()
+                            .nth(index)
+                            .map(|(b, _)| b)
+                            .unwrap_or_else(|| text.len());
+                        // Look up the actual loaded font (PFR1 if available).
+                        let render_font = player.font_manager.get_font_with_cast_and_bitmap(
+                            &display_font_name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            Some(display_font_size),
+                            None,
+                        ).or_else(|| player.font_manager.get_system_font());
+                        let visual_line = if let Some(font) = render_font {
+                            let lines = crate::player::bitmap::bitmap::Bitmap
+                                ::wrap_lines_with_spans(&text, &font, if effective_wrap_width > 0 { effective_wrap_width as i32 } else { i32::MAX });
+                            let mut idx = 0usize;
+                            for (i, ls) in lines.iter().enumerate() {
+                                if target_byte >= ls.start && target_byte <= ls.end {
+                                    idx = i;
+                                    break;
+                                }
+                                if i == lines.len() - 1 { idx = i; }
+                            }
+                            idx as i32
+                        } else {
+                            line_idx as i32
+                        };
+                        let y = top_spacing as i32 + visual_line * line_step;
 
                         Ok(player.alloc_datum(Datum::Point([width as f64, y as f64], 0)))
                     } else {
@@ -1643,7 +1777,27 @@ impl BuiltInHandlerManager {
                             line_spacing: fixed_line_space,
                             top_spacing,
                             char_spacing,
-                            member_width: if member_width > 0 { Some(member_width) } else { None },
+                            // Honour word_wrap: only constrain measurement
+                            // by the authored width when the member actually
+                            // wraps. Non-wrapping members (Habbo composer's
+                            // `new(#text)` titles) need single-line absolute
+                            // positions.
+                            member_width: if effective_wrap_width > 0 { Some(effective_wrap_width) } else { None },
+                            // Match the renderer's per-field space-min clamp
+                            // (0.30 * font_size) so charPosToLoc and the
+                            // hit-test stay aligned with the drawn layout.
+                            // Without this, `the locToCharPos` returns a
+                            // char position from a hit-test layout with
+                            // narrower spaces than the rendered one — so
+                            // a click on visual "Christ's passion" maps
+                            // into the following "the sign of the cross"
+                            // chunk.
+                            min_space_advance: {
+                                let sz = font.font_size.max(font.char_height) as i32;
+                                let v = ((sz as f32) * 0.30).round() as i16;
+                                if v > 0 { Some(v) } else { None }
+                            },
+                            per_char_advances: None,
                         };
                         // Tab-aware char position. Coke Studios' userlist computes
                         // the dotted-separator bounds via two charPosToLoc calls,
@@ -1726,7 +1880,43 @@ impl BuiltInHandlerManager {
                             }
                             result.unwrap_or((x, y))
                         } else {
-                            crate::player::font::get_text_char_pos(&text, &params, index)
+                            // Use the renderer's own wrap_lines_with_spans
+                            // to find the visual line containing the target
+                            // char. Any other algorithm (my chars-based pre-
+                            // scan in get_text_char_pos, Canvas2D per-char
+                            // measureText) diverges by a few px per line
+                            // and lands the AdvanceScroll target several
+                            // sections away from the intended header.
+                            let target_byte: usize = text
+                                .char_indices()
+                                .nth(index)
+                                .map(|(b, _)| b)
+                                .unwrap_or_else(|| text.len());
+                            let line_step = if fixed_line_space > 0 {
+                                fixed_line_space as i16
+                            } else if font.font_size > 0 {
+                                font.font_size as i16
+                            } else {
+                                font.char_height as i16
+                            };
+                            let lines = crate::player::bitmap::bitmap::Bitmap
+                                ::wrap_lines_with_spans(&text, &font, if effective_wrap_width > 0 { effective_wrap_width as i32 } else { i32::MAX });
+                            let mut visual_idx: usize = 0;
+                            for (i, ls) in lines.iter().enumerate() {
+                                if target_byte >= ls.start && target_byte <= ls.end {
+                                    visual_idx = i;
+                                    break;
+                                }
+                                if i + 1 == lines.len() {
+                                    visual_idx = i;
+                                }
+                            }
+                            // x: position within the line, computed by
+                            // get_text_char_pos (which handles char-level
+                            // x correctly). y: from visual_idx * line_step.
+                            let (x_pos, _y_unused) = crate::player::font::get_text_char_pos(&text, &params, index);
+                            let y_pos = top_spacing.saturating_add(visual_idx as i16 * line_step);
+                            (x_pos, y_pos)
                         };
 
                         // Apply alignment offset so the returned x matches the pixel position
@@ -2238,6 +2428,135 @@ impl BuiltInHandlerManager {
             }
         })
     }
+}
+
+
+/// Count word-wrap visual line breaks (NOT source `\r\n` breaks) that
+/// occur strictly before `target_char_idx` in `text`, given a wrap
+/// width and font. Used by `charPosToLoc` for native-rendered fields
+/// so the returned y matches the wrapped visual layout. Width is
+/// measured via Canvas2D `measureText` so it agrees with the
+/// rasterizer.
+fn count_wraps_before_index(
+    text: &str,
+    font_name: &str,
+    font_size: u16,
+    wrap_w: i16,
+    target_char_idx: usize,
+) -> usize {
+    use wasm_bindgen::JsCast;
+    let ctx_opt = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.create_element("canvas").ok())
+        .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .and_then(|c| c.get_context("2d").ok().flatten())
+        .and_then(|c| c.dyn_into::<web_sys::CanvasRenderingContext2d>().ok());
+    let Some(ctx) = ctx_opt else { return 0; };
+    ctx.set_font(&format!("{}px {}", font_size, font_name));
+    // Walk source lines; for each line, simulate word-wrap and count
+    // breaks that occur at char positions < target_char_idx.
+    let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut consumed_chars = 0usize;
+    let mut extra_wraps = 0usize;
+    for source_line in normalised.split('\n') {
+        let line_chars: Vec<char> = source_line.chars().collect();
+        let line_len = line_chars.len();
+        if consumed_chars + line_len + 1 < target_char_idx {
+            // Need full wrap count of this line, target is past it.
+            extra_wraps += wraps_in_line(&ctx, source_line, wrap_w);
+            consumed_chars += line_len + 1; // +1 for the \n
+            continue;
+        }
+        // Target is somewhere on this source line. Count wraps that
+        // happen before (target_char_idx - consumed_chars) chars in.
+        let offset_in_line = target_char_idx.saturating_sub(consumed_chars).min(line_len);
+        extra_wraps += wraps_in_line_up_to(&ctx, source_line, wrap_w, offset_in_line);
+        break;
+    }
+    extra_wraps
+}
+
+/// Total visual-line breaks (excluding the implicit final line) when
+/// `line` is word-wrapped at `wrap_w` pixels. Uses Canvas2D for width.
+fn wraps_in_line(
+    ctx: &web_sys::CanvasRenderingContext2d,
+    line: &str,
+    wrap_w: i16,
+) -> usize {
+    wraps_in_line_up_to(ctx, line, wrap_w, line.chars().count())
+}
+
+/// Visual-line breaks that occur in `line` before reaching
+/// `target_char_offset` chars into it. Mirrors EXACTLY the renderer's
+/// word-level wrap algorithm in `measure_text_native_styled` —
+/// candidates are built by joining the next whitespace-separated word
+/// and measured as a whole string (so Canvas2D's natural kerning is
+/// preserved). Per-char measurement, by contrast, over-estimates
+/// because kerning isn't applied between independent calls.
+fn wraps_in_line_up_to(
+    ctx: &web_sys::CanvasRenderingContext2d,
+    line: &str,
+    wrap_w: i16,
+    target_char_offset: usize,
+) -> usize {
+    if line.is_empty() || wrap_w <= 0 { return 0; }
+    let wrap_width = wrap_w as f64;
+    // Tokenize the line: each token is either a word (run of non-
+    // whitespace) or a whitespace gap. We need to know the cumulative
+    // char count up to and including each token so we can stop counting
+    // wraps once we've passed `target_char_offset`.
+    #[derive(Clone)]
+    struct Token<'a> { text: &'a str, char_count: usize, is_ws: bool }
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut iter = line.char_indices().peekable();
+    while let Some(&(start, c)) = iter.peek() {
+        let is_ws = c.is_whitespace();
+        let mut end = start;
+        let mut count = 0;
+        while let Some(&(p, ch)) = iter.peek() {
+            if ch.is_whitespace() != is_ws { break; }
+            end = p + ch.len_utf8();
+            count += 1;
+            iter.next();
+        }
+        tokens.push(Token { text: &line[start..end], char_count: count, is_ws });
+    }
+    // Now run the renderer's algorithm: `current` accumulates the
+    // running line; for each non-whitespace word, build a candidate
+    // `current + word` and check if it overflows wrap_width.
+    let mut current = String::new();
+    let mut wraps = 0usize;
+    let mut consumed_chars = 0usize;
+    for tok in &tokens {
+        if tok.is_ws {
+            // Whitespace between words. Renderer's split_whitespace
+            // discards these but joins with a single ' '. We mirror
+            // that by appending ' ' to current if current is non-empty.
+            // Match renderer's `format!("{} {}", current, word)` join.
+            consumed_chars += tok.char_count;
+            continue;
+        }
+        // Non-whitespace word.
+        let candidate = if current.is_empty() {
+            tok.text.to_string()
+        } else {
+            format!("{} {}", current, tok.text)
+        };
+        let w = ctx.measure_text(&candidate).map(|m| m.width()).unwrap_or(0.0);
+        if w > wrap_width && !current.is_empty() {
+            // Wrap before this word. The wrap-point sits at the start
+            // of THIS word in the original line.
+            if consumed_chars <= target_char_offset {
+                wraps += 1;
+            }
+            current = tok.text.to_string();
+        } else {
+            current = candidate;
+        }
+        consumed_chars += tok.char_count;
+        if consumed_chars > target_char_offset { break; }
+    }
+    wraps
 }
 
 fn get_datum_script_instance_ids(

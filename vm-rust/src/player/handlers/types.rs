@@ -420,6 +420,16 @@ impl TypeHandlers {
             let datum = player.get_datum(&args[0]);
             match datum {
                 Datum::String(s) => Some(s.clone()),
+                // StringChunk: produce the chunk's resolved text and
+                // parse that as Lingo, same as a plain string. Habbo
+                // / Sulake movies wrap field lookups in `value(...)`:
+                // `value(convertToPropList(field(...))["object.manager.class"])[1]`
+                // — without this branch, value() returned the chunk
+                // unchanged and `[1]` then errored with
+                // "No handler getAt for string chunk datum".
+                Datum::StringChunk(..) => {
+                    datum.string_value().ok()
+                },
                 _ => None,
             }
         });
@@ -566,6 +576,21 @@ impl TypeHandlers {
                 Datum::SpriteRef(sprite_num) => Datum::Int(*sprite_num as i32),
                 Datum::String(s) => {
                     let result = Self::integer_impl(&s);
+                    if let Some(int_value) = result {
+                        Datum::Int(int_value)
+                    } else {
+                        return Ok(DatumRef::Void);
+                    }
+                }
+                // StringChunk is what `member.line[N].item[M]` and friends
+                // now resolve to (since chunk-typed getProp returns refs so
+                // chained property reads like `.font` work). For
+                // `integer(...)` and other numeric coercions, fall through
+                // to the StringChunk's resolved string value and parse.
+                // Fugue No.4 Cues#startMovie: `lm = integer(member("ClikPts")
+                // .line[2].item[1])`.
+                Datum::StringChunk(_, _, resolved) => {
+                    let result = Self::integer_impl(resolved);
                     if let Some(int_value) = result {
                         Datum::Int(int_value)
                     } else {
@@ -743,6 +768,19 @@ impl TypeHandlers {
                         members.push(slot);
                     }
                     player.cursor = CursorRef::Member(members);
+                    player.cursor_is_hidden = false;
+                    player.wants_pointer_lock = false;
+                    Ok(DatumRef::Void)
+                } else if let Datum::CastMember(member_ref) = arg {
+                    // Director accepts a single cast member directly:
+                    //   cursor(member("HandCursor"))
+                    // Treated as a one-element list — equivalent to
+                    //   cursor([member("HandCursor")])
+                    let slot = CastMemberRefHandlers::get_cast_slot_number(
+                        member_ref.cast_lib as u32,
+                        member_ref.cast_member as u32,
+                    ) as i32;
+                    player.cursor = CursorRef::Member(vec![slot]);
                     player.cursor_is_hidden = false;
                     player.wants_pointer_lock = false;
                     Ok(DatumRef::Void)

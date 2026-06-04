@@ -53,6 +53,12 @@ pub struct FieldMember {
     pub font_style: String,
     pub font_size: u16,
     pub font_id: Option<u16>, // STXT font ID for lookup by ID
+    /// All STXT formatting runs parsed for this field. Each run has a
+    /// `start_position` (char index) and applies until the next run begins
+    /// (or end of text). Director's `the textStyle of char N of member`
+    /// and `member.char[N].fontStyle` resolve by walking these runs.
+    /// Empty when the field has uniform styling (older parser behaviour).
+    pub formatting_runs: Vec<crate::director::chunks::text::StxtFormattingRun>,
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
     pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
@@ -223,6 +229,7 @@ impl FieldMember {
             font_style: BuiltInSymbol::Plain.to_string(),
             font_size: 12,
             font_id: None,
+            formatting_runs: Vec::new(),
             text_height: 100,
             fixed_line_space: 0,
             top_spacing: 0,
@@ -295,6 +302,7 @@ impl FieldMember {
             font_style: BuiltInSymbol::Plain.to_string(),
             font_size: 12,
             font_id: None,
+            formatting_runs: Vec::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
             fixed_line_space: 0,  // Use default line spacing for text rendering
             top_spacing: field_info.scroll as i16,
@@ -824,6 +832,14 @@ pub struct FilmLoopMember {
 pub struct SoundMember {
     pub info: SoundInfo,
     pub sound: SoundChunk,
+    /// Cue point times in milliseconds, parsed from the member's `cupt`
+    /// child chunk. Exposed to Lingo as `member.cuePointTimes`. The
+    /// SoundChannel reads these on `queue()` so playback can fire
+    /// `on cuePassed` as the playhead crosses each entry.
+    pub cue_point_times: Vec<u32>,
+    /// Names parallel to `cue_point_times`. Empty string when the
+    /// authoring tool didn't assign one.
+    pub cue_point_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -2416,6 +2432,7 @@ impl CastMember {
             Chunk::Effect(_) => "FXmp",
             Chunk::Thum(_) => "Thum",
             Chunk::XtraList(_) => "XTRl",
+            Chunk::CuePoints(_) => "cupt",
             Chunk::Raw(_) => "Raw",
         }
     }
@@ -3387,6 +3404,55 @@ impl CastMember {
                 .unwrap_or_default();
             let mut text_member = TextMember::new();
             text_member.text = text;
+            // NOTE: a previous attempt to read the authored font/size from
+            // XMED raw bytes (`scan_xmed_for_font_info`) was REMOVED because
+            // its u16-in-range heuristic picked up arbitrary nearby bytes —
+            // bubbletext member ended up with fontsize=44 from random data
+            // following the "Arial" name. Until we have a real Section 7
+            // parse, this fallback keeps TextMember::new()'s Arial/12
+            // defaults. Text members authored at smaller sizes (Verdana 9
+            // in spineworld_dcr's txt_password) render a few pixels taller
+            // than Director — visible but tolerable; better than wildly
+            // wrong values.
+            // Pull authored width/height (and other text-shaped settings) from
+            // chunk.specific_data when it parsed as TextInfo. Without this,
+            // text members that take this fallback path keep TextMember::new()'s
+            // 100×20 defaults and word_wrap clamps text to a 100px box even
+            // when the author set width=349 (e.g. spineworld_dcr's
+            // `txt_droplist`, which is empty at authoring and gets populated by
+            // Lingo at runtime — the dropdown list then wrapped "Antigua and
+            // Barbuda" mid-string because the wrap budget was 100 instead of
+            // the authored 349).
+            let text_info_to_apply: Option<crate::director::enums::TextInfo> = match &chunk.specific_data {
+                crate::director::chunks::cast_member::CastMemberSpecificData::Text(ti) => Some(ti.clone()),
+                _ if !chunk.specific_data_raw.is_empty()
+                    && crate::director::enums::TextInfo::looks_like_text_info(chunk.specific_data_raw.as_slice()) =>
+                {
+                    Some(crate::director::enums::TextInfo::from(chunk.specific_data_raw.as_slice()))
+                }
+                _ => None,
+            };
+            if let Some(text_info) = text_info_to_apply {
+                if text_info.width > 0 {
+                    text_member.width = text_info.width as u16;
+                }
+                if text_info.height > 0 {
+                    text_member.height = text_info.height as u16;
+                }
+                text_member.word_wrap = !text_info.dont_wrap;
+                text_member.box_type = text_info.box_type_symbol();
+                // Propagate anti_alias from the TextInfo so the text-image
+                // setter's alpha-threshold branch (which only fires when
+                // anti_alias=false) doesn't promote anti-aliased halo pixels
+                // to fully opaque. TextMember::new() defaults anti_alias to
+                // false; without this propagation, modern #text members
+                // authored with AA on still get rendered with the alpha
+                // threshold, which makes Arial 12 look thick/double-struck
+                // (verified in spineworld_dcr's txt_droplist after the
+                // earlier "info=Some" change).
+                text_member.anti_alias = text_info.anti_alias;
+                text_member.info = Some(text_info);
+            }
             let xmed_script_id = chunk
                 .member_info
                 .as_ref()
@@ -3545,12 +3611,25 @@ impl CastMember {
                 .default_font_size
                 .or(first_span_size)
                 .unwrap_or(fallback_max);
-            (
-                first_style.font_face.clone().unwrap_or_else(|| "Arial".to_string()),
-                chosen_size,
-            )
+            // Same precedence for font NAME — pull from the char-run
+            // → Section 7 lookup so the (font, size) pair stays consistent.
+            // `styled_spans[0]` can hold Arial 12 (style[0]) while the real
+            // authored style is later in the table (style[3] = Verdana 9 for
+            // spineworld_dcr txt_password). default_font_name covers that.
+            let chosen_name = styled_text
+                .default_font_name
+                .clone()
+                .or_else(|| first_style.font_face.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Arial".to_string());
+            (chosen_name, chosen_size)
         } else {
-            ("Arial".to_string(), 12)
+            // Empty char-run section (member with no styled text). Still try
+            // the default_font_name (sourced from par-run table) before
+            // falling back to Arial/12.
+            let name = styled_text.default_font_name.clone().unwrap_or_else(|| "Arial".to_string());
+            let size = styled_text.default_font_size.unwrap_or(12);
+            (name, size)
         };
         // Correct XMED font sizes using STXT point size when available
         if let Some(stxt_size) = stxt_font_size {
@@ -4092,7 +4171,90 @@ impl CastMember {
 
                 // Parse STXT formatting data to extract actual fontId, fontSize, and style
                 let formatting_runs = text_chunk.parse_formatting_runs();
-                if let Some(first_run) = formatting_runs.first() {
+                // Keep the FULL run list on the field so per-char prop access
+                // (`the textStyle of char N of member`, `member.char[N].fontStyle`)
+                // and per-run rendering (underline links, mixed bold spans)
+                // can read it. Without this, fields with rich STXT formatting
+                // (Fugue No.4's "Narrative" text-link field, etc.) would
+                // collapse to a single uniform style and the script's
+                // link-detection logic never fires.
+                field_member.formatting_runs = formatting_runs.clone();
+                // Pick the DOMINANT font_size — the size used by the most
+                // characters — as the member-wide default. Director's
+                // rendering effectively uses this size for the bulk of
+                // the field; the first run's size (e.g. David's Notes
+                // header at 18) is correct for that range but the body
+                // (12) is what dominates the rendered area. Picking
+                // dominant matches Shockwave's visual output for
+                // Spanish/Portuguese/David's Notes alike.
+                //
+                // Algorithm:
+                //   1. For each run, compute its char coverage as
+                //      (next_run.start_position - run.start_position),
+                //      or text_len - run.start_position for the last
+                //      run.
+                //   2. Sum coverage per font_size (skipping bogus sizes
+                //      <6 from marker runs).
+                //   3. Pick the size with the highest total coverage.
+                //
+                // Other member-wide defaults (font, fixed_line_space,
+                // fore_color) still come from the FIRST run with that
+                // dominant size, so any consistent per-run formatting
+                // tied to the body comes through correctly.
+                let text_byte_len = text_chunk.text.len() as u32;
+                let mut coverage_by_size: std::collections::HashMap<u16, u32> =
+                    std::collections::HashMap::new();
+                for (i, r) in formatting_runs.iter().enumerate() {
+                    if r.font_size < 6 { continue; }
+                    let next_pos = if i + 1 < formatting_runs.len() {
+                        formatting_runs[i + 1].start_position
+                    } else {
+                        text_byte_len
+                    };
+                    let coverage = next_pos.saturating_sub(r.start_position);
+                    *coverage_by_size.entry(r.font_size).or_insert(0) += coverage;
+                }
+                let dominant_size: Option<u16> = coverage_by_size
+                    .iter()
+                    .max_by_key(|&(_, c)| *c)
+                    .map(|(s, _)| *s);
+                // Among runs at the dominant size, prefer one whose
+                // font_id resolves to a NON-styled (no "Bold"/"Italic")
+                // variant. The renderer loads one atlas per field and
+                // applies bold via double-strike / italic via shear on
+                // that atlas — if the atlas itself is "Arial Bold" or
+                // "Arial Italic", stacking another transformation on
+                // top produces bold-italic or extra-bold glyphs that
+                // don't match Shockwave's render. Fugue No. 4
+                // Narrative's 12pt body has its dominant run pointed
+                // at "Arial Bold" in the Fmap; without this preference
+                // the whole body atlas comes out heavy.
+                let resolve_name = |fid: u16| -> Option<String> {
+                    font_table.get(&fid).cloned()
+                };
+                let is_neutral_name = |name: &str| -> bool {
+                    let lc = name.to_ascii_lowercase();
+                    !lc.contains("bold") && !lc.contains("italic")
+                };
+                let primary_run = dominant_size
+                    .and_then(|sz| {
+                        formatting_runs.iter()
+                            .find(|r| r.font_size == sz
+                                && resolve_name(r.font_id)
+                                    .as_deref()
+                                    .map(is_neutral_name)
+                                    .unwrap_or(false))
+                            .or_else(|| formatting_runs.iter().find(|r| r.font_size == sz))
+                    })
+                    .or_else(|| formatting_runs.iter()
+                        .find(|r| r.font_size >= 6
+                            && resolve_name(r.font_id)
+                                .as_deref()
+                                .map(is_neutral_name)
+                                .unwrap_or(false)))
+                    .or_else(|| formatting_runs.iter().find(|r| r.font_size >= 6))
+                    .or_else(|| formatting_runs.first());
+                if let Some(first_run) = primary_run {
                     // Extract foreground color from STXT formatting run
                     let fg_r = (first_run.color_r >> 8) as u8;
                     let fg_g = (first_run.color_g >> 8) as u8;
@@ -4717,6 +4879,18 @@ impl CastMember {
                     }
                 }
 
+                // Pluck the cue-points child chunk (`cupt`), if present. Director
+                // stores these alongside the sound payload on the cast member; the
+                // movie's `on cuePassed` handler is driven by the playhead crossing
+                // these times.
+                let (cue_point_times, cue_point_names) = member_def.children.iter()
+                    .filter_map(|c| c.as_ref())
+                    .find_map(|c| match c {
+                        Chunk::CuePoints(cp) => Some((cp.times_ms.clone(), cp.names.clone())),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
                 // Try to find a sound chunk - check multiple formats:
                 // 1. "snd " chunk (Mac snd resource)
                 // 2. "ediM" chunk (MediaChunk)
@@ -4825,12 +4999,16 @@ impl CastMember {
                     CastMemberType::Sound(SoundMember {
                         info,
                         sound: sound_chunk,
+                        cue_point_times,
+                        cue_point_names,
                     })
                 } else {
                     warn!("No sound chunk found for member {}", number);
                     CastMemberType::Sound(SoundMember {
                         info: SoundInfo::default(),
                         sound: SoundChunk::default(),
+                        cue_point_times,
+                        cue_point_names,
                     })
                 }
             }

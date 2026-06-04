@@ -380,6 +380,13 @@ pub struct Pfr1ParsedFont {
     pub is_pfr1: bool,
     pub pfr_black_pixel: bool,
     pub target_em_px: i32,
+    /// True when the glyph outlines are rectilinear (no béziers, axis-aligned
+    /// edges) — i.e. a PIXEL/bitmap-style font (Habbo Volter, FFF Reaction…)
+    /// rather than a smooth outline font (Verdana, Arial). Computed once from
+    /// the parsed glyph geometry (see `classify_pixel_font`). Pixel fonts must
+    /// render through the crisp atlas-copy path, NOT the sub-pixel outline
+    /// composition (which is for smooth fonts that need anti-aliasing).
+    pub is_pixel_font: bool,
 }
 
 impl Pfr1ParsedFont {
@@ -395,6 +402,54 @@ impl Pfr1ParsedFont {
             is_pfr1: true,
             pfr_black_pixel: false,
             target_em_px: 0,
+            is_pixel_font: false,
         }
+    }
+
+    /// Classify the font as pixel (rectilinear) vs smooth (curvy) from its
+    /// glyph geometry, and cache the result in `is_pixel_font`. Pixel fonts are
+    /// drawn as axis-aligned rectangles: ~0% bézier curves and ~100% of their
+    /// straight edges are horizontal/vertical. Smooth fonts (Verdana/Arial) are
+    /// curve-heavy (34–68%); a diagonal display font (Tiki) has few curves but
+    /// mostly diagonal edges — both correctly classified as NOT pixel.
+    pub fn classify_pixel_font(&mut self) {
+        let mut curves: u64 = 0;
+        let mut lines: u64 = 0;
+        let mut axis_aligned: u64 = 0; // horizontal or vertical LineTo
+        for glyph in self.glyphs.values() {
+            for contour in &glyph.contours {
+                let mut cur = (0.0f32, 0.0f32);
+                let mut started = false;
+                for cmd in &contour.commands {
+                    match cmd.cmd_type {
+                        PfrCmdType::MoveTo => { cur = (cmd.x, cmd.y); started = true; }
+                        PfrCmdType::LineTo => {
+                            if started {
+                                let dx = (cmd.x - cur.0).abs();
+                                let dy = (cmd.y - cur.1).abs();
+                                if dx < 0.5 || dy < 0.5 { axis_aligned += 1; }
+                            }
+                            lines += 1;
+                            cur = (cmd.x, cmd.y);
+                        }
+                        PfrCmdType::CurveTo => { curves += 1; cur = (cmd.x, cmd.y); }
+                        PfrCmdType::Close => {}
+                    }
+                }
+            }
+        }
+        let total = lines + curves;
+        // Need a meaningful sample; tiny/empty fonts default to NOT-pixel
+        // (smooth path is the safe fallback — it also handles non-AA via the
+        // binary alpha threshold).
+        if total < 32 {
+            self.is_pixel_font = false;
+            return;
+        }
+        let curve_pct = 100.0 * curves as f64 / total as f64;
+        let axis_pct = if lines > 0 { 100.0 * axis_aligned as f64 / lines as f64 } else { 0.0 };
+        // Pixel fonts measured at curve≈0 / axis≈100; smooth fonts at
+        // curve≥34 / axis≤79. Wide margins on both axes.
+        self.is_pixel_font = curve_pct < 5.0 && axis_pct >= 90.0;
     }
 }

@@ -118,6 +118,14 @@ impl PropListUtils {
         if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
         }
+        // Director: `propList.string` returns the bracketed `[#key: val, …]`
+        // representation. Handled here (vs. get_built_in_prop) because
+        // formatting needs the full player context for nested datum lookup.
+        if key.as_str().eq_ignore_ascii_case("string") {
+            let datum_clone = Datum::PropList(prop_list.clone(), false);
+            let s = crate::player::datum_formatting::format_concrete_datum(&datum_clone, player);
+            return Ok(player.alloc_datum(Datum::String(s)));
+        }
         // Try built-in properties, but return VOID if not found instead of error
         match Self::get_built_in_prop(prop_list, key) {
             Ok(datum) => Ok(player.alloc_datum(datum)),

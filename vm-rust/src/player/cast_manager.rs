@@ -136,6 +136,7 @@ impl CastManager {
                 dir_version: 0,
                 palette_id_offset: cast_def.map_or(0, |x| x.palette_id_offset),
                 name_index: RefCell::new(None),
+                font_table: HashMap::new(),
             };
             if let Some(cast_def) = cast_def {
                 cast.apply_cast_def(dir, cast_def, bitmap_manager, &dir.font_table);

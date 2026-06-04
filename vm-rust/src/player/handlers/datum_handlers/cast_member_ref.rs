@@ -179,6 +179,29 @@ impl CastMemberRefHandlers {
                 )
             }
             Some(BuiltInSymbol::GetProp) => {
+                // Chunk-typed property + range args (e.g.
+                // `member.char[y..y+8]`, `member.line[3..5]`) compiles to
+                // `getProp(member, #char, y, y+8)`. Route those to the
+                // chunk-aware getPropRef path so the slice is taken as a
+                // StringChunk (with vm_range_to_host clamping) instead of
+                // being passed through a list getter that indexes a single
+                // element and ignores the end arg. Without this branch,
+                // Narrative_Buttons#upCount reads `member(nar).char[y..y+8]`
+                // and OOBs when locToCharPos returns a position past
+                // text.length.
+                let prop_name = reserve_player_mut(|player| {
+                    Ok::<String, ScriptError>(player.get_datum(&args[0]).string_value().unwrap_or_default())
+                })?;
+                let is_chunk_typed = matches!(
+                    prop_name.to_ascii_lowercase().as_str(),
+                    "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
+                );
+                if is_chunk_typed && args.len() >= 2 {
+                    // Delegate to the member-type getPropRef which builds a
+                    // StringChunk via field.rs / text.rs.
+                    return Self::call_member_type(datum, "getPropRef", args);
+                }
+
                 let result_ref = reserve_player_mut(|player| {
                     let cast_member_ref = match player.get_datum(datum) {
                         Datum::CastMember(cast_member_ref) => cast_member_ref.to_owned(),
@@ -910,8 +933,19 @@ impl CastMemberRefHandlers {
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 member.reg_point = (x, y);
+                // Explicitly setting regPoint turns off centerRegPoint — the
+                // user is saying "no, use THIS point, not the auto-center".
+                // Without this, the renderer's center-reg-point branch in
+                // get_concrete_sprite_rect overrides the explicit value with
+                // bitmap-center, which broke spineworld_dcr's pDropList box:
+                // the script does `pMember.image = timg; pMember.regPoint =
+                // point(0, 0)`, but the image setter auto-centers AND leaves
+                // centerRegPoint enabled, so the dropdown rendered with its
+                // top-left shifted by (-bitmap_w/2, -bitmap_h/2) and the box
+                // ended up at top-left of the stage instead of (280, 216).
                 if let CastMemberType::Bitmap(ref mut bm) = member.member_type {
                     bm.reg_point = (x as i16, y as i16);
+                    bm.info.center_reg_point = false;
                 }
                 Ok(())
             });

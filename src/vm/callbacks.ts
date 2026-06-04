@@ -127,7 +127,17 @@ export function initVmCallbacks() {
     },
     onBreakpointListChanged: (breakpoints: JsBridgeBreakpoint[]) => {
       store.dispatch(breakpointListChanged(breakpoints))
-      window.localStorage.setItem('breakpoints', JSON.stringify(breakpoints))
+      // Defensive dedup before persisting: guards against the breakpoint list
+      // ever ballooning with duplicates (the WASM side also dedups in
+      // add_breakpoint). Key on script + handler + bytecode index.
+      const seen = new Set<string>()
+      const unique = breakpoints.filter((bp) => {
+        const k = `${bp.script_name}|${bp.handler_name}|${bp.bytecode_index}`
+        if (seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
+      window.localStorage.setItem('breakpoints', JSON.stringify(unique))
     },
     onScriptErrorCleared: () => {
       store.dispatch(scriptErrorCleared())

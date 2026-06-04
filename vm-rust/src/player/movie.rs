@@ -41,6 +41,11 @@ pub struct Movie {
     pub trace_script: bool,
     pub trace_log_file: String,
     pub debug_playback_enabled: bool,
+    /// `the editShortCutsEnabled` — when FALSE, the player disables built-in
+    /// cut/copy/paste keyboard shortcuts. Web player has no native edit menu,
+    /// so this is stored for round-trip read/write but has no side effect.
+    /// Default TRUE for movies authored in Director 8+ (Scripting Dict p.890).
+    pub edit_shortcuts_enabled: bool,
     pub mouse_down: bool,
     /// Tracks the right mouse button independently of `mouse_down` — set by
     /// `right_mouse_down(x, y)` / `right_mouse_up(x, y)` from the JS host.
@@ -281,6 +286,7 @@ impl Movie {
                 Ok(Datum::String(s))
             },
             BuiltInSymbol::DebugPlaybackEnabled => Ok(datum_bool(self.debug_playback_enabled)),
+            BuiltInSymbol::EditShortCutsEnabled => Ok(datum_bool(self.edit_shortcuts_enabled)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         }
     }
@@ -303,6 +309,10 @@ impl Movie {
             },
             BuiltInSymbol::DebugPlaybackEnabled => {
                 self.debug_playback_enabled = value.int_value()? != 0;
+                Ok(())
+            },
+            BuiltInSymbol::EditShortCutsEnabled => {
+                self.edit_shortcuts_enabled = value.int_value()? != 0;
                 Ok(())
             },
             BuiltInSymbol::AlertHook => {

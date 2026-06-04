@@ -954,7 +954,13 @@ impl GetSetBytecodeHandler {
                     }
                 }
             } else if prop_type == 0x0a {
-                // Cast member property with chunk expression (e.g. the foreColor of char X of member Y)
+                // Cast member property with chunk expression (e.g. the
+                // textStyle of char X of member Y). The previous version
+                // discarded all 8 chunk refs and read the MEMBER-wide
+                // property, which made `the textStyle of char N of member`
+                // collapse to the member's overall font_style — Fugue No.4
+                // Narrative's underline-detection loop saw "plain" for
+                // every char and never routed clicks to underlined words.
                 let cast_lib_datum = if player.movie.dir_version >= 500 {
                     let r = {
                         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -969,14 +975,25 @@ impl GetSetBytecodeHandler {
                     scope.stack.pop().unwrap()
                 };
                 let member_id_datum = player.get_datum(&member_id_ref).clone();
-                // Pop 8 chunk ref values (first_char, last_char, first_word, last_word,
-                // first_item, last_item, first_line, last_line)
-                {
+                // Pop the 8 chunk-range values. Top of stack is last_line, then
+                // first_line, last_item, first_item, last_word, first_word,
+                // last_char, first_char (bottom).
+                let chunk_refs = {
                     let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    let mut v = Vec::with_capacity(8);
                     for _ in 0..8 {
-                        scope.stack.pop().unwrap();
+                        v.push(scope.stack.pop().unwrap());
                     }
-                }
+                    v
+                };
+                let last_line = player.get_datum(&chunk_refs[0]).int_value().unwrap_or(0);
+                let first_line = player.get_datum(&chunk_refs[1]).int_value().unwrap_or(0);
+                let last_item = player.get_datum(&chunk_refs[2]).int_value().unwrap_or(0);
+                let first_item = player.get_datum(&chunk_refs[3]).int_value().unwrap_or(0);
+                let last_word = player.get_datum(&chunk_refs[4]).int_value().unwrap_or(0);
+                let first_word = player.get_datum(&chunk_refs[5]).int_value().unwrap_or(0);
+                let last_char = player.get_datum(&chunk_refs[6]).int_value().unwrap_or(0);
+                let first_char = player.get_datum(&chunk_refs[7]).int_value().unwrap_or(0);
                 let prop_name = Symbol::builtin(get_cast_member_prop_name(prop_id as u16));
                 let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                     &member_id_datum,
@@ -985,8 +1002,119 @@ impl GetSetBytecodeHandler {
                 )?;
                 match member_ref {
                     Some(member_ref) => {
-                        let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
-                        Ok(player.alloc_datum(result))
+                        // Determine which chunk type is active (only one
+                        // pair is non-zero in Director's bytecode for
+                        // chunked prop reads).
+                        use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+                        let chunk_expr: Option<StringChunkExpr> = if first_char != 0 || last_char != 0 {
+                            Some(StringChunkExpr { chunk_type: StringChunkType::Char, start: first_char, end: last_char, item_delimiter: player.movie.item_delimiter })
+                        } else if first_word != 0 || last_word != 0 {
+                            Some(StringChunkExpr { chunk_type: StringChunkType::Word, start: first_word, end: last_word, item_delimiter: player.movie.item_delimiter })
+                        } else if first_item != 0 || last_item != 0 {
+                            Some(StringChunkExpr { chunk_type: StringChunkType::Item, start: first_item, end: last_item, item_delimiter: player.movie.item_delimiter })
+                        } else if first_line != 0 || last_line != 0 {
+                            Some(StringChunkExpr { chunk_type: StringChunkType::Line, start: first_line, end: last_line, item_delimiter: player.movie.item_delimiter })
+                        } else {
+                            None
+                        };
+
+                        // For per-char style props (textStyle / fontStyle),
+                        // read the active STXT formatting run directly.
+                        // Director 11.5 Scripting Dictionary p.949: returns
+                        // the style of the character at position N.
+                        let chunk_result: Option<Datum> = if let Some(ref ce) = chunk_expr {
+                            let lc = prop_name.as_str().to_ascii_lowercase();
+                            use crate::player::cast_member::CastMemberType;
+                            use crate::player::handlers::datum_handlers::string_chunk::{StringChunkHandlers, StringChunkUtils};
+                            if lc == "textstyle" || lc == "fontstyle" {
+                                if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                                    let text = match &member.member_type {
+                                        CastMemberType::Field(f) => f.text.clone(),
+                                        CastMemberType::Text(t) => t.text.clone(),
+                                        _ => String::new(),
+                                    };
+                                    let (char_start, _char_end) = StringChunkHandlers::resolve_chunk_char_range(&text, ce);
+                                    // STXT formatting_runs use BYTE positions
+                                    // in Director's text data, not char
+                                    // positions. For text with multi-byte
+                                    // UTF-8 chars (ñ, é, ç in Fugue No.4's
+                                    // Spanish/Portuguese headers and body),
+                                    // converting char_start to its byte
+                                    // offset is required so the run boundary
+                                    // lookup picks the run that contains the
+                                    // visible character — without this,
+                                    // chars after the first multi-byte char
+                                    // get the wrong style and `chunk =
+                                    // "Español"` ends up comparing the
+                                    // 8-char slice "Español " against
+                                    // the 7-char literal.
+                                    let byte_start: usize = text
+                                        .char_indices()
+                                        .nth(char_start)
+                                        .map(|(b, _)| b)
+                                        .unwrap_or_else(|| text.len());
+                                    let (bold, italic, underline) = match &member.member_type {
+                                        CastMemberType::Field(f) => {
+                                            let style = f.formatting_runs.iter().rev()
+                                                .find(|r| (r.start_position as usize) <= byte_start)
+                                                .map(|r| r.style).unwrap_or(0);
+                                            ((style & 0x01) != 0, (style & 0x02) != 0, (style & 0x04) != 0)
+                                        }
+                                        CastMemberType::Text(t) => {
+                                            let mut pos = 0usize;
+                                            let mut found = (false, false, false);
+                                            for span in &t.html_styled_spans {
+                                                let len = span.text.chars().count();
+                                                if char_start < pos + len {
+                                                    found = (span.style.bold, span.style.italic, span.style.underline);
+                                                    break;
+                                                }
+                                                pos += len;
+                                            }
+                                            found
+                                        }
+                                        _ => (false, false, false),
+                                    };
+                                    // For CHUNKED access (`the textStyle of
+                                    // char N` or `the fontStyle of char N`)
+                                    // Director returns a STRING form.
+                                    let mut parts: Vec<&str> = Vec::new();
+                                    if bold { parts.push("bold"); }
+                                    if italic { parts.push("italic"); }
+                                    if underline { parts.push("underline"); }
+                                    let s = if parts.is_empty() { "plain".to_string() } else { parts.join(",") };
+                                    let _ = lc;
+                                    Some(Datum::String(s))
+                                } else {
+                                    None
+                                }
+                            } else if lc == "text" {
+                                if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                                    let text = match &member.member_type {
+                                        CastMemberType::Field(f) => f.text.clone(),
+                                        CastMemberType::Text(t) => t.text.clone(),
+                                        _ => String::new(),
+                                    };
+                                    let s = StringChunkUtils::resolve_chunk_expr_string(&text, ce)?;
+                                    Some(Datum::String(s))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(d) = chunk_result {
+                            Ok(player.alloc_datum(d))
+                        } else {
+                            // Other props (foreColor, name, etc.) keep
+                            // current member-wide behaviour.
+                            let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
+                            Ok(player.alloc_datum(result))
+                        }
                     }
                     None => {
                         warn!("get cast member chunk prop '{}': member not found", prop_name);

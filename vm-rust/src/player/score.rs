@@ -114,6 +114,14 @@ pub struct Score {
     frame_script_cache: std::cell::RefCell<Option<(u32, Option<ScoreBehaviorReference>)>>,
     pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
+    /// Sound channel sprite spans extracted from `frame_intervals`. Keyed by
+    /// channel_index (4 = Sound1, 3 = Sound2 on D6+). Used by the audio-time
+    /// score-sync logic in `run_frame_loop` so it only catches up to audio
+    /// time while the playhead is inside the authored sound 1 span — outside
+    /// that range, the score is meant to advance at its own tempo. The
+    /// regular `sprite_spans` Vec excludes effects channels (1-5) so we
+    /// stash these separately.
+    pub sound_channel_spans: HashMap<u32, (u32, u32)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
     pub frame_labels: Vec<FrameLabel>,
@@ -186,7 +194,7 @@ pub fn get_sprite_in_context_mut<'a>(player: &'a mut DirPlayer, sprite_id: i16) 
 }
 
 /// Get sprite rect using current score context
-fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
+pub fn get_sprite_rect_in_context(player: &DirPlayer, sprite_id: i16) -> IntRectTuple {
     let sprite = get_sprite_in_context(player, sprite_id);
     let sprite = match sprite {
         Some(sprite) => sprite,
@@ -208,23 +216,24 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 /// / default not-set, treated as opaque).
 /// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 ///
-/// Director quirk: both extremes of the score byte (0 AND 255) are treated
-/// as "default opaque" at render time. A v850 sprite authored without an
-/// explicit blend has raw=255, which our Lingo getter would otherwise
-/// report as `the blend = 0` and our renderer would draw at 0% alpha —
-/// invisible. Director's runtime instead skips blending entirely when the
-/// score byte is 0 or 255 and only applies blend for intermediate values.
-/// We mirror that by mapping raw=255 to 100% so the sprite renders
-/// normally. Scripts that need a sprite hidden should use `the visibility
-/// of sprite` (or set blend to a small non-zero value, matching Director).
+/// Director D8+ stores blend INVERTED in the score byte: raw=0 means fully
+/// opaque (100%), raw=255 means fully transparent (0%), intermediate values
+/// linearly interpolate. raw=0 is also the "no override" sentinel used when
+/// the author hasn't touched blend in the Score, which matches the desired
+/// 100% default — handled by the same linear formula.
+///
+/// Previously we also clamped raw=255 → 100 on the theory that some v850
+/// sprites authored with no explicit blend stored raw=255. That heuristic
+/// masked legitimate `blend=0` authoring: spineworld_dcr's pDropList
+/// sprite 799 is a fullscreen click-catching modal background authored at
+/// `blend=0` (verified in Director Property Inspector) so it stays
+/// invisible. Forcing raw=255 → 100 turned that sprite into a fullscreen
+/// black overlay. The override is removed; if a v850 movie surfaces
+/// unintended raw=255 invisibility, the right fix is to identify the
+/// missing "blend is set" flag in the score chunk, not to clamp the value.
 pub(crate) fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
     if dir_version > 600 {
-        // D8+: inverted 0-255 scale, both 0 and 255 are "default opaque"
-        if raw == 0 || raw == 255 {
-            100
-        } else {
-            ((255.0 - raw as f32) * 100.0 / 255.0) as i32
-        }
+        ((255.0 - raw as f32) * 100.0 / 255.0).round() as i32
     } else {
         // D5-D7: direct percentage, 0 = fully opaque (not set)
         if raw == 0 { 100 } else { (raw as i32).min(100) }
@@ -238,6 +247,7 @@ impl Score {
             frame_labels: vec![],
             channel_initialization_data: vec![],
             sound_channel_data: vec![],
+            sound_channel_spans: HashMap::new(),
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
             sprite_spans: vec![],
@@ -2556,6 +2566,21 @@ impl Score {
             &score_chunk.frame_intervals
         ));
 
+        // Capture sound-channel sprite spans (channel_index 3 = Sound2,
+        // 4 = Sound1 on D6+). These are excluded from the regular
+        // sprite_spans Vec below, but the audio-time score-sync code
+        // needs Sound1's span range so it only catches up while the
+        // playhead is inside the authored span.
+        for (primary, _) in &score_chunk.frame_intervals {
+            if primary.channel_index == 3 || primary.channel_index == 4 {
+                let entry = self.sound_channel_spans
+                    .entry(primary.channel_index)
+                    .or_insert((primary.start_frame, primary.end_frame));
+                entry.0 = entry.0.min(primary.start_frame);
+                entry.1 = entry.1.max(primary.end_frame);
+            }
+        }
+
         for (primary, secondary) in &score_chunk.frame_intervals {
             let is_frame_script_or_sprite_script =
                 primary.channel_index == 0 || primary.channel_index > 5;
@@ -4148,8 +4173,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
         ),
         Some(BuiltInSymbol::Loc) => borrow_sprite_mut(
             sprite_id,
-            |_| value.clone(),  // Pass the value through so we can use it in the sprite closure
-            |sprite, value| -> Result<(), ScriptError> {
+            // flag (D6+) so the sprite-mut closure doesn't need to re-borrow.
+            |player| Ok::<_, ScriptError>(value.clone()),
+            |sprite, prep| -> Result<(), ScriptError> {
+                let value = prep?;
                 match value {
                     Datum::Point(vals, _) => {
                         sprite.loc_h = vals[0] as i32;
@@ -4181,67 +4208,68 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Rect) => reserve_player_mut(|player| {
-            borrow_sprite_mut(
-                sprite_id,
-                |player| {
-                    let sprite = player.movie.score.get_sprite(sprite_id).unwrap();
-                    let member_ref = sprite.member.as_ref();
-                    let cast_member =
-                        member_ref.and_then(|x| player.movie.cast_manager.find_member_by_ref(&x));
-                    let reg_point = cast_member
-                        .map(|x| match &x.member_type {
-                            CastMemberType::Bitmap(bitmap) => bitmap.reg_point,
-                            CastMemberType::FilmLoop(film_loop) => {
-                                // For filmloops, registration point is the center of the content bounds
-                                let w = film_loop.initial_rect.width();
-                                let h = film_loop.initial_rect.height();
-                                ((w / 2) as i16, (h / 2) as i16)
-                            }
-                            CastMemberType::Flash(flash) => flash.reg_point,
-                            _ => (0, 0),
-                        })
-                        .unwrap_or((0, 0));
+            // Extract the target rect from `value`.
+            let rect_values = match value {
+                Datum::Rect(ref vals, _) => {
+                    Some([vals[0] as i32, vals[1] as i32, vals[2] as i32, vals[3] as i32])
+                }
+                Datum::List(_, ref items, _) if items.len() == 4 => {
+                    Some([
+                        player.get_datum(&items[0]).int_value()?,
+                        player.get_datum(&items[1]).int_value()?,
+                        player.get_datum(&items[2]).int_value()?,
+                        player.get_datum(&items[3]).int_value()?,
+                    ])
+                }
+                Datum::Point(ref vals, _) => {
+                    let s = player.movie.score.get_sprite(sprite_id);
+                    let (sw, sh) = s.map(|s| (s.width, s.height)).unwrap_or((0, 0));
+                    let x = vals[0] as i32;
+                    let y = vals[1] as i32;
+                    Some([x, y, x + sw, y + sh])
+                }
+                _ => return Err(ScriptError::new(format!(
+                    "rect must be a rect (got {})", value.type_str()
+                ))),
+            };
+            let [left, top, right, bottom] = rect_values
+                .ok_or_else(|| ScriptError::new("rect parse failed".to_string()))?;
+            let new_width = right - left;
+            let new_height = bottom - top;
 
-                    reg_point
-                },
-                |sprite, reg_point| {
-                    let rect_values = match value {
-                        Datum::Rect(ref vals, _) => {
-                            Some([
-                                vals[0] as i32,
-                                vals[1] as i32,
-                                vals[2] as i32,
-                                vals[3] as i32,
-                            ])
-                        }
-                        Datum::List(_, ref items, _) if items.len() == 4 => {
-                            Some([
-                                player.get_datum(&items[0]).int_value()?,
-                                player.get_datum(&items[1]).int_value()?,
-                                player.get_datum(&items[2]).int_value()?,
-                                player.get_datum(&items[3]).int_value()?,
-                            ])
-                        }
-                        Datum::Point(ref vals, _) => {
-                            let x = vals[0] as i32;
-                            let y = vals[1] as i32;
-                            Some([x, y, x + sprite.width, y + sprite.height])
-                        }
-                        _ => None,
-                    };
-                    match rect_values {
-                        Some([left, top, right, bottom]) => {
-                            sprite.loc_h = left + reg_point.0 as i32;
-                            sprite.loc_v = top + reg_point.1 as i32;
-                            sprite.width = right - left;
-                            sprite.height = bottom - top;
-                            sprite.has_size_changed = true;
-                            Ok(())
-                        }
-                        None => Err(ScriptError::new(format!("rect must be a rect (got {})", value.type_str()))),
-                    }
-                },
-            )
+            // Probe approach: clone the sprite, apply the new dimensions with
+            // loc=0,0, then ask the *real* renderer logic what rect it would
+            // produce. Whatever offset it picks (scaled reg point, bbox-driven
+            // reg, centerRegPoint, vector-shape natural-rect scaling, …)
+            // becomes the offset we need to invert. This guarantees the
+            // round-trip property `sprite.rect = R → sprite.left == R.left`
+            // that Director provides, regardless of which member type or
+            // heuristic path the renderer takes. Fugue No.4's `cueCursor`
+            // relies on this for `if sprite(6).left < 20`.
+            let mut probe: Sprite = match player.movie.score.get_sprite(sprite_id) {
+                Some(s) => s.clone(),
+                None => return Err(ScriptError::new(format!(
+                    "rect: sprite {} not found", sprite_id
+                ))),
+            };
+            probe.loc_h = 0;
+            probe.loc_v = 0;
+            probe.width = new_width;
+            probe.height = new_height;
+            probe.has_size_changed = true;
+            let probe_rect = get_concrete_sprite_rect(player, &probe);
+            // probe_rect.left = -effective_reg_x with loc=0, so to make the
+            // real getter return `left`, write loc_h = left - probe_rect.left.
+            let new_loc_h = left - probe_rect.left;
+            let new_loc_v = top - probe_rect.top;
+
+            let s = player.movie.score.get_sprite_mut(sprite_id);
+            s.loc_h = new_loc_h;
+            s.loc_v = new_loc_v;
+            s.width = new_width;
+            s.height = new_height;
+            s.has_size_changed = true;
+            Ok(())
         }),
         Some(BuiltInSymbol::ScriptInstanceList) => {
             let ref_list = value.to_list()?;
@@ -4576,6 +4604,36 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     if sprite.editable {
         return false;
     }
+    // A sprite with `the blend of sprite = 0` is fully transparent on screen
+    // and should not eat clicks. Common idiom: a black/white overlay sprite
+    // that fades in/out during intros; once faded to blend=0 it stays in the
+    // score but is visually gone, so clicks must reach what's underneath.
+    // Only treat as transparent when there's no behavior actively trapping
+    // mouse events on it — script-attached overlays may set blend=0 as a
+    // hidden hit zone and need to keep their clicks.
+    if sprite.blend == 0 && !sprite_has_mouse_handler(player, sprite) {
+        return true;
+    }
+    // Translucent Shape / VectorShape overlays (blend < 50) with no mouse
+    // handler are also click-transparent — Director's hit test on these
+    // follows the visual: a semi-transparent highlight bar (e.g. spineworld
+    // pDropList's pSelSprite = sprite(802), GUI_dropsel at blend=20) sits
+    // ON TOP of an interactive sprite below and must let clicks pass through
+    // so the underlying sprite gets the mouseUp. Limited to shapes because
+    // bitmaps at low blend are usually still hit-test targets (e.g. ghosted
+    // buttons in a disabled state).
+    if sprite.blend < 50 && !sprite_has_mouse_handler(player, sprite) {
+        if let Some(member_ref) = sprite.member.as_ref() {
+            if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                if matches!(
+                    &member.member_type,
+                    CastMemberType::Shape(_) | CastMemberType::VectorShape(_)
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
     // Check if it's a non-editable text or field member
     let is_non_editable_text_or_field = if let Some(member_ref) = sprite.member.as_ref() {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -4599,40 +4657,101 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
     if !is_non_editable_text_or_field {
         return false;
     }
-    // Check if any sprite behavior script has a mouse handler.
-    // If so, this sprite captures clicks (not transparent).
+    !sprite_has_mouse_handler(player, sprite)
+}
+
+fn sprite_has_mouse_handler(player: &DirPlayer, sprite: &Sprite) -> bool {
+    sprite_has_handler(player, sprite, &["mouseDown", "mouseUp", "mouseUpOutSide"])
+}
+
+/// Returns true when any behaviour on `sprite` (sprite-attached, Lingo-added,
+/// or cast-member-attached) defines a handler matching any of `names`. Used to
+/// decide whether a sprite that would otherwise be click-transparent (e.g.
+/// non-editable text/field, blend=0 overlay) should actually keep its clicks,
+/// and to decide whether clicking a non-editable sprite should still steal
+/// keyboard focus (because a `keyDown` behaviour needs it).
+///
+/// Three places a behaviour can live, all of which need checking:
+///   1. `sprite.script_instance_list` — score-authored behaviours.
+///   2. The Lingo-side cached `scriptInstanceList` (Datum::List held in
+///      `player.script_instance_list_cache`) — populated when a script
+///      does `sprite.scriptInstanceList.add(...)` at runtime, which does
+///      NOT mirror back into the sprite's internal Vec.
+///   3. The cast member's attached "BehaviorScript" (Director's member
+///      script export) — covers movies that attach the handler at the
+///      cast level rather than per-sprite.
+pub fn sprite_has_handler(player: &DirPlayer, sprite: &Sprite, names: &[&str]) -> bool {
+    let script_has_any = |script: &crate::player::script::Script| -> bool {
+        names.iter().any(|n| script.get_own_handler(Symbol::from_str(n)).is_some())
+    };
+
+    // (1) Score-authored sprite behaviours.
     for instance_ref in &sprite.script_instance_list {
         if let Some(instance) = player.allocator.get_script_instance_opt(instance_ref) {
             if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
-                if script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseDown)).is_some()
-                    || script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseUp)).is_some()
-                    || script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseUpOutSide)).is_some()
-                {
-                    return false;
+                if script_has_any(script) {
+                    return true;
                 }
             }
         }
     }
-    // Also consult the cast member's own attached script (Director's
-    // "BehaviorScript" export, distinct from sprite-attached behaviors).
-    // Field/Text-typed buttons in some movies (e.g. ClubMarian)
-    // attach the mouseUp handler at the cast level; without this check
-    // the sprite is reported as transparent and clicks pass through.
-    if let Some(member_ref) = sprite.member.as_ref() {
-        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
-            if let Some(script_ref) = member.get_member_script_ref() {
-                if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
-                    if script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseDown)).is_some()
-                        || script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseUp)).is_some()
-                        || script.get_own_handler(Symbol::builtin(BuiltInSymbol::MouseUpOutSide)).is_some()
-                    {
-                        return false;
+
+    // (2) Runtime-added behaviours via `sprite.scriptInstanceList.add(...)`.
+    if let Some(cached_ref) = player.script_instance_list_cache.get(&(sprite.number as i16)) {
+        if let crate::director::lingo::datum::Datum::List(_, items, _) = player.get_datum(cached_ref) {
+            for item_ref in items {
+                if let crate::director::lingo::datum::Datum::ScriptInstanceRef(id) =
+                    player.get_datum(item_ref)
+                {
+                    if let Some(instance) = player.allocator.get_script_instance_opt(id) {
+                        if let Some(script) =
+                            player.movie.cast_manager.get_script_by_ref(&instance.script)
+                        {
+                            if script_has_any(script) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    true
+
+    // (3) Cast member's attached script.
+    if let Some(member_ref) = sprite.member.as_ref() {
+        if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+            if let Some(script_ref) = member.get_member_script_ref() {
+                if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+                    if script_has_any(script) {
+                        return true;
+                    }
+                }
+            }
+            // Fallback: behavior scripts attached to Field/Text members live
+            // in the cast's lctx, not as Script-type cast members, so
+            // get_script_by_ref above can return None for them. Consult
+            // get_script_id() → lctx.scripts directly. This is the path
+            // used by member-attached BehaviorScripts in Director 11.5
+            // (e.g. Fugue No.4's Narrative / Portuguese / Spanish fields).
+            if let Some(script_id) = member.get_script_id() {
+                if let Ok(cast) = player.movie.cast_manager.get_cast(member_ref.cast_lib as u32) {
+                    if let Some(lctx) = cast.lctx.as_ref() {
+                        if let Some(script_chunk) = lctx.scripts.get(&script_id) {
+                            let matches = script_chunk.handlers.iter().any(|h| {
+                                lctx.names.get(h.name_id as usize)
+                                    .map(|n| names.iter().any(|target| n.eq_ignore_ascii_case(target)))
+                                    .unwrap_or(false)
+                            });
+                            if matches {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {

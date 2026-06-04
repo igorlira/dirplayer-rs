@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        bitmap::bitmap::{get_system_default_palette, resolve_color_ref, PaletteRef},
+        bitmap::bitmap::{get_system_default_palette, nearest_palette_index, resolve_color_ref, PaletteRef},
         reserve_player_mut,
         sprite::ColorRef,
         symbols::symbol::Symbol,
@@ -74,7 +74,13 @@ impl ColorDatumHandlers {
             },
             "paletteIndex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
-                ColorRef::Rgb(..) => Err(ScriptError::new("RGB color has no palette index".to_owned())),
+                // Director 11.5 Scripting Dictionary p.832: `.paletteIndex` on
+                // an RGB color returns the nearest match in the current palette.
+                // E.g. `rgb(0,0,0).paletteIndex` → 255 on SystemWin.
+                ColorRef::Rgb(r, g, b) => {
+                    let idx = nearest_palette_index(*r, *g, *b, &get_system_default_palette());
+                    Ok(player.alloc_datum(Datum::Int(idx as i32)))
+                }
             },
             _ => Err(ScriptError::new(format!(
                 "Cannot get color property {}",

@@ -1,5 +1,4 @@
 use log::debug;
-use crate::io::encoding::win1252_byte_to_char;
 use crate::player::handlers::datum_handlers::cast_member::font::{StyledSpan, HtmlStyle, TextAlignment};
 
 impl XmedStyledText {
@@ -127,6 +126,14 @@ pub struct XmedStyledText {
     /// `None` when 0x0005 is absent — the consumer should fall back to the
     /// existing per-span font size.
     pub default_font_size: Option<u16>,
+    /// Member-level "default" font name, sourced from the same char-run
+    /// → Section 7 lookup as `default_font_size`. Lets consumers source
+    /// `member.font` from the correct (last-authored) style entry rather
+    /// than `styled_spans[0]`, which for spineworld_dcr's empty text
+    /// members points at style[0] = Arial 12 while the real authored
+    /// style is style[3] = Verdana 9. `None` when char-run sections
+    /// don't point at a parsed style.
+    pub default_font_name: Option<String>,
 }
 
 /// Section 1 data - document header with page/field properties
@@ -413,7 +420,15 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         debug!("Found text in Section 3");
         parse_section_3(section3)?
     } else {
-        return Err("Missing Section 2 or 3 (text content)".to_string());
+        // Empty text is valid: Director text members authored with explicit
+        // width/height/font but no initial content (the script populates
+        // .text at runtime — e.g. spineworld_dcr's txt_droplist /
+        // txt_password / txt_username) have no Section 2 OR 3. We still
+        // need the styling sections (7 = styles, 9 = fonts, 1 = page
+        // header) to recover the authored font / size / dimensions, so
+        // continue with empty text instead of bailing.
+        debug!("No Section 2 or 3 — empty text member, continuing");
+        Section3Data { text: String::new() }
     };
 
     // Parse Section 8 (fonts)
@@ -725,6 +740,23 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     let s5 = lookup_size_via(&section5_char_runs);
     let default_font_size = s4.or(s5);
 
+    // Parallel lookup for the default font NAME — see `default_font_name`
+    // doc on XmedStyledText. Source from the same char-run → style lookup
+    // so the (font, size) pair stays consistent.
+    let lookup_font_via = |runs: &[CharRun]| -> Option<String> {
+        if declared_count == 0 {
+            return None;
+        }
+        let run = runs.first()?;
+        let style = style_data.styles.get(run.style_index as usize)?;
+        if !style.font_index_valid || style.font_name.is_empty() {
+            return None;
+        }
+        Some(style.font_name.clone())
+    };
+    let default_font_name = lookup_font_via(&section4_char_runs)
+        .or_else(|| lookup_font_via(&section5_char_runs));
+
     // When Section 7 declares 0 styles AND no char-run path produced a
     // size, fall back to the HTML `<font size=N>` attribute Director
     // captures in Section 1 at index [42] (verified empirically by
@@ -776,6 +808,7 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         par_runs,
         bg_color: section1_data.bg_color,
         default_font_size,
+        default_font_name,
     })
 }
 
@@ -809,18 +842,21 @@ fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
     }
 
     // Extract text, preserving all characters including \r, \n, \t.
-    // Director text members store bytes as Windows-1252. The earlier
-    // Mac-Roman decoder mapped 0xE4 to U+2021 (‡) instead of U+00E4 (ä),
-    // breaking umlauts, ß, ø, ñ, and Spanish accents in Windows-authored
-    // movies (i.e. virtually all live test corpora).
-    let mut text = String::new();
-    for i in text_start..text_end {
-        let ch = win1252_byte_to_char(data[i]);
-        if ch == '\0' {
-            break; // Stop at first null byte (padding)
-        }
-        text.push(ch);
-    }
+    //
+    // Encoding: D6-D9 movies store text bytes as Windows-1252; D10+
+    // (Unicode-aware authoring) stores them as UTF-8. Fugue No.4 (D11.5)
+    // has e.g. "Tradução" as `m c3 a7 c3 a3 o` and "©" as `c2 a9`.
+    // Decoding either as plain Win-1252 mangles UTF-8 sequences into
+    // "Â©" / "TraduÃ§Ã£o" mojibake.
+    //
+    // Strategy: trim at the first 0x00 padding byte, then run
+    // `decode_text_auto` — strict UTF-8 first, falling back to Win-1252
+    // only when the bytes don't form a valid UTF-8 sequence. Win-1252
+    // input almost never coincidentally satisfies UTF-8's continuation-
+    // byte constraints, so older movies keep decoding correctly.
+    let raw = &data[text_start..text_end];
+    let body_end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let text = crate::io::encoding::decode_text_auto(&raw[..body_end]);
 
     debug!("    Section 3: {} chars", text.len());
 
