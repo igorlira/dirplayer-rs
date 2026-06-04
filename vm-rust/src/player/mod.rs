@@ -2809,7 +2809,6 @@ fn setup_handler_frame(
     push_return: bool,
 ) -> Result<FrameSetup, ScriptError> {
     let (script_member_ref, handler_name) = handler_ref;
-    diag_count_handler_call();
 
     // Virtual script handler.
     let virtual_result = reserve_player_mut(|player| {
@@ -3040,7 +3039,6 @@ pub async fn player_call_script_handler_raw_args(
         // Synchronous fast path: execute non-async opcodes directly, avoiding
         // the per-op async future/poll cost. Only the handful of genuinely-async
         // opcodes (calls, NewObj, SetObjProp) fall back to the awaited path.
-        diag_count_opcode();
         let mut took_async_path = false;
         let exec_result = match try_execute_bytecode_sync(&ctx) {
             Some(r) => r,
@@ -4125,21 +4123,9 @@ struct FrameLoopDiag {
 thread_local! {
     static FRAME_LOOP_DIAG: std::cell::RefCell<FrameLoopDiag> =
         std::cell::RefCell::new(FrameLoopDiag::default());
-    // TEMP diagnostics: count Lingo handler calls and executed opcodes so we can
-    // compute real per-call vs per-opcode time and decide whether load is
-    // call-overhead-bound or opcode-bound. Strip before committing.
-    static DIAG_HANDLER_CALLS: std::cell::Cell<u64> = std::cell::Cell::new(0);
-    static DIAG_OPCODES: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
-#[inline(always)]
-pub fn diag_count_handler_call() {
-    DIAG_HANDLER_CALLS.with(|c| c.set(c.get() + 1));
-}
-#[inline(always)]
-pub fn diag_count_opcode() {
-    DIAG_OPCODES.with(|c| c.set(c.get() + 1));
-}
+
 
 pub async fn run_frame_loop() {
     unsafe {
@@ -4290,17 +4276,12 @@ pub async fn run_frame_loop() {
                     let (net, parse, apply, casts) =
                         CAST_LOAD_DIAG.with(|c| *c.borrow());
                     let lingo = (d.work_ms - net - parse - apply).max(0.0);
-                    let calls = DIAG_HANDLER_CALLS.with(|c| c.get());
-                    let ops = DIAG_OPCODES.with(|c| c.get());
-                    let ns_per_call = if calls > 0 { lingo * 1_000_000.0 / calls as f64 } else { 0.0 };
-                    let ns_per_op = if ops > 0 { lingo * 1_000_000.0 / ops as f64 } else { 0.0 };
                     web_sys::console::log_1(
                         &format!(
-                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s || calls={} ({:.0}ns/call) ops={} ({:.0}ns/op)",
+                            "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
                             d.frames, current_tempo_for_diag, target_delay_ms,
                             wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
-                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0,
-                            calls, ns_per_call, ops, ns_per_op
+                            casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
                         )
                         .into(),
                     );
