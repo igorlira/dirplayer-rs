@@ -189,7 +189,11 @@ define_builtin_symbols! {
     "rightMouseDown" => RightMouseDown,
     "rightMouseUp" => RightMouseUp,
     "activeWindow" => ActiveWindow,
-    "rollOver" => RollOver,
+    // NOTE: `rollOver` is intentionally NOT a separate entry. The symbol table
+    // interns case-insensitively (lowercases), so "rollOver" and "rollover"
+    // are the same symbol — a second variant would just shadow the first and
+    // leave one dispatch arm dead (it broke `rollover(spriteNum)` in CS). Both
+    // the `the rollOver` property and the `rollover()` function use Rollover.
     "maxInteger" => MaxInteger,
     "memorySize" => MemorySize,
     "active3dRenderer" => Active3dRenderer,

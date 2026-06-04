@@ -210,7 +210,7 @@ impl Movie {
             BuiltInSymbol::RightMouseUp => Ok(datum_bool(!self.right_mouse_down)),
             BuiltInSymbol::TraceScript => Ok(datum_bool(self.trace_script)),
             BuiltInSymbol::ActiveWindow => Ok(Datum::Stage),
-            BuiltInSymbol::RollOver => {
+            BuiltInSymbol::Rollover => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
