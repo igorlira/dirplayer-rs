@@ -16,6 +16,7 @@ pub mod ci_string;
 pub mod cast_member;
 pub mod commands;
 pub mod compare;
+pub mod compiled;
 pub mod context_vars;
 pub mod datum_formatting;
 pub mod datum_operations;
@@ -4894,6 +4895,62 @@ pub fn run_bytecode_benchmark() -> String {
         let ms = bench_now_ms() - start;
         out.push_str(&line("inline push/pop", n, ms));
         out.push_str(&format!("   [sink={}]\n", sink & 1));
+    }
+
+    // ---- Register-IR PoC (Stage 2): same workloads via the compiled IR ----
+    // Go/no-go: does compiling basic ops to a dense-register IR (native-stack
+    // operand stack + locals, pre-decoded ops, no reserve_player / scope fetch /
+    // HashMap) beat the interpreter? Compare these to the interpreter lines above.
+    {
+        use crate::player::compiled;
+
+        // push+push+add+pop, compiled from bytecode then run once (with a Ret).
+        const ARITH_IR: usize = 150_000;
+        let mut bc = Vec::with_capacity(ARITH_IR * 4 + 1);
+        let mut pos: usize = 0;
+        for _ in 0..ARITH_IR {
+            bc.push(Bytecode::new(OpCode::PushInt8, 3, pos)); pos += 1;
+            bc.push(Bytecode::new(OpCode::PushInt8, 4, pos)); pos += 1;
+            bc.push(Bytecode::new(OpCode::Add, 0, pos)); pos += 1;
+            bc.push(Bytecode::new(OpCode::Pop, 1, pos)); pos += 1;
+        }
+        bc.push(Bytecode::new(OpCode::Ret, 0, pos));
+        let total = bc.len() - 1;
+        let handler = HandlerDef {
+            name_id: 0, bytecode_array: bc, bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![], local_name_ids: vec![], global_name_ids: vec![],
+        };
+        let compiled_h = compiled::compile(&handler, 1).expect("eligible");
+        let start = bench_now_ms();
+        let _ = compiled::run(&compiled_h, &[]);
+        let ms = bench_now_ms() - start;
+        out.push_str(&line("IR push+push+add+pop", total, ms));
+        out.push('\n');
+
+        // Loop-counter pattern (str_test's actual culprit): `repeat with j=1 to N`,
+        // built directly as IR. ~9 executed ops per iteration.
+        let n: i32 = 1_000_000;
+        let ops = vec![
+            compiled::IrOp::PushInt(1),     // 0
+            compiled::IrOp::SetLocal(0),    // 1   j = 1
+            compiled::IrOp::GetLocal(0),    // 2   cond: j
+            compiled::IrOp::PushInt(n),     // 3         N
+            compiled::IrOp::LtEq,           // 4         j <= N
+            compiled::IrOp::JmpIfZero(11),  // 5   if !cond -> Ret
+            compiled::IrOp::GetLocal(0),    // 6   incr: j
+            compiled::IrOp::PushInt(1),     // 7         1
+            compiled::IrOp::Add,            // 8         j+1
+            compiled::IrOp::SetLocal(0),    // 9   j = j+1
+            compiled::IrOp::Jmp(2),         // 10  loop
+            compiled::IrOp::Ret,            // 11
+        ];
+        let loop_ops = (n as usize) * 9;
+        let compiled_loop = compiled::CompiledHandler { ops, n_locals: 1 };
+        let start = bench_now_ms();
+        let _ = compiled::run(&compiled_loop, &[]);
+        let ms = bench_now_ms() - start;
+        out.push_str(&line("IR repeat-counter loop", loop_ops, ms));
+        out.push('\n');
     }
 
     out
