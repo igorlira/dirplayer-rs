@@ -2623,7 +2623,7 @@ pub async fn player_call_global_handler(
 
             if receiver_handler.is_none() {
                 receiver_handler =
-                    get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
+                    get_active_static_script_refs(player)
                         .iter()
                         .find_map(|script_ref| {
                             let script = player.movie.cast_manager.get_script_by_ref(script_ref);
@@ -4427,10 +4427,8 @@ pub fn init_player() {
     });
 }
 
-fn get_active_static_script_refs<'a>(
-    movie: &'a Movie,
-    globals: &'a FxHashMap<Symbol, &'a Datum>,
-) -> Vec<CastMemberRef> {
+fn get_active_static_script_refs(player: &DirPlayer) -> Vec<CastMemberRef> {
+    let movie = &player.movie;
     let frame_script = movie.score.get_script_in_frame(movie.current_frame);
     let movie_scripts = movie.cast_manager.get_movie_scripts();
     let movie_scripts = movie_scripts.as_ref().unwrap();
@@ -4445,8 +4443,11 @@ fn get_active_static_script_refs<'a>(
             cast_member: frame_script.cast_member.into(),
         });
     }
-    for global in globals.values() {
-        if let Datum::VarRef(VarRef::Script(script_ref)) = global {
+    // Resolve global *script* refs directly from `globals` (rare) instead of
+    // building a full hydrated-globals HashMap on every ext_call — this runs on
+    // the hottest builtin-dispatch path (voidp/offset/length in replaceChunks).
+    for global_ref in player.globals.values() {
+        if let Datum::VarRef(VarRef::Script(script_ref)) = player.get_datum(global_ref) {
             active_script_refs.push(script_ref.clone());
         }
     }
