@@ -21,16 +21,7 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
 use std::collections::HashMap;
 
 use crate::player::{
-    bitmap::bitmap::{get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef},
-    bitmap::drawing::CopyPixelsParams,
-    cast_lib::CastMemberRef,
-    cast_member::CastMemberType,
-    font::{measure_text, measure_text_wrapped, get_glyph_preference, GlyphPreference},
-    geometry::IntRect,
-    handlers::datum_handlers::cast_member::font::{FontMemberHandlers, StyledSpan, HtmlStyle, TextAlignment},
-    score::{get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at, ScoreRef},
-    sprite::{ColorRef, CursorRef, is_skew_flip},
-    datum_ref::DatumRef, DirPlayer,
+    DirPlayer, bitmap::{bitmap::{Bitmap, PaletteRef, get_system_default_palette, resolve_color_ref}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, font::{GlyphPreference, get_glyph_preference, measure_text, measure_text_wrapped}, geometry::IntRect, handlers::datum_handlers::cast_member::font::{FontMemberHandlers, HtmlStyle, StyledSpan, TextAlignment}, score::{ScoreRef, get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at}, sprite::{ColorRef, CursorRef, is_skew_flip}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
 };
 use crate::director::lingo::datum::Datum;
 use crate::js_api::JsApi;
@@ -1040,7 +1031,7 @@ impl WebGL2Renderer {
                 text_fg_color: ColorRef,
                 text_bg_color: ColorRef,
                 styled_spans: Option<Vec<StyledSpan>>,
-                alignment: String,
+                alignment: BuiltInSymbol,
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
@@ -1083,7 +1074,7 @@ impl WebGL2Renderer {
                 font_name: String,
                 font_size: u16,
                 font_id: Option<u16>,
-                alignment: String,
+                alignment: BuiltInSymbol,
                 ink: i32,
             },
             ShapeBitmap {
@@ -1104,8 +1095,8 @@ impl WebGL2Renderer {
                 member_key: (i32, i32),
                 scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
                 runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
-                active_camera: Option<String>,
-                extra_cameras: Vec<String>,
+                active_camera: Option<Symbol>,
+                extra_cameras: Vec<Symbol>,
             },
         }
 
@@ -1158,7 +1149,7 @@ impl WebGL2Renderer {
         // IFX stores 1x1 white placeholders for textures that should be loaded from cast members.
         {
             // Step 1: Collect placeholder names (immutable borrow of scene)
-            let placeholder_names: Vec<String> = {
+            let placeholder_names: Vec<Symbol> = {
                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                 member.and_then(|m| m.member_type.as_shockwave3d())
                     .and_then(|w3d| w3d.parsed_scene.as_ref())
@@ -1179,12 +1170,12 @@ impl WebGL2Renderer {
                         "[W3D-PH] {} placeholders to resolve", placeholder_names.len()
                     );
                 }
-                let mut resolved: Vec<(String, Vec<u8>)> = Vec::new();
+                let mut resolved: Vec<(Symbol, Vec<u8>)> = Vec::new();
                 let palettes = player.movie.cast_manager.palettes();
                 for tex_name in &placeholder_names {
                     let tex_name_str = tex_name.to_string();
                     let found_ref = player.movie.cast_manager.find_member_ref_by_name(&tex_name_str);
-                    if ph_log && tex_name.contains("panel") {
+                    if ph_log && tex_name.as_str().contains("panel") {
                         let status = match &found_ref {
                             Some(r) => {
                                 let m = player.movie.cast_manager.find_member_by_ref(r);
@@ -1394,7 +1385,7 @@ impl WebGL2Renderer {
                         false,
                         width,
                         height,
-                        "left",  // Font members default to left alignment
+                        BuiltInSymbol::Left,  // Font members default to left alignment
                         false,   // Font members default to no word wrap
                         &font_member.font_info.name,
                         font_member.font_info.size,
@@ -1427,7 +1418,7 @@ impl WebGL2Renderer {
                         } else {
                             Some(font_member.preview_html_spans.clone())
                         },
-                        alignment: "left".to_string(),
+                        alignment: BuiltInSymbol::Left,
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
@@ -1449,11 +1440,8 @@ impl WebGL2Renderer {
                     // Derive wrapping behavior from text member box type + explicit wordWrap flag.
                     // Director commonly uses #adjust with wrapped multi-line text.
                     let box_type_key = text_member
-                        .box_type
-                        .trim()
-                        .trim_start_matches('#')
-                        .to_ascii_lowercase();
-                    let box_type_implies_wrap = matches!(box_type_key.as_str(), "adjust");
+                        .box_type;
+                    let box_type_implies_wrap = box_type_key == BuiltInSymbol::Adjust;
                     let effective_word_wrap = text_member.word_wrap || box_type_implies_wrap;
                     let long_wrapped_text = effective_word_wrap && text.len() > 80;
 
@@ -1514,8 +1502,7 @@ impl WebGL2Renderer {
                     //     the historical "lines × text_member.height"
                     //     behavior — these are user-resizable boxes
                     //     where overflow is meant to be clipped.
-                    let is_adjust = text_member.box_type == "adjust"
-                        || text_member.box_type == "#adjust";
+                    let is_adjust = text_member.box_type == BuiltInSymbol::Adjust;
                     let base_height = if is_puppet || is_adjust {
                         sprite_rect.height().max(1)
                     } else if long_wrapped_text {
@@ -1657,13 +1644,13 @@ impl WebGL2Renderer {
                         (name, size, Some(style))
                     } else {
                         let mut style = 0u8;
-                        if text_member.font_style.iter().any(|s| s == "bold") {
+                        if text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Bold) {
                             style |= 1;
                         }
-                        if text_member.font_style.iter().any(|s| s == "italic") {
+                        if text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Italic) {
                             style |= 2;
                         }
-                        if text_member.font_style.iter().any(|s| s == "underline") {
+                        if text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Underline) {
                             style |= 4;
                         }
                         (
@@ -1870,7 +1857,7 @@ impl WebGL2Renderer {
                         text_caret_blink,
                         width,
                         height,
-                        &text_member.alignment,
+                        text_member.alignment,
                         effective_word_wrap,
                         &font_name,
                         font_size,
@@ -1898,12 +1885,12 @@ impl WebGL2Renderer {
                     // shrink branch crops the bitmap to 70 and ~6 wrapped
                     // lines overflow.
                     let box_type_unwrapped =
-                        text_member.box_type.trim_start_matches('#');
-                    let box_type_locked = box_type_unwrapped != "adjust";
+                        text_member.box_type;
+                    let box_type_locked = box_type_unwrapped != BuiltInSymbol::Adjust;
                     let text_has_breaks = text_member.text.contains('\r')
                         || text_member.text.contains('\n');
                     let multi_par_adjust_locked =
-                        box_type_unwrapped == "adjust" && text_has_breaks;
+                        box_type_unwrapped == BuiltInSymbol::Adjust && text_has_breaks;
                     let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
                     cache_key.transform_active = transform_active;
@@ -2315,7 +2302,7 @@ impl WebGL2Renderer {
                         field_caret_blink,
                         width,
                         height,
-                        &field_member.alignment,
+                        field_member.alignment,
                         field_member.word_wrap,
                         &field_member.font,
                         field_member.font_size,
@@ -2768,7 +2755,7 @@ impl WebGL2Renderer {
                         text_fg_color,
                         text_bg_color,
                         styled_spans.as_ref(),
-                        alignment,
+                        *alignment,
                         word_wrap,
                         border,
                         box_drop_shadow,
@@ -3041,7 +3028,7 @@ impl WebGL2Renderer {
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
                             chrome_offset_x, text_y,
-                            text_area_w, &alignment,
+                            text_area_w, alignment,
                             params, &palettes, 0, 0,
                         );
                     }
@@ -3063,11 +3050,7 @@ impl WebGL2Renderer {
                         },
                     };
 
-                    let text_alignment = match alignment.to_lowercase().as_str() {
-                        "center" | "#center" => TextAlignment::Center,
-                        "right" | "#right" => TextAlignment::Right,
-                        _ => TextAlignment::Left,
-                    };
+                    let text_alignment: TextAlignment = alignment.into();
 
                     // Push buttons center text vertically; radio/checkbox start at top
                     let text_y = if is_push {
@@ -3254,7 +3237,7 @@ impl WebGL2Renderer {
                 }
                 for cam_name in &extra_cameras {
                     let should_clear = runtime_state.camera_clear_at_render
-                        .get(&cam_name.to_ascii_lowercase()).copied().unwrap_or(true);
+                        .get(&cam_name).copied().unwrap_or(true);
                     static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         debug!(
@@ -4584,7 +4567,7 @@ impl WebGL2Renderer {
         fg_color: &ColorRef,
         bg_color: &ColorRef,
         styled_spans: Option<&Vec<StyledSpan>>,
-        alignment: &str,
+        alignment: BuiltInSymbol,
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
@@ -4767,7 +4750,7 @@ impl WebGL2Renderer {
         let bold = (style_bits & 1) != 0;
         let italic = (style_bits & 2) != 0;
         let underline = (style_bits & 4) != 0;
-        let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
+        // let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
 
         // Get the font bitmap. We clone it locally so the immutable
         // borrow on `player.bitmap_manager` is released — the PFR
@@ -4878,9 +4861,9 @@ impl WebGL2Renderer {
             };
             let box_width = width as i32;
             let line_width = line_width as i32;
-            match alignment.to_lowercase().as_str() {
-                "center" | "#center" => bitmap_start_x = ((box_width - line_width) / 2).max(0),
-                "right" | "#right" => bitmap_start_x = (box_width - line_width).max(0),
+            match alignment {
+                BuiltInSymbol::Center => bitmap_start_x = ((box_width - line_width) / 2).max(0),
+                BuiltInSymbol::Right => bitmap_start_x = (box_width - line_width).max(0),
                 _ => {}
             }
         }
@@ -5018,12 +5001,7 @@ impl WebGL2Renderer {
         // BUT only use native rendering if the font is NOT a PFR bitmap font
         if let Some(spans) = spans_for_native {
             // Parse alignment string to TextAlignment enum
-            let text_alignment = match alignment_key.as_str() {
-                "center" => TextAlignment::Center,
-                "right" => TextAlignment::Right,
-                "justify" => TextAlignment::Justify,
-                _ => TextAlignment::Left,
-            };
+            let text_alignment: TextAlignment = alignment.into();
 
             // For focused editable members, hand the caret/selection state to
             // the Canvas2D renderer so it draws them with measureText positions
@@ -5117,9 +5095,9 @@ impl WebGL2Renderer {
                         .chars()
                         .map(|c| font.get_char_advance(c as u8) as i32)
                         .sum();
-                let start_x = match alignment.to_lowercase().as_str() {
-                    "center" | "#center" => ((max_width - line_width) / 2).max(0),
-                    "right" | "#right" => (max_width - line_width).max(0),
+                let start_x = match alignment {
+                    BuiltInSymbol::Center => ((max_width - line_width) / 2).max(0),
+                    BuiltInSymbol::Right => (max_width - line_width).max(0),
                     _ => bitmap_start_x,
                 };
 
@@ -5746,9 +5724,9 @@ impl WebGL2Renderer {
                     }
                     prev_par_idx_pfr = this_par_idx;
 
-                    let start_x = match alignment_key.as_str() {
-                        "center" => ((max_width - line.width) / 2).max(0),
-                        "right" => (max_width - line.width).max(0),
+                    let start_x = match alignment {
+                        BuiltInSymbol::Center => ((max_width - line.width) / 2).max(0),
+                        BuiltInSymbol::Right => (max_width - line.width).max(0),
                         _ => bitmap_start_x,
                     };
 
@@ -6025,7 +6003,7 @@ impl WebGL2Renderer {
                         line_height,
                         render_line_spacing,
                         word_wrap,
-                        alignment_key
+                        alignment
                     );
                 }
 
@@ -6213,7 +6191,7 @@ impl WebGL2Renderer {
                 let line_h = renderer_line_h;
                 let lo = sel_lo as usize;
                 let hi = sel_hi as usize;
-                let alignment_key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
+                let text_alignment: TextAlignment = alignment.into();
                 for (i, line) in lines.iter().enumerate() {
                     if hi <= line.start || (lo >= line.end && line.start != line.end) {
                         continue;
@@ -6235,9 +6213,9 @@ impl WebGL2Renderer {
                         .map(|c| font.get_char_advance_for(c) as i32)
                         .sum();
                     let x_offset: i32 = if caret_max_width > 0 {
-                        match alignment_key.as_str() {
-                            "center" => ((caret_max_width - line_w) / 2).max(0),
-                            "right" => (caret_max_width - line_w).max(0),
+                        match text_alignment {
+                            TextAlignment::Center => ((caret_max_width - line_w) / 2).max(0),
+                            TextAlignment::Right => (caret_max_width - line_w).max(0),
                             _ => 0,
                         }
                     } else {

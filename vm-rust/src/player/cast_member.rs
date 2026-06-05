@@ -2,9 +2,10 @@ use core::fmt;
 use std::collections::HashMap;
 use std::fmt::Formatter;
 
+use itertools::Itertools;
 use log::{debug, warn};
 
-use crate::CastMemberRef;
+use crate::{CastMemberRef, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
 
 use super::{
     bitmap::{
@@ -43,10 +44,10 @@ pub enum Media {
     Sound(SoundMember),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FieldMember {
     pub text: String,
-    pub alignment: String,
+    pub alignment: BuiltInSymbol,
     pub word_wrap: bool,
     pub font: String,
     pub font_style: String,
@@ -61,7 +62,7 @@ pub struct FieldMember {
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
     pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
-    pub box_type: String,
+    pub box_type: BuiltInSymbol,
     pub anti_alias: bool,
     pub width: u16,
     pub height: u16,  // Field member height from FieldInfo
@@ -89,7 +90,7 @@ pub struct FieldMember {
     pub kerning: bool,
     pub kerning_threshold: u16,
     pub use_hypertext_styles: bool,
-    pub anti_alias_type: String,
+    pub anti_alias_type: BuiltInSymbol,
     // Cast-member-attached script (Director's "BehaviorScript" export).
     // Mirrors ButtonMember/BitmapMember/ShapeMember so Field-typed buttons
     // with a member script are recognised by `is_active_sprite` and the
@@ -97,6 +98,12 @@ pub struct FieldMember {
     // through them.
     pub script_id: u32,
     pub member_script_ref: Option<CastMemberRef>,
+}
+
+impl Default for FieldMember {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,11 +122,11 @@ impl ButtonType {
         }
     }
 
-    pub fn symbol_string(&self) -> &str {
+    pub fn symbol(&self) -> BuiltInSymbol {
         match self {
-            ButtonType::PushButton => "pushButton",
-            ButtonType::CheckBox => "checkBox",
-            ButtonType::RadioButton => "radioButton",
+            ButtonType::PushButton => BuiltInSymbol::PushButton,
+            ButtonType::CheckBox => BuiltInSymbol::CheckBox,
+            ButtonType::RadioButton => BuiltInSymbol::RadioButton,
         }
     }
 }
@@ -137,7 +144,7 @@ pub struct ButtonMember {
 /// Director supports #left, #center, and #right tab types.
 #[derive(Clone, Debug)]
 pub struct TabStop {
-    pub tab_type: String,   // "left", "center", or "right"
+    pub tab_type: BuiltInSymbol,   // "left", "center", or "right"
     pub position: i32,      // pixel position from left edge
 }
 
@@ -146,12 +153,12 @@ pub struct TextMember {
     pub text: String,
     pub html_source: String,  // Original HTML string when set via html property
     pub rtf_source: String,   // Original RTF string when set via RTF property
-    pub alignment: String,
-    pub box_type: String,
+    pub alignment: BuiltInSymbol,
+    pub box_type: BuiltInSymbol,
     pub word_wrap: bool,
     pub anti_alias: bool,
     pub font: String,
-    pub font_style: Vec<String>,
+    pub font_style: Vec<BuiltInSymbol>,
     pub font_size: u16,
     pub fixed_line_space: u16,
     pub top_spacing: i16,
@@ -181,7 +188,7 @@ pub struct TextMember {
     pub sel_anchor: i32,
     /// Anti-alias method: "AutoAlias", "GrayScaleAllAlias", "SubpixelAllAlias",
     /// "GrayscaleLargerThanAlias", or "NoneAlias".
-    pub anti_alias_type: String,
+    pub anti_alias_type: BuiltInSymbol,
     // Cast-member-attached script (Director's "BehaviorScript" export).
     // See FieldMember::script_id for the rationale.
     pub script_id: u32,
@@ -216,17 +223,17 @@ impl FieldMember {
     pub fn new() -> FieldMember {
         FieldMember {
             text: "".to_string(),
-            alignment: "left".to_string(),
+            alignment: BuiltInSymbol::Left,
             word_wrap: true,
             font: "Arial".to_string(),
-            font_style: "plain".to_string(),
+            font_style: BuiltInSymbol::Plain.to_string(),
             font_size: 12,
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: 100,
             fixed_line_space: 0,
             top_spacing: 0,
-            box_type: "adjust".to_string(),
+            box_type: BuiltInSymbol::Adjust,
             anti_alias: false,
             width: 100,
             height: 100,
@@ -250,7 +257,7 @@ impl FieldMember {
             kerning: false,
             kerning_threshold: 14,
             use_hypertext_styles: false,
-            anti_alias_type: "AutoAlias".to_string(),
+            anti_alias_type: BuiltInSymbol::AutoAlias,
             script_id: 0,
             member_script_ref: None,
         }
@@ -289,17 +296,17 @@ impl FieldMember {
         let back_color = Some(ColorRef::Rgb(bg_r, bg_g, bg_b));
         FieldMember {
             text: "".to_string(),
-            alignment: field_info.alignment_str(),
+            alignment: field_info.alignment(),
             word_wrap: field_info.wordwrap(),
             font: field_info.font_name().to_string(),
-            font_style: "plain".to_string(),
+            font_style: BuiltInSymbol::Plain.to_string(),
             font_size: 12,
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
             fixed_line_space: 0,  // Use default line spacing for text rendering
             top_spacing: field_info.scroll as i16,
-            box_type: field_info.box_type_str(),
+            box_type: field_info.box_type(),
             anti_alias: false,
             width: field_info.width(),  // Calculated from rect
             height: (field_info.text_height + 2 * field_info.border as u16 + 2 * field_info.margin as u16),  // Member height: text_height + borders + margins
@@ -323,7 +330,7 @@ impl FieldMember {
             kerning: false,
             kerning_threshold: 14,
             use_hypertext_styles: false,
-            anti_alias_type: "AutoAlias".to_string(),
+            anti_alias_type: BuiltInSymbol::AutoAlias,
             script_id: 0,
             member_script_ref: None,
         }
@@ -348,15 +355,15 @@ impl TextMember {
             text: "".to_string(),
             html_source: String::new(),
             rtf_source: String::new(),
-            alignment: "left".to_string(),
+            alignment: BuiltInSymbol::Left,
             word_wrap: true,
             font: "Arial".to_string(),
-            font_style: vec!["plain".to_string()],
+            font_style: vec![BuiltInSymbol::Plain],
             font_size: 12,
             fixed_line_space: 0,
             top_spacing: 0,
             bottom_spacing: 0,
-            box_type: "adjust".to_string(),
+            box_type: BuiltInSymbol::Adjust,
             anti_alias: false,
             width: 100,
             height: 20,
@@ -370,7 +377,7 @@ impl TextMember {
             sel_start: 0,
             sel_end: 0,
             sel_anchor: 0,
-            anti_alias_type: "AutoAlias".to_string(),
+            anti_alias_type: BuiltInSymbol::AutoAlias,
             script_id: 0,
             member_script_ref: None,
         }
@@ -409,7 +416,7 @@ impl TextMember {
 
         // Set material from TextInfo colors
         scene.materials.push(W3dMaterial {
-            name: "TextMaterial".to_string(),
+            name: BuiltInSymbol::TextMaterial.into(),
             diffuse: [0.0, 0.0, 0.0, 1.0], // Director text3D defaults diffuseColor to #000000
             ambient: [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0, 1.0],
             emissive: [0.0, 0.0, 0.0, 1.0],
@@ -419,21 +426,21 @@ impl TextMember {
             shininess: 50.0,
         });
         if let Some(shader) = scene.shaders.first_mut() {
-            shader.material_name = "TextMaterial".to_string();
+            shader.material_name = BuiltInSymbol::TextMaterial.into();
         }
 
         // Update directional light color from TextInfo
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == "DefaultDirectional") {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultDirectional) {
             light.color = [dir_r as f32 / 255.0, dir_g as f32 / 255.0, dir_b as f32 / 255.0];
         }
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == "DefaultAmbient") {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultAmbient) {
             light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
         }
 
         // Apply directionalPreset to light node transform (3D Z-up version)
         if let Some(ti) = ti {
             if ti.directional_preset > 0 && ti.directional_preset <= 9 {
-                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == "DefaultDirectional") {
+                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == BuiltInSymbol::DefaultDirectional) {
                     light_node.transform = Self::directional_preset_to_transform_3d(ti.directional_preset);
                 }
             }
@@ -464,7 +471,7 @@ impl TextMember {
             .map(|i| (i.camera_rotation_x, i.camera_rotation_y, i.camera_rotation_z));
         if let Some((px, py, pz)) = cam_pos {
             // Override DefaultView camera transform with TextInfo values
-            if let Some(cam_node) = scene.nodes.iter_mut().find(|n| n.name == "DefaultView") {
+            if let Some(cam_node) = scene.nodes.iter_mut().find(|n| n.name == BuiltInSymbol::DefaultView) {
                 // Build transform from position (rotation applied if non-zero)
                 let (rx, ry, rz) = cam_rot.unwrap_or((0.0, 0.0, 0.0));
                 let rx_rad = (-rx as f64).to_radians();
@@ -488,17 +495,17 @@ impl TextMember {
         }
 
         // Model resource for extruded text — mesh populated by ensure_text3d()
-        scene.model_resources.insert("Text".to_string(), ModelResourceInfo {
-            name: "Text".to_string(),
+        scene.model_resources.insert(BuiltInSymbol::Text.into(), ModelResourceInfo {
+            name: BuiltInSymbol::Text.into(),
             ..Default::default()
         });
         scene.nodes.push(W3dNode {
-            name: "Text".to_string(),
+            name: BuiltInSymbol::Text.into(),
             node_type: W3dNodeType::Model,
-            parent_name: "World".to_string(),
-            resource_name: "Text".to_string(),
-            model_resource_name: "Text".to_string(),
-            shader_name: "DefaultShader".to_string(),
+            parent_name: BuiltInSymbol::World.into(),
+            resource_name: BuiltInSymbol::Text.into(),
+            model_resource_name: BuiltInSymbol::Text.into(),
+            shader_name: BuiltInSymbol::DefaultShader.into(),
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
@@ -682,18 +689,18 @@ pub struct VectorShapeMember {
     // members #9 and #13 / Slider Groove). Enum / bool fields are still
     // mapped to defaults until a third payload disambiguates them.
     pub reg_point: (i16, i16),    // FLSH 0x14 / 0x10  (x / y)
-    pub gradient_type: String,    // default "linear"  (FLSH offset TBD)
+    pub gradient_type: BuiltInSymbol,    // default "linear"  (FLSH offset TBD)
     pub fill_scale: f32,          // FLSH 0x38, default 100.0
     pub fill_direction: f32,      // FLSH 0x3C, degrees, default 0.0
     pub fill_offset: (i32, i32),  // FLSH 0x40 / 0x44, default (0, 0)
     pub fill_cycles: i32,         // default 1  (FLSH offset TBD)
-    pub scale_mode: String,       // default "autoSize"  (FLSH offset TBD)
+    pub scale_mode: BuiltInSymbol,       // default "autoSize"  (FLSH offset TBD)
     pub scale: f32,               // FLSH 0x50, percent, default 100.0
     pub antialias: bool,          // default true  (FLSH offset TBD)
     pub center_reg_point: bool,   // default false (FLSH offset TBD)
     pub reg_point_vertex: i32,    // default 0     (FLSH offset TBD)
     pub direct_to_stage: bool,    // default false (FLSH offset TBD)
-    pub origin_mode: String,      // default "center" (FLSH offset TBD)
+    pub origin_mode: BuiltInSymbol,      // default "center" (FLSH offset TBD)
 }
 
 impl VectorShapeMember {
@@ -876,7 +883,7 @@ pub struct Text3dSource {
     pub font_size: u16,
     pub width: u16,
     pub height: u16,
-    pub alignment: String,
+    pub alignment: BuiltInSymbol,
     pub word_wrap: bool,
     pub fixed_line_space: u16,
     pub top_spacing: i16,
@@ -910,7 +917,7 @@ impl Shockwave3dMember {
 
 #[derive(Clone, Debug)]
 pub struct QueuedMotion {
-    pub name: String,
+    pub name: Symbol,
     pub looped: bool,
     pub start_time: f32,   // seconds
     pub end_time: f32,     // seconds, -1.0 = full duration
@@ -924,7 +931,7 @@ pub struct Shockwave3dRuntimeState {
     // ─── Animation ───
     pub animation_time: f32,
     pub animation_playing: bool,
-    pub current_motion: Option<String>,
+    pub current_motion: Option<Symbol>,
     pub play_rate: f32,
     pub animation_loop: bool,
     pub motion_queue: Vec<QueuedMotion>,
@@ -937,24 +944,24 @@ pub struct Shockwave3dRuntimeState {
     /// Whether the current non-looping motion has ended
     pub motion_ended: bool,
     /// Previous motion for crossfade blending
-    pub previous_motion: Option<String>,
+    pub previous_motion: Option<Symbol>,
     pub blend_weight: f32,       // 0.0 = all previous, 1.0 = all current
     pub blend_duration: f32,     // total blend time in seconds
     pub blend_elapsed: f32,      // time spent blending
 
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
-    pub node_transforms: std::collections::HashMap<String, [f32; 16]>,
+    pub node_transforms: std::collections::HashMap<Symbol, [f32; 16]>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
-    pub node_transform_datums: std::collections::HashMap<String, crate::player::DatumRef>,
+    pub node_transform_datums: std::collections::HashMap<Symbol, crate::player::DatumRef>,
     /// Director-friendly Euler readback hints for nodes oriented via pointAt().
-    pub node_rotation_hints: std::collections::HashMap<String, [f64; 3]>,
+    pub node_rotation_hints: std::collections::HashMap<Symbol, [f64; 3]>,
     /// Visibility overrides for nodes: 0=#none, 1=#front, 2=#back, 3=#both
-    pub node_visibility: std::collections::HashMap<String, u8>,
+    pub node_visibility: std::collections::HashMap<Symbol, u8>,
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
-    pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,
+    pub node_shaders: std::collections::HashMap<Symbol, std::collections::HashMap<usize, Symbol>>,
 
     // ─── World state ───
     pub background_color: Option<(u8, u8, u8)>,
@@ -974,65 +981,65 @@ pub struct Shockwave3dRuntimeState {
 
     // ─── Camera ───
     /// Per-camera projection mode: 0=perspective (default), 1=orthographic
-    pub camera_projection_mode: std::collections::HashMap<String, u8>,
+    pub camera_projection_mode: std::collections::HashMap<Symbol, u8>,
     /// Per-camera ortho height (world units visible vertically)
-    pub camera_ortho_height: std::collections::HashMap<String, f32>,
+    pub camera_ortho_height: std::collections::HashMap<Symbol, f32>,
     /// Render-to-texture requests: camera_name → target_texture_name
     /// When set, the next render from this camera writes to the named texture instead of the main FBO
-    pub render_targets: std::collections::HashMap<String, String>,
+    pub render_targets: std::collections::HashMap<Symbol, Symbol>,
 
     // ─── Particle systems ───
-    pub particles: std::collections::HashMap<String, ParticleSystemState>,
+    pub particles: std::collections::HashMap<Symbol, ParticleSystemState>,
 
     // ─── Shader persistent lists ───
     /// Per-shader persistent textureList DatumRefs: shader_name -> DatumRef to list
-    pub shader_texture_lists: std::collections::HashMap<String, crate::player::DatumRef>,
+    pub shader_texture_lists: std::collections::HashMap<Symbol, crate::player::DatumRef>,
     /// Per-shader persistent textureTransformList DatumRefs: shader_name -> DatumRef to list of Transform3d
-    pub shader_texture_transform_lists: std::collections::HashMap<String, crate::player::DatumRef>,
+    pub shader_texture_transform_lists: std::collections::HashMap<Symbol, crate::player::DatumRef>,
     /// Per-shader persistent textureModeList DatumRefs: shader_name -> DatumRef to list of mode symbols.
     /// Synced into shader.texture_layers[].tex_mode by sync_shader_texture_lists before render.
-    pub shader_texture_mode_lists: std::collections::HashMap<String, crate::player::DatumRef>,
+    pub shader_texture_mode_lists: std::collections::HashMap<Symbol, crate::player::DatumRef>,
 
     // ─── MeshDeform state ───
     /// Per-model mesh deform data: model_name -> list of mesh texture layers
     /// Each mesh has a Vec of texture layers, each layer has texture coordinates
-    pub mesh_deform: std::collections::HashMap<String, MeshDeformState>,
+    pub mesh_deform: std::collections::HashMap<Symbol, MeshDeformState>,
 
     // ─── Particle emitter state ───
     /// Per-resource emitter state: resource_name -> emitter properties
-    pub emitters: std::collections::HashMap<String, EmitterState>,
+    pub emitters: std::collections::HashMap<Symbol, EmitterState>,
 
     // ─── Level of Detail (LOD) state ───
-    pub lod_state: std::collections::HashMap<String, LodState>,
+    pub lod_state: std::collections::HashMap<Symbol, LodState>,
 
     // ─── Subdivision Surface (SDS) state ───
-    pub sds_state: std::collections::HashMap<String, SdsState>,
+    pub sds_state: std::collections::HashMap<Symbol, SdsState>,
 
     // ─── Reset tracking ───
     pub world_reset: bool,
 
     // ─── Detached nodes (parent set to VOID) ───
-    pub detached_nodes: std::collections::HashSet<String>,
+    pub detached_nodes: std::collections::HashSet<Symbol>,
 
     // ─── pointAtOrientation per node ───
     /// Per-node pointAtOrientation: node_name -> (front_axis, up_axis)
     /// Default: ([0,0,1], [0,1,0]) — +Z front, +Y up
-    pub point_at_orientations: std::collections::HashMap<String, ([f32; 3], [f32; 3])>,
+    pub point_at_orientations: std::collections::HashMap<Symbol, ([f32; 3], [f32; 3])>,
 
     // ─── Camera properties ───
     /// Per-camera rootNode: camera_name -> node_name (limits which subtree to render)
-    pub camera_root_nodes: std::collections::HashMap<String, String>,
+    pub camera_root_nodes: std::collections::HashMap<Symbol, Symbol>,
     /// Per-camera colorBuffer.clearAtRender: camera_name -> bool
-    pub camera_clear_at_render: std::collections::HashMap<String, bool>,
+    pub camera_clear_at_render: std::collections::HashMap<Symbol, bool>,
 
     // ─── Camera overlays/backdrops ───
     /// Per-camera overlay list: camera_name -> Vec<CameraOverlay>
-    pub camera_overlays: std::collections::HashMap<String, Vec<CameraOverlay>>,
-    pub camera_backdrops: std::collections::HashMap<String, Vec<CameraOverlay>>,
+    pub camera_overlays: std::collections::HashMap<Symbol, Vec<CameraOverlay>>,
+    pub camera_backdrops: std::collections::HashMap<Symbol, Vec<CameraOverlay>>,
 
     // ─── Mesh build data (for newMesh() → build() workflow) ───
     /// Per-model-resource mesh build data: resource_name -> MeshBuildData
-    pub mesh_build_data: std::collections::HashMap<String, MeshBuildData>,
+    pub mesh_build_data: std::collections::HashMap<Symbol, MeshBuildData>,
 
     // ─── Directional light preset ───
     /// member.directionalPreset value (1-9 matching topLeft..bottomRight,
@@ -1045,7 +1052,7 @@ pub struct Shockwave3dRuntimeState {
     /// `setaProp` / `addProp` mutations on the returned PropList stay
     /// visible across reads. Keyed by node name (case-insensitive lookup
     /// done at access time).
-    pub user_data: std::collections::HashMap<String, crate::player::DatumRef>,
+    pub user_data: std::collections::HashMap<Symbol, crate::player::DatumRef>,
 
     // ─── W3D event/timer registrations (registerForEvent / unregisterAllEvents) ───
     /// Per-member event subscriptions. Currently only `#timeMS` is honoured
@@ -1059,8 +1066,8 @@ pub struct Shockwave3dRuntimeState {
 pub struct RegisteredW3dEvent {
     /// `#timeMS`, `#collideAny`, `#collideWith`, `#animationStarted`,
     /// `#animationEnded`, or any user-defined symbol.
-    pub event_name: String,
-    pub handler_name: String,
+    pub event_name: Symbol,
+    pub handler_name: Symbol,
     /// Script instance to dispatch the handler on. `None` corresponds to
     /// passing `0` for `scriptObject` in Lingo — Director then searches
     /// movie scripts for the handler.
@@ -1097,8 +1104,8 @@ pub struct MeshBuildData {
 
 #[derive(Clone, Debug)]
 pub struct CameraOverlay {
-    pub source_texture: String,
-    pub source_texture_lower: String, // pre-lowercased for GPU texture lookup
+    pub source_texture: Symbol,
+    pub source_texture_lower: Symbol, // pre-lowercased for GPU texture lookup
     pub loc: [f64; 2],
     pub rotation: f64,
     pub blend: f64,
@@ -1106,14 +1113,14 @@ pub struct CameraOverlay {
     pub scale_x: f64,
     pub scale_y: f64,
     pub reg_point: [f64; 2],
-    pub shader_name: String,
+    pub shader_name: Symbol,
 }
 
 impl Default for CameraOverlay {
     fn default() -> Self {
         Self {
-            source_texture: String::new(),
-            source_texture_lower: String::new(),
+            source_texture: Symbol::empty(),
+            source_texture_lower: Symbol::empty(),
             loc: [0.0, 0.0],
             rotation: 0.0,
             blend: 100.0,
@@ -1121,7 +1128,7 @@ impl Default for CameraOverlay {
             scale_x: 1.0,
             scale_y: 1.0,
             reg_point: [0.0, 0.0],
-            shader_name: String::new(),
+            shader_name: Symbol::empty(),
         }
     }
 }
@@ -1279,9 +1286,9 @@ impl Shockwave3dRuntimeState {
             let cam_key = scene.map(|s| {
                 s.nodes.iter()
                     .find(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::View
-                        && n.name.eq_ignore_ascii_case("defaultview"))
+                        && n.name == BuiltInSymbol::DefaultView)
                     .map(|n| n.name.clone())
-            }).flatten().unwrap_or_else(|| "DefaultView".to_string());
+            }).flatten().unwrap_or_else(|| BuiltInSymbol::DefaultView.into());
             state.node_transforms.insert(cam_key, m);
         }
         if let Some(bg) = info.bg_color {
@@ -1459,7 +1466,7 @@ pub struct RestingContact {
 
 #[derive(Clone, Debug)]
 pub struct HavokRigidBody {
-    pub name: String,
+    pub name: Symbol,
     pub position: [f64; 3],
     pub rotation_axis: [f64; 3],
     pub rotation_angle: f64,
@@ -1503,7 +1510,7 @@ pub struct HavokRigidBody {
 }
 
 impl HavokRigidBody {
-    pub fn new_movable(name: &str, mass: f64, is_convex: bool) -> Self {
+    pub fn new_movable(name: Symbol, mass: f64, is_convex: bool) -> Self {
         // Placeholder isotropic box inertia for a 20×20×20 AABB.
         // Callers that know the real mesh geometry must overwrite
         // `unit_inertia_tensor` and then call `recompute_body_inertia`
@@ -1518,7 +1525,7 @@ impl HavokRigidBody {
             [1.0/i_tensor[0], 0.0, 0.0, 0.0, 1.0/i_tensor[4], 0.0, 0.0, 0.0, 1.0/i_tensor[8]]
         } else { [0.0; 9] };
         Self {
-            name: name.to_string(),
+            name,
             position: [0.0; 3],
             rotation_axis: [0.0, 1.0, 0.0],
             rotation_angle: 0.0,
@@ -1551,9 +1558,9 @@ impl HavokRigidBody {
         }
     }
 
-    pub fn new_fixed(name: &str, is_convex: bool) -> Self {
+    pub fn new_fixed(name: Symbol, is_convex: bool) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             position: [0.0; 3],
             rotation_axis: [0.0, 1.0, 0.0],
             rotation_angle: 0.0,
@@ -1589,9 +1596,9 @@ impl HavokRigidBody {
 
 #[derive(Clone, Debug)]
 pub struct HavokSpring {
-    pub name: String,
-    pub rigid_body_a: Option<String>,
-    pub rigid_body_b: Option<String>,
+    pub name: Symbol,
+    pub rigid_body_a: Option<Symbol>,
+    pub rigid_body_b: Option<Symbol>,
     pub point_a: [f64; 3],
     pub point_b: [f64; 3],
     pub rest_length: f64,
@@ -1602,9 +1609,9 @@ pub struct HavokSpring {
 }
 
 impl HavokSpring {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: Symbol) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             rigid_body_a: None,
             rigid_body_b: None,
             point_a: [0.0; 3],
@@ -1620,9 +1627,9 @@ impl HavokSpring {
 
 #[derive(Clone, Debug)]
 pub struct HavokLinearDashpot {
-    pub name: String,
-    pub rigid_body_a: Option<String>,
-    pub rigid_body_b: Option<String>,
+    pub name: Symbol,
+    pub rigid_body_a: Option<Symbol>,
+    pub rigid_body_b: Option<Symbol>,
     pub point_a: [f64; 3],
     pub point_b: [f64; 3],
     pub strength: f64,
@@ -1630,9 +1637,9 @@ pub struct HavokLinearDashpot {
 }
 
 impl HavokLinearDashpot {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: Symbol) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             rigid_body_a: None,
             rigid_body_b: None,
             point_a: [0.0; 3],
@@ -1645,9 +1652,9 @@ impl HavokLinearDashpot {
 
 #[derive(Clone, Debug)]
 pub struct HavokAngularDashpot {
-    pub name: String,
-    pub rigid_body_a: Option<String>,
-    pub rigid_body_b: Option<String>,
+    pub name: Symbol,
+    pub rigid_body_a: Option<Symbol>,
+    pub rigid_body_b: Option<Symbol>,
     pub rotation_axis: [f64; 3],
     pub rotation_angle: f64,
     pub strength: f64,
@@ -1655,9 +1662,9 @@ pub struct HavokAngularDashpot {
 }
 
 impl HavokAngularDashpot {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: Symbol) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             rigid_body_a: None,
             rigid_body_b: None,
             rotation_axis: [0.0, 1.0, 0.0],
@@ -1670,19 +1677,19 @@ impl HavokAngularDashpot {
 
 #[derive(Clone, Debug)]
 pub struct HavokCollisionInterest {
-    pub rb_name1: String,
-    pub rb_name2: String,  // or "#all"
+    pub rb_name1: Symbol,
+    pub rb_name2: Symbol,  // or "#all"
     pub frequency: f64,
     pub threshold: f64,
-    pub handler_name: Option<String>,
+    pub handler_name: Option<Symbol>,
     pub script_instance: Option<crate::player::DatumRef>,
 }
 
 /// Collision contact info for the collisionList property
 #[derive(Clone, Debug)]
 pub struct HavokCollisionInfo {
-    pub body_a: String,
-    pub body_b: String,
+    pub body_a: Symbol,
+    pub body_b: Symbol,
     pub point: [f64; 3],
     pub normal: [f64; 3],
 }
@@ -1704,8 +1711,8 @@ pub struct HavokPhysicsState {
     pub linear_dashpots: Vec<HavokLinearDashpot>,
     pub angular_dashpots: Vec<HavokAngularDashpot>,
     pub collision_interests: Vec<HavokCollisionInterest>,
-    pub step_callbacks: Vec<(String, crate::player::DatumRef)>,  // (handler_name, script_instance)
-    pub disabled_collision_pairs: Vec<(String, String)>,
+    pub step_callbacks: Vec<(Symbol, crate::player::DatumRef)>,  // (handler_name, script_instance)
+    pub disabled_collision_pairs: Vec<(Symbol, Symbol)>,
     pub hke_data: Vec<u8>,
     /// Ground Z for native Havok ground constraint (flat plane fallback)
     pub ground_z: f64,
@@ -1831,7 +1838,7 @@ impl HavokPhysicsMember {
 #[derive(Debug, Clone)]
 pub struct PhysXRigidBody {
     pub id: u32,
-    pub name: String,
+    pub name: Symbol,
     pub model_name: String,
     pub body_type: PhysXBodyType,           // Static / Dynamic / Kinematic
     pub shape: PhysXShapeKind,              // box / sphere / convex / concave
@@ -1881,7 +1888,7 @@ pub struct PhysXRigidBody {
 impl Default for PhysXRigidBody {
     fn default() -> Self {
         Self {
-            id: 0, name: String::new(), model_name: String::new(),
+            id: 0, name: Symbol::default(), model_name: String::new(),
             body_type: PhysXBodyType::Dynamic,
             shape: PhysXShapeKind::Box,
             position: [0.0; 3], orientation: [1.0, 0.0, 0.0, 0.0],
@@ -1911,7 +1918,7 @@ pub enum PhysXShapeKind { Box, Sphere, Capsule, ConvexShape, ConcaveShape }
 #[derive(Debug, Clone)]
 pub struct PhysXConstraint {
     pub id: u32,
-    pub name: String,
+    pub name: Symbol,
     pub kind: PhysXConstraintKind,
     pub body_a: Option<u32>,                 // body id
     pub body_b: Option<u32>,
@@ -1930,7 +1937,7 @@ pub struct PhysXConstraint {
 impl Default for PhysXConstraint {
     fn default() -> Self {
         Self {
-            id: 0, name: String::new(),
+            id: 0, name: Symbol::default(),
             kind: PhysXConstraintKind::Spring,
             body_a: None, body_b: None,
             anchor_a: [0.0; 3], anchor_b: [0.0; 3],
@@ -1951,7 +1958,7 @@ pub enum PhysXConstraintKind { Spring, LinearJoint, AngularJoint, D6Joint }
 #[derive(Debug, Clone)]
 pub struct PhysXTerrain {
     pub id: u32,
-    pub name: String,
+    pub name: Symbol,
     pub height_field: crate::player::handlers::datum_handlers::cast_member::physx_gu_heightfield::GuHeightField,
     pub friction: f64,
     pub restitution: f64,
@@ -1996,13 +2003,13 @@ pub struct PhysXPhysicsState {
     pub all_collisions_disabled: bool,
     pub all_callbacks_disabled: bool,
     /// Body-name pairs where collision is filtered. Canonical (min, max) order.
-    pub disabled_collision_pairs: std::collections::HashSet<(String, String)>,
-    pub disabled_callback_pairs: std::collections::HashSet<(String, String)>,
+    pub disabled_collision_pairs: std::collections::HashSet<(Symbol, Symbol)>,
+    pub disabled_callback_pairs: std::collections::HashSet<(Symbol, Symbol)>,
     /// Single bodies whose collisions are globally disabled.
-    pub body_collision_disabled: std::collections::HashSet<String>,
-    pub body_callback_disabled: std::collections::HashSet<String>,
+    pub body_collision_disabled: std::collections::HashSet<Symbol>,
+    pub body_callback_disabled: std::collections::HashSet<Symbol>,
     /// `registerCollisionCallback(#handler, scriptRef)`.
-    pub collision_callback_handler: Option<String>,
+    pub collision_callback_handler: Option<Symbol>,
     pub collision_callback_script_ref: Option<crate::player::DatumRef>,
     /// Reports captured during the last Simulate(); drained by NotifyCollisions.
     /// Each entry: (bodyA_id, bodyB_id, contact_points, contact_normals).
@@ -3020,17 +3027,17 @@ impl CastMember {
         let mut scene = W3dScene::default();
         // Director always has a DefaultShader that cannot be deleted
         scene.shaders.push(W3dShader {
-            name: "DefaultShader".to_string(),
+            name: BuiltInSymbol::DefaultShader.into(),
             ..Default::default()
         });
         // Director always creates a DefaultView camera in empty 3D members
         scene.nodes.push(W3dNode {
-            name: "DefaultView".to_string(),
+            name: BuiltInSymbol::DefaultView.into(),
             node_type: W3dNodeType::View,
-            parent_name: "World".to_string(),
-            resource_name: String::new(),
-            model_resource_name: String::new(),
-            shader_name: String::new(),
+            parent_name: BuiltInSymbol::World.into(),
+            resource_name: Symbol::empty(),
+            model_resource_name: Symbol::empty(),
+            shader_name: Symbol::empty(),
             near_plane: 1.0,
             far_plane: 10000.0,
             fov: 34.516,
@@ -3040,7 +3047,7 @@ impl CastMember {
         });
         // Default ambient light
         scene.lights.push(W3dLight {
-            name: "DefaultAmbient".to_string(),
+            name: BuiltInSymbol::DefaultAmbient.into(),
             light_type: W3dLightType::Ambient,
             color: [0.3, 0.3, 0.3],
             enabled: true,
@@ -3049,7 +3056,7 @@ impl CastMember {
         });
         // Default directional light (IFX default: 0.75)
         scene.lights.push(W3dLight {
-            name: "DefaultDirectional".to_string(),
+            name: BuiltInSymbol::DefaultDirectional.into(),
             light_type: W3dLightType::Directional,
             color: [0.75, 0.75, 0.75],
             enabled: true,
@@ -3058,12 +3065,12 @@ impl CastMember {
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
-            name: "DefaultDirectional".to_string(),
+            name: BuiltInSymbol::DefaultDirectional.into(),
             node_type: W3dNodeType::Light,
-            parent_name: "World".to_string(),
-            resource_name: "DefaultDirectional".to_string(),
-            model_resource_name: String::new(),
-            shader_name: String::new(),
+            parent_name: BuiltInSymbol::World.into(),
+            resource_name: BuiltInSymbol::DefaultDirectional.into(),
+            model_resource_name: Symbol::empty(),
+            shader_name: Symbol::empty(),
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
             // Rotation: Z-axis points toward (0.5, 1.0, 0.7) normalized
@@ -3344,9 +3351,9 @@ impl CastMember {
                             debug!("W3D parsed: {} materials, {} nodes, {} meshes",
                                 scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len());
                             // Ensure DefaultShader exists
-                            if !scene.shaders.iter().any(|s| s.name == "DefaultShader") {
+                            if !scene.shaders.iter().any(|s| s.name == BuiltInSymbol::DefaultShader) {
                                 scene.shaders.push(crate::director::chunks::w3d::types::W3dShader {
-                                    name: "DefaultShader".to_string(),
+                                    name: BuiltInSymbol::DefaultShader.into(),
                                     ..Default::default()
                                 });
                             }
@@ -3433,7 +3440,7 @@ impl CastMember {
                     text_member.height = text_info.height as u16;
                 }
                 text_member.word_wrap = !text_info.dont_wrap;
-                text_member.box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+                text_member.box_type = text_info.box_type_symbol();
                 // Propagate anti_alias from the TextInfo so the text-image
                 // setter's alpha-threshold branch (which only fires when
                 // anti_alias=false) doesn't promote anti-aliased halo pixels
@@ -3554,18 +3561,12 @@ impl CastMember {
         stxt_font_size: Option<u16>,
         cast_lib: u32,
     ) -> CastMember {
-        use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
         debug!(
             "[XMED] Creating TextMember from XMED styled text (member #{})", number
         );
 
-        let alignment_str = match styled_text.alignment {
-            TextAlignment::Left => "left",
-            TextAlignment::Center => "center",
-            TextAlignment::Right => "right",
-            TextAlignment::Justify => "justify",
-        };
+        let alignment: BuiltInSymbol = styled_text.alignment.into();
 
         // Use the FIRST styled span's font face and font size — i.e. the
         // style covering text offset 0. This matches Paige's
@@ -3645,7 +3646,7 @@ impl CastMember {
 
         debug!(
             "[XMED]   text='{}', alignment={}, font='{}', size={}, spans={}, word_wrap={}",
-            styled_text.text, alignment_str, font_name, font_size, styled_text.styled_spans.len(),
+            styled_text.text, alignment, font_name, font_size, styled_text.styled_spans.len(),
             styled_text.word_wrap
         );
 
@@ -3849,7 +3850,7 @@ impl CastMember {
         text_info.width = box_w as u32;
         text_info.height = box_h as u32;
 
-        let box_type = text_info.box_type_str().trim_start_matches('#').to_string();
+        let box_type = text_info.box_type_symbol();
         let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
         // Member-level fontStyle list: derived from the first styled span's
@@ -3857,14 +3858,14 @@ impl CastMember {
         // getter (which returns [#italic] for member 35 etc.). The XMED parse
         // already applies Paige's gap2 -> bool conversion, so we just collect
         // the active span's flags here.
-        let member_font_style: Vec<String> = styled_text
+        let member_font_style: Vec<BuiltInSymbol> = styled_text
             .styled_spans
             .first()
             .map(|s| {
                 let mut v = Vec::new();
-                if s.style.bold      { v.push("bold".to_string()); }
-                if s.style.italic    { v.push("italic".to_string()); }
-                if s.style.underline { v.push("underline".to_string()); }
+                if s.style.bold      { v.push(BuiltInSymbol::Bold); }
+                if s.style.italic    { v.push(BuiltInSymbol::Italic); }
+                if s.style.underline { v.push(BuiltInSymbol::Underline); }
                 v
             })
             .unwrap_or_default();
@@ -3885,7 +3886,7 @@ impl CastMember {
             text: styled_text.text.clone(),
             html_source: String::new(),
             rtf_source: String::new(),
-            alignment: alignment_str.to_string(),
+            alignment,
             box_type,
             word_wrap,
             anti_alias: true,
@@ -3918,7 +3919,7 @@ impl CastMember {
             sel_start: 0,
             sel_end: 0,
             sel_anchor: 0,
-            anti_alias_type: "AutoAlias".to_string(),
+            anti_alias_type: BuiltInSymbol::AutoAlias,
             script_id: xmed_script_id,
             member_script_ref: xmed_member_script_ref,
         };
@@ -5054,13 +5055,13 @@ impl CastMember {
                         }
                         if first_run.style != 0 {
                             let mut styles = Vec::new();
-                            if (first_run.style & 0x01) != 0 { styles.push("bold"); }
-                            if (first_run.style & 0x02) != 0 { styles.push("italic"); }
-                            if (first_run.style & 0x04) != 0 { styles.push("underline"); }
+                            if (first_run.style & 0x01) != 0 { styles.push(BuiltInSymbol::Bold); }
+                            if (first_run.style & 0x02) != 0 { styles.push(BuiltInSymbol::Italic); }
+                            if (first_run.style & 0x04) != 0 { styles.push(BuiltInSymbol::Underline); }
                             if styles.is_empty() {
-                                field_member.font_style = "plain".to_string();
+                                field_member.font_style = BuiltInSymbol::Plain.to_string();
                             } else {
-                                field_member.font_style = styles.join(" ");
+                                field_member.font_style = styles.iter().map(|x| x.as_str()).collect_vec().join(" ");
                             }
                         }
                     }

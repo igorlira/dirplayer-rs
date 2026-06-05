@@ -4,7 +4,7 @@ use crate::{
     player::{
         datum_formatting::format_datum,
         datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
-        reserve_player_mut, HandlerExecutionResult, ScriptError,
+        reserve_player_mut, scope::StackDatum, HandlerExecutionResult, ScriptError,
     },
 };
 
@@ -15,40 +15,50 @@ pub struct ArithmeticsBytecodeHandler {}
 impl ArithmeticsBytecodeHandler {
     pub fn add(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let (left, right) = {
+            let (lv, rv) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
+                let right = scope.stack.pop_value().unwrap();
+                let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
-            let right = player.get_datum(&right);
-            let left = player.get_datum(&left);
-
-            let result_id = {
-                let result = add_datums(left.to_owned(), right.to_owned(), player)?;
-                player.alloc_datum(result)
-            };
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
+            // Inline int+int: no get_datum, no result alloc — push the sum
+            // back inline. Mirrors add_datums' Int/Int arm exactly.
+            if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
+                let sum = a + b;
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(sum);
+                return Ok(HandlerExecutionResult::Advance);
+            }
+            let right = rv.into_ref();
+            let left = lv.into_ref();
+            let right_d = player.get_datum(&right).to_owned();
+            let left_d = player.get_datum(&left).to_owned();
+            let result = add_datums(left_d, right_d, player)?;
+            let result_id = player.alloc_datum(result);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
     pub fn sub(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let (left, right) = {
+            let (lv, rv) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
+                let right = scope.stack.pop_value().unwrap();
+                let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
-            let right = player.get_datum(&right);
-            let left = player.get_datum(&left);
-
-            let result = subtract_datums(left.to_owned(), right.to_owned(), player)?;
+            if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
+                let diff = a.wrapping_sub(*b);
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(diff);
+                return Ok(HandlerExecutionResult::Advance);
+            }
+            let right = rv.into_ref();
+            let left = lv.into_ref();
+            let right_d = player.get_datum(&right).to_owned();
+            let left_d = player.get_datum(&left).to_owned();
+            let result = subtract_datums(left_d, right_d, player)?;
             let result_id = player.alloc_datum(result);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -156,32 +166,46 @@ impl ArithmeticsBytecodeHandler {
 
     pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let (left, right) = {
+            let (lv, rv) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
+                let right = scope.stack.pop_value().unwrap();
+                let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
+            if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
+                // Lingo coerces divisor 0 to 1 (matches divide_datums' Int/Int arm).
+                let d = if *b == 0 { 1 } else { *b };
+                let q = a / d;
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(q);
+                return Ok(HandlerExecutionResult::Advance);
+            }
+            let right = rv.into_ref();
+            let left = lv.into_ref();
             let result = divide_datums(left, right, player)?;
             let result_id = player.alloc_datum(result);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
     pub fn mul(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let (left_ref, right_ref) = {
+            let (lv, rv) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
+                let right = scope.stack.pop_value().unwrap();
+                let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
+            if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
+                let prod = a * b;
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(prod);
+                return Ok(HandlerExecutionResult::Advance);
+            }
+            let right_ref = rv.into_ref();
+            let left_ref = lv.into_ref();
             let result = multiply_datums(left_ref, right_ref, player)?;
             let result_id = player.alloc_datum(result);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }

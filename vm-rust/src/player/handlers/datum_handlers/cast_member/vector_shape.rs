@@ -1,14 +1,9 @@
 use std::collections::VecDeque;
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     player::{
-        bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef},
-        cast_lib::CastMemberRef,
-        cast_member::CastMemberType,
-        datum_ref::DatumRef,
-        sprite::ColorRef,
-        DirPlayer, ScriptError,
+        DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -24,15 +19,17 @@ impl VectorShapeMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
+        let prop = prop.into_builtin_or_error()?;
+
         // The .image getter rasterizes the polygon into a fresh ephemeral
         // bitmap and needs `&mut player.bitmap_manager`, which conflicts
         // with holding `&cast_member` from the cast manager. Handle .image
         // first by snapshotting all the values it needs, dropping the
         // borrow, and only then touching bitmap_manager. Other props read
         // directly from the cast member.
-        if prop.eq_ignore_ascii_case("image") {
+        if prop == BuiltInSymbol::Image {
             return Self::get_image(player, member_ref);
         }
 
@@ -49,7 +46,7 @@ impl VectorShapeMemberHandlers {
         // `vertexList` returns a list of prop-lists, which requires
         // `player.alloc_datum` calls — also a borrow conflict with
         // `cast_member`. Snapshot the data, drop the borrow, then build.
-        if prop.eq_ignore_ascii_case("vertexList") {
+        if prop == BuiltInSymbol::VertexList {
             // Director omits #handle1 / #handle2 keys for plain polygon
             // vertices (both handles == 0,0) and includes them only for
             // Bezier vertices. Verified against figure8 Slider Groove —
@@ -70,76 +67,77 @@ impl VectorShapeMemberHandlers {
             return Self::build_vertex_list(player, verts);
         }
 
-        match_ci!(prop, {
-            "width"           => Ok(Datum::Int(vs.width().ceil() as i32)),
-            "height"          => Ok(Datum::Int(vs.height().ceil() as i32)),
-            "rect"            => Ok(Datum::Rect(
+        match prop {
+            BuiltInSymbol::Width           => Ok(Datum::Int(vs.width().ceil() as i32)),
+            BuiltInSymbol::Height          => Ok(Datum::Int(vs.height().ceil() as i32)),
+            BuiltInSymbol::Rect            => Ok(Datum::Rect(
                                     [0.0, 0.0, vs.width().ceil() as f64, vs.height().ceil() as f64],
                                     0,
                                 )),
-            "strokeColor"     => {
+            BuiltInSymbol::StrokeColor     => {
                                     let (r, g, b) = vs.stroke_color;
                                     Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
                                 },
-            "strokeWidth"     => Ok(Datum::Float(vs.stroke_width as f64)),
-            "closed"          => Ok(datum_bool(vs.closed)),
-            "fillMode"        => {
+            BuiltInSymbol::StrokeWidth     => Ok(Datum::Float(vs.stroke_width as f64)),
+            BuiltInSymbol::Closed          => Ok(datum_bool(vs.closed)),
+            BuiltInSymbol::FillMode        => {
                                     let sym = match vs.fill_mode {
-                                        0 => "none",
-                                        1 => "solid",
-                                        2 => "gradient",
-                                        _ => "none",
+                                        0 => BuiltInSymbol::None,
+                                        1 => BuiltInSymbol::Solid,
+                                        2 => BuiltInSymbol::Gradient,
+                                        _ => BuiltInSymbol::None,
                                     };
-                                    Ok(Datum::Symbol(sym.to_string()))
+                                    Ok(Datum::Symbol(sym.into()))
                                 },
-            "fillColor"       => {
+            BuiltInSymbol::FillColor       => {
                                     let (r, g, b) = vs.fill_color;
                                     Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
                                 },
-            "backgroundColor" | "bgColor" => {
+            BuiltInSymbol::BackgroundColor | BuiltInSymbol::BgColor => {
                                     let (r, g, b) = vs.bg_color;
                                     Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
                                 },
-            "endColor"        => {
+            BuiltInSymbol::EndColor        => {
                                     let (r, g, b) = vs.end_color;
                                     Ok(Datum::ColorRef(ColorRef::Rgb(r, g, b)))
                                 },
-            "gradientType"    => Ok(Datum::Symbol(vs.gradient_type.clone())),
-            "fillScale"       => Ok(Datum::Float(vs.fill_scale as f64)),
-            "fillDirection"   => Ok(Datum::Float(vs.fill_direction as f64)),
-            "fillOffset"      => Ok(Datum::Point(
+            BuiltInSymbol::GradientType    => Ok(Datum::Symbol(vs.gradient_type.into())),
+            BuiltInSymbol::FillScale       => Ok(Datum::Float(vs.fill_scale as f64)),
+            BuiltInSymbol::FillDirection   => Ok(Datum::Float(vs.fill_direction as f64)),
+            BuiltInSymbol::FillOffset      => Ok(Datum::Point(
                                     [vs.fill_offset.0 as f64, vs.fill_offset.1 as f64],
                                     0,
                                 )),
-            "fillCycles"      => Ok(Datum::Int(vs.fill_cycles)),
-            "scaleMode"       => Ok(Datum::Symbol(vs.scale_mode.clone())),
-            "scale"           => Ok(Datum::Float(vs.scale as f64)),
-            "antialias"       => Ok(datum_bool(vs.antialias)),
-            "centerRegPoint"  => Ok(datum_bool(vs.center_reg_point)),
-            "regPointVertex"  => Ok(Datum::Int(vs.reg_point_vertex)),
-            "directToStage"   => Ok(datum_bool(vs.direct_to_stage)),
-            "originMode"      => Ok(Datum::Symbol(vs.origin_mode.clone())),
-            "originPoint"     => Ok(Datum::Point(
+            BuiltInSymbol::FillCycles      => Ok(Datum::Int(vs.fill_cycles)),
+            BuiltInSymbol::ScaleMode       => Ok(Datum::Symbol(vs.scale_mode.into())),
+            BuiltInSymbol::Scale           => Ok(Datum::Float(vs.scale as f64)),
+            BuiltInSymbol::Antialias       => Ok(datum_bool(vs.antialias)),
+            BuiltInSymbol::CenterRegPoint  => Ok(datum_bool(vs.center_reg_point)),
+            BuiltInSymbol::RegPointVertex  => Ok(Datum::Int(vs.reg_point_vertex)),
+            BuiltInSymbol::DirectToStage   => Ok(datum_bool(vs.direct_to_stage)),
+            BuiltInSymbol::OriginMode      => Ok(Datum::Symbol(vs.origin_mode.into())),
+            BuiltInSymbol::OriginPoint     => Ok(Datum::Point(
                                     [vs.reg_point.0 as f64, vs.reg_point.1 as f64],
                                     0,
                                 )),
             _ => Err(ScriptError::new(format!(
                 "VectorShape members don't support property {}", prop
             ))),
-        })
+        }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        let prop = prop.into_builtin_or_error()?;
         // `regPoint` writes both vs.reg_point AND the outer
         // cast_member.reg_point (so the generic `the regPoint of member`
         // getter sees it). Apply outer first to avoid the vs-borrow
         // overlap, then vs.
-        if prop.eq_ignore_ascii_case("regPoint") || prop.eq_ignore_ascii_case("originPoint") {
+        if prop == BuiltInSymbol::RegPoint || prop == BuiltInSymbol::OriginPoint {
             let (vals, _) = value.to_point_inline()?;
             let cast_member = player
                 .movie
@@ -164,11 +162,11 @@ impl VectorShapeMemberHandlers {
         // fill and the WFprev floor preview didn't update on color
         // picker changes. Resolve any PaletteIndex up-front (BEFORE the
         // mutable cast-member borrow) so both forms reach the setter.
-        let resolved_color_rgb: Option<(u8, u8, u8)> = if prop.eq_ignore_ascii_case("fillColor")
-            || prop.eq_ignore_ascii_case("endColor")
-            || prop.eq_ignore_ascii_case("bgColor")
-            || prop.eq_ignore_ascii_case("backgroundColor")
-            || prop.eq_ignore_ascii_case("strokeColor")
+        let resolved_color_rgb: Option<(u8, u8, u8)> = if prop == BuiltInSymbol::FillColor
+            || prop == BuiltInSymbol::EndColor
+            || prop == BuiltInSymbol::BgColor
+            || prop == BuiltInSymbol::BackgroundColor
+            || prop == BuiltInSymbol::StrokeColor
         {
             let cref = value.to_color_ref()?.to_owned();
             let rgb = match &cref {
@@ -199,73 +197,73 @@ impl VectorShapeMemberHandlers {
             _ => return Err(ScriptError::new("Expected VectorShape member".to_string())),
         };
 
-        match_ci!(prop, {
+        match prop {
             // ---- Colors ------------------------------------------------
-            "fillColor" => {
+            BuiltInSymbol::FillColor => {
                 if let Some(rgb) = resolved_color_rgb{ vs.fill_color = rgb; }
                 Ok(())
             },
-            "endColor" => {
+            BuiltInSymbol::EndColor => {
                 if let Some(rgb) = resolved_color_rgb{ vs.end_color = rgb; }
                 Ok(())
             },
-            "bgColor" | "backgroundColor" => {
+            BuiltInSymbol::BgColor | BuiltInSymbol::BackgroundColor => {
                 if let Some(rgb) = resolved_color_rgb{ vs.bg_color = rgb; }
                 Ok(())
             },
-            "strokeColor" => {
+            BuiltInSymbol::StrokeColor => {
                 if let Some(rgb) = resolved_color_rgb{ vs.stroke_color = rgb; }
                 Ok(())
             },
             // ---- Stroke / shape ---------------------------------------
-            "strokeWidth" => {
+            BuiltInSymbol::StrokeWidth => {
                 vs.stroke_width = value.to_float()? as f32;
                 Ok(())
             },
-            "closed" => {
+            BuiltInSymbol::Closed => {
                 vs.closed = value.int_value()? != 0;
                 Ok(())
             },
             // ---- Fill mode + gradient ---------------------------------
-            "fillMode" => {
+            BuiltInSymbol::FillMode => {
                 vs.fill_mode = parse_fill_mode(&value)?;
                 Ok(())
             },
-            "gradientType" => {
-                vs.gradient_type = symbol_or_string_lc(&value)?;
+            BuiltInSymbol::GradientType => {
+                vs.gradient_type = value.symbol_value()?.into_builtin_or_error()?;
                 Ok(())
             },
-            "fillScale" => {
+            BuiltInSymbol::FillScale => {
                 vs.fill_scale = value.to_float()? as f32;
                 Ok(())
             },
-            "fillDirection" => {
+            BuiltInSymbol::FillDirection => {
                 vs.fill_direction = value.to_float()? as f32;
                 Ok(())
             },
-            "fillOffset" => {
+            BuiltInSymbol::FillOffset => {
                 let (vals, _) = value.to_point_inline()?;
                 vs.fill_offset = (vals[0] as i32, vals[1] as i32);
                 Ok(())
             },
-            "fillCycles" => {
+            BuiltInSymbol::FillCycles => {
                 vs.fill_cycles = value.int_value()?;
                 Ok(())
             },
             // ---- Display / scale / origin -----------------------------
-            "scaleMode" => {
-                vs.scale_mode = symbol_or_string_lc(&value)?;
+            BuiltInSymbol::ScaleMode => {
+                vs.scale_mode = value.symbol_value()?.into_builtin_or_error()?;
                 Ok(())
             },
-            "scale" => {
+            BuiltInSymbol::Scale => {
                 vs.scale = value.to_float()? as f32;
                 Ok(())
             },
-            "antialias" => {
+            BuiltInSymbol::Antialias => {
                 vs.antialias = value.int_value()? != 0;
                 Ok(())
             },
-            "centerRegPoint" => {
+            BuiltInSymbol::CenterRegPoint => {
                 let v = value.int_value()? != 0;
                 vs.center_reg_point = v;
                 // Director treats centerRegPoint and originMode=#point as
@@ -273,21 +271,21 @@ impl VectorShapeMemberHandlers {
                 // back to #center. (The reverse — originMode=#point clearing
                 // centerRegPoint — is handled in the originMode arm.)
                 if v {
-                    vs.origin_mode = "center".to_string();
+                    vs.origin_mode = BuiltInSymbol::Center;
                 }
                 Ok(())
             },
-            "regPointVertex" => {
+            BuiltInSymbol::RegPointVertex => {
                 vs.reg_point_vertex = value.int_value()?;
                 Ok(())
             },
-            "directToStage" => {
+            BuiltInSymbol::DirectToStage => {
                 vs.direct_to_stage = value.int_value()? != 0;
                 Ok(())
             },
-            "originMode" => {
-                let s = symbol_or_string_lc(&value)?;
-                if s.eq_ignore_ascii_case("point") {
+            BuiltInSymbol::OriginMode => {
+                let s = value.symbol_value()?.into_builtin_or_error()?;
+                if s == BuiltInSymbol::Point {
                     vs.center_reg_point = false;
                 }
                 vs.origin_mode = s;
@@ -296,7 +294,7 @@ impl VectorShapeMemberHandlers {
             _ => Err(ScriptError::new(format!(
                 "Cannot set VectorShape prop {}", prop
             ))),
-        })
+        }
     }
 
     /// Allocate the `[[#vertex: point(x,y), ...], ...]` Lingo list for
@@ -309,15 +307,15 @@ impl VectorShapeMemberHandlers {
         let list: VecDeque<DatumRef> = verts
             .iter()
             .map(|(vx, vy, h1x, h1y, h2x, h2y, is_bezier)| {
-                let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
+                let vertex_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Vertex.into()));
                 let vertex_val =
                     player.alloc_datum(Datum::Point([*vx as f64, *vy as f64], 0));
                 let mut entries = vec![(vertex_key, vertex_val)];
                 if *is_bezier {
-                    let h1_key = player.alloc_datum(Datum::Symbol("handle1".to_string()));
+                    let h1_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Handle1.into()));
                     let h1_val =
                         player.alloc_datum(Datum::Point([*h1x as f64, *h1y as f64], 0));
-                    let h2_key = player.alloc_datum(Datum::Symbol("handle2".to_string()));
+                    let h2_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Handle2.into()));
                     let h2_val =
                         player.alloc_datum(Datum::Point([*h2x as f64, *h2y as f64], 0));
                     entries.push((h1_key, h1_val));
@@ -449,7 +447,7 @@ impl VectorShapeMemberHandlers {
         //    a circular radial gradient it's a no-op; only relevant once
         //    we add elliptical/rotated gradients.
         let is_gradient = fill_mode == 2;
-        let is_radial = is_gradient && gradient_type.eq_ignore_ascii_case("radial");
+        let is_radial = is_gradient && gradient_type == BuiltInSymbol::Radial;
         let bh_minus_1 = (bh as f32 - 1.0).max(1.0);
         let radial_origin = (
             bw as f32 / 2.0 + fill_offset.0 as f32,
@@ -519,24 +517,14 @@ impl VectorShapeMemberHandlers {
 /// or a 0/1/2 integer. Map to the FLSH-stored u32 enum (offset 0x84).
 fn parse_fill_mode(value: &Datum) -> Result<u32, ScriptError> {
     if let Datum::Symbol(s) = value {
-        Ok(match_ci!(s.as_str(), {
-            "none"     => 0u32,
-            "solid"    => 1u32,
-            "gradient" => 2u32,
+        let symbol = s.into_builtin_or_error()?;
+        Ok(match symbol {
+            BuiltInSymbol::None => 0u32,
+            BuiltInSymbol::Solid => 1u32,
+            BuiltInSymbol::Gradient => 2u32,
             _ => return Err(ScriptError::new(format!("invalid fillMode {}", s))),
-        }))
+        })
     } else {
         Ok(value.int_value()? as u32)
     }
-}
-
-/// Pull a string out of a Datum::Symbol or generic value, lowercase-normalized
-/// — used by `gradientType`/`scaleMode`/`originMode` setters where Lingo
-/// callers pass `#linear`, `"linear"`, `#Linear`, etc. interchangeably.
-fn symbol_or_string_lc(value: &Datum) -> Result<String, ScriptError> {
-    Ok(if let Datum::Symbol(s) = value {
-        s.to_ascii_lowercase()
-    } else {
-        value.string_value()?.to_ascii_lowercase()
-    })
 }

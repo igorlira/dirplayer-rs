@@ -3,7 +3,7 @@ use itertools::Itertools;
 use log::{debug, warn};
 
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         bitmap::bitmap::{get_system_default_palette, Bitmap, BuiltInPalette, PaletteRef},
@@ -14,6 +14,7 @@ use crate::{
         geometry::IntRect,
         reserve_player_mut, reserve_player_ref,
         sprite::{ColorRef, CursorRef},
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
         xtra::manager::{create_xtra_instance_async, is_xtra_registered},
         DatumRef, DirPlayer, MathObject, ScriptError, XmlDocument,
     },
@@ -34,51 +35,51 @@ pub struct TypeHandlers {}
 pub struct TypeUtils {}
 
 impl TypeUtils {
-    pub fn get_datum_ilks(datum: &Datum) -> Result<Vec<&str>, ScriptError> {
+    pub fn get_datum_ilks(datum: &Datum) -> Result<Vec<BuiltInSymbol>, ScriptError> {
         match datum {
-            Datum::List(..) => Ok(vec!["list", "linearlist"]),
-            Datum::Int(..) => Ok(vec!["integer"]),
-            Datum::Float(..) => Ok(vec!["float"]),
-            Datum::String(..) => Ok(vec!["string"]),
-            Datum::Symbol(..) => Ok(vec!["symbol"]),
-            Datum::Void | Datum::Null => Ok(vec!["void"]),
-            Datum::PropList(..) => Ok(vec!["proplist", "list"]),
-            Datum::ScriptInstanceRef(..) => Ok(vec!["instance"]),
-            Datum::ScriptRef(..) => Ok(vec!["script"]),
+            Datum::List(..) => Ok(vec![BuiltInSymbol::List, BuiltInSymbol::LinearList]),
+            Datum::Int(..) => Ok(vec![BuiltInSymbol::Integer]),
+            Datum::Float(..) => Ok(vec![BuiltInSymbol::Float]),
+            Datum::String(..) => Ok(vec![BuiltInSymbol::String]),
+            Datum::Symbol(..) => Ok(vec![BuiltInSymbol::Symbol]),
+            Datum::Void | Datum::Null => Ok(vec![BuiltInSymbol::Void]),
+            Datum::PropList(..) => Ok(vec![BuiltInSymbol::PropList, BuiltInSymbol::List]),
+            Datum::ScriptInstanceRef(..) => Ok(vec![BuiltInSymbol::Instance]),
+            Datum::ScriptRef(..) => Ok(vec![BuiltInSymbol::Script]),
             Datum::CastMember(member_ref) => Ok(vec![if member_ref.is_valid() {
-                "member"
+                BuiltInSymbol::Member
             } else {
-                "void"
+                BuiltInSymbol::Void
             }]),
-            Datum::ColorRef(..) => Ok(vec!["color"]),
-            Datum::TimeoutRef(..) => Ok(vec!["timeout"]),
-            Datum::TimeoutFactory => Ok(vec!["timeout"]),
-            Datum::TimeoutInstance { .. } => Ok(vec!["timeout"]),
-            Datum::BitmapRef(..) => Ok(vec!["image"]),
-            Datum::Rect(..) => Ok(vec!["rect"]),
-            Datum::Point(..) => Ok(vec!["point"]),
-            Datum::SpriteRef(..) => Ok(vec!["sprite"]),
-            Datum::PaletteRef(..) => Ok(vec!["palette"]),
-            Datum::Vector(..) => Ok(vec!["vector"]),
-            Datum::StringChunk(..) => Ok(vec!["string"]),
-            Datum::CastLib(..) => Ok(vec!["castlib"]),
-            Datum::Stage => Ok(vec!["stage"]),
-            Datum::SoundChannel(..) => Ok(vec!["instance"]),
-            Datum::SoundRef(..) => Ok(vec!["sound"]),
-            Datum::CursorRef(..) => Ok(vec!["cursor"]),
-            Datum::Xtra(..) => Ok(vec!["xtra"]),
-            Datum::XtraInstance(..) => Ok(vec!["instance"]),
-            Datum::Matte(..) => Ok(vec!["image"]),
-            Datum::PlayerRef => Ok(vec!["player"]),
-            Datum::MovieRef => Ok(vec!["movie"]),
-            Datum::MouseRef => Ok(vec!["mouse"]),
-            Datum::XmlRef(..) => Ok(vec!["xml"]),
-            Datum::DateRef(..) => Ok(vec!["date"]),
-            Datum::MathRef(..) => Ok(vec!["math"]),
-            Datum::VarRef(..) => Ok(vec!["void"]), // VarRef should be dereferenced before checking ilk
-            Datum::FlashObjectRef(..) => Ok(vec!["instance"]),
-            Datum::Shockwave3dObjectRef(r) => Ok(vec![&r.object_type]),
-            Datum::Transform3d(..) => Ok(vec!["transform"]),
+            Datum::ColorRef(..) => Ok(vec![BuiltInSymbol::Color]),
+            Datum::TimeoutRef(..) => Ok(vec![BuiltInSymbol::Timeout]),
+            Datum::TimeoutFactory => Ok(vec![BuiltInSymbol::Timeout]),
+            Datum::TimeoutInstance { .. } => Ok(vec![BuiltInSymbol::Timeout]),
+            Datum::BitmapRef(..) => Ok(vec![BuiltInSymbol::Image]),
+            Datum::Rect(..) => Ok(vec![BuiltInSymbol::Rect]),
+            Datum::Point(..) => Ok(vec![BuiltInSymbol::Point]),
+            Datum::SpriteRef(..) => Ok(vec![BuiltInSymbol::Sprite]),
+            Datum::PaletteRef(..) => Ok(vec![BuiltInSymbol::Palette]),
+            Datum::Vector(..) => Ok(vec![BuiltInSymbol::Vector]),
+            Datum::StringChunk(..) => Ok(vec![BuiltInSymbol::String]),
+            Datum::CastLib(..) => Ok(vec![BuiltInSymbol::CastLib]),
+            Datum::Stage => Ok(vec![BuiltInSymbol::Stage]),
+            Datum::SoundChannel(..) => Ok(vec![BuiltInSymbol::Instance]),
+            Datum::SoundRef(..) => Ok(vec![BuiltInSymbol::Sound]),
+            Datum::CursorRef(..) => Ok(vec![BuiltInSymbol::Cursor]),
+            Datum::Xtra(..) => Ok(vec![BuiltInSymbol::Xtra]),
+            Datum::XtraInstance(..) => Ok(vec![BuiltInSymbol::Instance]),
+            Datum::Matte(..) => Ok(vec![BuiltInSymbol::Image]),
+            Datum::PlayerRef => Ok(vec![BuiltInSymbol::Player]),
+            Datum::MovieRef => Ok(vec![BuiltInSymbol::Movie]),
+            Datum::MouseRef => Ok(vec![BuiltInSymbol::Mouse]),
+            Datum::XmlRef(..) => Ok(vec![BuiltInSymbol::Xml]),
+            Datum::DateRef(..) => Ok(vec![BuiltInSymbol::Date]),
+            Datum::MathRef(..) => Ok(vec![BuiltInSymbol::Math]),
+            Datum::VarRef(..) => Ok(vec![BuiltInSymbol::Void]), // VarRef should be dereferenced before checking ilk
+            Datum::FlashObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
+            Datum::Shockwave3dObjectRef(r) => Ok(vec![r.object_type]),
+            Datum::Transform3d(..) => Ok(vec![BuiltInSymbol::Transform]),
 
             _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
@@ -87,14 +88,14 @@ impl TypeUtils {
         }
     }
 
-    pub fn get_datum_ilk(datum: &Datum) -> Result<&str, ScriptError> {
-        Ok(Self::get_datum_ilks(datum)?.get(0).unwrap())
+    pub fn get_datum_ilk(datum: &Datum) -> Result<BuiltInSymbol, ScriptError> {
+        Ok(*Self::get_datum_ilks(datum)?.get(0).unwrap())
     }
 
-    fn is_datum_ilk(datum: &Datum, ilk: &str) -> Result<bool, ScriptError> {
+    fn is_datum_ilk(datum: &Datum, ilk: Symbol) -> Result<bool, ScriptError> {
         Ok(Self::get_datum_ilks(datum)?
             .iter()
-            .any(|x| x.eq_ignore_ascii_case(ilk)))
+            .any(|x| Symbol::builtin(*x) == ilk))
     }
 
     pub fn get_sub_prop(
@@ -162,25 +163,25 @@ impl TypeUtils {
 
                     if zero_based_index < property_names.len() {
                         let prop_name = &property_names[zero_based_index];
-                        if let Some(prop_ref) = instance.properties.get(CiStr::new(prop_name)) {
+                        if let Some(prop_ref) = instance.properties.get(&Symbol::from_str(prop_name)) {
                             return Ok(prop_ref.clone());
                         }
                     }
                     return Ok(DatumRef::Void);
                 }
 
-                // String key
-                if let Ok(prop_name) = prop_key.string_value() {
+                // Symbol key
+                if let Datum::Symbol(prop_name) = prop_key {
                     let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(CiStr::new(&prop_name)) {
+                    if let Some(prop_ref) = instance.properties.get(prop_name) {
                         return Ok(prop_ref.clone());
                     }
                 }
 
-                // Symbol key
-                if let Datum::Symbol(prop_name) = prop_key {
+                // String key
+                if let Ok(prop_name) = prop_key.string_value() {
                     let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(CiStr::new(prop_name)) {
+                    if let Some(prop_ref) = instance.properties.get(&Symbol::from_str(&prop_name)) {
                         return Ok(prop_ref.clone());
                     }
                 }
@@ -487,10 +488,13 @@ impl TypeHandlers {
             let ilk_type = args.get(1).map(|d| player.get_datum(d));
 
             let result_datum = if let Some(query) = ilk_type {
-                let query = query.string_value()?;
-                datum_bool(TypeUtils::is_datum_ilk(&obj, &query)?)
+                let query = match query {
+                    Datum::Symbol(s) => *s,
+                    _ => Symbol::from_str(&query.string_value()?)
+                };
+                datum_bool(TypeUtils::is_datum_ilk(&obj, query)?)
             } else {
-                Datum::Symbol(TypeUtils::get_datum_ilk(&obj)?.to_string())
+                Datum::Symbol(Symbol::builtin(TypeUtils::get_datum_ilk(&obj)?))
             };
             Ok(player.alloc_datum(result_datum))
         })
@@ -665,17 +669,17 @@ impl TypeHandlers {
             let result = if let Datum::Symbol(_) = symbol_name {
                 symbol_name.clone()
             } else if let Datum::Void = symbol_name {
-                Datum::Symbol("void".to_string())
+                Datum::Symbol(Symbol::builtin(BuiltInSymbol::Void))
             } else if symbol_name.is_string() {
                 let str_value = symbol_name.string_value()?;
                 // Director's symbol() trims whitespace from the input string
                 let trimmed = str_value.trim();
                 if trimmed.is_empty() {
-                    Datum::Symbol("".to_string())
+                    Datum::Symbol(Symbol::builtin(BuiltInSymbol::EmptyString))
                 } else if trimmed.starts_with("#") {
-                    Datum::Symbol(trimmed[1..].to_string())
+                    Datum::Symbol(Symbol::from_str(&trimmed[1..]))
                 } else {
-                    Datum::Symbol(trimmed.to_string())
+                    Datum::Symbol(Symbol::from_str(trimmed))
                 }
             } else {
                 return Err(ScriptError::new(format!(
@@ -829,7 +833,7 @@ impl TypeHandlers {
             }),
             DatumType::ScriptRef => {
                 Ok(
-                    player_call_datum_handler(&args[0], &"new".to_owned(), &args[1..].to_vec())
+                    player_call_datum_handler(&args[0], Symbol::builtin(BuiltInSymbol::New), &args[1..].to_vec())
                         .await?,
                 )
             }
@@ -928,8 +932,8 @@ impl TypeHandlers {
             let mut props: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
 
             // Insert #filterType first.
-            let key_type = player.alloc_datum(Datum::Symbol("filterType".to_string()));
-            let val_type = player.alloc_datum(Datum::Symbol(kind_sym));
+            let key_type = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FilterType)));
+            let val_type = player.alloc_datum(Datum::Symbol(Symbol::from_str(&kind_sym)));
             props.push_back((key_type, val_type));
 
             if args.len() > 1 {
@@ -1107,7 +1111,7 @@ impl TypeHandlers {
                     DatumType::Symbol => {
                         palette_ref = match arg3 {
                             Datum::Symbol(s) => {
-                                PaletteRef::BuiltIn(BuiltInPalette::from_symbol_string(s).unwrap())
+                                PaletteRef::BuiltIn(BuiltInPalette::from_symbol(*s).unwrap())
                             }
                             _ => {
                                 return Err(ScriptError::new(format!(
@@ -1268,7 +1272,7 @@ impl TypeHandlers {
         reserve_player_mut(|player| {
             // transform() with no args returns identity matrix
             if args.is_empty() {
-                return Ok(player.alloc_datum(Datum::Transform3d([
+                return Ok(player.alloc_datum(Datum::transform3d([
                     1.0, 0.0, 0.0, 0.0,
                     0.0, 1.0, 0.0, 0.0,
                     0.0, 0.0, 1.0, 0.0,
@@ -1315,15 +1319,15 @@ impl TypeHandlers {
                     // color(#rgb, "RRGGBB") or color(#paletteIndex, index)
                     let first = player.get_datum(&args[0]);
                     if let Datum::Symbol(sym) = first {
-                        match sym.to_lowercase().as_str() {
-                            "rgb" => {
+                        match sym.into_builtin_or_error()? {
+                            BuiltInSymbol::Rgb => {
                                 let hex_str = player.get_datum(&args[1]).string_value()?.replace("#", "");
                                 let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap_or(0);
                                 let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap_or(0);
                                 let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap_or(0);
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                             }
-                            "paletteindex" => {
+                            BuiltInSymbol::PaletteIndex => {
                                 let index = player.get_datum(&args[1]).int_value()? as u8;
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                             }
@@ -1629,7 +1633,7 @@ impl TypeHandlers {
             // Command form: sound(#verb, channelNum, ...args)
             // e.g. sound #stop, 3  or  sound #play, 1, member("snd")
             if let Datum::Symbol(verb) = &first_arg {
-                let verb = verb.to_lowercase();
+                let verb = *verb;
                 let channel_num = if args.len() > 1 {
                     player.get_datum(&args[1]).int_value()? as u16
                 } else {
@@ -1643,7 +1647,7 @@ impl TypeHandlers {
                 }
                 let channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num));
                 let remaining_args: Vec<DatumRef> = args[2..].to_vec();
-                SoundChannelDatumHandlers::call(player, &channel_datum, &verb, &remaining_args)
+                SoundChannelDatumHandlers::call(player, &channel_datum, verb, &remaining_args)
             } else {
                 // Function form: sound(channelNum) - returns a SoundChannel datum
                 let channel_num = first_arg.int_value()? as u16;
@@ -1678,7 +1682,7 @@ impl TypeHandlers {
         //   -> current receiver is A, but we need B's ancestor (C)
         //   -> We look at the scope's script_ref to find B, then get B's ancestor
         let (ancestor_list, original_me_list, instance_datum_refs, handler_name, extra_args) = reserve_player_mut(|player| {
-            let handler_name = player.get_datum(&args[0]).string_value()?;
+            let handler_name = player.get_datum(&args[0]).symbol_value()?;
 
             // Get the current scope's script_ref to determine which script we're currently in
             let current_scope_ref = player.current_scope_ref();
@@ -1761,7 +1765,7 @@ impl TypeHandlers {
                     let walk_instance = player.allocator.get_script_instance(&walk_ref);
                     let script = player.movie.cast_manager.get_script_by_ref(&walk_instance.script);
                     if let Some(script) = script {
-                        if let Some(handler_ref) = script.get_own_handler_ref(&handler_name) {
+                        if let Some(handler_ref) = script.get_own_handler_ref(handler_name) {
                             return Some((handler_ref, walk_ref.clone()));
                         }
                     }

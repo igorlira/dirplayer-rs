@@ -3,6 +3,7 @@ use crate::{
     player::{
         reserve_player_mut, reserve_player_ref, DatumRef,
         ScriptError, ScriptErrorCode,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 use super::super::types::TypeHandlers;
@@ -10,10 +11,10 @@ use super::super::types::TypeHandlers;
 pub struct PlayerDatumHandlers {}
 
 impl PlayerDatumHandlers {
-    pub fn call(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "count" => Self::count(args),
-            "cursor" => TypeHandlers::cursor(args),
+    pub fn call(handler_name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::Count => Self::count(args),
+            BuiltInSymbol::Cursor => TypeHandlers::cursor(args),
             _ => reserve_player_ref(|player| {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,

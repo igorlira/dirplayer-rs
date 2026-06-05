@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        reserve_player_mut, reserve_player_ref, timeout::Timeout, DatumRef, DirPlayer, ScriptError,
+        DatumRef, DirPlayer, ScriptError, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol}, timeout::Timeout
     },
 };
 
@@ -11,12 +11,12 @@ impl TimeoutDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "forget" => Self::forget(datum, args),
-            "setAt" => Self::set_at(datum, args),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Forget) => Self::forget(datum, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for timeout"
             ))),
@@ -27,9 +27,9 @@ impl TimeoutDatumHandlers {
         // TimeoutInstance needs to support setAt for #ancestor to work with Object Manager
         // We silently ignore ancestor setting since timeouts don't use ancestor chains
         reserve_player_ref(|player| {
-            let key = player.get_datum(&args[0]).string_value()?;
-            match key.as_str() {
-                "ancestor" => {
+            let key = player.get_datum(&args[0]).symbol_value()?;
+            match key.into_builtin() {
+                Some(BuiltInSymbol::Ancestor) => {
                     // Silently accept but ignore - timeouts don't use ancestor chains
                     Ok(DatumRef::Void)
                 }
@@ -40,21 +40,18 @@ impl TimeoutDatumHandlers {
         })
     }
 
-    pub fn has_async_handler(name: &str) -> bool {
-        match name {
-            "new" => true,
-            _ => false,
-        }
+    pub fn has_async_handler(name: Symbol) -> bool {
+        matches!(name.into_builtin(), Some(BuiltInSymbol::New))
     }
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "new" => Self::new(datum, args).await,
-            "forget" => Self::forget_async(datum).await,
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::New) => Self::new(datum, args).await,
+            Some(BuiltInSymbol::Forget) => Self::forget_async(datum).await,
             _ => Err(ScriptError::new(format!(
                 "No async handler {handler_name} for timeout"
             ))),
@@ -161,13 +158,13 @@ impl TimeoutDatumHandlers {
                     // Wrap the script instance in a TimeoutInstance so that timeout operations
                     // like forget() work correctly
                     return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::TimeoutInstance {
-                            name: timeout_name,
-                            duration: 0, // Script-based timeouts manage their own duration
-                            callback: DatumRef::Void,
-                            target: DatumRef::Void,
-                            script_instance: Some(script_instance),
-                        }))
+                        Ok(player.alloc_datum(Datum::timeout_instance(
+                            timeout_name,
+                            0, // Script-based timeouts manage their own duration
+                            DatumRef::Void,
+                            DatumRef::Void,
+                            Some(script_instance),
+                        )))
                     });
                 }
             }
@@ -181,8 +178,8 @@ impl TimeoutDatumHandlers {
 
         let timeout_handler = reserve_player_ref(|player| {
             match player.get_datum(&args[handler_arg]) {
-                Datum::String(s) => Ok(s.clone()),
-                Datum::Symbol(s) => Ok(s.clone()),
+                Datum::String(s) => Ok(Symbol::from_str(s)),
+                Datum::Symbol(s) => Ok(*s),
                 _ => Err(ScriptError::new(
                     "Timeout handler must be a string or symbol".to_string(),
                 )),
@@ -210,13 +207,13 @@ impl TimeoutDatumHandlers {
             player.timeout_manager.add_timeout(timeout);
             
             // Return a TimeoutInstance
-            Ok(player.alloc_datum(Datum::TimeoutInstance {
-                name: timeout_name,
-                duration: timeout_period,
-                callback: args[handler_arg].clone(),
-                target: target_ref,
-                script_instance: None,
-            }))
+            Ok(player.alloc_datum(Datum::timeout_instance(
+                timeout_name,
+                timeout_period,
+                args[handler_arg].clone(),
+                target_ref,
+                None,
+            )))
         })
     }
 
@@ -224,7 +221,7 @@ impl TimeoutDatumHandlers {
         reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(datum);
             match timeout_datum {
-                Datum::TimeoutInstance { script_instance: Some(_), .. } => true,
+                Datum::TimeoutInstance(ti) => ti.script_instance.is_some(),
                 _ => false,
             }
         })
@@ -235,7 +232,7 @@ impl TimeoutDatumHandlers {
         let script_instance_ref = reserve_player_ref(|player| {
             let timeout_datum = player.get_datum(datum);
             match timeout_datum {
-                Datum::TimeoutInstance { script_instance: Some(si), .. } => Some(si.clone()),
+                Datum::TimeoutInstance(ti) => ti.script_instance.clone(),
                 _ => None,
             }
         });
@@ -243,10 +240,10 @@ impl TimeoutDatumHandlers {
         if let Some(script_instance_ref) = script_instance_ref {
             // Call the script's destroy() handler to remove it from actorList
             use super::script_instance::ScriptInstanceDatumHandlers;
-            if ScriptInstanceDatumHandlers::has_async_handler(&script_instance_ref, &"destroy".to_string())? {
+            if ScriptInstanceDatumHandlers::has_async_handler(&script_instance_ref, Symbol::builtin(BuiltInSymbol::Destroy))? {
                 let _ = ScriptInstanceDatumHandlers::call_async(
                     &script_instance_ref,
-                    &"destroy".to_string(),
+                    Symbol::builtin(BuiltInSymbol::Destroy),
                     &vec![],
                 ).await;
             }
@@ -258,7 +255,7 @@ impl TimeoutDatumHandlers {
                 let timeout_ref = player.get_datum(datum);
                 match timeout_ref {
                     Datum::TimeoutRef(timeout_name) => Some(timeout_name.to_owned()),
-                    Datum::TimeoutInstance { name, .. } => Some(name.to_owned()),
+                    Datum::TimeoutInstance(ti) => Some(ti.name.to_owned()),
                     _ => None,
                 }
             };
@@ -275,7 +272,7 @@ impl TimeoutDatumHandlers {
                 let timeout_ref = player.get_datum(datum);
                 match timeout_ref {
                     Datum::TimeoutRef(timeout_name) => Ok(timeout_name.to_owned()),
-                    Datum::TimeoutInstance { name, .. } => Ok(name.to_owned()),
+                    Datum::TimeoutInstance(ti) => Ok(ti.name.to_owned()),
                     _ => Err(ScriptError::new("Cannot forget non-timeout".to_string())),
                 }?
             };
@@ -287,13 +284,13 @@ impl TimeoutDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let timeout_datum = player.get_datum(datum);
         match timeout_datum {
             Datum::TimeoutRef(timeout_name) => {
                 let timeout = player.timeout_manager.get_timeout(timeout_name);
-                match prop {
+                match prop.as_str() {
                     "name" => Ok(player.alloc_datum(Datum::String(timeout_name.to_owned()))),
                     "target" => Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone())),
                     _ => Err(ScriptError::new(format!(
@@ -302,10 +299,10 @@ impl TimeoutDatumHandlers {
                     ))),
                 }
             }
-            Datum::TimeoutInstance { name, target, .. } => {
-                match prop {
-                    "name" => Ok(player.alloc_datum(Datum::String(name.to_owned()))),
-                    "target" => Ok(target.clone()),
+            Datum::TimeoutInstance(ti) => {
+                match prop.as_str() {
+                    "name" => Ok(player.alloc_datum(Datum::String(ti.name.to_owned()))),
+                    "target" => Ok(ti.target.clone()),
                     _ => Err(ScriptError::new(format!(
                         "Cannot get timeout property {}",
                         prop
@@ -321,21 +318,21 @@ impl TimeoutDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let timeout_datum = player.get_datum(datum);
         let timeout_name = match timeout_datum {
             Datum::TimeoutRef(timeout_name) => timeout_name.clone(),
-            Datum::TimeoutInstance { name, .. } => name.clone(),
+            Datum::TimeoutInstance(ti) => ti.name.clone(),
             _ => return Err(ScriptError::new(
                 "Cannot set prop of non-timeout".to_string(),
             )),
         };
         
         let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
-        match prop {
-            "target" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Target) => {
                 let new_target = value;
                 if let Some(timeout) = timeout {
                     timeout.target_ref = new_target.clone();
@@ -348,7 +345,7 @@ impl TimeoutDatumHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set timeout property {}",
-                prop
+                prop.to_string()
             ))),
         }
     }

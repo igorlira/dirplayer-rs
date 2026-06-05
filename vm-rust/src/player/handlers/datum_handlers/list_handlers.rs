@@ -3,6 +3,9 @@ use std::collections::VecDeque;
 use log::debug;
 
 use crate::player::datum_formatting::format_concrete_datum;
+use crate::player::symbols::builtin::BuiltInSymbol;
+use crate::player::symbols::symbol::Symbol;
+use crate::symbol_match;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{
@@ -42,13 +45,13 @@ impl ListDatumUtils {
 
     pub fn get_prop(
         list_vec: &VecDeque<DatumRef>,
-        prop_name: &str,
+        prop_name: Symbol,
         _datums: &DatumAllocator,
     ) -> Result<Datum, ScriptError> {
-        match prop_name {
-            "count" => Ok(Datum::Int(list_vec.len() as i32)),
-            "length" => Ok(Datum::Int(list_vec.len() as i32)),
-            "ilk" => Ok(Datum::Symbol("list".to_string())),
+        match prop_name.into_builtin_or_error()? {
+            BuiltInSymbol::Count => Ok(Datum::Int(list_vec.len() as i32)),
+            BuiltInSymbol::Length => Ok(Datum::Int(list_vec.len() as i32)),
+            BuiltInSymbol::Ilk => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::List))),
             _ => Err(ScriptError::new(format!(
                 "No property {prop_name} for list datum"
             ))),
@@ -60,7 +63,7 @@ impl ListDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop_name: &str,
+        prop_name: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         // Director: every datum has a `string` property returning its
         // textual representation. For lists this is the bracketed literal
@@ -69,7 +72,7 @@ impl ListDatumHandlers {
         // `appearanceToString` (MovieScript 2 global events line 299) that
         // do `inList.string` then strip `[`, `]`, spaces to serialise an
         // appearance list into a flat custom-delimited string.
-        if prop_name.eq_ignore_ascii_case("string") {
+        if prop_name.as_str().eq_ignore_ascii_case("string") {
             let datum_clone = player.get_datum(datum_ref).clone();
             let s = format_concrete_datum(&datum_clone, player);
             return Ok(player.alloc_datum(Datum::String(s)));
@@ -134,44 +137,44 @@ impl ListDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "count" => Self::count(datum, args),
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
-            "sort" => Self::sort(datum, args),
-            "getOne" => Self::get_one(datum, args),
-            "add" => Self::add(datum, args),
-            "duplicate" => Self::duplicate(datum, args),
-            "addAt" => Self::add_at(datum, args),
-            "getLast" => Self::get_last(datum, args),
-            "append" | "push" => Self::append(datum, args),
-            "deleteOne" => Self::delete_one(datum, args),
-            "deleteAt" => Self::delete_at(datum, args),
-            "deleteAll" => Self::delete_all(datum, args),
-            "findPos" => Self::find_pos(datum, args),
-            "getPos" => Self::get_one(datum, args),
-            "findPosNear" => Self::find_pos_near(datum, args),
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::Count => Self::count(datum, args),
+            BuiltInSymbol::GetAt => Self::get_at(datum, args),
+            BuiltInSymbol::SetAt => Self::set_at(datum, args),
+            BuiltInSymbol::Sort => Self::sort(datum, args),
+            BuiltInSymbol::GetOne => Self::get_one(datum, args),
+            BuiltInSymbol::Add => Self::add(datum, args),
+            BuiltInSymbol::Duplicate => Self::duplicate(datum, args),
+            BuiltInSymbol::AddAt => Self::add_at(datum, args),
+            BuiltInSymbol::GetLast => Self::get_last(datum, args),
+            BuiltInSymbol::Append | BuiltInSymbol::Push => Self::append(datum, args),
+            BuiltInSymbol::DeleteOne => Self::delete_one(datum, args),
+            BuiltInSymbol::DeleteAt => Self::delete_at(datum, args),
+            BuiltInSymbol::DeleteAll => Self::delete_all(datum, args),
+            BuiltInSymbol::FindPos => Self::find_pos(datum, args),
+            BuiltInSymbol::GetPos => Self::get_one(datum, args),
+            BuiltInSymbol::FindPosNear => Self::find_pos_near(datum, args),
             //"getPos" => Self::find_pos(datum, args), TODO: Check which getPos is correct
-            "join" => Self::join(datum, args),
-            "getPropRef" | "getProp" => Self::get_prop_ref(datum, args),
-            "toString" => {
+            BuiltInSymbol::Join => Self::join(datum, args),
+            BuiltInSymbol::GetPropRef | BuiltInSymbol::GetProp => Self::get_prop_ref(datum, args),
+            BuiltInSymbol::ToString => {
                 Ok(reserve_player_mut(|player| {
                     let s = crate::player::datum_formatting::format_datum(datum, player);
                     player.alloc_datum(Datum::String(s))
                 }))
             },
-            "getTypeOf" => {
+            BuiltInSymbol::GetTypeOf => {
                 // Flash objects have getTypeOf() for error checking.
                 // A list is never an error type, so return empty string.
                 Ok(reserve_player_mut(|player| {
                     player.alloc_datum(Datum::String("".to_string()))
                 }))
             },
-            "max" => Self::max(datum, args),
-            "min" => Self::min(datum, args),
+            BuiltInSymbol::Max => Self::max(datum, args),
+            BuiltInSymbol::Min => Self::min(datum, args),
             // Director matrix methods (chapter 15): when a list-of-lists is
             // used as a matrix (the layout `newMatrix` produces), `setVal`
             // and `getVal` access cells by 1-based (row, col) indices.
@@ -180,8 +183,8 @@ impl ListDatumHandlers {
             // 4th arg that's a leftover from copy-paste; e.g. the Batman
             // terrain script's `myMatrix.setVal(b+1, a+1, h, y)` — we drop the
             // `y` to match Director's tolerant behaviour).
-            "setVal" => Self::set_val(datum, args),
-            "getVal" => Self::get_val(datum, args),
+            BuiltInSymbol::SetVal => Self::set_val(datum, args),
+            BuiltInSymbol::GetVal => Self::get_val(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for list datum"
             ))),
@@ -405,7 +408,7 @@ impl ListDatumHandlers {
             if args.is_empty() {
                 // add() with no args — used by meshDeform.mesh[m].textureLayer.add()
                 // Find the meshDeform context for this list to create proper meshDeformTexLayer refs
-                let tex_layer_context: Option<(i32, i32, String, usize)> = {
+                let tex_layer_context: Option<(i32, i32, Symbol, usize)> = {
                     let mut found = None;
                     for cast in &player.movie.cast_manager.casts {
                         for (member_num, member) in &cast.members {
@@ -443,14 +446,14 @@ impl ListDatumHandlers {
                     let tex_layer_ref = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib,
                         cast_member,
-                        object_type: "meshDeformTexLayer".to_string(),
-                        name: format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx),
+                        object_type: BuiltInSymbol::MeshDeformTexLayer,
+                        name: Symbol::from_str(&format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx)),
                     }));
                     let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
                     list_vec.push_back(tex_layer_ref);
                 } else {
                     // Fallback: generic PropList (non-textureLayer list)
-                    let key = player.alloc_datum(Datum::Symbol("textureCoordinateList".to_string()));
+                    let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::TextureCoordinateList)));
                     let val = player.alloc_datum(Datum::List(
                         crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
                     ));
@@ -668,7 +671,7 @@ impl ListDatumHandlers {
                     let datum = player.get_datum(item_ref);
                     match datum {
                         Datum::String(s) => s.clone(),
-                        Datum::Symbol(sym) => sym.clone(),
+                        Datum::Symbol(sym) => sym.to_string(),
                         Datum::Int(n) => n.to_string(),
                         _ => format!("{:?}", format_concrete_datum(&datum, player)),
                     }

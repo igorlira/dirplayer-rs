@@ -3,7 +3,7 @@ use crate::{
     player::{
         HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::{
             player_call_datum_handler, script_instance::ScriptInstanceUtils,
-        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{get_current_handler_def, get_current_script, get_name}
+        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, scope::StackDatum, script::{get_current_handler_def, get_current_script, get_name}, symbols::symbol::Symbol
     },
 };
 
@@ -31,7 +31,8 @@ impl FlowControlBytecodeHandler {
 
             let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
 
-            let name = get_name(player_cell, &ctx, name_id).unwrap().to_owned();
+            let _ = player_cell;
+            let name = ctx.get_name(name_id);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let arg_list_datum_ref = match scope.stack.pop() {
                 Some(datum_ref) => datum_ref,
@@ -42,20 +43,21 @@ impl FlowControlBytecodeHandler {
                     )));
                 }
             };
-            let arg_list_datum = player.get_datum(&arg_list_datum_ref);
-
-            if let Datum::List(list_type, list, _) = arg_list_datum {
-                let is_no_ret = match list_type {
-                    DatumType::ArgListNoRet => true,
-                    _ => false,
-                };
-                (name, Vec::from(list.to_owned()), is_no_ret)
-            } else {
-                return Err(ScriptError::new(format!(
-                    "ext_call '{}': expected arg list on stack",
-                    name
-                )));
-            }
+            let is_no_ret = match player.get_datum(&arg_list_datum_ref) {
+                Datum::List(DatumType::ArgListNoRet, _, _) => true,
+                Datum::List(_, _, _) => false,
+                _ => {
+                    return Err(ScriptError::new(format!(
+                        "ext_call '{}': expected arg list on stack",
+                        name
+                    )));
+                }
+            };
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let args = Vec::from(std::mem::take(
+                player.get_datum_mut(&arg_list_datum_ref).to_list_mut()?.1,
+            ));
+            (name, args, is_no_ret)
         };
 
         let (result_ctx, return_value) =
@@ -86,19 +88,21 @@ impl FlowControlBytecodeHandler {
                     }
                 }
             };
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_id),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move args out of the consumed ArgList instead of cloning (see
+            // obj_call). Done before borrowing `script` so the &mut doesn't
+            // overlap the immutable script borrow.
+            let args: Vec<DatumRef> =
+                std::mem::take(player.get_datum_mut(&arg_list_id).to_list_mut()?.1).into();
+
             let script = get_current_script(&player, &ctx).unwrap();
-
-            let arg_list_datum = player.get_datum(&arg_list_id);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let args: Vec<DatumRef> = arg_list_datum.to_list()?.iter().cloned().collect();
-
             let mut handler_ref = script
                 .get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize)
                 .unwrap();
-            let handler_name = &handler_ref.1;
+            let handler_name = handler_ref.1;
 
             // if first arg is a script or script instance and has a handler by the same name
             // use that handler instead
@@ -117,27 +121,37 @@ impl FlowControlBytecodeHandler {
             }
             Ok((handler_ref, is_no_ret, args, receiver))
         })?;
-        let scope = player_call_script_handler_raw_args(receiver, handler_ref, &args, true).await?;
-        player_handle_scope_return(&scope);
-        let result = scope.return_value;
-        if !is_no_ret {
-            reserve_player_mut(|player| {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.push(result);
-            });
-        }
-        Ok(HandlerExecutionResult::Advance)
+        // Hand the call to the trampoline driver instead of recursively awaiting
+        // (which would box a future). `use_raw_arg_list: true` matches the old
+        // `player_call_script_handler_raw_args(.., true)` call; the driver does
+        // `player_handle_scope_return` + the result push on the callee's return.
+        Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
+            receiver,
+            handler_ref,
+            args,
+            use_raw_arg_list: true,
+            push_return: !is_no_ret,
+        }))
     }
 
     pub fn jmp_if_zero(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let value_id = {
+            // Inline-aware: an int/void condition (the overwhelming common case
+            // for loop/if guards) is tested directly without materializing a
+            // DatumRef or touching the arena.
+            let is_zero = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.stack.pop() {
-                    Some(v) => v,
+                match scope.stack.pop_value() {
+                    Some(StackDatum::Int(n)) => n == 0,
+                    Some(StackDatum::Void) => true,
+                    Some(other) => {
+                        let value_id = other.into_ref();
+                        datum_is_zero(player.get_datum(&value_id), &player.allocator)?
+                    }
                     None => {
+                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                         let current_handler_name = ctx.get_name(scope.handler_name_id);
                         return Err(ScriptError::new(format!(
                             "jmp_if_zero: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
@@ -147,12 +161,11 @@ impl FlowControlBytecodeHandler {
                 }
             };
 
-            let datum = player.get_datum(&value_id);
             let bytecode = player.get_ctx_current_bytecode(&ctx);
             let position = bytecode.pos as i32;
             let offset = bytecode.obj as i32;
 
-            if datum_is_zero(datum, &player.allocator)? {
+            if is_zero {
                 let new_bytecode_index = {
                     let handler = get_current_handler_def(player, &ctx);
                     let dest_pos = (position as i32 + offset) as usize;
@@ -185,15 +198,18 @@ impl FlowControlBytecodeHandler {
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         // let token = start_profiling("_obj_call_prepare".to_string());
-        let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
+        // Resolve args AND the trampoline target in one player borrow. The
+        // trampoline fast path: if the receiver is a script instance whose script
+        // (or an ancestor) defines this handler as a plain user handler (not a
+        // virtual handler), hand the call to the driver instead of awaiting — and
+        // boxing — player_call_datum_handler. Everything else (datum methods like
+        // `string.char[..]`/`delete`, virtual handlers, system-event no-ops,
+        // ancestor delegation) falls through to the existing path below. Folded
+        // into this block so a datum-method objcall pays only one get_datum.
+        let (obj_ref, handler_name, args, is_no_ret, lingo_target) = reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(&ctx);
-            let target_handler_name = get_name(
-                &player,
-                &ctx,
-                bytecode.obj as u16,
-            )
-            .map(|s| s.to_owned())
-            .unwrap_or_else(|| "?".to_owned());
+            // ctx.get_name indexes ctx.names_ptr directly (no per-op get_cast).
+            let target_handler_name = ctx.get_name(bytecode.obj as u16);
             let arg_list_id = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 match scope.stack.pop() {
@@ -207,20 +223,49 @@ impl FlowControlBytecodeHandler {
                     }
                 }
             };
-            let arg_list_datum = player.get_datum(&arg_list_id);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let arg_list = arg_list_datum.to_list()?;
-            let obj = arg_list[0].clone();
-            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_id),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move the args out of the immediately-consumed ArgList datum instead
+            // of cloning them into a fresh Vec — avoids a per-call heap allocation
+            // and the refcount churn. The List is left empty and freed when
+            // arg_list_id drops.
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_id).to_list_mut()?.1);
+            let obj = arg_vd.pop_front().unwrap();
+            let args: Vec<DatumRef> = arg_vd.into();
 
-            Ok((obj, target_handler_name, args, is_no_ret))
+            let lingo_target = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj) {
+                let instance_ref = instance_ref.clone();
+                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, &instance_ref, target_handler_name) {
+                    None
+                } else {
+                    ScriptInstanceUtils::get_handler(target_handler_name, &obj, player)?
+                        .map(|hr| (instance_ref, hr))
+                }
+            } else {
+                None
+            };
+
+            Ok((obj, target_handler_name, args, is_no_ret, lingo_target))
         })?;
+
+        if let Some((instance_ref, handler_ref)) = lingo_target {
+            // `use_raw_arg_list: false` matches the old
+            // `player_call_script_handler(Some(instance), handler_ref, args)`
+            // (prepends `me`); the driver does player_handle_scope_return + push.
+            return Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
+                receiver: Some(instance_ref),
+                handler_ref,
+                args,
+                use_raw_arg_list: false,
+                push_return: !is_no_ret,
+            }));
+        }
+
         // end_profiling(token);
         // let token = start_profiling(handler_name.clone());
-        let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
+        let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;
         // end_profiling(token);
         // let token = start_profiling("_obj_call_push_result".to_string());
         reserve_player_mut(|player| {
@@ -250,14 +295,14 @@ impl FlowControlBytecodeHandler {
 
             let handler_name = player.get_datum(&handler_name_ref).symbol_value()?;
 
-            let arg_list_datum = player.get_datum(&arg_list_ref);
-            let is_no_ret = match arg_list_datum {
-                Datum::List(DatumType::ArgListNoRet, _, _) => true,
-                _ => false,
-            };
-            let arg_list = arg_list_datum.to_list()?;
-            let mut obj = arg_list[0].clone();
-            let args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            let is_no_ret = matches!(
+                player.get_datum(&arg_list_ref),
+                Datum::List(DatumType::ArgListNoRet, _, _)
+            );
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_ref).to_list_mut()?.1);
+            let mut obj = arg_vd.pop_front().unwrap();
+            let args: Vec<DatumRef> = arg_vd.into();
 
             // In Director 4 calling convention, the receiver is often passed as a
             // symbol (e.g. #oTrackControl). Resolve it by looking up the symbol
@@ -270,7 +315,7 @@ impl FlowControlBytecodeHandler {
 
             Ok((obj, handler_name, args, is_no_ret))
         })?;
-        let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
+        let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;
         reserve_player_mut(|player| {
             player.last_handler_result = result.clone();
             if !is_no_ret {

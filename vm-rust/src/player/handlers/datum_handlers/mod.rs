@@ -46,6 +46,8 @@ use self::{
 };
 use std::collections::VecDeque;
 
+use crate::player::symbols::builtin::BuiltInSymbol;
+use crate::player::symbols::symbol::Symbol;
 use crate::{
     director::lingo::datum::DatumType,
     player::{
@@ -60,7 +62,7 @@ use crate::{
 
 pub async fn player_call_datum_handler(
     obj_ref: &DatumRef,
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     // Track handler depth
@@ -69,7 +71,7 @@ pub async fn player_call_datum_handler(
     });
    
     // Block recursive getPropertyDescriptionList calls
-    if handler_name == "getPropertyDescriptionList" {
+    if handler_name == BuiltInSymbol::GetPropertyDescriptionList {
         let should_skip = reserve_player_mut(|player| {
             if player.is_getting_property_descriptions {
                 web_sys::console::warn_1(&"BLOCKED recursive getPropertyDescriptionList".into());
@@ -143,15 +145,15 @@ pub async fn player_call_datum_handler(
         DatumType::Point => PointDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::BitmapRef => BitmapDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::SpriteRef => {
-            if SpriteDatumHandlers::has_async_handler(obj_ref, handler_name)? {
+            if SpriteDatumHandlers::has_async_handler(obj_ref, handler_name.as_str())? {
                 SpriteDatumHandlers::call_async(obj_ref.clone(), handler_name, args).await
             } else {
-                SpriteDatumHandlers::call(obj_ref, handler_name, args)
+                SpriteDatumHandlers::call(obj_ref, handler_name.as_str(), args)
             }
         }
         DatumType::Xtra => {
             // xtra("name").new() — create an instance via method call on the Xtra class datum
-            if handler_name == "new" {
+            if handler_name == BuiltInSymbol::New {
                 let mut full_args = vec![obj_ref.clone()];
                 full_args.extend(args.iter().cloned());
                 Box::pin(crate::player::handlers::types::TypeHandlers::new(&full_args)).await
@@ -168,10 +170,10 @@ pub async fn player_call_datum_handler(
                     player.get_datum(obj_ref).to_xtra_instance().unwrap();
                 (xtra_name.to_owned(), instance_id.clone())
             });
-            if has_xtra_instance_async_handler(&xtra_name, handler_name, instance_id) {
-                call_xtra_instance_async_handler(&xtra_name, instance_id, handler_name, args).await
+            if has_xtra_instance_async_handler(&xtra_name, handler_name.as_str(), instance_id) {
+                call_xtra_instance_async_handler(&xtra_name, instance_id, handler_name.as_str(), args).await
             } else {
-                call_xtra_instance_handler(&xtra_name, instance_id, handler_name, args)
+                call_xtra_instance_handler(&xtra_name, instance_id, handler_name.as_str(), args)
             }
         }
         DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
@@ -185,18 +187,18 @@ pub async fn player_call_datum_handler(
         }),
         DatumType::CastLibRef => CastLibDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::MovieRef => {
-            match handler_name {
-                "newMember" => {
+            match handler_name.into_builtin_or_error()? {
+                BuiltInSymbol::NewMember => {
                     Box::pin(crate::player::handlers::types::TypeHandlers::new(&args.clone())).await
                 }
-                "go" => {
+                BuiltInSymbol::Go => {
                     Box::pin(crate::player::handlers::movie::MovieHandlers::go(&args)).await
                 }
-                "count" => {
+                BuiltInSymbol::Count => {
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
-                        let prop_name = player.get_datum(&args[0]).string_value()?;
-                        let prop_datum = player.movie.get_prop(&prop_name)?;
+                        let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                        let prop_datum = player.movie.get_prop(prop_name)?;
                         let count = match &prop_datum {
                             Datum::List(_, items, _) => items.len() as i32,
                             Datum::PropList(items, _) => items.len() as i32,
@@ -205,12 +207,12 @@ pub async fn player_call_datum_handler(
                         Ok(player.alloc_datum(Datum::Int(count)))
                     })
                 }
-                "getProp" | "getAt" | "getPropRef" => {
+                BuiltInSymbol::GetProp | BuiltInSymbol::GetAt | BuiltInSymbol::GetPropRef => {
                     // _system.desktopRectList[1] → getProp(desktopRectList, 1)
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
-                        let prop_name = player.get_datum(&args[0]).string_value()?;
-                        let prop_datum = player.movie.get_prop(&prop_name)?;
+                        let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                        let prop_datum = player.movie.get_prop(prop_name)?;
                         let prop_ref = player.alloc_datum(prop_datum);
                         if args.len() > 1 {
                             let index = player.get_datum(&args[1]).int_value()?;
@@ -238,10 +240,10 @@ pub async fn player_call_datum_handler(
             }
         }
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
-        DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
         DatumType::Transform3d => transform3d::Transform3dDatumHandlers::call(obj_ref, handler_name, args),
-        DatumType::HavokObjectRef => havok_object::HavokObjectDatumHandlers::call(obj_ref, handler_name, args),
-        DatumType::PhysXObjectRef => physx_object::PhysXObjectDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::HavokObjectRef => havok_object::HavokObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
+        DatumType::PhysXObjectRef => physx_object::PhysXObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
         DatumType::Void => {
             // Try VoidDatumHandlers first for specific methods that should return VOID gracefully
             match VoidDatumHandlers::call(obj_ref.clone(), handler_name, args) {
@@ -266,7 +268,7 @@ pub async fn player_call_datum_handler(
         }
         _ => {
             // getAt on scalar types (Int, Float) returns the value itself for index 1
-            if handler_name == "getAt" {
+            if handler_name == BuiltInSymbol::GetAt {
                 return Ok(obj_ref.clone());
             }
             reserve_player_ref(|player| {
@@ -280,7 +282,7 @@ pub async fn player_call_datum_handler(
         },
     };
 
-    if handler_name == "getPropertyDescriptionList" {
+    if handler_name == BuiltInSymbol::GetPropertyDescriptionList {
         reserve_player_mut(|player| {
             player.is_getting_property_descriptions = false;
         });

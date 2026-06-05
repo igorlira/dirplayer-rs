@@ -10,19 +10,12 @@ use crate::{
     director::{
         chunks::score::{FrameLabel, ScoreFrameChannelData, SoundChannelData, TempoChannelData},
         file::DirectorFile,
-        lingo::datum::{datum_bool, Datum, DatumType},
+        lingo::datum::{Datum, DatumType, datum_bool},
     },
     js_api::JsApi,
-    player::bitmap::bitmap::{PaletteRef, get_system_default_palette},
-    player::bitmap::drawing::{should_matte_hit_test},
-    player::bitmap::palette::SYSTEM_WIN_PALETTE,
-    player::events::dispatch_event_endsprite_for_score,
-    player::score_keyframes::{
-        ChannelKeyframes,
-        build_all_keyframes_cache,
-        KeyframeTrack,
-    },
-    player::handlers::datum_handlers::player_call_datum_handler,
+    player::{bitmap::{bitmap::{PaletteRef, get_system_default_palette}, drawing::should_matte_hit_test, palette::SYSTEM_WIN_PALETTE}, events::dispatch_event_endsprite_for_score, handlers::datum_handlers::player_call_datum_handler, score_keyframes::{
+        ChannelKeyframes, KeyframeTrack, build_all_keyframes_cache
+    }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 use super::{
@@ -112,6 +105,13 @@ pub struct ScoreSpriteSpan {
 pub struct Score {
     pub channels: Vec<SpriteChannel>,
     pub sprite_spans: Vec<ScoreSpriteSpan>,
+    /// Memoized `get_script_in_frame` result, keyed by frame. The frame-script
+    /// lookup is a linear scan over `sprite_spans` + a clone, and it runs on
+    /// EVERY Lingo handler call (to set `in_frame_script`). During the Habbo
+    /// preloader that's millions of calls on a constant frame, so cache the
+    /// result and recompute only when the frame changes. Cleared whenever
+    /// `sprite_spans` is rebuilt.
+    frame_script_cache: std::cell::RefCell<Option<(u32, Option<ScoreBehaviorReference>)>>,
     pub channel_initialization_data: Vec<(u32, u16, ScoreFrameChannelData)>,
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     /// Sound channel sprite spans extracted from `frame_intervals`. Keyed by
@@ -251,6 +251,7 @@ impl Score {
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
             sprite_spans: vec![],
+            frame_script_cache: std::cell::RefCell::new(None),
             sound_channel_triggered: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
@@ -295,13 +296,21 @@ impl Score {
     }
 
     pub fn get_script_in_frame(&self, frame: u32) -> Option<ScoreBehaviorReference> {
-        return self
+        // Fast path: reuse the cached result if it was computed for this frame.
+        if let Some((cached_frame, ref cached)) = *self.frame_script_cache.borrow() {
+            if cached_frame == frame {
+                return cached.clone();
+            }
+        }
+        let result = self
             .sprite_spans
             .iter()
             .find(|span| {
                 span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame
             })
             .and_then(|span| span.scripts.first().cloned());
+        *self.frame_script_cache.borrow_mut() = Some((frame, result.clone()));
+        result
     }
 
     /// Create a behavior script instance.
@@ -377,7 +386,7 @@ impl Score {
 
         let result = player_call_datum_handler(
             &instance_datum_ref,
-            &"getPropertyDescriptionList".to_string(),
+            Symbol::builtin(BuiltInSymbol::GetPropertyDescriptionList),
             &vec![],
         )
         .await;
@@ -389,7 +398,7 @@ impl Score {
                 if let Datum::PropList(prop_descriptions, _) = prop_desc_datum {
                     // First pass: collect all the data we need (avoiding nested borrows)
 
-                    let prop_data: Vec<(String, DatumRef, Vec<(String, DatumRef)>)> =
+                    let prop_data: Vec<(Symbol, DatumRef, Vec<(Symbol, DatumRef)>)> =
                         prop_descriptions
                             .iter()
                             .filter_map(|(prop_key_ref, prop_desc_ref)| {
@@ -399,7 +408,7 @@ impl Score {
                                     let prop_desc = player.get_datum(prop_desc_ref).clone();
 
                                     if let Datum::PropList(desc_props, _) = prop_desc {
-                                        let desc_props_cloned: Vec<(String, DatumRef)> = desc_props
+                                        let desc_props_cloned: Vec<(Symbol, DatumRef)> = desc_props
                                             .iter()
                                             .filter_map(|(k, v)| {
                                                 let key = player.get_datum(k).clone();
@@ -430,7 +439,7 @@ impl Score {
                     for (prop_name, _, desc_props) in prop_data {
                         // Check if property already has a non-void value
                         let should_set_default = if let Some(existing) =
-                            script_get_prop_opt(player, &script_instance_ref, &prop_name)
+                            script_get_prop_opt(player, &script_instance_ref, prop_name)
                         {
                             let existing_datum = player.get_datum(&existing);
                             let is_void = matches!(existing_datum, Datum::Void);
@@ -452,7 +461,7 @@ impl Score {
                         if should_set_default {
                             // Find the default value
                             for (key_name, default_value_ref) in desc_props {
-                                if key_name == "default" {
+                                if key_name == Symbol::builtin(BuiltInSymbol::Default) {
                                     let default_value = player.get_datum(&default_value_ref);
                                     debug!("    [getPropertyDescriptionList] Will set default for '{}' to {:?}", 
                                         prop_name, default_value.type_enum());
@@ -474,7 +483,7 @@ impl Score {
                         let result = script_set_prop(
                             player,
                             &script_instance_ref,
-                            &prop_name,
+                            prop_name,
                             &default_value_ref,
                             false,
                         );
@@ -678,7 +687,7 @@ impl Score {
                 // member directly since sprite_set_prop always writes to main stage score.
                 match &score_ref {
                     ScoreRef::Stage => {
-                        let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                        let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
                     }
                     ScoreRef::FilmLoop(_) => {
                         sprite.member = Some(member.clone());
@@ -915,7 +924,7 @@ impl Score {
                 match &score_ref {
                     ScoreRef::Stage => {
                         if current_member.as_ref() != Some(&member) {
-                            let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                            let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
                         }
                     }
                     ScoreRef::FilmLoop(_) => {
@@ -992,7 +1001,7 @@ impl Score {
 
                     match &score_ref {
                         ScoreRef::Stage => {
-                            let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member.clone()));
+                            let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
                         }
                         ScoreRef::FilmLoop(_) => {
                             let sprite = self.get_sprite_mut(sprite_num);
@@ -1261,7 +1270,7 @@ impl Score {
                         let _ = script_set_prop(
                             player,
                             &actual_instance_ref,
-                            &"spriteNum".to_string(),
+                            Symbol::builtin(BuiltInSymbol::SpriteNum),
                             &sprite_num_ref,
                             false,
                         );
@@ -1278,7 +1287,7 @@ impl Score {
                                 let param_datum = player.get_datum(param_ref);
                                 debug!("  Parameter type: {:?}", param_datum.type_enum());
                                 if let Datum::PropList(props, _) = param_datum {
-                                    let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                    let props_to_set: Vec<(Symbol, DatumRef)> = props.iter()
                                         .filter_map(|(key_ref, value_ref)| {
                                             let key = player.get_datum(key_ref);
                                             if let Datum::Symbol(key_name) = key {
@@ -1315,7 +1324,7 @@ impl Score {
                                         let result = script_set_prop(
                                             player,
                                             &actual_instance_ref,
-                                            prop_name,
+                                            *prop_name,
                                             value_ref,
                                             false,
                                         );
@@ -1481,7 +1490,7 @@ impl Score {
                             let _ = script_set_prop(
                                 player,
                                 &actual_instance_ref,
-                                &"spriteNum".to_string(),
+                                Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
                             );
@@ -1498,7 +1507,7 @@ impl Score {
                                     let param_datum = player.get_datum(param_ref);
                                     debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
-                                        let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                        let props_to_set: Vec<(Symbol, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
@@ -1520,7 +1529,7 @@ impl Score {
                                             let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
-                                                &prop_name,
+                                                prop_name,
                                                 &value_ref,
                                                 false,
                                             );
@@ -1618,7 +1627,7 @@ impl Score {
                             let _ = script_set_prop(
                                 player,
                                 &actual_instance_ref,
-                                &"spriteNum".to_string(),
+                                Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
                             );
@@ -1759,7 +1768,7 @@ impl Score {
                             let _ = script_set_prop(
                                 player,
                                 &actual_instance_ref,
-                                &"spriteNum".to_string(),
+                                Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
                             );
@@ -1774,7 +1783,7 @@ impl Score {
                                     let param_datum = player.get_datum(param_ref);
                                     debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
-                                        let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                        let props_to_set: Vec<(Symbol, DatumRef)> = props.iter()
                                             .filter_map(|(key_ref, value_ref)| {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
@@ -1796,7 +1805,7 @@ impl Score {
                                             let result = script_set_prop(
                                                 player,
                                                 &actual_instance_ref,
-                                                &prop_name,
+                                                prop_name,
                                                 &value_ref,
                                                 false,
                                             );
@@ -1919,7 +1928,7 @@ impl Score {
                     let _ = script_set_prop(
                         player,
                         &actual_instance_ref,
-                        &"spriteNum".to_string(),
+                        Symbol::builtin(BuiltInSymbol::SpriteNum),
                         &sprite_num_ref,
                         false,
                     );
@@ -1935,7 +1944,7 @@ impl Score {
 
                             if let Datum::PropList(props, _) = param_datum {
                                 // Collect properties first
-                                let props_to_set: Vec<(String, DatumRef)> = props.iter()
+                                let props_to_set: Vec<(Symbol, DatumRef)> = props.iter()
                                     .filter_map(|(key_ref, value_ref)| {
                                         let key = player.get_datum(key_ref);
                                         if let Datum::Symbol(prop_name) = key {
@@ -1952,7 +1961,7 @@ impl Score {
                                     let _ = script_set_prop(
                                         player,
                                         &actual_instance_ref,
-                                        &prop_name,
+                                        prop_name,
                                         &value_ref,
                                         false,
                                     );
@@ -2544,6 +2553,7 @@ impl Score {
 
         // Clear previous sprite_spans so they don't accumulate across movie transitions
         self.sprite_spans.clear();
+        self.frame_script_cache.replace(None);
         self.sprite_details.clear();
         self.invalidate_span_channel_cache();
 
@@ -2649,6 +2659,7 @@ impl Score {
     /// but do have frame_channel_data with sprite and frame script information.
     fn generate_sprite_spans_from_channel_data(&mut self, dir_version: u16) {
         use std::collections::HashMap;
+        self.frame_script_cache.replace(None);
 
         // Group by channel: find min/max frame for each channel with data
         let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
@@ -2760,6 +2771,7 @@ impl Score {
     /// isn't covered by any existing sprite_span for that channel.
     fn extend_sprite_spans_from_channel_data(&mut self) {
         use std::collections::HashMap;
+        self.frame_script_cache.replace(None);
 
         // Build a map of channel -> list of (start_frame, end_frame) from existing sprite_spans
         let mut channel_spans: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
@@ -3066,18 +3078,18 @@ impl Score {
 pub fn sprite_get_prop(
     player: &mut DirPlayer,
     sprite_id: i16,
-    prop_name: &str,
+    prop_name: Symbol,
 ) -> Result<Datum, ScriptError> {
     // Clear any previous cached ref. Only set for scriptInstanceList.
     player.last_sprite_prop_ref = None;
     // Use context-aware sprite lookup to support filmloop behaviors
     let sprite = get_sprite_in_context(player, sprite_id);
-    match prop_name {
-        "ilk" => Ok(Datum::Symbol("sprite".to_string())),
-        "spriteNum" | "spriteNumber" => Ok(Datum::Int(
+    match prop_name.into_builtin() {
+        Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Sprite))),
+        Some(BuiltInSymbol::SpriteNum | BuiltInSymbol::SpriteNumber) => Ok(Datum::Int(
             sprite.map_or(sprite_id as i32, |x| x.number as i32),
         )),
-        "loc" => {
+        Some(BuiltInSymbol::Loc) => {
             let sprite = get_sprite_in_context(player, sprite_id);
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
             Ok(Datum::Point([x as f64, y as f64], 0))
@@ -3092,74 +3104,74 @@ pub fn sprite_get_prop(
         // `destRect = rect(L, T, L + sprite(chan).width, ...)` read the
         // cell-size 48 instead of the overlay's 29×29 and stretch the
         // composite — verified in Trick or Treat Beat's `buildTileAnims`.
-        "width" => {
+        Some(BuiltInSymbol::Width) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int((rect.2 - rect.0) as i32))
         }
-        "height" => {
+        Some(BuiltInSymbol::Height) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int((rect.3 - rect.1) as i32))
         }
-        "blend" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
-        "ink" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.ink) as i32)),
-        "left" => {
+        Some(BuiltInSymbol::Blend) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
+        Some(BuiltInSymbol::Ink) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.ink) as i32)),
+        Some(BuiltInSymbol::Left) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.0 as i32))
         }
-        "top" => {
+        Some(BuiltInSymbol::Top) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.1 as i32))
         }
-        "right" => {
+        Some(BuiltInSymbol::Right) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.2 as i32))
         }
-        "bottom" => {
+        Some(BuiltInSymbol::Bottom) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.3 as i32))
         }
-        "rect" => {
+        Some(BuiltInSymbol::Rect) => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Rect([rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64], 0))
         }
-        "color" => Ok(Datum::ColorRef(
+        Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(
             sprite.map_or(ColorRef::PaletteIndex(255), |sprite| sprite.color.clone()),
         )),
-        "bgColor" => Ok(Datum::ColorRef(
+        Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(
             sprite.map_or(ColorRef::PaletteIndex(0), |sprite| sprite.bg_color.clone()),
         )),
-        "skew" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.skew))),
-        "locH" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_h) as i32)),
-        "locV" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_v) as i32)),
-        "locZ" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_z) as i32)),
-        "member" => Ok(Datum::CastMember(
+        Some(BuiltInSymbol::Skew) => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.skew))),
+        Some(BuiltInSymbol::LocH) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_h) as i32)),
+        Some(BuiltInSymbol::LocV) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_v) as i32)),
+        Some(BuiltInSymbol::LocZ) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.loc_z) as i32)),
+        Some(BuiltInSymbol::Member) => Ok(Datum::CastMember(
             sprite
                 .and_then(|x| x.member.as_ref())
                 .map(|x| x.clone())
                 .unwrap_or(NULL_CAST_MEMBER_REF),
         )),
-        "camera" => {
+        Some(BuiltInSymbol::Camera) => {
             // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
             let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
             let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned()
-                .unwrap_or_else(|| "DefaultView".to_string());
+                .unwrap_or_else(|| crate::player::symbols::builtin::BuiltInSymbol::DefaultView.into());
             Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member,
-                object_type: "camera".to_string(),
+                object_type: BuiltInSymbol::Camera,
                 name: cam_name,
             }))
         }
-        "cameraCount" => {
+        Some(BuiltInSymbol::CameraCount) => {
             let count = sprite.map_or(1, |s| {
                 1 + s.w3d_cameras.len() as i32
             });
             Ok(Datum::Int(count))
         }
-        "flipH" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
-        "flipV" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
-        "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
-        "scriptInstanceList" => {
+        Some(BuiltInSymbol::FlipH) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
+        Some(BuiltInSymbol::FlipV) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
+        Some(BuiltInSymbol::Rotation) => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
+        Some(BuiltInSymbol::ScriptInstanceList) => {
             // Return cached list datum if available, so that
             // sprite.scriptInstanceList.add(x) modifies the live list.
             if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_id).cloned() {
@@ -3181,16 +3193,16 @@ pub fn sprite_get_prop(
                 Ok(list)
             }
         }
-        "memberNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+        Some(BuiltInSymbol::MemberNum) => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_member)
         }))),
-        "castNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+        Some(BuiltInSymbol::CastNum) => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| {
                 CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
                     as i32
             })
         }))),
-        "scriptNum" => {
+        Some(BuiltInSymbol::ScriptNum) => {
             let fallback = sprite.map_or(vec![], |sprite| sprite.script_instance_list.clone());
             let script_ids = player.get_sprite_script_instance_ids(
                 sprite_id,
@@ -3204,18 +3216,18 @@ pub fn sprite_get_prop(
                 .map(|script_instance| script_instance.script.cast_member);
             Ok(Datum::Int(script_num.unwrap_or(0)))
         }
-        "visible" | "visibility" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
-        "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
-        "moveableSprite" | "moveable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.moveable))),
-        "constraint" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.constraint))),
-        "trails" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.trails))),
-        "foreColor" | "forecolor" => Ok(Datum::Int(
+        Some(BuiltInSymbol::Visible | BuiltInSymbol::Visibility) => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
+        Some(BuiltInSymbol::Puppet) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
+        Some(BuiltInSymbol::MoveableSprite | BuiltInSymbol::Moveable) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.moveable))),
+        Some(BuiltInSymbol::Constraint) => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.constraint))),
+        Some(BuiltInSymbol::Trails) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.trails))),
+        Some(BuiltInSymbol::ForeColor) => Ok(Datum::Int(
             sprite.map_or(255, |sprite| sprite.fore_color) as i32,
         )),
-        "backColor" | "backcolor" => Ok(Datum::Int(
+        Some(BuiltInSymbol::BackColor) => Ok(Datum::Int(
             sprite.map_or(0, |sprite| sprite.back_color) as i32,
         )),
-        "cursor" => {
+        Some(BuiltInSymbol::Cursor) => {
             let cursor_ref = sprite.and_then(|sprite| sprite.cursor_ref.clone());
             match cursor_ref {
                 Some(CursorRef::System(id)) => Ok(Datum::Int(id)),
@@ -3232,7 +3244,7 @@ pub fn sprite_get_prop(
                 None => Ok(Datum::Int(0)),
             }
         }
-        "startFrame" => {
+        Some(BuiltInSymbol::StartFrame) => {
             let current_frame = player.movie.current_frame;
             let start_frame = player
                 .movie
@@ -3248,7 +3260,7 @@ pub fn sprite_get_prop(
                 .unwrap_or(0);
             Ok(Datum::Int(start_frame as i32))
         }
-        "endFrame" => {
+        Some(BuiltInSymbol::EndFrame) => {
             let current_frame = player.movie.current_frame;
             let end_frame = player
                 .movie
@@ -3264,65 +3276,65 @@ pub fn sprite_get_prop(
                 .unwrap_or(0);
             Ok(Datum::Int(end_frame as i32))
         }
-        "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
+        Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
         // Flash (SWF) sprite properties — keyed by sprite_num because
         // each Flash sprite has its own dedicated Ruffle instance.
-        "playing" => {
+        Some(BuiltInSymbol::Playing) => {
             if sprite.and_then(|s| s.member.as_ref()).is_some() {
                 Ok(datum_bool(ruffle_is_playing(sprite_id as i32)))
             } else {
                 Ok(datum_bool(false))
             }
         }
-        "frameCount" => {
+        Some(BuiltInSymbol::FrameCount) => {
             if sprite.and_then(|s| s.member.as_ref()).is_some() {
                 Ok(Datum::Int(ruffle_get_frame_count(sprite_id as i32)))
             } else {
                 Ok(Datum::Int(0))
             }
         }
-        "currentFrame" | "frame" => {
+        Some(BuiltInSymbol::CurrentFrame | BuiltInSymbol::Frame) => {
             if sprite.and_then(|s| s.member.as_ref()).is_some() {
                 Ok(Datum::Int(ruffle_get_current_frame(sprite_id as i32)))
             } else {
                 Ok(Datum::Int(0))
             }
         }
-        "actionsEnabled" | "buttonsEnabled" | "imageEnabled" | "sound" | "static" => {
+        Some(BuiltInSymbol::ActionsEnabled | BuiltInSymbol::ButtonsEnabled | BuiltInSymbol::ImageEnabled | BuiltInSymbol::Sound | BuiltInSymbol::Static) => {
             // Flash properties that default to true/1
             Ok(datum_bool(true))
         }
-        "quality" => Ok(Datum::String("high".to_string())),
-        "scaleMode" => Ok(Datum::String("showAll".to_string())),
-        "playBackMode" => Ok(Datum::Int(0)), // 0 = normal
-        "centerRegPoint" => Ok(datum_bool(true)),
-        "defaultRectMode" => Ok(Datum::Int(0)),
-        "eventPassMode" => Ok(Datum::Int(0)),
-        "clickMode" => Ok(Datum::Int(0)),
-        "fixedRate" => Ok(Datum::Int(0)),
-        "streamMode" => Ok(Datum::Int(0)),
-        "broadcastProps" => Ok(datum_bool(false)),
-        "linked" => Ok(datum_bool(false)),
-        "posterFrame" => Ok(Datum::Int(1)),
-        "mouseOverButton" => Ok(datum_bool(false)),
-        "viewScale" => Ok(Datum::Float(100.0)),
-        "originMode" => Ok(Datum::Int(0)),
-        "originH" | "originV" => Ok(Datum::Int(0)),
-        "viewH" | "viewV" => Ok(Datum::Int(0)),
-        "flashRect" | "defaultRect" => {
+        Some(BuiltInSymbol::Quality) => Ok(Datum::String("high".to_string())),
+        Some(BuiltInSymbol::ScaleMode) => Ok(Datum::String("showAll".to_string())),
+        Some(BuiltInSymbol::PlayBackMode) => Ok(Datum::Int(0)), // 0 = normal
+        Some(BuiltInSymbol::CenterRegPoint) => Ok(datum_bool(true)),
+        Some(BuiltInSymbol::DefaultRectMode) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::EventPassMode) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::ClickMode) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::FixedRate) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::StreamMode) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::BroadcastProps) => Ok(datum_bool(false)),
+        Some(BuiltInSymbol::Linked) => Ok(datum_bool(false)),
+        Some(BuiltInSymbol::PosterFrame) => Ok(Datum::Int(1)),
+        Some(BuiltInSymbol::MouseOverButton) => Ok(datum_bool(false)),
+        Some(BuiltInSymbol::ViewScale) => Ok(Datum::Float(100.0)),
+        Some(BuiltInSymbol::OriginMode) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::OriginH | BuiltInSymbol::OriginV) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::ViewH | BuiltInSymbol::ViewV) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::FlashRect | BuiltInSymbol::DefaultRect) => {
             let w = sprite.map_or(0, |s| s.width);
             let h = sprite.map_or(0, |s| s.height);
             Ok(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0))
         }
-        "originPoint" | "viewPoint" => {
+        Some(BuiltInSymbol::OriginPoint) | Some(BuiltInSymbol::ViewPoint) => {
             Ok(Datum::Point([0.0, 0.0], 0))
         }
-        "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
-        "scale" => Ok(Datum::Float(100.0)),
-        "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
-        "scriptList" | "scriptlist" => {
+        Some(BuiltInSymbol::BytesStreamed | BuiltInSymbol::BufferSize | BuiltInSymbol::StreamSize) => Ok(Datum::Int(0)),
+        Some(BuiltInSymbol::Scale) => Ok(Datum::Float(100.0)),
+        Some(BuiltInSymbol::Editable) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
+        Some(BuiltInSymbol::ScriptList) => {
             // Returns a list of [memberRef, propertiesString] for each behavior
             // attached to this sprite. Used by trigger behaviors (Mouse Left etc.)
             // for event routing.
@@ -3363,11 +3375,11 @@ pub fn sprite_get_prop(
 
             Ok(Datum::List(DatumType::List, items, false))
         }
-        prop_name => {
+        _ => {
             let datum_ref = sprite.and_then(|sprite| {
                 reserve_player_mut(|player| {
                     sprite.script_instance_list.iter().find_map(|behavior| {
-                        script_get_prop_opt(player, behavior, &prop_name.to_string())
+                        script_get_prop_opt(player, behavior, prop_name)
                     })
                 })
             });
@@ -3471,7 +3483,7 @@ fn resolve_sprite_member_assignment(
 
 fn sprite_set_prop_is_noop(
     sprite_id: i16,
-    prop_name: &str,
+    prop_name: Symbol,
     value: &Datum,
 ) -> Result<bool, ScriptError> {
     reserve_player_ref(|player| {
@@ -3479,47 +3491,47 @@ fn sprite_set_prop_is_noop(
             return Ok(false);
         };
 
-        match prop_name {
-            "visible" | "visibility" => Ok(sprite.visible == value.to_bool()?),
-            "stretch" => Ok(sprite.stretch == value.int_value()?),
-            "locH" => Ok(sprite.loc_h == value.int_value()?),
-            "locV" => Ok(sprite.loc_v == value.int_value()?),
-            "locZ" => {
+        match prop_name.into_builtin() {
+            Some(BuiltInSymbol::Visible | BuiltInSymbol::Visibility) => Ok(sprite.visible == value.to_bool()?),
+            Some(BuiltInSymbol::Stretch) => Ok(sprite.stretch == value.int_value()?),
+            Some(BuiltInSymbol::LocH) => Ok(sprite.loc_h == value.int_value()?),
+            Some(BuiltInSymbol::LocV) => Ok(sprite.loc_v == value.int_value()?),
+            Some(BuiltInSymbol::LocZ) => {
                 if matches!(value, Datum::Void) {
                     Ok(true)
                 } else {
                     Ok(sprite.loc_z == value.int_value()?)
                 }
             }
-            "width" => {
+            Some(BuiltInSymbol::Width) => {
                 let width = value.int_value()?;
                 Ok(sprite.width == width && sprite.has_size_changed)
             }
-            "height" => {
+            Some(BuiltInSymbol::Height) => {
                 let height = value.int_value()?;
                 Ok(sprite.height == height && sprite.has_size_changed)
             }
-            "left" => {
+            Some(BuiltInSymbol::Left) => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 Ok(left == value.int_value()?)
             }
-            "top" => {
+            Some(BuiltInSymbol::Top) => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 Ok(top == value.int_value()?)
             }
-            "right" => {
+            Some(BuiltInSymbol::Right) => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 let width = value.int_value()? - left;
                 Ok(sprite.width == width && sprite.has_size_changed)
             }
-            "bottom" => {
+            Some(BuiltInSymbol::Bottom) => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 let height = value.int_value()? - top;
                 Ok(sprite.height == height && sprite.has_size_changed)
             }
-            "ink" => Ok(sprite.ink == value.int_value()?),
-            "blend" => Ok(sprite.blend == value.int_value()?),
-            "rotation" => {
+            Some(BuiltInSymbol::Ink) => Ok(sprite.ink == value.int_value()?),
+            Some(BuiltInSymbol::Blend) => Ok(sprite.blend == value.int_value()?),
+            Some(BuiltInSymbol::Rotation) => {
                 let rotation = if value.is_number() {
                     value.to_float()?
                 } else {
@@ -3527,7 +3539,7 @@ fn sprite_set_prop_is_noop(
                 };
                 Ok(sprite.rotation == rotation)
             }
-            "skew" => {
+            Some(BuiltInSymbol::Skew) => {
                 let skew = if value.is_number() {
                     value.to_float()?
                 } else {
@@ -3535,7 +3547,7 @@ fn sprite_set_prop_is_noop(
                 };
                 Ok(sprite.skew == skew)
             }
-            "flipH" => {
+            Some(BuiltInSymbol::FlipH) => {
                 let flip_h = if value.is_number() {
                     value.to_bool()?
                 } else {
@@ -3543,7 +3555,7 @@ fn sprite_set_prop_is_noop(
                 };
                 Ok(sprite.flip_h == flip_h)
             }
-            "flipV" => {
+            Some(BuiltInSymbol::FlipV) => {
                 let flip_v = if value.is_number() {
                     value.to_bool()?
                 } else {
@@ -3551,7 +3563,7 @@ fn sprite_set_prop_is_noop(
                 };
                 Ok(sprite.flip_v == flip_v)
             }
-            "backColor" | "backcolor" => {
+            Some(BuiltInSymbol::BackColor) => {
                 let back_color = value.int_value()?;
                 Ok(
                     sprite.back_color == back_color
@@ -3559,7 +3571,7 @@ fn sprite_set_prop_is_noop(
                         && sprite.has_back_color,
                 )
             }
-            "bgColor" => {
+            Some(BuiltInSymbol::BgColor) => {
                 let bg_color = value.to_color_ref()?.to_owned();
                 Ok(
                     sprite.bg_color == bg_color
@@ -3568,7 +3580,7 @@ fn sprite_set_prop_is_noop(
                         && sprite.has_back_color,
                 )
             }
-            "foreColor" | "forecolor" => {
+            Some(BuiltInSymbol::ForeColor) => {
                 let fore_color = value.int_value()?;
                 Ok(
                     sprite.fore_color == fore_color
@@ -3576,7 +3588,7 @@ fn sprite_set_prop_is_noop(
                         && sprite.has_fore_color,
                 )
             }
-            "color" => {
+            Some(BuiltInSymbol::Color) => {
                 let color = value.to_color_ref()?.to_owned();
                 Ok(
                     sprite.color == color
@@ -3584,11 +3596,11 @@ fn sprite_set_prop_is_noop(
                         && sprite.has_fore_color,
                 )
             }
-            "member" => {
+            Some(BuiltInSymbol::Member) => {
                 let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
                 Ok(sprite.member == mem_ref)
             }
-            "memberNum" => {
+            Some(BuiltInSymbol::MemberNum) => {
                 let value = value.int_value()?;
                 let actual_member_num = if value > 65535 {
                     (value as u32 & 0xFFFF) as i32
@@ -3601,12 +3613,12 @@ fn sprite_set_prop_is_noop(
                 };
                 Ok(sprite.member.as_ref() == Some(&new_member_ref))
             }
-            "castNum" => {
+            Some(BuiltInSymbol::CastNum) => {
                 let new_member_ref =
                     CastMemberRefHandlers::member_ref_from_slot_number(value.int_value()? as u32);
                 Ok(sprite.member.as_ref() == Some(&new_member_ref))
             }
-            "loc" => match value {
+            Some(BuiltInSymbol::Loc) => match value {
                 Datum::Point(vals, _) => {
                     Ok(sprite.loc_h == vals[0] as i32 && sprite.loc_v == vals[1] as i32)
                 }
@@ -3621,7 +3633,7 @@ fn sprite_set_prop_is_noop(
                 // assignment doesn't error.
                 _ => Ok(false),
             },
-            "rect" => {
+            Some(BuiltInSymbol::Rect) => {
                 let rect_values = match value {
                     Datum::Rect(vals, _) => Some([
                         vals[0] as i32,
@@ -3672,7 +3684,7 @@ fn sprite_set_prop_is_noop(
                     ))),
                 }
             }
-            "scriptInstanceList" => {
+            Some(BuiltInSymbol::ScriptInstanceList) => {
                 let ref_list = value.to_list()?;
                 if ref_list.len() != sprite.script_instance_list.len() {
                     return Ok(false);
@@ -3690,8 +3702,8 @@ fn sprite_set_prop_is_noop(
                 }
                 Ok(true)
             }
-            "editable" => Ok(sprite.editable == value.to_bool()?),
-            "quad" => {
+            Some(BuiltInSymbol::Editable) => Ok(sprite.editable == value.to_bool()?),
+            Some(BuiltInSymbol::Quad) => {
                 let list = value
                     .to_list()
                     .map_err(|_| ScriptError::new("quad must be a list".to_string()))?;
@@ -3708,16 +3720,16 @@ fn sprite_set_prop_is_noop(
                 }
                 Ok(sprite.quad == Some([points[0], points[1], points[2], points[3]]))
             }
-            "puppet" => Ok(sprite.puppet == value.to_bool()?),
-            "moveableSprite" | "moveable" => Ok(sprite.moveable == value.to_bool()?),
-            "constraint" => Ok(sprite.constraint == value.int_value()?),
-            "trails" => Ok(sprite.trails == value.to_bool()?),
+            Some(BuiltInSymbol::Puppet) => Ok(sprite.puppet == value.to_bool()?),
+            Some(BuiltInSymbol::MoveableSprite) | Some(BuiltInSymbol::Moveable) => Ok(sprite.moveable == value.to_bool()?),
+            Some(BuiltInSymbol::Constraint) => Ok(sprite.constraint == value.int_value()?),
+            Some(BuiltInSymbol::Trails) => Ok(sprite.trails == value.to_bool()?),
             _ => Ok(false),
         }
     })
 }
 
-pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<(), ScriptError> {
+pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Result<(), ScriptError> {
     // Director silently ignores property writes to invalid sprite refs. A
     // script doing `sprite(N).prop = X` where N came from a list-lookup
     // returning -1 (not-found sentinel) is legitimate Lingo — verified in
@@ -3738,7 +3750,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
     }
 
     reserve_player_mut(|player| { player.stage_dirty = true; });
-    let result = match prop_name {
+    let result = match prop_name.into_builtin() {
         // Flash (SWF) sprite frame setter — `mySprite.frame = N` on a Flash
         // member must navigate that sprite's embedded Ruffle player, not be
         // treated as a behaviour-property assignment. Each Flash sprite has
@@ -3746,7 +3758,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         // sharing a single Flash cast member can independently pin to
         // different frames (storyscramble's 3 story tiles use cast 2:1 but
         // display poster frames 2/4/6 simultaneously).
-        "frame" | "currentFrame" => {
+        Some(BuiltInSymbol::Frame) | Some(BuiltInSymbol::CurrentFrame) => {
             let frame_or_label = value.string_value()?;
             let has_member = reserve_player_ref(|player| {
                 player
@@ -3761,7 +3773,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             }
             Ok(())
         }
-        "visible" | "visibility" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Visible) | Some(BuiltInSymbol::Visibility) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -3770,7 +3782,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "stretch" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Stretch) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3778,7 +3790,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "locH" => borrow_sprite_mut(
+        Some(BuiltInSymbol::LocH) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3787,7 +3799,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "locV" => borrow_sprite_mut(
+        Some(BuiltInSymbol::LocV) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3796,7 +3808,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "locZ" => {
+        Some(BuiltInSymbol::LocZ) => {
             // Handle Void as a no-op (Director behavior when setting locZ = VOID)
             if matches!(value, Datum::Void) {
                 return Ok(());
@@ -3810,7 +3822,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 },
             )
         }
-        "width" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Width) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3819,7 +3831,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "height" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Height) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3828,7 +3840,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "left" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Left) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -3841,7 +3853,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "top" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Top) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -3854,7 +3866,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "right" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Right) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -3868,7 +3880,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "bottom" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Bottom) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -3882,7 +3894,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "ink" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Ink) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3890,7 +3902,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "blend" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Blend) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -3899,7 +3911,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "rotation" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Rotation) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -3911,7 +3923,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "skew" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Skew) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -3923,7 +3935,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "flipH" => borrow_sprite_mut(
+        Some(BuiltInSymbol::FlipH) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -3935,7 +3947,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "flipV" => borrow_sprite_mut(
+        Some(BuiltInSymbol::FlipV) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -3947,7 +3959,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "backColor" | "backcolor" => borrow_sprite_mut(
+        Some(BuiltInSymbol::BackColor) => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -3958,7 +3970,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "bgColor" => borrow_sprite_mut(
+        Some(BuiltInSymbol::BgColor) => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -3968,7 +3980,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "foreColor" | "forecolor" => borrow_sprite_mut(
+        Some(BuiltInSymbol::ForeColor) => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -3979,7 +3991,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "color" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Color) => borrow_sprite_mut(
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -3990,23 +4002,23 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             },
         ),
         // Shockwave3D camera assignment
-        "camera" => {
+        Some(BuiltInSymbol::Camera) => {
             let cam_name = match &value {
                 Datum::Shockwave3dObjectRef(r) => r.name.clone(),
-                Datum::String(s) => s.clone(),
-                _ => "DefaultView".to_string(),
+                Datum::String(s) => crate::player::symbols::symbol::Symbol::from_str(s),
+                _ => crate::player::symbols::builtin::BuiltInSymbol::DefaultView.into(),
             };
             borrow_sprite_mut(
                 sprite_id,
                 |_player| Ok(cam_name.clone()),
-                |sprite, name: Result<String, ScriptError>| {
-                    sprite.w3d_camera = Some(name.unwrap_or_default());
+                |sprite, name: Result<crate::player::symbols::symbol::Symbol, ScriptError>| {
+                    sprite.w3d_camera = Some(name.unwrap_or_else(|_| crate::player::symbols::builtin::BuiltInSymbol::DefaultView.into()));
                     Ok(())
                 },
             )
         }
         // Member properties
-        "member" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Member) => borrow_sprite_mut(
             sprite_id,
             |player| resolve_sprite_member_assignment(player, &value),
             |sprite, value| {
@@ -4070,7 +4082,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "memberNum" => borrow_sprite_mut(
+        Some(BuiltInSymbol::MemberNum) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4093,7 +4105,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "castNum" => borrow_sprite_mut(
+        Some(BuiltInSymbol::CastNum) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4105,7 +4117,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "cursor" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Cursor) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 if value.is_int() {
@@ -4159,7 +4171,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "loc" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Loc) => borrow_sprite_mut(
             sprite_id,
             // flag (D6+) so the sprite-mut closure doesn't need to re-borrow.
             |player| Ok::<_, ScriptError>(value.clone()),
@@ -4195,7 +4207,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 }
             },
         ),
-        "rect" => reserve_player_mut(|player| {
+        Some(BuiltInSymbol::Rect) => reserve_player_mut(|player| {
             // Extract the target rect from `value`.
             let rect_values = match value {
                 Datum::Rect(ref vals, _) => {
@@ -4259,7 +4271,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             s.has_size_changed = true;
             Ok(())
         }),
-        "scriptInstanceList" => {
+        Some(BuiltInSymbol::ScriptInstanceList) => {
             let ref_list = value.to_list()?;
             let instance_refs = borrow_sprite_mut(
                 sprite_id,
@@ -4296,7 +4308,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     script_set_prop(
                         player,
                         &instance_ref,
-                        &"spriteNum".to_string(),
+                        Symbol::builtin(BuiltInSymbol::SpriteNum),
                         &value_ref,
                         false,
                     )?
@@ -4304,7 +4316,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             })
         }
-        "editable" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Editable) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4312,7 +4324,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "quad" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Quad) => borrow_sprite_mut(
             sprite_id,
             |player| {
                 // quad should be a list of 4 points: [topLeft, topRight, bottomRight, bottomLeft]
@@ -4342,7 +4354,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "puppet" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Puppet) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4350,7 +4362,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "moveableSprite" | "moveable" => borrow_sprite_mut(
+        Some(BuiltInSymbol::MoveableSprite) | Some(BuiltInSymbol::Moveable) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4358,7 +4370,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "constraint" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Constraint) => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4367,7 +4379,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
-        "trails" => borrow_sprite_mut(
+        Some(BuiltInSymbol::Trails) => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4375,7 +4387,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),       
-        prop_name => borrow_sprite_mut(
+        _ => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4389,7 +4401,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             match script_set_prop(
                                 player,
                                 behavior,
-                                &prop_name.to_string(),
+                                prop_name,
                                 &value_ref,
                                 true,
                             ) {
@@ -4411,7 +4423,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                                 script_set_prop(
                                     player,
                                     &first_behavior,
-                                    &prop_name.to_string(),
+                                    prop_name,
                                     &value_ref,
                                     false,
                                 )
@@ -4429,29 +4441,30 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
     };
     if result.is_ok() {
-        let affects_render_order = prop_name.eq_ignore_ascii_case("visible")
-            || prop_name.eq_ignore_ascii_case("visibility")
-            || prop_name.eq_ignore_ascii_case("locZ")
-            || prop_name.eq_ignore_ascii_case("member")
-            || prop_name.eq_ignore_ascii_case("memberNum")
-            || prop_name.eq_ignore_ascii_case("castNum")
-            || prop_name.eq_ignore_ascii_case("puppet");
+        let prop_name_builtin = prop_name.into_builtin();
+        let affects_render_order = prop_name_builtin == Some(BuiltInSymbol::Visible)
+            || prop_name_builtin == Some(BuiltInSymbol::Visibility)
+            || prop_name_builtin == Some(BuiltInSymbol::LocZ)
+            || prop_name_builtin == Some(BuiltInSymbol::Member)
+            || prop_name_builtin == Some(BuiltInSymbol::MemberNum)
+            || prop_name_builtin == Some(BuiltInSymbol::CastNum)
+            || prop_name_builtin == Some(BuiltInSymbol::Puppet);
         if affects_render_order {
             reserve_player_mut(|player| {
                 player.movie.score.invalidate_render_channel_cache();
             });
         }
-        if prop_name.eq_ignore_ascii_case("puppet") {
+        if prop_name_builtin == Some(BuiltInSymbol::Puppet) {
             reserve_player_mut(|player| {
                 player.refresh_stage_behavior_channel_cache_entry(sprite_id);
             });
         }
-        if prop_name.eq_ignore_ascii_case("visible")
-            || prop_name.eq_ignore_ascii_case("visibility")
-            || prop_name.eq_ignore_ascii_case("puppet")
-            || prop_name.eq_ignore_ascii_case("member")
-            || prop_name.eq_ignore_ascii_case("memberNum")
-            || prop_name.eq_ignore_ascii_case("castNum")
+        if prop_name_builtin == Some(BuiltInSymbol::Visible)
+            || prop_name_builtin == Some(BuiltInSymbol::Visibility)
+            || prop_name_builtin == Some(BuiltInSymbol::Puppet)
+            || prop_name_builtin == Some(BuiltInSymbol::Member)
+            || prop_name_builtin == Some(BuiltInSymbol::MemberNum)
+            || prop_name_builtin == Some(BuiltInSymbol::CastNum)
         {
             reserve_player_mut(|player| {
                 player.invalidate_active_stage_filmloop_cache();
@@ -4669,7 +4682,7 @@ fn sprite_has_mouse_handler(player: &DirPlayer, sprite: &Sprite) -> bool {
 ///      cast level rather than per-sprite.
 pub fn sprite_has_handler(player: &DirPlayer, sprite: &Sprite, names: &[&str]) -> bool {
     let script_has_any = |script: &crate::player::script::Script| -> bool {
-        names.iter().any(|n| script.get_own_handler(n).is_some())
+        names.iter().any(|n| script.get_own_handler(Symbol::from_str(n)).is_some())
     };
 
     // (1) Score-authored sprite behaviours.
@@ -5064,7 +5077,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // Other boxTypes (#scroll, #fixed, #limit) honor
             // sprite.width unconditionally — those are user-resizable
             // containers independent of the member's authored width.
-            let is_adjust_for_width = field_member.box_type == "adjust";
+            let is_adjust_for_width = field_member.box_type == crate::player::symbols::builtin::BuiltInSymbol::Adjust;
             let member_authored_w = field_member.width as i32;
             let chrome_w = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
@@ -5078,7 +5091,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let extras = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
                 + (4 * field_member.box_drop_shadow as i32);
-            let is_adjust = field_member.box_type == "adjust";
+            let is_adjust = field_member.box_type == BuiltInSymbol::Adjust;
 
             // Measure the actual rendered text height using the same logic as
             // the text member path: bitmap font measurement when available,
@@ -5153,10 +5166,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // (`member.boxType = #fixed` may serialize with the `#` prefix
             // and arbitrary case). Normalize before comparing.
             let box_type_norm = field_member
-                .box_type
-                .trim()
-                .trim_start_matches('#')
-                .to_ascii_lowercase();
+                .box_type;
             let _ = box_type_norm; // (used only for legacy debug logs; safe to drop later)
             let (field_height, height_arm) = if is_adjust && measured_plus_extras.is_some() {
                 // #adjust is the ONLY box type that auto-grows. #fixed clips
@@ -5411,7 +5421,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let text_height = if sprite.puppet && measured_height.unwrap_or(0) > 0 {
                 let measured_h = measured_height.unwrap();
                 measured_h.max(preferred_authored)
-            } else if text_member.box_type == "adjust" && preferred_authored > 0 {
+            } else if text_member.box_type == BuiltInSymbol::Adjust && preferred_authored > 0 {
                 // Non-puppet #adjust text members: trust the authored
                 // member.height when text has explicit breaks (the value
                 // is the laid-out total Director rendered into); for
@@ -5440,7 +5450,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                         measured_h.max(preferred_authored)
                     }
                 }
-            } else if text_member.box_type == "adjust" {
+            } else if text_member.box_type == BuiltInSymbol::Adjust {
                 match measured_height {
                     Some(m) if m > stored_height => m,
                     _ => stored_height,

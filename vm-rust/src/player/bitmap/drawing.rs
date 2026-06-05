@@ -8,11 +8,7 @@ use crate::{
         lingo::datum::Datum,
     },
     player::{
-        font::{bitmap_font_copy_char, BitmapFont},
-        geometry::IntRect,
-        sprite::{ColorRef, is_skew_flip},
-        bitmap::bitmap::{get_system_default_palette, PaletteRef}, Sprite, Score,
-        reserve_player_mut,
+        Score, Sprite, bitmap::bitmap::{PaletteRef, get_system_default_palette}, font::{BitmapFont, bitmap_font_copy_char}, geometry::IntRect, reserve_player_mut, sprite::{ColorRef, is_skew_flip}, symbols::builtin::BuiltInSymbol
     },
 };
 
@@ -1945,7 +1941,7 @@ impl Bitmap {
 
         let use_grayscale_as_alpha = match src.palette_ref {
             PaletteRef::BuiltIn(palette) => {
-                palette.symbol_string().eq_ignore_ascii_case("grayscale")
+                palette.symbol() == BuiltInSymbol::Grayscale
             }
             _ => false, // Any other palette → not grayscale
         };
@@ -3115,7 +3111,7 @@ impl Bitmap {
         loc_h: i32,
         loc_v: i32,
         max_width: i32,
-        alignment: &str,
+        alignment: BuiltInSymbol,
         params: CopyPixelsParams,
         palettes: &PaletteMap,
         line_spacing: u16,
@@ -3133,8 +3129,8 @@ impl Bitmap {
                 .map(|ch| font.get_char_advance_for(ch) as i32)
                 .sum();
             let x = match alignment {
-                "center" => loc_h + ((max_width - line_w) / 2).max(0),
-                "right" => loc_h + (max_width - line_w).max(0),
+                BuiltInSymbol::Center => loc_h + ((max_width - line_w) / 2).max(0),
+                BuiltInSymbol::Right => loc_h + (max_width - line_w).max(0),
                 _ => loc_h,
             };
 
@@ -3280,7 +3276,7 @@ impl Bitmap {
         text: &str,
         font: &BitmapFont,
         max_width: i32,
-        alignment: &str,
+        alignment: BuiltInSymbol,
         line_height: i32,
         idx: i32,
     ) -> (i32, i32) {
@@ -3316,10 +3312,9 @@ impl Bitmap {
         // "öäüß" (8 UTF-8 bytes → 8 advances instead of 4).
         let line_w: i32 = line.text.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
         let x_offset = if max_width > 0 {
-            let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
-            match key.as_str() {
-                "center" => ((max_width - line_w) / 2).max(0),
-                "right" => (max_width - line_w).max(0),
+            match alignment {
+                BuiltInSymbol::Center => ((max_width - line_w) / 2).max(0),
+                BuiltInSymbol::Right => (max_width - line_w).max(0),
                 _ => 0,
             }
         } else {

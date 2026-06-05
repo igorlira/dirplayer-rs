@@ -8,10 +8,7 @@ use crate::{
         cast::CastDef, chunks::sound::SoundChunk, enums::{ScriptType, BitmapInfo, SoundInfo},
         file::{read_director_file_bytes, DirectorFile},
         lingo::{datum::Datum, script::ScriptContext},
-    },
-    js_api::JsApi,
-    utils::{get_base_url, get_basename_no_extension, log_i},
-    player::{cast_member::ScriptMember, ci_string::CiString},
+    }, js_api::JsApi, player::{cast_member::ScriptMember, ci_string::CiString, symbols::{builtin::BuiltInSymbol, symbol::Symbol}}, utils::{get_base_url, get_basename_no_extension, log_i}
 };
 
 use super::{
@@ -52,11 +49,17 @@ pub struct CastLib {
     pub lctx: Option<ScriptContext>,
     pub members: FxHashMap<u32, CastMember>,
     pub scripts: FxHashMap<u32, Rc<Script>>,
+    pub name_symbols: Vec<Symbol>,
     pub preload_mode: u16,
     pub capital_x: bool,
     pub dir_version: u16,
     /// Offset to adjust bitmap clutId from Config-based to MCsL-based member numbering.
     pub palette_id_offset: i16,
+    /// Lazy lowercased-name → lowest member number index for `find_member_by_name`.
+    /// Built on first lookup and reused until a member is inserted/removed/renamed
+    /// (see `invalidate_name_index`). Replaces an O(members) linear scan per call —
+    /// the Habbo preloader's `FindCastNumber` hammers name lookups in tight loops.
+    pub name_index: RefCell<Option<FxHashMap<String, u32>>>,
     /// Director Fmap/VWFM font-table snapshot: font_id → font name (e.g.
     /// "Arial", "Arial Bold", "Arial Italic"). Kept on the cast lib so
     /// per-run `font_id`s from STXT can be resolved to actual names at
@@ -87,6 +90,7 @@ impl CastLib {
         // TODO remove from movie script cache
         self.members.remove(&number);
         self.scripts.remove(&number);
+        self.invalidate_name_index();
         JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
             self.number,
             number,
@@ -104,17 +108,17 @@ impl CastLib {
         if file_name.is_empty() {
             return;
         } else if let Some(cached_file) = dir_cache.get(&*file_name) {
+            let __t = crate::player::bench_now_ms();
             self.load_from_dir_file(cached_file, &file_name, bitmap_manager);
+            crate::player::cast_diag_add_apply(crate::player::bench_now_ms() - __t);
         } else {
-            log_i(
-                format_args!("Loading cast {} into castLib {} ('{}')", self.file_name, self.number, self.name)
-                    .to_string()
-                    .as_str(),
-            );
+            log::debug!("Loading cast {} into castLib {} ('{}')", self.file_name, self.number, self.name);
             self.state = CastLibState::Loading;
             let task_id = net_manager.preload_net_thing(self.file_name.clone());
             if !net_manager.is_task_done(Some(task_id)) {
+                let __t = crate::player::bench_now_ms();
                 net_manager.await_task(task_id).await;
+                crate::player::cast_diag_add_net(crate::player::bench_now_ms() - __t);
             }
             let task = net_manager.get_task(task_id).unwrap();
             let result = net_manager.get_task_result(Some(task_id)).unwrap();
@@ -131,23 +135,29 @@ impl CastLib {
     ) {
         let load_file_name = resolved_url.as_str();
         if let Ok(cast_bytes) = result {
+            let __tp = crate::player::bench_now_ms();
             let cast_file = read_director_file_bytes(
                 cast_bytes,
                 &resolved_url.to_string(),
                 &get_base_url(resolved_url).to_string(),
             );
+            crate::player::cast_diag_add_parse(crate::player::bench_now_ms() - __tp);
             if let Ok(cast_file) = cast_file {
                 dir_cache.insert(load_file_name.into(), cast_file);
                 let cast_file = dir_cache.get(load_file_name).unwrap();
+                let __ta = crate::player::bench_now_ms();
                 self.load_from_dir_file(&cast_file, load_file_name, bitmap_manager);
+                crate::player::cast_diag_add_apply(crate::player::bench_now_ms() - __ta);
                 // We return here because the function `load_from_dir_file()`
                 // has changed our `state` to `Loaded` and we want to keep this.
                 return;
             } else {
-                log_i(format!("Could not parse {load_file_name}").as_str());
+                log::debug!("Could not parse {load_file_name}");
             }
         } else {
-            log_i(format!("Fetching {load_file_name} failed").as_str());
+            // ~650 null.cst pool slots fail to fetch during resetCastLibs;
+            // keep this off the console (log::debug) to avoid flooding DevTools.
+            log::debug!("Fetching {load_file_name} failed");
         }
         self.state = CastLibState::None;
     }
@@ -160,18 +170,47 @@ impl CastLib {
         self.members.get_mut(&number)
     }
 
+    /// Drop the lazily-built name index. Called whenever the member set or a
+    /// member name changes, so the next `find_member_by_name` rebuilds it.
+    pub fn invalidate_name_index(&self) {
+        self.name_index.replace(None);
+    }
+
     pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
-        // Director returns the lowest-numbered member when duplicates exist in the same cast.
-        // HashMap iteration order is non-deterministic, so we must track the best match.
-        let mut best: Option<&CastMember> = None;
-        for member in self.members.values() {
-            if member.name.eq_ignore_ascii_case(name) {
-                if best.is_none() || member.number < best.unwrap().number {
-                    best = Some(member);
-                }
+        // Director returns the lowest-numbered member when duplicates exist in the
+        // same cast. Build (once) a lowercased-name → lowest-number index so repeated
+        // lookups are O(1) instead of an O(members) scan per call.
+        if self.name_index.borrow().is_none() {
+            let mut index: FxHashMap<String, u32> = FxHashMap::default();
+            for member in self.members.values() {
+                let key = member.name.to_ascii_lowercase();
+                index
+                    .entry(key)
+                    .and_modify(|n| {
+                        if member.number < *n {
+                            *n = member.number;
+                        }
+                    })
+                    .or_insert(member.number);
             }
+            self.name_index.replace(Some(index));
         }
-        best
+
+        let number = {
+            let idx_ref = self.name_index.borrow();
+            let idx = idx_ref.as_ref().unwrap();
+            // Avoid allocating a lowercased key on every lookup: most callers
+            // (Habbo's normalizeCastName output) already pass a lowercase name,
+            // so probe the index directly with `&str` and only allocate when the
+            // name actually contains uppercase ASCII.
+            if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                let lookup = name.to_ascii_lowercase();
+                idx.get(lookup.as_str()).copied()
+            } else {
+                idx.get(name).copied()
+            }
+        };
+        number.and_then(|n| self.members.get(&n))
     }
 
 
@@ -197,6 +236,7 @@ impl CastLib {
         self.scripts.clear();
         self.lctx = None;
         self.state = CastLibState::None;
+        self.invalidate_name_index();
 
         JsApi::dispatch_cast_member_list_changed(self.number);
     }
@@ -210,19 +250,19 @@ impl CastLib {
 
     pub fn set_prop(
         &mut self,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
         // TODO
-        match prop {
-            "preloadMode" => {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::PreloadMode => {
                 self.preload_mode = value.int_value()? as u16;
             }
-            "name" => {
+            BuiltInSymbol::Name => {
                 self.set_name(value.string_value()?);
             }
-            "fileName" => {
+            BuiltInSymbol::FileName => {
                 self.file_name = value.string_value()?;
             }
             _ => {
@@ -235,10 +275,10 @@ impl CastLib {
         Ok(())
     }
 
-    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match prop {
-            "preloadMode" => Ok(Datum::Int(self.preload_mode as i32)),
-            "fileName" => {
+    pub fn get_prop(&self, prop: Symbol) -> Result<Datum, ScriptError> {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::PreloadMode => Ok(Datum::Int(self.preload_mode as i32)),
+            BuiltInSymbol::FileName => {
                 // Only return the fileName if the cast is actually loaded.
                 // External casts with preloadMode=0 ("When Needed") have file_name set
                 // in the movie structure but aren't loaded yet. Scripts like PreloadCast
@@ -250,9 +290,9 @@ impl CastLib {
                     Ok(Datum::String(self.file_name.clone()))
                 }
             }
-            "number" => Ok(Datum::Int(self.number as i32)),
-            "name" => Ok(Datum::String(self.name.clone())),
-            "number of castMembers" | "number of members" => {
+            BuiltInSymbol::Number => Ok(Datum::Int(self.number as i32)),
+            BuiltInSymbol::Name => Ok(Datum::String(self.name.clone())),
+            BuiltInSymbol::NumberOfCastMembers | BuiltInSymbol::NumberOfMembers => {
                 // Director semantics: the highest member slot number in use,
                 // not the population count. Casts routinely have gaps, and
                 // Lingo code like `repeat with i = 1 to the number of
@@ -283,15 +323,11 @@ impl CastLib {
             self.set_name(get_basename_no_extension(load_file_name));
         }
         if let Some(cast_def) = file.casts.first() {
-            log_i(
-                format_args!(
-                    "Applying cast def to castLib {} ('{}'): {} members",
-                    self.number,
-                    self.name,
-                    cast_def.members.len()
-                )
-                .to_string()
-                .as_str(),
+            log::debug!(
+                "Applying cast def to castLib {} ('{}'): {} members",
+                self.number,
+                self.name,
+                cast_def.members.len()
             );
             self.apply_cast_def(file, cast_def, bitmap_manager, &file.font_table);
         } else {
@@ -316,6 +352,9 @@ impl CastLib {
         font_table: &HashMap<u16, String>,
     ) {
         self.lctx = cast_def.lctx.clone();
+        self.name_symbols = self.lctx.as_ref()
+            .map(|lctx| lctx.names.iter().map(|n| Symbol::from_str(n)).collect())
+            .unwrap_or_default();
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;
         self.palette_id_offset = cast_def.palette_id_offset;
@@ -350,20 +389,23 @@ impl CastLib {
 
             if let Some(script_def) = script_def {
                 let mut handler_names = Vec::new();
+                let mut handler_names_raw = Vec::new();
                 let mut handler_name_map = FxHashMap::default();
                 for handler in &script_def.handlers {
                     let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-                    handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-                    handler_names.push(handler_name.to_owned());
+                    let handler_name_symbol = Symbol::from_str(handler_name);
+                    handler_name_map.insert(handler_name_symbol, Rc::new(handler.clone()));
+                    handler_names.push(handler_name_symbol);
+                    handler_names_raw.push(handler_name.clone());
                 }
 
                 let property_names = script_def
                     .property_name_ids
                     .iter()
-                    .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+                    .map(|id| Symbol::from_str(&self.lctx.as_ref().unwrap().names[*id as usize]));
                 let mut properties = FxHashMap::default();
                 for name in property_names {
-                    properties.insert(CiString::from(name), DatumRef::Void);
+                    properties.insert(name, DatumRef::Void);
                 }
 
                 let script = Script {
@@ -373,6 +415,7 @@ impl CastLib {
                     script_type: script_member.script_type,
                     handlers: handler_name_map,
                     handler_names,
+                    handler_names_raw,
                     properties: RefCell::new(properties),
                 };
                 // JS Lingo diagnostic: decode and disassemble each XDR-wrapped JSScript
@@ -387,6 +430,7 @@ impl CastLib {
         }
 
         self.members.insert(number, member);
+        self.invalidate_name_index();
     }
 
     pub fn create_member_at(
@@ -500,21 +544,24 @@ impl CastLib {
         
         // Build handler map
         let mut handler_names = Vec::new();
+        let mut handler_names_raw = Vec::new();
         let mut handler_name_map = FxHashMap::default();
         for handler in &script_chunk.handlers {
             let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
-            handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-            handler_names.push(handler_name.to_owned());
+            let handler_name_symbol = Symbol::from_str(handler_name);
+            handler_name_map.insert(handler_name_symbol, Rc::new(handler.clone()));
+            handler_names.push(handler_name_symbol);
+            handler_names_raw.push(handler_name.clone());
         }
 
         // Build properties
         let property_names = script_chunk
             .property_name_ids
             .iter()
-            .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+            .map(|id| Symbol::from_str(&self.lctx.as_ref().unwrap().names[*id as usize]));
         let mut properties = FxHashMap::default();
         for name in property_names {
-            properties.insert(CiString::from(name), DatumRef::Void);
+            properties.insert(name, DatumRef::Void);
         }
 
         let script = Rc::new(Script {
@@ -524,6 +571,7 @@ impl CastLib {
             script_type: ScriptType::Member,
             handlers: handler_name_map,
             handler_names,
+            handler_names_raw,
             properties: RefCell::new(properties),
         });
         
@@ -534,7 +582,7 @@ impl CastLib {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct CastMemberRef {
     pub cast_lib: i32,
     pub cast_member: i32,
@@ -565,29 +613,29 @@ impl CastMemberRef {
 
 pub async fn player_cast_lib_set_prop(
     cast_lib: u32,
-    prop_name: &str,
+    prop_name: Symbol,
     value: Datum,
 ) -> Result<(), ScriptError> {
     let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let builtin_prop_name = prop_name.into_builtin_or_error()?;
 
     let cast_manager = &mut player.movie.cast_manager;
     let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
 
-    if prop_name == "fileName" {
-        log_i(
-            format_args!(
-                "Setting fileName of castLib {} ('{}') to '{}'",
-                cast_lib,
-                cast_lib_obj.name,
-                value.string_value().unwrap_or_default()
-            )
-            .to_string()
-            .as_str(),
+    if builtin_prop_name == BuiltInSymbol::FileName {
+        // log::debug (not console) — the cast pool sets fileName on ~650 empty
+        // slots during resetCastLibs; a per-set console.log floods DevTools and
+        // dominates load time when the console is open.
+        log::debug!(
+            "Setting fileName of castLib {} ('{}') to '{}'",
+            cast_lib,
+            cast_lib_obj.name,
+            value.string_value().unwrap_or_default()
         );
     }
 
-    cast_lib_obj.set_prop(&prop_name, value, &player.allocator)?;
-    if prop_name == "fileName" {
+    cast_lib_obj.set_prop(prop_name, value, &player.allocator)?;
+    if builtin_prop_name == BuiltInSymbol::FileName {
         cast_lib_obj
             .preload(
                 &mut player.net_manager,
@@ -598,4 +646,75 @@ pub async fn player_cast_lib_set_prop(
     }
     // TODO handle preload error
     Ok(())
+}
+
+#[cfg(test)]
+mod name_index_tests {
+    use super::*;
+    use crate::player::cast_member::FieldMember;
+
+    fn empty_cast() -> CastLib {
+        // Constructing cast members can format BuiltInSymbols, which read the
+        // global symbol table; make sure it's initialized (idempotent).
+        crate::player::symbols::symbol_table::init_symbol_table();
+        CastLib {
+            name: String::new(),
+            file_name: String::new(),
+            number: 1,
+            is_external: false,
+            state: CastLibState::Loaded,
+            lctx: None,
+            members: FxHashMap::default(),
+            scripts: FxHashMap::default(),
+            name_symbols: Vec::new(),
+            preload_mode: 0,
+            capital_x: false,
+            dir_version: 0,
+            palette_id_offset: 0,
+            name_index: RefCell::new(None),
+            font_table: HashMap::new(),
+        }
+    }
+
+    fn field_member(number: u32, name: &str) -> CastMember {
+        // Field members take the simple insert path (no JsApi / script wiring).
+        let mut m = CastMember::new(number, CastMemberType::Field(FieldMember::new()));
+        m.name = name.to_string();
+        m
+    }
+
+    #[test]
+    fn find_by_name_is_case_insensitive_and_lowest_number_wins() {
+        let mut cast = empty_cast();
+        cast.insert_member(5, field_member(5, "Window"));
+        cast.insert_member(2, field_member(2, "window")); // duplicate name, lower number
+        cast.insert_member(9, field_member(9, "Frame"));
+
+        // Lowest-numbered match wins; lookup is case-insensitive.
+        assert_eq!(cast.find_member_by_name("WINDOW").map(|m| m.number), Some(2));
+        assert_eq!(cast.find_member_by_name("window").map(|m| m.number), Some(2));
+        assert_eq!(cast.find_member_by_name("frame").map(|m| m.number), Some(9));
+        assert!(cast.find_member_by_name("missing").is_none());
+        // Second lookup hits the cached index and returns the same result.
+        assert_eq!(cast.find_member_by_name("window").map(|m| m.number), Some(2));
+    }
+
+    #[test]
+    fn index_invalidates_on_rename_and_remove() {
+        let mut cast = empty_cast();
+        cast.insert_member(3, field_member(3, "Alpha"));
+        assert_eq!(cast.find_member_by_name("alpha").map(|m| m.number), Some(3)); // builds index
+
+        // Rename: mutate the member then invalidate (mirrors the name-setter,
+        // which routes through invalidate_member_name_cache -> invalidate_name_index).
+        cast.members.get_mut(&3).unwrap().name = "Beta".to_string();
+        cast.invalidate_name_index();
+        assert!(cast.find_member_by_name("alpha").is_none());
+        assert_eq!(cast.find_member_by_name("beta").map(|m| m.number), Some(3));
+
+        // Remove via the map + invalidate (avoid remove_member's JsApi calls in tests).
+        cast.members.remove(&3);
+        cast.invalidate_name_index();
+        assert!(cast.find_member_by_name("beta").is_none());
+    }
 }

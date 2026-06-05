@@ -5,7 +5,7 @@ use log::{warn, debug};
 use crate::{
     director::lingo::datum::{Datum, VarRef},
     player::{
-        handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut,
+        handlers::datum_handlers::player_call_datum_handler, player_is_playing, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 
@@ -18,12 +18,12 @@ use super::{
 };
 
 pub enum PlayerVMEvent {
-    Global(String, Vec<DatumRef>),
-    Targeted(String, Vec<DatumRef>, Option<Vec<ScriptInstanceRef>>),
-    Callback(DatumRef, String, Vec<DatumRef>),
+    Global(Symbol, Vec<DatumRef>),
+    Targeted(Symbol, Vec<DatumRef>, Option<Vec<ScriptInstanceRef>>),
+    Callback(DatumRef, Symbol, Vec<DatumRef>),
 }
 
-pub fn player_dispatch_global_event(handler_name: &str, args: &Vec<DatumRef>) {
+pub fn player_dispatch_global_event(handler_name: Symbol, args: &Vec<DatumRef>) {
     if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
         let _ = tx.try_send(PlayerVMEvent::Global(
             handler_name.to_owned(),
@@ -34,7 +34,7 @@ pub fn player_dispatch_global_event(handler_name: &str, args: &Vec<DatumRef>) {
 
 pub fn player_dispatch_callback_event(
     receiver: DatumRef,
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) {
     if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
@@ -47,7 +47,7 @@ pub fn player_dispatch_callback_event(
 }
 
 pub fn player_dispatch_targeted_event(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
     instance_ids: Option<&Vec<ScriptInstanceRef>>,
 ) {
@@ -61,7 +61,7 @@ pub fn player_dispatch_targeted_event(
 }
 
 pub fn player_dispatch_event_to_sprite(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
@@ -91,7 +91,7 @@ pub fn player_dispatch_event_to_sprite(
 }
 
 pub async fn player_dispatch_event_to_sprite_targeted(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
     sprite_num: u16,
 ) {
@@ -124,7 +124,7 @@ pub async fn player_dispatch_event_to_sprite_targeted(
 }
 
 pub async fn player_invoke_event_to_instances(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
     instance_refs: &Vec<ScriptInstanceRef>,
 ) -> Result<bool, ScriptError> {
@@ -132,7 +132,7 @@ pub async fn player_invoke_event_to_instances(
         let mut result = vec![];
         for instance_ref in instance_refs {
             let handler_pair = ScriptInstanceUtils::get_script_instance_handler(
-                &handler_name,
+                handler_name,
                 instance_ref,
                 player,
             )?;
@@ -177,7 +177,7 @@ pub async fn player_invoke_event_to_instances(
 }
 
 pub async fn player_invoke_targeted_event(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
     instance_refs: Option<&Vec<ScriptInstanceRef>>,
 ) -> Result<DatumRef, ScriptError> {
@@ -194,7 +194,7 @@ pub async fn player_invoke_targeted_event(
 }
 
 pub async fn player_invoke_frame_and_movie_scripts(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
@@ -247,7 +247,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
         
         let result = player_call_script_handler(
             receiver,  // Changed from None to receiver
-            (script_member_ref.clone(), handler_name.to_owned()),
+            (script_member_ref.clone(), handler_name),
             args
         ).await;
         match &result {
@@ -271,7 +271,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
 }
 
 pub async fn player_invoke_static_event(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<bool, ScriptError> {
     let active_static_scripts = reserve_player_mut(|player| {
@@ -320,7 +320,7 @@ pub async fn player_invoke_static_event(
         
         let result = player_call_script_handler(
             receiver,  // Changed from None to receiver
-            (script_member_ref, handler_name.to_owned()),
+            (script_member_ref, handler_name),
             args
         ).await?;
         
@@ -333,7 +333,7 @@ pub async fn player_invoke_static_event(
 }
 
 pub async fn player_invoke_global_event(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
     // First stage behavior script
@@ -371,19 +371,19 @@ pub async fn player_invoke_global_event(
 }
 
 pub async fn player_dispatch_movie_callback(
-    handler_name: &str,
+    handler_name: BuiltInSymbol,
 ) -> Result<(), ScriptError> {
     enum CallbackAction {
-        CallHandler(Option<ScriptInstanceRef>, (CastMemberRef, String)),
+        CallHandler(Option<ScriptInstanceRef>, (CastMemberRef, Symbol)),
         EvalText(String),
     }
 
     let action = reserve_player_ref(|player| {
         let callback = match handler_name {
-            "mouseDown" => &player.movie.mouse_down_script,
-            "mouseUp" => &player.movie.mouse_up_script,
-            "keyDown" => &player.movie.key_down_script,
-            "keyUp" => &player.movie.key_up_script,
+            BuiltInSymbol::MouseDown => &player.movie.mouse_down_script,
+            BuiltInSymbol::MouseUp => &player.movie.mouse_up_script,
+            BuiltInSymbol::KeyDown => &player.movie.key_down_script,
+            BuiltInSymbol::KeyUp => &player.movie.key_up_script,
             _ => return None,
         };
         let callback = callback.as_ref()?;
@@ -391,12 +391,12 @@ pub async fn player_dispatch_movie_callback(
             ScriptReceiver::ScriptInstance(instance_ref) => {
                 let script_instance = player.allocator.get_script_instance(instance_ref);
                 let script = player.movie.cast_manager.get_script_by_ref(&script_instance.script)?;
-                let handler = script.get_own_handler_ref(&handler_name.to_string())?;
+                let handler = script.get_own_handler_ref(Symbol::builtin(handler_name))?;
                 Some(CallbackAction::CallHandler(Some(instance_ref.clone()), handler))
             }
             ScriptReceiver::Script(script_ref) => {
                 let script = player.movie.cast_manager.get_script_by_ref(script_ref)?;
-                let handler = script.get_own_handler_ref(&handler_name.to_string())?;
+                let handler = script.get_own_handler_ref(Symbol::builtin(handler_name))?;
                 Some(CallbackAction::CallHandler(None, handler))
             }
             ScriptReceiver::ScriptText(text) => {
@@ -441,7 +441,7 @@ pub async fn dispatch_w3d_timer_events() {
     // them outside it. Each fire is (member_ref, instance_opt, handler_name, args).
     struct Fire {
         instance: Option<crate::player::script_ref::ScriptInstanceRef>,
-        handler_name: String,
+        handler_name: Symbol,
         args: [f64; 5],
     }
 
@@ -472,7 +472,7 @@ pub async fn dispatch_w3d_timer_events() {
                 let mut i = 0;
                 while i < events.len() {
                     let ev = &mut events[i];
-                    if !ev.event_name.eq_ignore_ascii_case("timeMS") {
+                    if !ev.event_name.eq_builtin(BuiltInSymbol::TimeMS) {
                         i += 1;
                         continue;
                     }
@@ -529,12 +529,12 @@ pub async fn dispatch_w3d_timer_events() {
         });
         if let Some(inst_ref) = fire.instance {
             let _ = player_invoke_event_to_instances(
-                &fire.handler_name,
+                fire.handler_name,
                 &arg_refs,
                 &vec![inst_ref],
             ).await;
         } else {
-            let _ = player_invoke_static_event(&fire.handler_name, &arg_refs).await;
+            let _ = player_invoke_static_event(fire.handler_name, &arg_refs).await;
         }
     }
 }
@@ -602,11 +602,11 @@ pub async fn dispatch_physx_collision_callbacks() {
     use std::collections::VecDeque;
 
     struct Fire {
-        handler_name: String,
+        handler_name: Symbol,
         cast_lib: i32,
         cast_member: i32,
         // (a_id, b_id, a_name, b_name, points, normals)
-        collisions: Vec<(u32, u32, Option<String>, Option<String>, Vec<[f64; 3]>, Vec<[f64; 3]>)>,
+        collisions: Vec<(u32, u32, Option<Symbol>, Option<Symbol>, Vec<[f64; 3]>, Vec<[f64; 3]>)>,
     }
 
     let fires: Vec<Fire> = reserve_player_mut(|player| {
@@ -637,7 +637,7 @@ pub async fn dispatch_physx_collision_callbacks() {
                     continue;
                 };
                 // Resolve body names while we still hold the borrow.
-                let body_names: std::collections::HashMap<u32, String> =
+                let body_names: std::collections::HashMap<u32, Symbol> =
                     physx.state.bodies.iter().map(|b| (b.id, b.name.clone())).collect();
                 let mut drained: Vec<(u32, u32, Vec<[f64; 3]>, Vec<[f64; 3]>)> = Vec::new();
                 std::mem::swap(&mut drained, &mut physx.state.pending_collisions);
@@ -669,7 +669,7 @@ pub async fn dispatch_physx_collision_callbacks() {
                 let a_ref = match name_a {
                     Some(n) => player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                         cast_lib, cast_member,
-                        object_type: "rigidBody".to_string(),
+                        object_type: BuiltInSymbol::RigidBody,
                         id: *a_id, name: n.clone(),
                     })),
                     None => DatumRef::Void,
@@ -677,7 +677,7 @@ pub async fn dispatch_physx_collision_callbacks() {
                 let b_ref = match name_b {
                     Some(n) => player.alloc_datum(Datum::PhysXObjectRef(PhysXObjectRef {
                         cast_lib, cast_member,
-                        object_type: "rigidBody".to_string(),
+                        object_type: BuiltInSymbol::RigidBody,
                         id: *b_id, name: n.clone(),
                     })),
                     None => DatumRef::Void,
@@ -688,10 +688,10 @@ pub async fn dispatch_physx_collision_callbacks() {
                 let mut nms = VecDeque::new();
                 for n in normals { nms.push_back(player.alloc_datum(Datum::Vector(*n))); }
                 let nms_list = player.alloc_datum(Datum::List(DatumType::List, nms, false));
-                let key_a = player.alloc_datum(Datum::Symbol("objectA".to_string()));
-                let key_b = player.alloc_datum(Datum::Symbol("objectB".to_string()));
-                let key_pts = player.alloc_datum(Datum::Symbol("contactPoints".to_string()));
-                let key_nms = player.alloc_datum(Datum::Symbol("contactNormals".to_string()));
+                let key_a = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ObjectA)));
+                let key_b = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ObjectB)));
+                let key_pts = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ContactPoints)));
+                let key_nms = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ContactNormals)));
                 let mut props = VecDeque::new();
                 props.push_back((key_a, a_ref));
                 props.push_back((key_b, b_ref));
@@ -702,7 +702,7 @@ pub async fn dispatch_physx_collision_callbacks() {
             let collisions_list = player.alloc_datum(Datum::List(DatumType::List, reports, false));
             vec![collisions_list]
         });
-        let _ = player_invoke_global_event(&fire.handler_name, &arg_refs).await;
+        let _ = player_invoke_global_event(fire.handler_name, &arg_refs).await;
     }
 }
 
@@ -747,12 +747,12 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
             continue;
         }
         let result = match item {
-            PlayerVMEvent::Global(name, args) => player_invoke_global_event(&name, &args).await,
+            PlayerVMEvent::Global(name, args) => player_invoke_global_event(name, &args).await,
             PlayerVMEvent::Targeted(name, args, instances) => {
-                player_invoke_targeted_event(&name, &args, instances.as_ref()).await
+                player_invoke_targeted_event(name, &args, instances.as_ref()).await
             }
             PlayerVMEvent::Callback(receiver, name, args) => {
-                player_call_datum_handler(&receiver, &name, &args).await
+                player_call_datum_handler(&receiver, name, &args).await
             }
         };
         match result {
@@ -782,7 +782,7 @@ pub fn player_unwrap_result(result: Result<DatumRef, ScriptError>) -> DatumRef {
 }
 
 pub async fn player_dispatch_event_beginsprite(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>
 ) -> Result<Vec<(ScoreRef, u32)>, ScriptError> {
     let (sprite_instances, frame_instances, all_channels) =
@@ -990,7 +990,7 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
 
     // Dispatch to frame behaviors first (number == 0)
     if frame_tuple.len() > 0 {
-        let _ = player_invoke_frame_and_movie_scripts(&"endSprite".to_string(), &vec![]).await;
+        let _ = player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::EndSprite), &vec![]).await;
     }
 
     // Set the score context for this dispatch
@@ -1004,7 +1004,7 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
             let receivers = vec![behavior.clone()];
 
             if let Err(err) = player_invoke_event_to_instances(
-                    &"endSprite".to_string(), &vec![], &receivers
+                    Symbol::builtin(BuiltInSymbol::EndSprite), &vec![], &receivers
                 ).await {
                 if err.code == ScriptErrorCode::Abort {
                     break;
@@ -1026,7 +1026,7 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
 }
 
 pub async fn dispatch_event_to_all_behaviors(
-    handler_name: &str,
+    handler_name: Symbol,
     args: &Vec<DatumRef>,
 ) {
     use crate::player::allocator::ScriptInstanceAllocatorTrait;
@@ -1197,7 +1197,7 @@ pub async fn player_wait_available() {
 /// Dispatch system events to all timeout targets
 /// System events include: prepareMovie, startMovie, stopMovie, prepareFrame, exitFrame
 pub async fn dispatch_system_event_to_timeouts(
-    handler_name: &str,
+    handler_name: BuiltInSymbol,
     args: &Vec<DatumRef>,
 ) {
     // Get all timeout targets that are currently scheduled
@@ -1213,7 +1213,7 @@ pub async fn dispatch_system_event_to_timeouts(
 
     // Dispatch the event to each timeout target
     for target_ref in timeout_targets {
-        let result = player_call_datum_handler(&target_ref, handler_name, args).await;
+        let result = player_call_datum_handler(&target_ref, Symbol::builtin(handler_name), args).await;
         if let Err(err) = result {
             if err.code == ScriptErrorCode::Abort {
                 return; // abort stops the entire handler chain

@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
 };
 
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, warn};
 use url::Url;
 
@@ -33,6 +33,19 @@ use super::{
 pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+    /// Superset of every handler name defined by ANY script in ANY cast. Lets
+    /// `ext_call` skip the active-script scan for builtin names (voidp/offset/
+    /// length, millions in the preloader): if a name is absent here, no script
+    /// anywhere defines it, so resolution goes straight to the builtin. Built
+    /// lazily; invalidated (with movie_script_cache) on any cast/script change.
+    pub all_handler_names: RefCell<Option<FxHashSet<crate::player::symbols::symbol::Symbol>>>,
+    /// Cached resolution of a global handler name to the MOVIE script that
+    /// defines it (lowest member wins, matching get_active_static_script_refs's
+    /// movie-scripts-first order). Lets `ext_call` to singleton accessors
+    /// (getObjectManager / getStringServices / getObject — called millions of
+    /// times via the preloader's replaceChunks chain) skip the per-call script
+    /// scan. Built lazily; invalidated with movie_script_cache on cast load.
+    pub movie_handler_refs: RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, crate::player::script::ScriptHandlerRef>>>,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
@@ -57,6 +70,8 @@ impl CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
+            all_handler_names: RefCell::new(None),
+            movie_handler_refs: RefCell::new(None),
             member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
@@ -115,10 +130,12 @@ impl CastManager {
                 lctx: cast_def.and_then(|x| x.lctx.clone()),
                 members: FxHashMap::default(),
                 scripts: FxHashMap::default(),
+                name_symbols: Vec::new(),
                 preload_mode: cast_entry.preload_settings,
                 capital_x: false,
                 dir_version: 0,
                 palette_id_offset: cast_def.map_or(0, |x| x.palette_id_offset),
+                name_index: RefCell::new(None),
                 font_table: HashMap::new(),
             };
             if let Some(cast_def) = cast_def {
@@ -366,11 +383,17 @@ impl CastManager {
             self.member_name_cache.replace(Some(cache));
         }
 
-        let lookup_name = name.to_ascii_lowercase();
+        // Avoid allocating a lowercased copy when the name is already lowercase
+        // (the common case) — only allocate if there's an uppercase byte.
+        let lookup: std::borrow::Cow<str> = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(name.to_ascii_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(name)
+        };
         self.member_name_cache
             .borrow()
             .as_ref()
-            .and_then(|cache| cache.get(&lookup_name).cloned())
+            .and_then(|cache| cache.get(lookup.as_ref()).cloned())
     }
 
     pub fn find_member_ref_by_identifiers(
@@ -644,10 +667,76 @@ impl CastManager {
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
+        // The handler-name superset + movie-handler resolution are derived from
+        // the same scripts.
+        self.all_handler_names.replace(None);
+        self.movie_handler_refs.replace(None);
+    }
+
+    /// Resolve a global handler name to the movie script that defines it (or
+    /// None). Cached; mirrors get_active_static_script_refs's movie-scripts-first
+    /// precedence (lowest member number wins on duplicate names).
+    pub fn movie_handler_ref(
+        &self,
+        name: crate::player::symbols::symbol::Symbol,
+    ) -> Option<crate::player::script::ScriptHandlerRef> {
+        if self.movie_handler_refs.borrow().is_none() {
+            let mut map: FxHashMap<
+                crate::player::symbols::symbol::Symbol,
+                crate::player::script::ScriptHandlerRef,
+            > = FxHashMap::default();
+            // Build in the same order get_movie_scripts produces (cast/member
+            // order); first writer wins so the lowest-numbered script holding a
+            // duplicate name takes precedence.
+            for cast in &self.casts {
+                for script in cast.scripts.values() {
+                    if let ScriptType::Movie = script.script_type {
+                        for handler_name in script.handlers.keys() {
+                            map.entry(*handler_name)
+                                .or_insert_with(|| (script.member_ref.clone(), *handler_name));
+                        }
+                    }
+                }
+            }
+            self.movie_handler_refs.replace(Some(map));
+        }
+        self.movie_handler_refs.borrow().as_ref().unwrap().get(&name).cloned()
+    }
+
+    /// True if ANY script in ANY cast defines a handler named `name`. Used by
+    /// `ext_call` to skip the active-script resolution scan for builtin names.
+    /// Conservative superset: a `true` still does the full scan; only a `false`
+    /// (no script anywhere defines it) lets the caller jump to the builtin.
+    pub fn any_script_defines_handler(&self, name: crate::player::symbols::symbol::Symbol) -> bool {
+        if self.all_handler_names.borrow().is_none() {
+            let mut set: FxHashSet<crate::player::symbols::symbol::Symbol> = FxHashSet::default();
+            for cast in &self.casts {
+                for script in cast.scripts.values() {
+                    for handler_name in script.handlers.keys() {
+                        set.insert(*handler_name);
+                    }
+                }
+            }
+            self.all_handler_names.replace(Some(set));
+        }
+        self.all_handler_names.borrow().as_ref().unwrap().contains(&name)
+    }
+
+    /// True if any cast library is mid-load. The frame loop uses this (with
+    /// pending net tasks) to run preload frames fast instead of idling to tempo.
+    pub fn any_cast_loading(&self) -> bool {
+        self.casts.iter().any(|c| c.state == CastLibState::Loading)
     }
 
     pub fn invalidate_member_name_cache(&self) {
         self.member_name_cache.replace(None);
+        // Also drop each cast's per-cast name index. This is the single
+        // authoritative invalidation point hit on every member/name mutation,
+        // so it keeps the per-cast indexes (used by `CastLib::find_member_by_name`)
+        // correct for name-only changes that don't insert/remove members.
+        for cast in &self.casts {
+            cast.invalidate_name_index();
+        }
     }
 
     pub fn get_movie_scripts(&self) -> Ref<Option<Vec<Rc<Script>>>> {

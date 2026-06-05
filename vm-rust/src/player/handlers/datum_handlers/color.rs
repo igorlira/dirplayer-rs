@@ -4,6 +4,7 @@ use crate::{
         bitmap::bitmap::{get_system_default_palette, nearest_palette_index, resolve_color_ref, PaletteRef},
         reserve_player_mut,
         sprite::ColorRef,
+        symbols::symbol::Symbol,
         DatumRef, DirPlayer, ScriptError,
     },
 };
@@ -13,10 +14,10 @@ pub struct ColorDatumHandlers {}
 impl ColorDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         _args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
+        match handler_name.as_str() {
             "hexString" => reserve_player_mut(|player| {
                 let color_ref = player.get_datum(datum).to_color_ref()?;
                 let (r, g, b) = resolve_color_ref(
@@ -38,12 +39,12 @@ impl ColorDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let color_ref = player.get_datum(datum).to_color_ref()?;
-        match prop {
+        match prop.as_str() {
             "red" => match color_ref {
-                ColorRef::Rgb(r, _, _timeout_name) => Ok(player.alloc_datum(Datum::Int(*r as i32))),
+                ColorRef::Rgb(r, _, _) => Ok(player.alloc_datum(Datum::Int(*r as i32))),
                 ColorRef::PaletteIndex(i) => match i {
                     0 => Ok(player.alloc_datum(Datum::Int(255))),
                     255 => Ok(player.alloc_datum(Datum::Int(0))),
@@ -51,7 +52,7 @@ impl ColorDatumHandlers {
                 },
             },
             "green" => match color_ref {
-                ColorRef::Rgb(_, g, _timeout_name) => Ok(player.alloc_datum(Datum::Int(*g as i32))),
+                ColorRef::Rgb(_, g, _) => Ok(player.alloc_datum(Datum::Int(*g as i32))),
                 ColorRef::PaletteIndex(i) => match i {
                     0 => Ok(player.alloc_datum(Datum::Int(255))),
                     255 => Ok(player.alloc_datum(Datum::Int(0))),
@@ -66,10 +67,10 @@ impl ColorDatumHandlers {
                     _ => Ok(player.alloc_datum(Datum::Int(255))),
                 },
             },
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol("color".to_owned()))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("color")))),
             "colorType" => match color_ref {
-                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol("rgb".to_owned()))),
-                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol("paletteIndex".to_owned()))),
+                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("rgb")))),
+                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("paletteIndex")))),
             },
             "paletteIndex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
@@ -91,10 +92,10 @@ impl ColorDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop {
+        match prop.as_str() {
             "red" => {
                 let r = player.get_datum(value).int_value()?;
                 let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
@@ -156,7 +157,6 @@ impl ColorDatumHandlers {
                     }
                     "paletteIndex" => {
                         if let ColorRef::Rgb(r, g, b) = color_ref {
-                            // Convert RGB to nearest palette index (default to index based on luminance)
                             let luminance = (r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100;
                             let index = if luminance > 128 { 0u8 } else { 255u8 };
                             let color_mut = player.get_datum_mut(datum).to_color_ref_mut()?;

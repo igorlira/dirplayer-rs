@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use crate::player::symbols::symbol::Symbol;
+
 use super::skeleton::{build_node_world_matrices, export_basis_transform};
 
 #[derive(Clone, Debug)]
 pub struct W3dMaterial {
-    pub name: String,
+    pub name: Symbol,
     pub ambient: [f32; 4],
     pub diffuse: [f32; 4],
     pub specular: [f32; 4],
@@ -16,7 +18,7 @@ pub struct W3dMaterial {
 impl Default for W3dMaterial {
     fn default() -> Self {
         Self {
-            name: String::new(),
+            name: Symbol::empty(),
             ambient: [63.0 / 255.0, 63.0 / 255.0, 63.0 / 255.0, 1.0],
             diffuse: [1.0, 1.0, 1.0, 1.0],
             specular: [1.0, 1.0, 1.0, 1.0],
@@ -30,7 +32,7 @@ impl Default for W3dMaterial {
 
 #[derive(Clone, Debug)]
 pub struct W3dTextureLayer {
-    pub name: String,
+    pub name: Symbol,
     pub intensity: f32,
     pub blend_func: u8,
     pub blend_src: u8,
@@ -45,7 +47,7 @@ pub struct W3dTextureLayer {
 impl Default for W3dTextureLayer {
     fn default() -> Self {
         Self {
-            name: String::new(),
+            name: Symbol::empty(),
             intensity: 1.0,
             blend_func: 0,
             blend_src: 0,
@@ -82,8 +84,8 @@ impl Default for W3dShaderType {
 /// - Fallback values in `get_shader_prop` match Director's DefaultShader spec.
 #[derive(Clone, Debug, Default)]
 pub struct W3dShader {
-    pub name: String,
-    pub material_name: String,
+    pub name: Symbol,
+    pub material_name: Symbol,
     pub attrs: u32,
     pub render_pass: u32,
     pub texture_layers: Vec<W3dTextureLayer>,
@@ -99,7 +101,7 @@ pub struct W3dShader {
 
 #[derive(Clone, Debug)]
 pub struct W3dBone {
-    pub name: String,
+    pub name: Symbol,
     pub parent_index: i32,
     pub length: f32,
     pub dir_x: f32,
@@ -114,12 +116,12 @@ pub struct W3dBone {
 
 #[derive(Clone, Debug, Default)]
 pub struct W3dSkeleton {
-    pub name: String,
+    pub name: Symbol,
     pub bones: Vec<W3dBone>,
 }
 
 impl W3dSkeleton {
-    pub fn find_bone_by_name(&self, name: &str) -> Option<usize> {
+    pub fn find_bone_by_name(&self, name: Symbol) -> Option<usize> {
         self.bones.iter().position(|b| b.name == name)
     }
 }
@@ -159,7 +161,7 @@ impl Default for W3dKeyframe {
 
 #[derive(Clone, Debug, Default)]
 pub struct W3dMotionTrack {
-    pub bone_name: String,
+    pub bone_name: Symbol,
     pub keyframes: Vec<W3dKeyframe>,
 }
 
@@ -244,12 +246,12 @@ fn slerp(
 
 #[derive(Clone, Debug, Default)]
 pub struct W3dMotion {
-    pub name: String,
+    pub name: Symbol,
     pub tracks: Vec<W3dMotionTrack>,
 }
 
 impl W3dMotion {
-    pub fn find_track_by_bone(&self, bone_name: &str) -> Option<&W3dMotionTrack> {
+    pub fn find_track_by_bone(&self, bone_name: Symbol) -> Option<&W3dMotionTrack> {
         self.tracks.iter().find(|t| t.bone_name == bone_name)
     }
 
@@ -271,13 +273,13 @@ pub enum W3dNodeType {
 
 #[derive(Clone, Debug)]
 pub struct W3dNode {
-    pub name: String,
-    pub parent_name: String,
-    pub resource_name: String,
-    pub model_resource_name: String,
+    pub name: Symbol,
+    pub parent_name: Symbol,
+    pub resource_name: Symbol,
+    pub model_resource_name: Symbol,
     pub node_type: W3dNodeType,
     pub transform: [f32; 16],
-    pub shader_name: String,
+    pub shader_name: Symbol,
     pub near_plane: f32,
     pub far_plane: f32,
     pub fov: f32,
@@ -288,13 +290,13 @@ pub struct W3dNode {
 impl Default for W3dNode {
     fn default() -> Self {
         Self {
-            name: String::new(),
-            parent_name: String::new(),
-            resource_name: String::new(),
-            model_resource_name: String::new(),
+            name: Symbol::empty(),
+            parent_name: Symbol::empty(),
+            resource_name: Symbol::empty(),
+            model_resource_name: Symbol::empty(),
             node_type: W3dNodeType::Group,
             transform: [0.0; 16],
-            shader_name: String::new(),
+            shader_name: Symbol::empty(),
             near_plane: 1.0,
             far_plane: 1000.0,
             fov: 30.0,
@@ -314,7 +316,7 @@ pub enum W3dLightType {
 
 #[derive(Clone, Debug)]
 pub struct W3dLight {
-    pub name: String,
+    pub name: Symbol,
     pub light_type: W3dLightType,
     pub color: [f32; 3],
     pub attenuation: [f32; 3],
@@ -325,7 +327,7 @@ pub struct W3dLight {
 impl Default for W3dLight {
     fn default() -> Self {
         Self {
-            name: String::new(),
+            name: Symbol::empty(),
             light_type: W3dLightType::Ambient,
             color: [1.0, 1.0, 1.0],
             attenuation: [1.0, 0.0, 0.0],
@@ -357,13 +359,13 @@ pub struct DistalEdgeMergeRecord {
 
 #[derive(Clone, Debug, Default)]
 pub struct ModelShaderBinding {
-    pub name: String,
-    pub mesh_bindings: Vec<String>,
+    pub name: Symbol,
+    pub mesh_bindings: Vec<Symbol>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ModelResourceInfo {
-    pub name: String,
+    pub name: Symbol,
     pub mesh_infos: Vec<ClodMeshInfo>,
     pub max_resolution: u32,
     pub shading_count: u32,
@@ -391,7 +393,7 @@ pub struct ModelResourceInfo {
 
 #[derive(Clone, Debug, Default)]
 pub struct ClodDecodedMesh {
-    pub name: String,
+    pub name: Symbol,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub tex_coords: Vec<Vec<[f32; 2]>>,
@@ -404,7 +406,7 @@ pub struct ClodDecodedMesh {
 
 #[derive(Clone, Debug)]
 pub struct W3dRawMesh {
-    pub name: String,
+    pub name: Symbol,
     pub chain_index: u32,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
@@ -415,7 +417,7 @@ pub struct W3dRawMesh {
 
 #[derive(Clone, Debug)]
 pub struct W3dTextureInfo {
-    pub name: String,
+    pub name: Symbol,
     pub render_format: u8,
     pub mip_mode: u8,
     pub mag_filter: u8,
@@ -428,13 +430,13 @@ pub struct W3dScene {
     pub shaders: Vec<W3dShader>,
     pub nodes: Vec<W3dNode>,
     pub lights: Vec<W3dLight>,
-    pub texture_images: HashMap<String, Vec<u8>>,
+    pub texture_images: HashMap<Symbol, Vec<u8>>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
-    pub model_resources: HashMap<String, ModelResourceInfo>,
-    pub clod_meshes: HashMap<String, Vec<ClodDecodedMesh>>,
-    pub clod_decoders: HashMap<String, super::clod_decoder::ClodMeshDecoder>,
+    pub model_resources: HashMap<Symbol, ModelResourceInfo>,
+    pub clod_meshes: HashMap<Symbol, Vec<ClodDecodedMesh>>,
+    pub clod_decoders: HashMap<Symbol, super::clod_decoder::ClodMeshDecoder>,
     pub raw_meshes: Vec<W3dRawMesh>,
     /// Monotonically increasing counter; bumped whenever mesh geometry changes
     pub mesh_content_version: u64,
@@ -464,9 +466,9 @@ impl W3dScene {
 
         // Export each CLOD resource as a part (like C# WriteAssembledPart)
         for (resource_name, meshes) in &self.clod_meshes {
-            let safe_name = resource_name.replace(' ', "_");
-            let world_transform = self.find_transform_for_resource(resource_name);
-            let mat_name = self.resolve_material_for_resource(resource_name);
+            let safe_name = resource_name.as_str().replace(' ', "_");
+            let world_transform = self.find_transform_for_resource(*resource_name);
+            let mat_name = self.resolve_material_for_resource(*resource_name);
 
             // Collect all positions from all sub-meshes of this resource
             // Collect all positions, build per-mesh face groups
@@ -552,11 +554,11 @@ impl W3dScene {
                 obj.push_str(&format!("\no mesh_{}\ng mesh_{}\n", mesh_idx, mesh_idx));
 
                 // Per-mesh material from shader bindings
-                let mesh_mat = self.resolve_material_for_mesh(resource_name, mesh_idx);
+                let mesh_mat = self.resolve_material_for_mesh(*resource_name, mesh_idx);
                 if let Some(ref mat) = mesh_mat {
-                    obj.push_str(&format!("usemtl {}\n", mat.replace(' ', "_")));
+                    obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
                 } else if let Some(ref mat) = mat_name {
-                    obj.push_str(&format!("usemtl {}\n", mat.replace(' ', "_")));
+                    obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
                 }
 
                 for face in faces {
@@ -586,7 +588,7 @@ impl W3dScene {
 
         // Export raw meshes
         for mesh in &self.raw_meshes {
-            let safe_name = mesh.name.replace(' ', "_");
+            let safe_name = mesh.name.as_str().replace(' ', "_");
 
             // Vertex data first (with optional vertex colors)
             let has_raw_vcolors = mesh.vertex_colors.len() == mesh.positions.len();
@@ -615,9 +617,9 @@ impl W3dScene {
             obj.push_str(&format!("\no {}\ng {}\n", safe_name, safe_name));
 
             // Try to resolve material for raw mesh by name
-            let raw_mat = self.resolve_raw_mesh_material(&mesh.name);
+            let raw_mat = self.resolve_raw_mesh_material(mesh.name);
             if let Some(ref mat) = raw_mat {
-                obj.push_str(&format!("usemtl {}\n", mat.replace(' ', "_")));
+                obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
             }
 
             let has_normals = !mesh.normals.is_empty();
@@ -657,7 +659,7 @@ impl W3dScene {
         mtl.push_str("# W3D materials\n");
 
         for mat in &self.materials {
-            let safe_name = mat.name.replace(' ', "_");
+            let safe_name = mat.name.as_str().replace(' ', "_");
             mtl.push_str(&format!("newmtl {}\n", safe_name));
             mtl.push_str(&format!("Ka {:.4} {:.4} {:.4}\n", mat.ambient[0], mat.ambient[1], mat.ambient[2]));
             mtl.push_str(&format!("Kd {:.4} {:.4} {:.4}\n", mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]));
@@ -670,10 +672,10 @@ impl W3dScene {
             mtl.push_str(&format!("d {:.4}\n", mat.opacity));
 
             // Find texture maps from shaders
-            if let Some(shader) = self.shaders.iter().find(|s| s.material_name.eq_ignore_ascii_case(&mat.name)) {
+            if let Some(shader) = self.shaders.iter().find(|s| s.material_name == mat.name) {
                 for layer in &shader.texture_layers {
                     if layer.name.is_empty() { continue; }
-                    let ext = self.get_texture_extension(&layer.name);
+                    let ext = self.get_texture_extension(layer.name);
                     match layer.tex_mode {
                         0 | 5 => mtl.push_str(&format!("map_Kd {}.{}\n", layer.name, ext)),
                         6 => mtl.push_str(&format!("map_Ks {}.{}\n", layer.name, ext)),
@@ -695,7 +697,7 @@ impl W3dScene {
         let mut result = Vec::new();
         for (name, data) in &self.texture_images {
             if data.is_empty() { continue; }
-            let ext = self.get_texture_extension(name);
+            let ext = self.get_texture_extension(*name);
             let filename = format!("{}.{}", name, ext);
 
             if ext == "jpg" || ext == "png" {
@@ -718,8 +720,8 @@ impl W3dScene {
         result
     }
 
-    fn get_texture_extension(&self, tex_name: &str) -> &str {
-        if let Some(data) = self.texture_images.get(tex_name) {
+    fn get_texture_extension(&self, tex_name: Symbol) -> &str {
+        if let Some(data) = self.texture_images.get(&tex_name) {
             if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 { return "jpg"; }
             if data.len() >= 2 && data[0] == 0x89 && data[1] == 0x50 { return "png"; }
         }
@@ -727,14 +729,14 @@ impl W3dScene {
     }
 
     /// Resolve material name for a model resource via shader bindings and model nodes.
-    pub fn resolve_material_for_resource(&self, resource_name: &str) -> Option<String> {
+    pub fn resolve_material_for_resource(&self, resource_name: Symbol) -> Option<Symbol> {
         // Try model node shader → material chain
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
-            if res != resource_name { continue; }
+            if *res != resource_name { continue; }
             if !node.shader_name.is_empty() {
-                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&node.shader_name)) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -742,27 +744,27 @@ impl W3dScene {
             }
         }
         // Try resource shader bindings
-        if let Some(res) = self.model_resources.get(resource_name) {
+        if let Some(res) = self.model_resources.get(&resource_name) {
             for binding in &res.shader_bindings {
                 // Try binding name as shader name
-                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
                 }
                 // Try binding name as direct material name
-                if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(&binding.name)) {
+                if self.materials.iter().any(|m| m.name == binding.name) {
                     return Some(binding.name.clone());
                 }
                 // Try mesh binding names
                 for mesh_binding in &binding.mesh_bindings {
                     if mesh_binding.is_empty() { continue; }
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(mesh_binding)) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *mesh_binding) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
-                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(mesh_binding)) {
+                    if self.materials.iter().any(|m| m.name == *mesh_binding) {
                         return Some(mesh_binding.clone());
                     }
                 }
@@ -770,7 +772,7 @@ impl W3dScene {
         }
         // Fallback: if there's only one non-default material, use it
         let non_default: Vec<_> = self.materials.iter()
-            .filter(|m| !m.name.contains("Default"))
+            .filter(|m| !m.name.as_str().contains("Default"))
             .collect();
         if non_default.len() == 1 {
             return Some(non_default[0].name.clone());
@@ -779,25 +781,25 @@ impl W3dScene {
     }
 
     /// Resolve material for a specific sub-mesh within a resource (via shader bindings).
-    fn resolve_material_for_mesh(&self, resource_name: &str, mesh_idx: usize) -> Option<String> {
-        if let Some(res) = self.model_resources.get(resource_name) {
+    fn resolve_material_for_mesh(&self, resource_name: Symbol, mesh_idx: usize) -> Option<Symbol> {
+        if let Some(res) = self.model_resources.get(&resource_name) {
             for binding in &res.shader_bindings {
                 if mesh_idx < binding.mesh_bindings.len() {
                     let binding_name = &binding.mesh_bindings[mesh_idx];
                     if binding_name.is_empty() { continue; }
                     // Try as shader name → material
-                    if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(binding_name)) {
+                    if let Some(shader) = self.shaders.iter().find(|s| s.name == *binding_name) {
                         if !shader.material_name.is_empty() {
                             return Some(shader.material_name.clone());
                         }
                     }
                     // Try as direct material name
-                    if self.materials.iter().any(|m| m.name.eq_ignore_ascii_case(binding_name)) {
+                    if self.materials.iter().any(|m| m.name == *binding_name) {
                         return Some(binding_name.clone());
                     }
                 }
                 // Try binding.name as shader for all meshes
-                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&binding.name)) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -808,14 +810,14 @@ impl W3dScene {
     }
 
     /// Resolve material for a raw mesh by matching its name to model nodes and shader bindings.
-    fn resolve_raw_mesh_material(&self, mesh_name: &str) -> Option<String> {
+    fn resolve_raw_mesh_material(&self, mesh_name: Symbol) -> Option<Symbol> {
         // Try to find a model node that references this mesh
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
-            if res != mesh_name { continue; }
+            if *res != mesh_name { continue; }
             if !node.shader_name.is_empty() {
-                if let Some(shader) = self.shaders.iter().find(|s| s.name.eq_ignore_ascii_case(&node.shader_name)) {
+                if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
                     if !shader.material_name.is_empty() {
                         return Some(shader.material_name.clone());
                     }
@@ -827,17 +829,17 @@ impl W3dScene {
     }
 
     /// Find world transform for a model resource from the scene graph (public).
-    pub fn find_transform_for_resource_pub(&self, resource_name: &str) -> Option<[f32; 16]> {
+    pub fn find_transform_for_resource_pub(&self, resource_name: Symbol) -> Option<[f32; 16]> {
         self.find_transform_for_resource(resource_name)
     }
 
     /// Find world transform for a model resource from the scene graph.
-    fn find_transform_for_resource(&self, resource_name: &str) -> Option<[f32; 16]> {
+    fn find_transform_for_resource(&self, resource_name: Symbol) -> Option<[f32; 16]> {
         let world_transforms = build_node_world_matrices(&self.nodes);
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
             let res = if !node.model_resource_name.is_empty() { &node.model_resource_name } else { &node.resource_name };
-            if res != resource_name { continue; }
+            if *res != resource_name { continue; }
             if let Some(world_transform) = world_transforms.get(&node.name) {
                 if !is_identity(world_transform) {
                     return Some(*world_transform);

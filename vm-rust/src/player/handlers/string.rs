@@ -68,7 +68,7 @@ impl StringHandlers {
                 Datum::String("".to_string())
             } else if let Datum::Symbol(s) = obj {
                 // In Director, string(#symbol) returns "symbol" without the # prefix
-                Datum::String(s.clone())
+                Datum::String(s.to_string())
             } else {
                 Datum::String(format_concrete_datum(obj, player))
             };
@@ -143,8 +143,8 @@ impl StringHandlers {
                         let value = player.get_datum(value_ref);
 
                         let key_str = match key {
-                            Datum::Symbol(s) => s.clone(),
-                            Datum::String(s) => s.clone(),
+                            Datum::Symbol(s) => s.as_str(),
+                            Datum::String(s) => s.as_str(),
                             _ => continue,
                         };
 
@@ -152,7 +152,7 @@ impl StringHandlers {
                             Datum::String(s) => s.clone(),
                             Datum::Int(n) => n.to_string(),
                             Datum::Float(f) => f.to_string(),
-                            Datum::Symbol(s) => s.clone(),
+                            Datum::Symbol(s) => s.to_string(),
                             Datum::Void => String::new(),
                             _ => continue,
                         };

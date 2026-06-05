@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 use std::f64::consts::PI;
@@ -20,7 +20,7 @@ pub struct MathDatumHandlers;
 impl MathDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -35,47 +35,28 @@ impl MathDatumHandlers {
                 .filter_map(|a| player.get_datum(a).float_value().ok().map(|v| v as f64))
                 .collect();
 
-            let name = handler_name.to_lowercase();
-            let result: f64 = match name.as_str() {
-                // Basic
-                "abs" => arg_values.get(0).copied().unwrap_or(0.0).abs(),
-                "ceil" => arg_values.get(0).copied().unwrap_or(0.0).ceil(),
-                "floor" => arg_values.get(0).copied().unwrap_or(0.0).floor(),
-                "round" => arg_values.get(0).copied().unwrap_or(0.0).round(),
+            let arg0 = || arg_values.get(0).copied().unwrap_or(0.0);
+            let arg1 = || arg_values.get(1).copied().unwrap_or(0.0);
 
-                // Trig
-                "sin" => arg_values.get(0).copied().unwrap_or(0.0).sin(),
-                "cos" => arg_values.get(0).copied().unwrap_or(0.0).cos(),
-                "tan" => arg_values.get(0).copied().unwrap_or(0.0).tan(),
-                "asin" => arg_values.get(0).copied().unwrap_or(0.0).asin(),
-                "acos" => arg_values.get(0).copied().unwrap_or(0.0).acos(),
-                "atan" => arg_values.get(0).copied().unwrap_or(0.0).atan(),
-                "atan2" => {
-                    let y = arg_values.get(0).copied().unwrap_or(0.0);
-                    let x = arg_values.get(1).copied().unwrap_or(0.0);
-                    y.atan2(x)
-                }
-
-                // Power/log
-                "sqrt" => arg_values.get(0).copied().unwrap_or(0.0).sqrt(),
-                "exp" => arg_values.get(0).copied().unwrap_or(0.0).exp(),
-                "log" => arg_values.get(0).copied().unwrap_or(0.0).ln(),
-                "pow" => {
-                    let base = arg_values.get(0).copied().unwrap_or(0.0);
-                    let exp = arg_values.get(1).copied().unwrap_or(1.0);
-                    base.powf(exp)
-                }
-
-                // Min / Max (✅ use f64::min and f64::max)
-                "min" => arg_values.iter().copied().fold(f64::INFINITY, f64::min),
-                "max" => arg_values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-
-                _ => {
-                    return Err(ScriptError::new(format!(
-                        "Unknown math function '{}'",
-                        handler_name
-                    )))
-                }
+            let result: f64 = match handler_name.into_builtin_or_error()? {
+                BuiltInSymbol::Abs   => arg0().abs(),
+                BuiltInSymbol::Ceil  => arg0().ceil(),
+                BuiltInSymbol::Floor => arg0().floor(),
+                BuiltInSymbol::Round => arg0().round(),
+                BuiltInSymbol::Sin   => arg0().sin(),
+                BuiltInSymbol::Cos   => arg0().cos(),
+                BuiltInSymbol::Tan   => arg0().tan(),
+                BuiltInSymbol::Asin  => arg0().asin(),
+                BuiltInSymbol::Acos  => arg0().acos(),
+                BuiltInSymbol::Atan  => arg0().atan(),
+                BuiltInSymbol::Atan2 => arg0().atan2(arg1()),
+                BuiltInSymbol::Sqrt  => arg0().sqrt(),
+                BuiltInSymbol::Exp   => arg0().exp(),
+                BuiltInSymbol::Log   => arg0().ln(),
+                BuiltInSymbol::Pow   => arg0().powf(arg1()),
+                BuiltInSymbol::Min   => arg_values.iter().copied().fold(f64::INFINITY, f64::min),
+                BuiltInSymbol::Max   => arg_values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                _ => return Err(ScriptError::new(format!("Unknown math function '{handler_name}'")))
             };
 
             Ok(player.alloc_datum(Datum::Float(result)))
@@ -84,29 +65,22 @@ impl MathDatumHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
-        datum: &DatumRef,
-        prop: &str,
+        _datum: &DatumRef,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        let name = prop.to_lowercase();
-        match name.as_str() {
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol("math".to_owned()))),
-            "pi" => Ok(player.alloc_datum(Datum::Float(PI))),
-            _ => Err(ScriptError::new(format!(
-                "Unknown math property '{}'",
-                prop
-            ))),
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Ilk => Ok(player.alloc_datum(Datum::Symbol(BuiltInSymbol::Math.into()))),
+            BuiltInSymbol::Pi  => Ok(player.alloc_datum(Datum::Float(PI))),
+            _ => Err(ScriptError::new(format!("Unknown math property '{prop}'"))),
         }
     }
 
     pub fn set_prop(
         _player: &mut DirPlayer,
         _datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         _value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        Err(ScriptError::new(format!(
-            "Cannot set math property '{}'",
-            prop
-        )))
+        Err(ScriptError::new(format!("Cannot set math property '{prop}'")))
     }
 }

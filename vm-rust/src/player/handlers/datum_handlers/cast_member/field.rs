@@ -6,7 +6,7 @@ use crate::{
     player::{
         ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{get_text_index_at_pos, measure_text, measure_text_wrapped, DrawTextParams}, handlers::datum_handlers::{
             cast_member_ref::borrow_member_mut, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
-        }
+        }, symbols::symbol::Symbol
     },
 };
 
@@ -28,14 +28,14 @@ impl FieldMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let count_of = player.get_datum(&args[0]).string_value()?;
+                let count_of = player.get_datum(&args[0]).symbol_value()?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &field.text,
-                    StringChunkType::from(&count_of),
+                    StringChunkType::from(count_of),
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -48,14 +48,14 @@ impl FieldMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let prop_name = player.get_datum(&args[0]).symbol_value()?;
                 let start = player.get_datum(&args[1]).int_value()?;
                 let end = if args.len() > 2 {
                     player.get_datum(&args[2]).int_value()?
                 } else {
                     start
                 };
-                let chunk_type = StringChunkType::from(&prop_name);
+                let chunk_type = StringChunkType::from(prop_name);
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start,
@@ -248,11 +248,11 @@ impl FieldMemberHandlers {
             "fontSize" => Ok(Datum::Int(field.font_size as i32)),
             "fontStyle" => Ok(Datum::String(field.font_style.to_owned())),
             "width" => Ok(Datum::Int(field.width as i32)),
-            "alignment" => Ok(Datum::String(field.alignment.to_owned())),
+            "alignment" => Ok(Datum::String(field.alignment.to_string())),
             "wordWrap" => Ok(datum_bool(field.word_wrap)),
             "fixedLineSpace" | "lineHeight" => Ok(Datum::Int(field.fixed_line_space as i32)),
             "topSpacing" => Ok(Datum::Int(field.top_spacing as i32)),
-            "boxType" => Ok(Datum::String(field.box_type.to_owned())),
+            "boxType" => Ok(Datum::String(field.box_type.to_string())),
             "antialias" => Ok(datum_bool(field.anti_alias)),
             "autoTab" => Ok(datum_bool(field.auto_tab)),
             "editable" => Ok(datum_bool(field.editable)),
@@ -493,7 +493,7 @@ impl FieldMemberHandlers {
                     _ => unreachable!(),
                 }
             }
-            "media" => Ok(Datum::Media(Media::Field(field.clone()))),
+            "media" => Ok(Datum::media(Media::Field(field.clone()))),
             // Chunk count shortcuts — computed from text string.
             "charCount" => {
                 let delimiter = player.movie.item_delimiter;
@@ -557,7 +557,7 @@ impl FieldMemberHandlers {
             "kerning" => Ok(datum_bool(field.kerning)),
             "kerningThreshold" => Ok(Datum::Int(field.kerning_threshold as i32)),
             "useHypertextStyles" => Ok(datum_bool(field.use_hypertext_styles)),
-            "antiAliasType" => Ok(Datum::Symbol(field.anti_alias_type.clone())),
+            "antiAliasType" => Ok(Datum::Symbol(Symbol::builtin(field.anti_alias_type.clone()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
@@ -627,7 +627,7 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().alignment = value?;
+                    cast_member.member_type.as_field_mut().unwrap().alignment = Symbol::from_str(&value?).into_builtin_or_error()?;
                     Ok(())
                 },
             ),
@@ -718,7 +718,7 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().box_type = value?;
+                    cast_member.member_type.as_field_mut().unwrap().box_type = Symbol::from_str(&value?).into_builtin_or_error()?;
                     Ok(())
                 },
             ),
@@ -892,9 +892,9 @@ impl FieldMemberHandlers {
             ),
             "antiAliasType" => borrow_member_mut(
                 member_ref,
-                |_player| value.string_value(),
+                |_player| value.symbol_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = value?;
+                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = value?.into_builtin_or_error()?;
                     Ok(())
                 },
             ),

@@ -1,17 +1,8 @@
 use std::collections::VecDeque;
 use crate::{
-    director::lingo::datum::{datum_bool, Datum, DatumType},
+    director::lingo::datum::{Datum, DatumType, datum_bool},
     player::{
-        allocator::ScriptInstanceAllocatorTrait,
-        cast_lib::CastMemberRef,
-        ci_string::{CiStr, CiString},
-        handlers::types::TypeUtils,
-        player_call_script_handler, player_handle_scope_return, reserve_player_mut,
-        reserve_player_ref,
-        script::{script_get_prop, script_set_prop, Script, ScriptHandlerRef},
-        script_ref::ScriptInstanceRef,
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
-        virtual_scripts::VirtualScriptRegistry,
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, handlers::types::TypeUtils, player_call_script_handler, player_handle_scope_return, reserve_player_mut, reserve_player_ref, script::{Script, ScriptHandlerRef, script_get_prop, script_set_prop}, script_ref::ScriptInstanceRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}, virtual_scripts::VirtualScriptRegistry
     },
 };
 use crate::player::script::script_get_prop_opt;
@@ -67,7 +58,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_handler(
-        name: &str,
+        name: Symbol,
         datum: &DatumRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -86,7 +77,7 @@ impl ScriptInstanceUtils {
     }
 
     pub fn get_script_instance_handler(
-        name: &str,
+        name: Symbol,
         instance_ref: &ScriptInstanceRef,
         player: &DirPlayer,
     ) -> Result<Option<ScriptHandlerRef>, ScriptError> {
@@ -115,8 +106,8 @@ impl ScriptInstanceUtils {
 
     pub fn get_handler_from_first_arg(
         args: &Vec<DatumRef>,
-        handler_name: &str,
-    ) -> Option<(Option<ScriptInstanceRef>, (CastMemberRef, String))> {
+        handler_name: Symbol,
+    ) -> Option<(Option<ScriptInstanceRef>, ScriptHandlerRef)> {
         reserve_player_mut(|player| {
             let receiver_handler = args
                 .first()
@@ -129,7 +120,7 @@ impl ScriptInstanceUtils {
                             .get_script_by_ref(&script_ref)
                             .unwrap();
                         script
-                            .get_own_handler_ref(&handler_name)
+                            .get_own_handler_ref(handler_name)
                             .map(|handler| (None, handler))
                     }
                     Datum::ScriptInstanceRef(script_instance_ref) => {
@@ -166,7 +157,7 @@ impl ScriptInstanceUtils {
 
     pub fn set_at(
         datum: &DatumRef,
-        key: &str,
+        key: Symbol,
         value: &DatumRef,
         player: &mut DirPlayer,
     ) -> Result<(), ScriptError> {
@@ -178,7 +169,7 @@ impl ScriptInstanceUtils {
                 ))
             }
         };
-        match key {
+        match key.as_str() {
             "ancestor" => {
                 let value_datum = player.get_datum(value).to_owned();
                 match value_datum {
@@ -197,7 +188,7 @@ impl ScriptInstanceUtils {
                     _ => {
                         let script_instance =
                             player.allocator.get_script_instance_mut(&self_instance_id);
-                        script_instance.properties.insert(CiString::from("ancestor"), value.clone());
+                        script_instance.properties.insert(Symbol::builtin(BuiltInSymbol::Ancestor), value.clone());
                         Ok(())
                     }
                 }
@@ -227,7 +218,7 @@ impl ScriptInstanceDatumHandlers {
             let instance = player.allocator.get_script_instance(inst_ref);
 
             // Check if this instance has a non-ScriptInstance ancestor in properties
-            if let Some(ancestor_prop_ref) = instance.properties.get(CiStr::new("ancestor")) {
+            if let Some(ancestor_prop_ref) = instance.properties.get(&Symbol::builtin(BuiltInSymbol::Ancestor)) {
                 let ancestor_datum = player.get_datum(ancestor_prop_ref);
                 match ancestor_datum {
                     // If ancestor is not a ScriptInstanceRef, return it for delegation
@@ -256,7 +247,7 @@ impl ScriptInstanceDatumHandlers {
         None
     }
 
-    pub fn has_async_handler(datum: &DatumRef, name: &str) -> Result<bool, ScriptError> {
+    pub fn has_async_handler(datum: &DatumRef, name: Symbol) -> Result<bool, ScriptError> {
         return reserve_player_ref(|player| {
             if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(datum) {
                 if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, instance_ref, name) {
@@ -272,8 +263,8 @@ impl ScriptInstanceDatumHandlers {
             if let Some(ancestor_ref) = Self::find_non_script_ancestor(datum, player) {
                 let ancestor_datum = player.get_datum(&ancestor_ref);
                 // For TimeoutInstance, check if the method is a timeout method
-                if let Datum::TimeoutInstance { .. } = ancestor_datum {
-                    if name == "forget" || name == "new" {
+                if let Datum::TimeoutInstance(_) = ancestor_datum {
+                    if name.eq_builtin(BuiltInSymbol::Forget) || name.eq_builtin(BuiltInSymbol::New) {
                         return Ok(true);
                     }
                 }
@@ -284,7 +275,7 @@ impl ScriptInstanceDatumHandlers {
 
     pub async fn call_async(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         let (instance_id, handler_ref) = reserve_player_ref(|player| {
@@ -313,15 +304,17 @@ impl ScriptInstanceDatumHandlers {
                 Ok(None) => {}
             }
 
+            let handler_name_str = handler_name.as_str();
+
             // getPropertyDescriptionList returns empty prop list if not implemented
-            if handler_name == "getPropertyDescriptionList" {
+            if handler_name_str == "getPropertyDescriptionList" {
                 return reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
                 });
             }
 
             // Director system events should be silently ignored if not implemented
-            match handler_name {
+            match handler_name_str {
                 "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
                 "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
                 "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
@@ -357,7 +350,8 @@ impl ScriptInstanceDatumHandlers {
                 }
             }
             Err(ScriptError::new(format!(
-                "No async handler {handler_name} for script instance datum"
+                "No async handler {} for script instance datum",
+                handler_name
             )))
         }
     }
@@ -386,17 +380,17 @@ impl ScriptInstanceDatumHandlers {
 
     fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let key = player.get_datum(&args[0]).string_value()?;
+            let key = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let value_ref = &args[1];
 
-            ScriptInstanceUtils::set_at(datum, &key, &value_ref, player)?;
+            ScriptInstanceUtils::set_at(datum, key, value_ref, player)?;
             Ok(DatumRef::Void)
         })
     }
 
     pub fn set_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let prop_name = player.get_datum(&args[0]).string_value()?;
+            let prop_name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let value_ref = &args[1];
 
             let instance_ref = match player.get_datum(datum) {
@@ -407,7 +401,7 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            script_set_prop(player, &instance_ref, &prop_name, &value_ref, false)
+            script_set_prop(player, &instance_ref, prop_name, value_ref, false)
                 .map(|_| DatumRef::Void)
         })
     }
@@ -416,7 +410,7 @@ impl ScriptInstanceDatumHandlers {
         reserve_player_mut(|player| {
             let list_prop_name_ref = &args[1];
 
-            let local_prop_name = player.get_datum(&args[0]).string_value()?;
+            let local_prop_name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let instance_ref = match player.get_datum(datum) {
                 Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
                 _ => {
@@ -426,8 +420,8 @@ impl ScriptInstanceDatumHandlers {
                 }
             };
 
-            let local_prop_ref = script_get_prop(player, &instance_ref, &local_prop_name)?;
-            let result = TypeUtils::get_sub_prop(&local_prop_ref, &list_prop_name_ref, player)?;
+            let local_prop_ref = script_get_prop(player, &instance_ref, local_prop_name)?;
+            let result = TypeUtils::get_sub_prop(&local_prop_ref, list_prop_name_ref, player)?;
             Ok(result)
         })
     }
@@ -437,7 +431,7 @@ impl ScriptInstanceDatumHandlers {
             let list_prop_name_ref = &args[1];
             let value_ref = &args[2];
 
-            let local_prop_name = player.get_datum(&args[0]).string_value()?;
+            let local_prop_name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let instance_ref = match player.get_datum(datum) {
                 Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
                 _ => {
@@ -447,8 +441,8 @@ impl ScriptInstanceDatumHandlers {
                 }
             };
 
-            let local_prop_ref = script_get_prop(player, &instance_ref, &local_prop_name)?;
-            TypeUtils::set_sub_prop(&local_prop_ref, &list_prop_name_ref, &value_ref, player)?;
+            let local_prop_ref = script_get_prop(player, &instance_ref, local_prop_name)?;
+            TypeUtils::set_sub_prop(&local_prop_ref, list_prop_name_ref, value_ref, player)?;
 
             Ok(DatumRef::Void)
         })
@@ -456,9 +450,9 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn handler(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let name = player.get_datum(&args[0]).string_value()?;
+            let name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let (_, script) = ScriptInstanceUtils::get_script(datum, player)?;
-            let own_handler = script.get_own_handler(&name);
+            let own_handler = script.get_own_handler(name);
             Ok(player.alloc_datum(datum_bool(own_handler.is_some())))
         })
     }
@@ -473,8 +467,8 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            let prop_name = player.get_datum(&args[0]).string_value()?;
-            let prop_value = script_get_prop(player, &instance_ref, &prop_name)?;
+            let prop_name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
+            let prop_value = script_get_prop(player, &instance_ref, prop_name)?;
             let prop_value_datum = player.get_datum(&prop_value);
             let count = match prop_value_datum {
                 Datum::List(_, list, _) => list.len(),
@@ -491,7 +485,7 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn get_a_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let prop_name = player.get_datum(&args[0]).string_value()?;
+            let prop_name = Symbol::from_str(&player.get_datum(&args[0]).string_value()?);
             let instance_ref = match player.get_datum(datum) {
                 Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
                 _ => {
@@ -500,7 +494,7 @@ impl ScriptInstanceDatumHandlers {
                     ))
                 }
             };
-            let prop_value = script_get_prop_opt(player, &instance_ref, &prop_name).unwrap_or(DatumRef::Void);
+            let prop_value = script_get_prop_opt(player, &instance_ref, prop_name).unwrap_or(DatumRef::Void);
             Ok(prop_value)
         })
     }
@@ -535,33 +529,33 @@ impl ScriptInstanceDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "setAt" => Self::set_at(datum, args),
-            "handler" => Self::handler(datum, args),
-            "setaProp" => Self::set_a_prop(datum, args),
-            "setProp" => Self::set_prop(datum, args),
-            "getProp" => Self::get_prop(datum, args),
-            "getPropRef" => Self::get_prop(datum, args),
-            "getaProp" => Self::get_a_prop(datum, args),
-            "getAt" => Self::get_at(datum, args),
-            "count" => Self::count(datum, args),
-            "handlers" => Self::handlers(datum, args),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
+            Some(BuiltInSymbol::Handler) => Self::handler(datum, args),
+            Some(BuiltInSymbol::SetaProp) => Self::set_a_prop(datum, args),
+            Some(BuiltInSymbol::SetProp) => Self::set_prop(datum, args),
+            Some(BuiltInSymbol::GetProp) => Self::get_prop(datum, args),
+            Some(BuiltInSymbol::GetPropRef) => Self::get_prop(datum, args),
+            Some(BuiltInSymbol::GetaProp) => Self::get_a_prop(datum, args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(datum, args),
+            Some(BuiltInSymbol::Count) => Self::count(datum, args),
+            Some(BuiltInSymbol::Handlers) => Self::handlers(datum, args),
             // getPropertyDescriptionList returns empty prop list if not implemented
-            "getPropertyDescriptionList" => {
+            Some(BuiltInSymbol::GetPropertyDescriptionList) => {
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
                 })
             }
             // Director system events that should be silently ignored if not implemented
-            "exitFrame" | "enterFrame" | "prepareFrame" | "idle" | "stepFrame" |
-            "mouseDown" | "mouseUp" | "mouseEnter" | "mouseLeave" | "mouseWithin" |
-            "keyDown" | "keyUp" | "beginSprite" | "endSprite" | "prepareMovie" |
-            "startMovie" | "stopMovie" | "activate" | "deactivate" |
+            Some(BuiltInSymbol::ExitFrame) | Some(BuiltInSymbol::EnterFrame) | Some(BuiltInSymbol::PrepareFrame) | Some(BuiltInSymbol::Idle) | Some(BuiltInSymbol::StepFrame) |
+            Some(BuiltInSymbol::MouseDown) | Some(BuiltInSymbol::MouseUp) | Some(BuiltInSymbol::MouseEnter) | Some(BuiltInSymbol::MouseLeave) | Some(BuiltInSymbol::MouseWithin) |
+            Some(BuiltInSymbol::KeyDown) | Some(BuiltInSymbol::KeyUp) | Some(BuiltInSymbol::BeginSprite) | Some(BuiltInSymbol::EndSprite) | Some(BuiltInSymbol::PrepareMovie) |
+            Some(BuiltInSymbol::StartMovie) | Some(BuiltInSymbol::StopMovie) | Some(BuiltInSymbol::Activate) | Some(BuiltInSymbol::Deactivate) |
             // forget is called on wrapper objects that may not have it - silently ignore
-            "forget" |
+            Some(BuiltInSymbol::Forget) |
             // CS IsoAvatar.updateStatus invokes standOn on whatever action class
             // the under-foot furni has. getStandOnAtSquare returns any furni
             // whose type is "Stand_On" or "mirror", which matches some items
@@ -572,7 +566,7 @@ impl ScriptInstanceDatumHandlers {
             // and Director silently no-ops when the handler isn't there. Match
             // that here. has_async_handler still walks the ancestor chain
             // first, so call_async runs the real handler when one exists.
-            "standOn" => {
+            Some(BuiltInSymbol::StandOn) => {
                 Ok(DatumRef::Void)
             }
             _ => {
@@ -646,7 +640,7 @@ impl ScriptInstanceDatumHandlers {
     fn forget(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             // Get the actorList
-            let actor_list_ref = player.globals.get("actorList").cloned();
+            let actor_list_ref = player.globals.get(&BuiltInSymbol::ActorList.into()).cloned();
 
             if let Some(actor_list_ref) = actor_list_ref {
                 let actor_list = player.get_datum(&actor_list_ref).clone();
@@ -672,7 +666,7 @@ impl ScriptInstanceDatumHandlers {
                         // Update the actorList with the filtered list
                         let new_list = Datum::List(dtype, new_items, sorted);
                         let new_list_ref = player.alloc_datum(new_list);
-                        player.globals.insert("actorList".to_string(), new_list_ref);
+                        player.globals.insert(BuiltInSymbol::ActorList.into(), new_list_ref);
                     }
                 }
             }

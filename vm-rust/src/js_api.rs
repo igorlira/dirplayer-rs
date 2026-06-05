@@ -681,10 +681,10 @@ impl JsApi {
                             lm.str_set("value", &JsValue::from_f64(*v));
                         }
                         Datum::String(s) => {
-                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(&s)));
                         }
                         Datum::Symbol(s) => {
-                            lm.str_set("value", &JsValue::from_str(&ascii_safe(s)));
+                            lm.str_set("value", &JsValue::from_str(&ascii_safe(&s.to_string())));
                         }
                         Datum::JavaScript(data) => {
                             lm.str_set("size", &JsValue::from_f64(data.len() as f64));
@@ -875,7 +875,11 @@ impl JsApi {
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
             onCastLibNameChanged(cast_number, &cast.name);
         });
@@ -883,7 +887,11 @@ impl JsApi {
 
     pub fn dispatch_cast_list_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let names = player
                 .movie
                 .cast_manager
@@ -903,7 +911,11 @@ impl JsApi {
 
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -922,7 +934,11 @@ impl JsApi {
 
     pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let subscribed_members = &player.subscribed_member_refs;
             if !subscribed_members.contains(&member_ref) {
                 return;
@@ -948,7 +964,11 @@ impl JsApi {
 
     pub fn on_cast_member_name_changed(slot_number: u32) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             if player.is_subscribed_to_channel_names {
                 for channel in player.movie.score.channels.iter() {
@@ -972,7 +992,13 @@ impl JsApi {
 
     pub fn dispatch_score_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // This runs on a later tick, by which point the player may already
+            // be gone (torn down between movies / at shutdown). No player means
+            // no score to snapshot — bail rather than unwrap a None.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             onScoreChanged(snapshot.to_js_object());
@@ -996,7 +1022,11 @@ impl JsApi {
 
         if selected_channel == Some(channel) {
             async_std::task::spawn_local(async move {
-                let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+                // Deferred task — the player may be gone by the time it runs.
+                let player = match unsafe { PLAYER_OPT.as_ref() } {
+                    Some(player) => player,
+                    None => return,
+                };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 onChannelChanged(channel, snapshot.to_js_object());
             });
@@ -1066,15 +1096,15 @@ impl JsApi {
             CastMemberType::Text(text_data) => {
                 member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
                 member_map.str_set("htmlSource", &ascii_safe(&text_data.html_source).to_js_value());
-                member_map.str_set("alignment", &ascii_safe(&text_data.alignment).to_js_value());
-                member_map.str_set("boxType", &ascii_safe(&text_data.box_type).to_js_value());
+                member_map.str_set("alignment", &ascii_safe(text_data.alignment.as_str()).to_js_value());
+                member_map.str_set("boxType", &ascii_safe(&text_data.box_type.to_string()).to_js_value());
                 member_map.str_set("wordWrap", &JsValue::from_bool(text_data.word_wrap));
                 member_map.str_set("antiAlias", &JsValue::from_bool(text_data.anti_alias));
                 member_map.str_set("font", &ascii_safe(&text_data.font).to_js_value());
                 // set fontStyle array of strings
                 let font_style_array = js_sys::Array::new();
                 for style in &text_data.font_style {
-                    font_style_array.push(&ascii_safe(style).to_js_value());
+                    font_style_array.push(&ascii_safe(&style.to_string()).to_js_value());
                 }
                 member_map.str_set("fontStyle", &font_style_array);
                 member_map.str_set("fixedLineSpace", &JsValue::from_f64(text_data.fixed_line_space as f64));
@@ -1406,7 +1436,11 @@ impl JsApi {
 
     pub fn dispatch_channel_name_changed(channel: i16) {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
 
             if player.is_subscribed_to_channel_names {
                 let display_name =
@@ -1779,7 +1813,7 @@ impl JsApi {
                                 (name, v.clone())
                             })
                             .collect(),
-                        stack: scope.stack.clone(),
+                        stack: scope.stack.iter().cloned().collect(),
                         args: scope.args.clone(),
                     };
                     let scope_js: js_sys::Map = scope.into();
@@ -1809,23 +1843,24 @@ impl JsApi {
 
         let data: js_sys::Map =
             if let Some(current_scope) = player.scopes.get(player.current_scope_ref()) {
-                let cast_lib = player
+                // Best-effort handler-name resolution: this is error-reporting
+                // code, so it must not itself panic. The erroring scope can have
+                // an invalid script_ref (cast_lib = u32::MAX sentinel), no lctx,
+                // or an out-of-range handler id — in any of those cases just
+                // report the error without a handler name.
+                let current_handler_name = player
                     .movie
                     .cast_manager
                     .get_cast(current_scope.script_ref.cast_lib as u32)
-                    .unwrap();
-                let current_handler_name = cast_lib
-                    .lctx
-                    .as_ref()
-                    .unwrap()
-                    .names
-                    .get(current_scope.handler_name_id as usize)
-                    .unwrap();
+                    .ok()
+                    .and_then(|cast_lib| cast_lib.lctx.as_ref())
+                    .and_then(|lctx| lctx.names.get(current_scope.handler_name_id as usize))
+                    .cloned();
 
                 OnScriptErrorCallbackData {
                     message: err.message.to_owned(),
                     script_member_ref: Some(current_scope.script_ref.to_js()),
-                    handler_name: Some(current_handler_name.to_owned()),
+                    handler_name: current_handler_name,
                     is_paused,
                 }
                 .into()
@@ -1844,7 +1879,11 @@ impl JsApi {
 
     pub fn dispatch_breakpoint_list_changed() {
         async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            // Deferred task — the player may be gone by the time it runs.
+            let player = match unsafe { PLAYER_OPT.as_ref() } {
+                Some(player) => player,
+                None => return,
+            };
             let breakpoints = player
                 .breakpoint_manager
                 .breakpoints
@@ -1968,7 +2007,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Symbol(val) => {
             map.str_set("type", &safe_js_string("symbol"));
-            map.str_set("value", &safe_js_string(val));
+            map.str_set("value", &safe_js_string(&val.to_string()));
         }
         Datum::List(_, item_refs, _) => {
             map.str_set("type", &safe_js_string("list"));
@@ -2028,7 +2067,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(k.as_str()), &v.unwrap().to_js_value());
+                props_map.set(&safe_js_string(&k.to_string()), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
         }
@@ -2090,9 +2129,9 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         Datum::TimeoutFactory => {
             map.str_set("type", &safe_js_string("timeoutFactory"));
         }
-        Datum::TimeoutInstance { name, .. } => {
+        Datum::TimeoutInstance(ti) => {
             map.str_set("type", &safe_js_string("timeoutInstance"));
-            map.str_set("name", &safe_js_string(name));
+            map.str_set("name", &safe_js_string(&ti.name));
         }
         Datum::ColorRef(color_ref) => {
             map.str_set("type", &safe_js_string("colorRef"));
@@ -2243,7 +2282,7 @@ impl ToJsValue for i16 {
 impl ToJsValue for PaletteRef {
     fn to_js_value(&self) -> JsValue {
         match self {
-            PaletteRef::BuiltIn(id) => safe_js_string(&id.symbol_string()),
+            PaletteRef::BuiltIn(id) => safe_js_string(&id.symbol().to_string()),
             PaletteRef::Member(member_ref) => safe_js_string(
                 format!(
                     "(member {} of castLib {})",

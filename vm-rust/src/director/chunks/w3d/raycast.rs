@@ -2,6 +2,8 @@
 
 use log::debug;
 
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+
 use super::types::*;
 
 pub struct Ray {
@@ -128,8 +130,8 @@ pub fn raycast_scene_multi(
     scene: &W3dScene,
     max_dist: f32,
     max_hits: usize,
-    node_transforms: Option<&std::collections::HashMap<String, [f32; 16]>>,
-    excluded_nodes: Option<&std::collections::HashSet<String>>,
+    node_transforms: Option<&std::collections::HashMap<Symbol, [f32; 16]>>,
+    excluded_nodes: Option<&std::collections::HashSet<Symbol>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
@@ -151,7 +153,7 @@ pub fn raycast_scene_multi(
                 nt.get(&node.name).cloned()
                     .or_else(|| {
                         // Case-insensitive fallback
-                        nt.iter().find(|(k, _)| k.eq_ignore_ascii_case(&node.name)).map(|(_, v)| *v)
+                        nt.iter().find(|(k, _)| **k == node.name).map(|(_, v)| *v)
                     })
                     .unwrap_or(node.transform)
             } else {
@@ -161,11 +163,11 @@ pub fn raycast_scene_multi(
             let mut result = local;
             let mut current_parent = &node.parent_name;
             for _ in 0..20 {
-                if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") { break; }
-                if let Some(pn) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
+                if current_parent.is_empty() || *current_parent == BuiltInSymbol::World { break; }
+                if let Some(pn) = scene.nodes.iter().find(|n| n.name == *current_parent) {
                     let pt = if let Some(nt) = node_transforms {
                         nt.get(&pn.name).cloned()
-                            .or_else(|| nt.iter().find(|(k, _)| k.eq_ignore_ascii_case(&pn.name)).map(|(_, v)| *v))
+                            .or_else(|| nt.iter().find(|(k, _)| **k == pn.name).map(|(_, v)| *v))
                             .unwrap_or(pn.transform)
                     } else {
                         pn.transform
@@ -177,7 +179,7 @@ pub fn raycast_scene_multi(
             result
         };
         // Debug: log MainA transform
-        if node.name == "MainA" {
+        if node.name == BuiltInSymbol::MainA {
             static MA_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if MA_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
                 debug!(
@@ -197,10 +199,10 @@ pub fn raycast_scene_multi(
         };
 
         // Debug: log MainA sub-mesh info and check floor face on first call
-        if node.name == "MainA" {
+        if node.name == BuiltInSymbol::MainA {
             static MA_MESH_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if MA_MESH_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
-                if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
+                if let Some(meshes) = scene.clod_meshes.get(resource) {
                     for (mi, m) in meshes.iter().enumerate() {
                         let v0z = if !m.positions.is_empty() { m.positions[0][2] } else { -999.0 };
                         debug!(
@@ -244,9 +246,9 @@ pub fn raycast_scene_multi(
         }
 
         // Test CLOD meshes
-        if let Some(meshes) = scene.clod_meshes.get(resource.as_str()) {
+        if let Some(meshes) = scene.clod_meshes.get(resource) {
             // Log local ray for MainA sub[4] on first downward ray
-            if node.name == "MainA" && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
+            if node.name == BuiltInSymbol::MainA && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
                 static LR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 if LR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2 {
                     debug!(
@@ -259,7 +261,7 @@ pub fn raycast_scene_multi(
             }
             for (mi, mesh) in meshes.iter().enumerate() {
                 // Debug: for MainA sub[4], manually test face 35 inside the real raycast flow
-                if node.name == "MainA" && mi == 4 && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
+                if node.name == BuiltInSymbol::MainA && mi == 4 && ray.direction[2] < -0.9 && ray.direction[0].abs() < 0.1 && ray.origin[2] > 300.0 {
                     static F35_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     if F35_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
                         let f = &mesh.faces[35];
@@ -276,7 +278,7 @@ pub fn raycast_scene_multi(
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist) {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
@@ -298,7 +300,7 @@ pub fn raycast_scene_multi(
         for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
                 let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
                     for v in &mut hit.vertices {
@@ -338,7 +340,7 @@ fn raycast_mesh(
     _normals: &[[f32; 3]],
     faces: &[[u32; 3]],
     tex_coords: Option<&[[f32; 2]]>,
-    model_name: &str,
+    model_name: Symbol,
     mesh_id: u32,
     max_dist: f32,
 ) -> Option<RayHit> {

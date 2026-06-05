@@ -58,6 +58,7 @@ base64 = "0.22"
 toml = "0.8"
 dotenvy = "0.15"
 binary_rw = "4.1.0"
+lasso = "0.7.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

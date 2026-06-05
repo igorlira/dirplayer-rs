@@ -2,11 +2,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        context_vars::player_get_context_var,
-        handlers::datum_handlers::script::ScriptDatumHandlers,
-        reserve_player_mut,
-        script::{get_current_handler_def, get_current_script, get_current_variable_multiplier, get_name},
-        DatumRef, HandlerExecutionResult, ScriptError, PLAYER_OPT,
+        DatumRef, HandlerExecutionResult, PLAYER_OPT, ScriptError, context_vars::player_get_context_var, handlers::datum_handlers::script::ScriptDatumHandlers, reserve_player_mut, script::{get_current_handler_def, get_current_script, get_name}, symbols::builtin::BuiltInSymbol
     },
 };
 
@@ -17,10 +13,10 @@ pub struct StackBytecodeHandler {}
 impl StackBytecodeHandler {
     pub fn push_int(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_ref =
-                player.alloc_datum(Datum::Int(player.get_ctx_current_bytecode(ctx).obj as i32));
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            let n = player.get_ctx_current_bytecode(ctx).obj as i32;
+            // Inline: store the int directly on the stack — no Datum, no DatumRef,
+            // no arena. Materialized to a DatumRef only if/when a consumer needs one.
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(n);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -33,9 +29,7 @@ impl StackBytecodeHandler {
             let float_f32 = f32::from_bits(obj_value);
             let float_f64 = float_f32 as f64;
             
-            let datum_ref = player.alloc_datum(Datum::Float(float_f64));
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_float(float_f64);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -51,7 +45,9 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
+            let items = scope
+                .stack
+                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgList, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -72,7 +68,9 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = VecDeque::from(scope.pop_n(bytecode_obj as usize));
+            let items = scope
+                .stack
+                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
             let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgListNoRet, items, false));
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -85,46 +83,52 @@ impl StackBytecodeHandler {
     pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
-        let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
-
+        // ctx.get_name indexes ctx.names_ptr directly — no per-op get_cast lookup
+        // (the free get_name() re-resolves the cast's name table every call).
+        let symbol_name = ctx.get_name(name_id as u16);
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(datum_ref);
+        scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
     }
 
     pub fn push_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
-        let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
-        let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
-
+        let symbol_name = ctx.get_name(name_id as u16);
         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-        scope.stack.push(datum_ref);
+        scope.stack.push_symbol(symbol_name);
         Ok(HandlerExecutionResult::Advance)
     }
 
     pub fn push_cons(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            // let (member_ref, handler_def) = get_current_handler_def(&player, ctx.to_owned()).unwrap();
-            let script = get_current_script(&player, &ctx).unwrap();
-
-            let literal_id = player.get_ctx_current_bytecode(ctx).obj as u32
-                / get_current_variable_multiplier(player, &ctx);
-            let literal = &script.chunk.literals[literal_id as usize];
-            let datum_ref = player.alloc_datum(literal.clone());
-
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            let literal_id = (player.get_ctx_current_bytecode(ctx).obj as u32 / ctx.multiplier) as usize;
+            // SAFETY: script_ptr is valid for the whole handler (same assumption
+            // as get_current_script). Tying the borrow to ctx rather than player
+            // lets us call the &mut player fast-path allocators below.
+            let script = unsafe { &*ctx.script_ptr };
+            let literal = &script.chunk.literals[literal_id];
+            // Fast paths: int/symbol literals build the DatumRef directly (no
+            // 64-byte Datum clone + move). Other literal types clone as before.
+            // Inline primitive literals (no Datum clone/alloc); other literal
+            // types allocate and push a ref as before.
+            match literal {
+                Datum::Int(n) => { let n = *n; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(n); }
+                Datum::Float(f) => { let f = *f; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_float(f); }
+                Datum::Symbol(s) => { let s = *s; player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_symbol(s); }
+                Datum::Void => { player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_void(); }
+                other => {
+                    let dr = player.alloc_datum(other.clone());
+                    player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(dr);
+                }
+            }
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
     pub fn push_zero(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let datum_ref = player.alloc_datum(Datum::Int(0));
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(0);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -186,7 +190,9 @@ impl StackBytecodeHandler {
         reserve_player_mut(|player| {
             let count = player.get_ctx_current_bytecode(ctx).obj;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.pop_n(count as usize);
+            // The Pop opcode throws the values away — discard inline entries
+            // without an alloc_int materialization round-trip.
+            scope.stack.discard(count as usize);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -248,19 +254,21 @@ impl StackBytecodeHandler {
         let (script_ref, extra_args) = reserve_player_mut(|player| {
             let bytecode = player.get_ctx_current_bytecode(&ctx);
             let obj_type = get_name(player, &ctx, bytecode.obj as u16).unwrap();
-            if obj_type != "script" {
+            if obj_type.into_builtin() != Some(BuiltInSymbol::Script) {
                 return Err(ScriptError::new(format!(
                     "Cannot create new instance of non-script: {}",
                     obj_type
                 )));
             }
-            let arg_list = {
+            let arg_list_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
             };
-            let arg_list = player.get_datum(&arg_list).to_list()?;
-            let script_arg = player.get_datum(&arg_list[0]);
-            let extra_args: Vec<DatumRef> = arg_list.iter().skip(1).cloned().collect();
+            // Move args out of the consumed ArgList instead of cloning (see obj_call).
+            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_ref).to_list_mut()?.1);
+            let script_arg_ref = arg_vd.pop_front().unwrap();
+            let extra_args: Vec<DatumRef> = arg_vd.into();
+            let script_arg = player.get_datum(&script_arg_ref);
             let script_ref = match script_arg {
                 Datum::String(script_name) => {
                     if let Some(script_ref) = player

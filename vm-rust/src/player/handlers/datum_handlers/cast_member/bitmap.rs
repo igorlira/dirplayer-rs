@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut
+        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 use num_traits::FromPrimitive;
@@ -12,7 +12,7 @@ impl BitmapMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         let member = player
             .movie
@@ -28,11 +28,11 @@ impl BitmapMemberHandlers {
                 "Cannot get prop of invalid bitmap ref"
             )));
         }
-        match prop {
-            "width" => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
-            "height" => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
-            "image" | "picture" => Ok(Datum::BitmapRef(bitmap_ref)),
-            "media" => Ok(Datum::Media(Media::Bitmap {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Width => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
+            BuiltInSymbol::Height => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
+            BuiltInSymbol::Image | BuiltInSymbol::Picture => Ok(Datum::BitmapRef(bitmap_ref)),
+            BuiltInSymbol::Media => Ok(Datum::media(Media::Bitmap {
                 bitmap: bitmap.unwrap().clone(),
                 reg_point: bitmap_member.reg_point,
             })),
@@ -43,12 +43,12 @@ impl BitmapMemberHandlers {
             // the alias, `put member("studiofloor_1_preview").palette`
             // errored even though the matching setter at line 200 accepts
             // the same name.
-            "palette" | "paletteRef" => {
+            BuiltInSymbol::Palette | BuiltInSymbol::PaletteRef => {
                 let palette = bitmap
                     .map(|x| x.palette_ref.clone())
                     .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
                 match palette {
-                    PaletteRef::BuiltIn(builtin) => Ok(Datum::Symbol(builtin.symbol_string())),
+                    PaletteRef::BuiltIn(builtin) => Ok(Datum::Symbol(Symbol::builtin(builtin.symbol()))),
                     PaletteRef::Member(member_ref) => {
                         let member_ref = CastMemberRef {
                             cast_member: member_ref.cast_member,
@@ -59,19 +59,19 @@ impl BitmapMemberHandlers {
                     PaletteRef::Default => Ok(Datum::PaletteRef(PaletteRef::Default)),
                 }
             },
-            "rect" => {
+            BuiltInSymbol::Rect => {
                 let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
                 let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
                 Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
             }
-            "depth" => Ok(Datum::Int(
+            BuiltInSymbol::Depth => Ok(Datum::Int(
                 bitmap
                     .map(|x| x.bit_depth as i32)
                     .unwrap_or(0),
             )),
-            "useAlpha" => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
-            "trimWhiteSpace" => Ok(Datum::Int(if bitmap_member.info.trim_white_space { 1 } else { 0 })),
-            "centerRegPoint" => Ok(Datum::Int(if bitmap_member.info.center_reg_point { 1 } else { 0 })),
+            BuiltInSymbol::UseAlpha => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
+            BuiltInSymbol::TrimWhiteSpace => Ok(Datum::Int(if bitmap_member.info.trim_white_space { 1 } else { 0 })),
+            BuiltInSymbol::CenterRegPoint => Ok(Datum::Int(if bitmap_member.info.center_reg_point { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
                 prop
@@ -81,11 +81,11 @@ impl BitmapMemberHandlers {
 
     pub fn set_prop(
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "image" | "picture" => {
+        match prop.into_builtin_or_error()? {
+            BuiltInSymbol::Image | BuiltInSymbol::Picture => {
                 if value.is_void() {
                     return Ok(());
                 }
@@ -144,7 +144,7 @@ impl BitmapMemberHandlers {
                     Ok(())
                 })
             }
-            "media" => {
+            BuiltInSymbol::Media => {
                 let media = value.media_value()?;
                 let (media_bitmap, media_reg_point) = match media {
                     Media::Bitmap { bitmap, reg_point } => (bitmap, reg_point),
@@ -173,7 +173,7 @@ impl BitmapMemberHandlers {
                     Ok(())
                 })
             }
-            "paletteRef" => {
+            BuiltInSymbol::PaletteRef => {
                 let bitmap_id = borrow_member_mut(
                     member_ref,
                     |_| {},
@@ -185,7 +185,7 @@ impl BitmapMemberHandlers {
                 )?;
                 match value {
                     Datum::Symbol(name) => {
-                        let palette_ref = BuiltInPalette::from_symbol_string(&name).unwrap();
+                        let palette_ref = BuiltInPalette::from_symbol(name).unwrap();
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
                             bitmap.palette_ref = PaletteRef::BuiltIn(palette_ref);
@@ -215,7 +215,7 @@ impl BitmapMemberHandlers {
                 }
                 Ok(())
             }
-            "palette" => {
+            BuiltInSymbol::Palette => {
                 let bitmap_id = borrow_member_mut(
                     member_ref,
                     |_| {},
@@ -257,7 +257,7 @@ impl BitmapMemberHandlers {
                 }
                 Ok(())
             }
-            "useAlpha" => {
+            BuiltInSymbol::UseAlpha => {
                 let use_alpha = value.to_bool()?;
                 borrow_member_mut(
                     member_ref,
@@ -283,7 +283,7 @@ impl BitmapMemberHandlers {
                     Ok(())
                 })
             }
-            "trimWhiteSpace" => {
+            BuiltInSymbol::TrimWhiteSpace => {
                 let trim_white_space = value.to_bool()?;
                 borrow_member_mut(
                     member_ref,
@@ -308,7 +308,7 @@ impl BitmapMemberHandlers {
                     Ok(())
                 })
             }
-            "centerRegPoint" => {
+            BuiltInSymbol::CenterRegPoint => {
                 let center = value.to_bool()?;
                 borrow_member_mut(
                     member_ref,

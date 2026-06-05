@@ -4,7 +4,7 @@ use num_derive::FromPrimitive;
 
 use std::convert::TryInto;
 
-use crate::io::reader::DirectorExt;
+use crate::{io::reader::DirectorExt, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
 
 #[derive(Copy, Clone, FromPrimitive, Debug)]
 pub enum MemberType {
@@ -232,22 +232,22 @@ impl FieldInfo {
         (self.flags & 0x04) == 0  // Inverted: 0=true, 1=false
     }
     
-    pub fn alignment_str(&self) -> String {
+    pub fn alignment(&self) -> BuiltInSymbol {
         match self.alignment {
-            0x0000 => "left".to_string(),
-            0x0001 => "center".to_string(),
-            -1 => "right".to_string(),  // 0xFFFF as i16
-            _ => "left".to_string(),
+            0x0000 => BuiltInSymbol::Left,
+            0x0001 => BuiltInSymbol::Center,
+            -1 => BuiltInSymbol::Right,  // 0xFFFF as i16
+            _ => BuiltInSymbol::Left,
         }
     }
     
-    pub fn box_type_str(&self) -> String {
+    pub fn box_type(&self) -> BuiltInSymbol {
         match self.box_type {
-            0 => "adjust".to_string(),
-            1 => "scroll".to_string(),
-            2 => "fixed".to_string(),
-            3 => "limit".to_string(),
-            _ => "adjust".to_string(),
+            0 => BuiltInSymbol::Adjust,
+            1 => BuiltInSymbol::Scroll,
+            2 => BuiltInSymbol::Fixed,
+            3 => BuiltInSymbol::Limit,
+            _ => BuiltInSymbol::Adjust,
         }
     }
     
@@ -619,18 +619,18 @@ pub struct VectorShapeInfo {
     pub member_width: u32,
     pub member_height: u32,
     pub reg_point: (i16, i16),
-    pub gradient_type: String, // "linear" | "radial"
+    pub gradient_type: BuiltInSymbol, // "linear" | "radial"
     pub fill_scale: f32,       // percent (default 100.0)
     pub fill_direction: f32,   // degrees
     pub fill_offset: (i32, i32), // (.x, .y)
     pub fill_cycles: i32,
-    pub scale_mode: String,    // "showAll" | "noBorder" | "exactFit" | "autoSize" | "noScale"
+    pub scale_mode: BuiltInSymbol,    // "showAll" | "noBorder" | "exactFit" | "autoSize" | "noScale"
     pub scale: f32,            // percent (default 100.0)
     pub antialias: bool,
     pub center_reg_point: bool,
     pub reg_point_vertex: i32, // not persisted; default 0
     pub direct_to_stage: bool,
-    pub origin_mode: String,   // "center" | "topLeft" | "point"
+    pub origin_mode: BuiltInSymbol,   // "center" | "topLeft" | "point"
 }
 
 impl From<&[u8]> for VectorShapeInfo {
@@ -667,15 +667,15 @@ impl From<&[u8]> for VectorShapeInfo {
         let fill_cycles = read_u32(0x9C) as i32;
 
         let origin_mode = match origin_mode_raw {
-            0 => "center", 1 => "topLeft", 2 => "point", _ => "center",
-        }.to_string();
+            0 => BuiltInSymbol::Center, 1 => BuiltInSymbol::TopLeft, 2 => BuiltInSymbol::Point, _ => BuiltInSymbol::Center,
+        };
         let gradient_type = match gradient_type_raw {
-            0 => "linear", 1 => "radial", _ => "linear",
-        }.to_string();
+            0 => BuiltInSymbol::Linear, 1 => BuiltInSymbol::Radial, _ => BuiltInSymbol::Linear,
+        };
         let scale_mode = match scale_mode_raw {
-            0 => "showAll", 1 => "noBorder", 2 => "exactFit",
-            3 => "autoSize", 4 => "noScale", _ => "autoSize",
-        }.to_string();
+            0 => BuiltInSymbol::ShowAll, 1 => BuiltInSymbol::NoBorder, 2 => BuiltInSymbol::ExactFit,
+            3 => BuiltInSymbol::AutoSize, 4 => BuiltInSymbol::NoScale, _ => BuiltInSymbol::AutoSize,
+        };
 
         // 4 colors at offsets 160/176/192/208, each: 4-byte marker (0x12) + 3x 4-byte RGB
         let parse_color = |base: usize| -> (u8, u8, u8) {
@@ -1698,31 +1698,31 @@ impl TextInfo {
     }
 
     /// Get the box type as a Lingo symbol string
-    pub fn box_type_str(&self) -> &'static str {
+    pub fn box_type_symbol(&self) -> BuiltInSymbol {
         match self.box_type {
-            0 => "#adjust",
-            1 => "#scroll",
-            2 => "#fixed",
-            _ => "#unknown",
+            0 => BuiltInSymbol::Adjust,
+            1 => BuiltInSymbol::Scroll,
+            2 => BuiltInSymbol::Fixed,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 
     /// Get the display mode as a Lingo symbol string
-    pub fn display_mode_str(&self) -> &'static str {
+    pub fn display_mode_symbol(&self) -> BuiltInSymbol {
         match self.display_mode {
-            0 => "#normal",
-            1 => "#mode3d",
-            _ => "#unknown",
+            0 => BuiltInSymbol::Normal,
+            1 => BuiltInSymbol::Mode3d,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 
     /// Get the pre-render mode as a Lingo symbol string
-    pub fn pre_render_str(&self) -> &'static str {
+    pub fn pre_render_symbol(&self) -> BuiltInSymbol {
         match self.pre_render {
-            0 => "#none",
-            1 => "#copyInk",
-            2 => "#otherInk",
-            _ => "#unknown",
+            0 => BuiltInSymbol::None,
+            1 => BuiltInSymbol::CopyInk,
+            2 => BuiltInSymbol::OtherInk,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 
@@ -1732,70 +1732,70 @@ impl TextInfo {
     }
 
     /// Get the texture type as a Lingo symbol string
-    pub fn texture_type_str(&self) -> &'static str {
+    pub fn texture_type_symbol(&self) -> BuiltInSymbol {
         match self.texture_type {
-            0 => "#none",
-            1 => "#default",
-            2 => "#member",
-            _ => "#unknown",
+            0 => BuiltInSymbol::None,
+            1 => BuiltInSymbol::Default,
+            2 => BuiltInSymbol::Member,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 
     /// Get the bevel type as a Lingo symbol string
-    pub fn bevel_type_str(&self) -> &'static str {
+    pub fn bevel_type_symbol(&self) -> BuiltInSymbol {
         match self.bevel_type {
-            0 => "#none",
-            1 => "#miter",
-            2 => "#round",
-            _ => "#unknown",
+            0 => BuiltInSymbol::None,
+            1 => BuiltInSymbol::Miter,
+            2 => BuiltInSymbol::Round,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 
     /// Check if a specific face is enabled in displayFace
-    pub fn has_face(&self, face: &str) -> bool {
+    pub fn has_face(&self, face: Symbol) -> bool {
         if self.display_face == -1 {
             return true; // All faces enabled
         }
-        match face {
-            "#front" => (self.display_face & 1) != 0,
-            "#tunnel" => (self.display_face & 2) != 0,
-            "#back" => (self.display_face & 4) != 0,
+        match face.into_builtin() {
+            Some(BuiltInSymbol::Front) => (self.display_face & 1) != 0,
+            Some(BuiltInSymbol::Tunnel) => (self.display_face & 2) != 0,
+            Some(BuiltInSymbol::Back) => (self.display_face & 4) != 0,
             _ => false,
         }
     }
 
     /// Get displayFace as a list of enabled faces
-    pub fn display_face_list(&self) -> Vec<&'static str> {
+    pub fn display_face_list(&self) -> Vec<BuiltInSymbol> {
         if self.display_face == -1 {
-            return vec!["#front", "#back", "#tunnel"];
+            return vec![BuiltInSymbol::Front, BuiltInSymbol::Back, BuiltInSymbol::Tunnel];
         }
         let mut faces = Vec::new();
         if (self.display_face & 1) != 0 {
-            faces.push("#front");
+            faces.push(BuiltInSymbol::Front);
         }
         if (self.display_face & 4) != 0 {
-            faces.push("#back");
+            faces.push(BuiltInSymbol::Back);
         }
         if (self.display_face & 2) != 0 {
-            faces.push("#tunnel");
+            faces.push(BuiltInSymbol::Tunnel);
         }
         faces
     }
 
     /// Get the directional preset as a Lingo symbol string
-    pub fn directional_preset_str(&self) -> &'static str {
+    pub fn directional_preset_symbol(&self) -> BuiltInSymbol {
         match self.directional_preset {
-            0 => "#none",
-            1 => "#topLeft",
-            2 => "#topCenter",
-            3 => "#topRight",
-            4 => "#middleLeft",
-            5 => "#middleCenter",
-            6 => "#middleRight",
-            7 => "#bottomLeft",
-            8 => "#bottomCenter",
-            9 => "#bottomRight",
-            _ => "#unknown",
+            0 => BuiltInSymbol::None,
+            1 => BuiltInSymbol::TopLeft,
+            2 => BuiltInSymbol::TopCenter,
+            3 => BuiltInSymbol::TopRight,
+            4 => BuiltInSymbol::MiddleLeft,
+            5 => BuiltInSymbol::MiddleCenter,
+            6 => BuiltInSymbol::MiddleRight,
+            7 => BuiltInSymbol::BottomLeft,
+            8 => BuiltInSymbol::BottomCenter,
+            9 => BuiltInSymbol::BottomRight,
+            _ => BuiltInSymbol::Unknown,
         }
     }
 

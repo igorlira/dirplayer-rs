@@ -3,15 +3,10 @@ use itertools::Itertools;
 use crate::{
     director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType},
     player::{
-        cast_lib::CastMemberRef,
-        cast_member::CastMemberType,
-        handlers::datum_handlers::{
+        DatumRef, DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::CastMemberType, handlers::datum_handlers::{
             cast_member::font::{HtmlStyle, StyledSpan},
             string::string_get_words,
-        },
-        reserve_player_mut,
-        sprite::ColorRef,
-        DatumRef, DirPlayer, ScriptError,
+        }, reserve_player_mut, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -528,11 +523,11 @@ impl StringChunkHandlers {
     pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let value = player.get_datum(datum).string_value()?;
-            let operand = player.get_datum(&args[0]).string_value()?;
+            let operand = player.get_datum(&args[0]).symbol_value()?;
             let delimiter = player.movie.item_delimiter;
             let count = StringChunkUtils::resolve_chunk_count(
                 &value,
-                StringChunkType::from(&operand),
+                StringChunkType::from(operand),
                 delimiter,
             )?;
             Ok(player.alloc_datum(Datum::Int(count as i32)))
@@ -552,7 +547,7 @@ impl StringChunkHandlers {
         reserve_player_mut(|player| {
             let datum_val = player.get_datum(&datum);
             let parent_str = datum_val.string_value()?;
-            let prop_name = player.get_datum(&args[0]).string_value()?;
+            let prop_name = player.get_datum(&args[0]).symbol_value()?;
             let start = player.get_datum(&args[1]).int_value()?;
             let end = if args.len() > 2 {
                 player.get_datum(&args[2]).int_value()?
@@ -560,7 +555,7 @@ impl StringChunkHandlers {
                 start
             };
             let chunk_expr = StringChunkExpr {
-                chunk_type: StringChunkType::from(&prop_name),
+                chunk_type: StringChunkType::from(prop_name),
                 start,
                 end,
                 item_delimiter: player.movie.item_delimiter,
@@ -747,14 +742,14 @@ impl StringChunkHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "font" | "fontStyle" | "color" | "hyperlink" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Font | BuiltInSymbol::FontStyle | BuiltInSymbol::Color | BuiltInSymbol::Hyperlink) => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
             }
-            "fontSize" => {
+            Some(BuiltInSymbol::FontSize) => {
                 let new_val = player.get_datum(value_ref).int_value()?;
                 let datum = player.get_datum(datum_ref).clone();
                 if let Datum::StringChunk(source, _, _) = datum {
@@ -786,7 +781,7 @@ impl StringChunkHandlers {
                     }
                 }
             }
-            "charSpacing" => {
+            Some(BuiltInSymbol::CharSpacing) => {
                 // Update the source member's char_spacing
                 // Walk the source chain to find the originating member
                 let new_val = player.get_datum(value_ref).int_value()?;
@@ -835,7 +830,7 @@ impl StringChunkHandlers {
     fn set_chunk_style_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         // Resolve the chunk range up-front (read-only borrows) before taking
@@ -856,16 +851,16 @@ impl StringChunkHandlers {
             Hyperlink(String),
         }
         let value_datum = player.get_datum(value_ref).clone();
-        let change = match prop {
-            "font" => StyleChange::Font(value_datum.string_value()?),
-            "hyperlink" => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
-            "fontStyle" => {
+        let change = match prop.into_builtin() {
+            Some(BuiltInSymbol::Font) => StyleChange::Font(value_datum.string_value()?),
+            Some(BuiltInSymbol::Hyperlink) => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
+            Some(BuiltInSymbol::FontStyle) => {
                 // Director accepts either a single symbol (#bold) or a list
                 // of symbols ([#bold, #underline]). #plain resets the style.
                 let mut bold = false;
                 let mut italic = false;
                 let mut underline = false;
-                let symbols: Vec<String> = match &value_datum {
+                let symbols: Vec<Symbol> = match &value_datum {
                     Datum::Symbol(s) => vec![s.clone()],
                     Datum::List(_, items, _) => {
                         let mut out = Vec::new();
@@ -879,11 +874,11 @@ impl StringChunkHandlers {
                     _ => Vec::new(),
                 };
                 for s in symbols.iter() {
-                    match s.to_ascii_lowercase().as_str() {
-                        "bold" => bold = true,
-                        "italic" => italic = true,
-                        "underline" => underline = true,
-                        "plain" => {
+                    match s.into_builtin() {
+                        Some(BuiltInSymbol::Bold) => bold = true,
+                        Some(BuiltInSymbol::Italic) => italic = true,
+                        Some(BuiltInSymbol::Underline) => underline = true,
+                        Some(BuiltInSymbol::Plain) => {
                             bold = false;
                             italic = false;
                             underline = false;
@@ -893,7 +888,7 @@ impl StringChunkHandlers {
                 }
                 StyleChange::FontStyle { bold, italic, underline }
             }
-            "color" => {
+            Some(BuiltInSymbol::Color) => {
                 let color_ref = value_datum.to_color_ref()?.to_owned();
                 let rgb = match color_ref {
                     ColorRef::Rgb(r, g, b) => {
@@ -929,9 +924,9 @@ impl StringChunkHandlers {
                 let default_style = HtmlStyle {
                     font_face: if text.font.is_empty() { None } else { Some(text.font.clone()) },
                     font_size: if text.font_size > 0 { Some(text.font_size as i32) } else { None },
-                    bold: text.font_style.iter().any(|s| s == "bold"),
-                    italic: text.font_style.iter().any(|s| s == "italic"),
-                    underline: text.font_style.iter().any(|s| s == "underline"),
+                    bold: text.font_style.iter().any(|s| *s == BuiltInSymbol::Bold),
+                    italic: text.font_style.iter().any(|s| *s == BuiltInSymbol::Italic),
+                    underline: text.font_style.iter().any(|s| *s == BuiltInSymbol::Underline),
                     ..HtmlStyle::default()
                 };
                 Self::apply_styled_span_range(
@@ -1041,11 +1036,11 @@ impl StringChunkHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "count" => Self::count(datum, args),
+        match handler_name.into_builtin_or_error()? {
+            BuiltInSymbol::Count => Self::count(datum, args),
             // Chunk-typed nested access (`member.line[o].char[1..x]`) is
             // ALWAYS routed through get_prop_ref so the returned datum is
             // a StringChunk — chained property reads like
@@ -1054,7 +1049,7 @@ impl StringChunkHandlers {
             // get_prop here it would resolve to a plain String, and the
             // `.font` access then errors with "Invalid string built-in
             // property font" (Fugue No.4 Cues#AdvanceScroll trips this).
-            "getProp" => {
+            BuiltInSymbol::GetProp => {
                 let prop_name = reserve_player_mut(|player| {
                     Ok::<String, ScriptError>(
                         player.get_datum(&args[0]).string_value().unwrap_or_default()
@@ -1070,17 +1065,17 @@ impl StringChunkHandlers {
                     Self::get_prop(datum, args)
                 }
             }
-            "getPropRef" => Self::get_prop_ref(datum, args),
-            "delete" => Self::delete(datum, args),
-            "setContents" => Self::set_contents(datum, args),
-            "hilite" => Self::hilite(datum, args),
+            BuiltInSymbol::GetPropRef => Self::get_prop_ref(datum, args),
+            BuiltInSymbol::Delete => Self::delete(datum, args),
+            BuiltInSymbol::SetContents => Self::set_contents(datum, args),
+            BuiltInSymbol::Hilite => Self::hilite(datum, args),
             // `chunk[N]` — index access. Director treats this as the Nth
             // character of the chunk's text (1-based). Movies that wrap a
             // field lookup in `value(...)` and then `[1]` to grab the
             // first element fall through here when our chain-preserving
             // chunk machinery returns a StringChunk where the script
             // expected a String.
-            "getAt" => {
+            BuiltInSymbol::GetAt => {
                 if args.is_empty() {
                     return Err(ScriptError::new("getAt requires 1 argument".to_string()));
                 }

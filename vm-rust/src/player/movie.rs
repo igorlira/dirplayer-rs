@@ -3,12 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use chrono::Local;
 
 use crate::{
-    director::{
+    CastMemberRef, director::{
         file::DirectorFile,
-        lingo::datum::{datum_bool, Datum},
-    },
-    utils::PATH_SEPARATOR, reserve_player_ref, reserve_player_mut,
-    player::ColorRef, player::ScriptInstanceRef, CastMemberRef,
+        lingo::datum::{Datum, datum_bool},
+    }, player::{ColorRef, ScriptInstanceRef, symbols::{builtin::{self, BuiltInSymbol}, symbol::Symbol}}, reserve_player_mut, reserve_player_ref, utils::PATH_SEPARATOR
 };
 
 use super::{
@@ -113,9 +111,10 @@ impl Movie {
         self.stage_color_ref = stage_color_ref;
     }
 
-    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match_ci!(prop, {
-            "alertHook" => match self.alert_hook.to_owned() {
+    pub fn get_prop(&self, prop: Symbol) -> Result<Datum, ScriptError> {
+        let builtin_prop = prop.into_builtin_or_error()?;
+        match builtin_prop {
+            BuiltInSymbol::AlertHook => match self.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
                     Ok(Datum::ScriptInstanceRef(script_instance_id))
@@ -123,42 +122,42 @@ impl Movie {
                 Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                 None => Ok(Datum::Int(0)),
             },
-            "exitlock" => Ok(datum_bool(self.exit_lock)),
-            "itemdelimiter" => Ok(Datum::String(self.item_delimiter.into())),
-            "runmode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
-            "date" => {
+            BuiltInSymbol::ExitLock => Ok(datum_bool(self.exit_lock)),
+            BuiltInSymbol::ItemDelimiter => Ok(Datum::String(self.item_delimiter.into())),
+            BuiltInSymbol::RunMode => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
+            BuiltInSymbol::Date => {
                 // TODO localize formatting
                 let time = Local::now();
                 let formatted = time.format("%m/%d/%Y").to_string();
                 Ok(Datum::String(formatted))
             },
-            "long time" => {
+            BuiltInSymbol::LongTime => {
                 let time = Local::now();
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
             },
-            "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
-            "moviePath" => {
+            BuiltInSymbol::LastChannel => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            BuiltInSymbol::MoviePath => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);
                 }
                 Ok(Datum::String(result))
             },
-            "platform" => Ok(Datum::String("Windows,32".to_string())),
-            "frame" => Ok(Datum::Int(self.current_frame as i32)),
-            "productversion" => Ok(Datum::String("11.0".to_string())),
-            "moviename" => Ok(Datum::String(self.file_name.to_owned())),
-            "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
-            "path" => Ok(Datum::String(self.base_path.to_owned())),
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
+            BuiltInSymbol::Platform => Ok(Datum::String("Windows,32".to_string())),
+            BuiltInSymbol::Frame => Ok(Datum::Int(self.current_frame as i32)),
+            BuiltInSymbol::ProductVersion => Ok(Datum::String("11.0".to_string())),
+            BuiltInSymbol::MovieName => Ok(Datum::String(self.file_name.to_owned())),
+            BuiltInSymbol::UpdateLock => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
+            BuiltInSymbol::Path => Ok(Datum::String(self.base_path.to_owned())),
+            BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
+                let script = if builtin_prop == BuiltInSymbol::MouseDownScript {
                     &self.mouse_down_script
-                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                } else if builtin_prop == BuiltInSymbol::MouseUpScript {
                     &self.mouse_up_script
-                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyDownScript {
                     &self.key_down_script
-                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyUpScript {
                     &self.key_up_script
                 } else {
                     &self.timeout_script
@@ -170,8 +169,8 @@ impl Movie {
                     None => Ok(Datum::Int(0)),
                 }
             },
-            "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
-            "timer" => {
+            BuiltInSymbol::AllowCustomCaching => Ok(datum_bool(self.allow_custom_caching)),
+            BuiltInSymbol::Timer => {
                 reserve_player_ref(|player| {
                     let elapsed = chrono::Local::now()
                         .signed_duration_since(player.start_time)
@@ -181,7 +180,7 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             },
-            "lastKey" => {
+            BuiltInSymbol::LastKey => {
                 // `the lastKey` returns ticks (1/60 s) since the last key event.
                 // Before any key is pressed, fall back to ticks since movie start
                 // (matches Director's monotonic behaviour for these accessors).
@@ -197,41 +196,41 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             },
-            "mouseDown" => {
+            BuiltInSymbol::MouseDown => {
                 Ok(datum_bool(self.mouse_down))
             },
             // `the mouseUp` is the inverse of `the mouseDown` — true while
             // the mouse button is in the up (released) state. Director uses
             // this in per-frame polling like storyscramble's Draggable
             // behavior (`if the mouseUp then …`) to detect button release.
-            "mouseUp" => {
+            BuiltInSymbol::MouseUp => {
                 Ok(datum_bool(!self.mouse_down))
             },
-            "rightMouseDown" => Ok(datum_bool(self.right_mouse_down)),
-            "rightMouseUp" => Ok(datum_bool(!self.right_mouse_down)),
-            "traceScript" => Ok(datum_bool(self.trace_script)),
-            "activeWindow" => Ok(Datum::Stage),
-            "rollOver" => {
+            BuiltInSymbol::RightMouseDown => Ok(datum_bool(self.right_mouse_down)),
+            BuiltInSymbol::RightMouseUp => Ok(datum_bool(!self.right_mouse_down)),
+            BuiltInSymbol::TraceScript => Ok(datum_bool(self.trace_script)),
+            BuiltInSymbol::ActiveWindow => Ok(Datum::Stage),
+            BuiltInSymbol::Rollover => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
                 })
             },
-            "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
-            "maxInteger" => Ok(Datum::Int(i32::MAX)),
-            "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
-            "active3dRenderer" => Ok(Datum::String("#openGL".to_string())),
-            "scriptExecutionStyle" => Ok(Datum::Int(9)),
-            "xtraList" => {
+            BuiltInSymbol::RandomSeed => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+            BuiltInSymbol::MaxInteger => Ok(Datum::Int(i32::MAX)),
+            BuiltInSymbol::MemorySize => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            BuiltInSymbol::Active3dRenderer => Ok(Datum::String("#openGL".to_string())),
+            BuiltInSymbol::ScriptExecutionStyle => Ok(Datum::Int(9)),
+            BuiltInSymbol::XtraList => {
                 // Return a list of prop lists, each with #name and #fileName
                 use crate::player::xtra::manager::get_registered_xtra_names;
                 reserve_player_mut(|player| {
                     let names = get_registered_xtra_names();
                     let mut items = VecDeque::new();
                     for name in names {
-                        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
                         let name_val = player.alloc_datum(Datum::String(name.to_string()));
-                        let file_key = player.alloc_datum(Datum::Symbol("fileName".to_string()));
+                        let file_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
                         let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
                         let entry = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                             (name_key, name_val), (file_key, file_val),
@@ -245,8 +244,8 @@ impl Movie {
                     ))
                 })
             },
-            "soundDevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
-            "soundDeviceList" => {
+            BuiltInSymbol::SoundDevice => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+            BuiltInSymbol::SoundDeviceList => {
                 reserve_player_mut(|player| {
                     let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
                     Ok(Datum::List(
@@ -256,7 +255,7 @@ impl Movie {
                     ))
                 })
             },
-            "desktopRectList" => {
+            BuiltInSymbol::DesktopRectList => {
                 reserve_player_mut(|player| {
                     let w = player.movie.rect.right as i32;
                     let h = player.movie.rect.bottom as i32;
@@ -268,7 +267,7 @@ impl Movie {
                     ))
                 })
             },
-            "labelList" => {
+            BuiltInSymbol::LabelList => {
                 // Director's `the labelList` ends each label (including the
                 // last) with a `\r`, so `the number of lines in the labelList`
                 // returns label_count + 1 — script idioms like
@@ -286,36 +285,37 @@ impl Movie {
                 }
                 Ok(Datum::String(s))
             },
-            "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
-            "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
+            BuiltInSymbol::DebugPlaybackEnabled => Ok(datum_bool(self.debug_playback_enabled)),
+            BuiltInSymbol::EditShortCutsEnabled => Ok(datum_bool(self.edit_shortcuts_enabled)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
-        })
+        }
     }
 
     pub fn set_prop(
         &mut self,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        match_ci!(prop, {
-            "exitLock" => {
+        let builtin_prop = prop.into_builtin_or_error()?;
+        match builtin_prop {
+            BuiltInSymbol::ExitLock => {
                 self.exit_lock = value.int_value()? == 1;
                 Ok(())
             },
-            "itemDelimiter" => {
+            BuiltInSymbol::ItemDelimiter => {
                 self.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             },
-            "debugPlaybackEnabled" => {
+            BuiltInSymbol::DebugPlaybackEnabled => {
                 self.debug_playback_enabled = value.int_value()? != 0;
                 Ok(())
             },
-            "editShortCutsEnabled" => {
+            BuiltInSymbol::EditShortCutsEnabled => {
                 self.edit_shortcuts_enabled = value.int_value()? != 0;
                 Ok(())
             },
-            "alertHook" => {
+            BuiltInSymbol::AlertHook => {
                 match value {
                     Datum::Int(0) => {
                         self.alert_hook = None;
@@ -334,26 +334,26 @@ impl Movie {
                     )),
                 }
             },
-            "traceScript" => {
+            BuiltInSymbol::TraceScript => {
                 self.trace_script = value.int_value()? != 0;
                 Ok(())
             },
-            "traceLogFile" => {
+            BuiltInSymbol::TraceLogFile => {
                 self.trace_log_file = value.string_value()?;
                 Ok(())
             },
-            "updateLock" => {
+            BuiltInSymbol::UpdateLock => {
                 self.update_lock = value.int_value()? != 0;
                 Ok(())
             },
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let target = if prop.eq_ignore_ascii_case("mouseDownScript") {
+            BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
+                let target = if builtin_prop == BuiltInSymbol::MouseDownScript {
                     &mut self.mouse_down_script
-                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                } else if builtin_prop == BuiltInSymbol::MouseUpScript {
                     &mut self.mouse_up_script
-                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyDownScript {
                     &mut self.key_down_script
-                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyUpScript {
                     &mut self.key_up_script
                 } else {
                     &mut self.timeout_script
@@ -384,19 +384,19 @@ impl Movie {
                     )),
                 }
             },
-            "allowCustomCaching" => {
+            BuiltInSymbol::AllowCustomCaching => {
                 self.allow_custom_caching = value.int_value()? != 0;
                 Ok(())
             },
-            "puppetTempo" => {
+            BuiltInSymbol::PuppetTempo => {
                 self.puppet_tempo = value.int_value()? as u32;
                 Ok(())
             },
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks" => {
+            BuiltInSymbol::ColorDepth | BuiltInSymbol::UseFastQuads | BuiltInSymbol::RomanLingo | BuiltInSymbol::AllowSaveLocal | BuiltInSymbol::CpuHogTicks => {
                 // Read-only / no-op in practice; ignore sets like Director does
                 Ok(())
             },
-            "stageColor" => {
+            BuiltInSymbol::StageColor => {
                 match value {
                     Datum::Int(color_index) => {
                         self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);
@@ -411,28 +411,28 @@ impl Movie {
                     }
                 }
             },
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
-            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" => {
+            BuiltInSymbol::TimeoutLength | BuiltInSymbol::TimeoutKeyDown | BuiltInSymbol::TimeoutMouse | BuiltInSymbol::TimeoutPlay
+            | BuiltInSymbol::TimeoutLapsed | BuiltInSymbol::SoundEnabled | BuiltInSymbol::SoundLevel
+            | BuiltInSymbol::BeepOn | BuiltInSymbol::CenterStage | BuiltInSymbol::ExitLock | BuiltInSymbol::FixStageSize => {
                 // Anim props that are set via property_type 0x07 - accept silently
                 Ok(())
             },
-            "randomSeed" => {
+            BuiltInSymbol::RandomSeed => {
                 self.random_seed = Some(value.int_value()?);
                 Ok(())
             },
-            "soundDevice" => {
+            BuiltInSymbol::SoundDevice => {
                 // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
                 // In WASM we use WebAudio, so this is stored but not acted upon
                 self.sound_device = value.string_value().unwrap_or_default();
                 Ok(())
             },
-            "preferred3drenderer" | "milesfast" => {
+            BuiltInSymbol::Preferred3dRenderer | BuiltInSymbol::MilesFast => {
                 // 3D renderer preference / sound settings — accept silently in WASM
                 Ok(())
             },
             _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
-        })
+        }
     }
 
     /// Get the current effective tempo (puppetTempo overrides frameTempo)

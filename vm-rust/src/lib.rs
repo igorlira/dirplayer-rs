@@ -30,6 +30,8 @@ use player::{
     PLAYER_OPT,
 };
 
+use crate::{player::symbols::symbol::Symbol};
+
 #[wasm_bindgen]
 extern "C" {
     fn alert(s: &str);
@@ -187,6 +189,47 @@ pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
     reserve_player_mut(|player| {
         player.step_into_line(skip_bytecode_indices);
     });
+}
+
+/// Run a synthetic Lingo bytecode-throughput benchmark in the live (browser)
+/// interpreter and return a human-readable report (ops/sec, ns/op). Call from
+/// the DevTools console after a movie has loaded to measure real WASM per-op
+/// cost. Requires an initialized player.
+#[wasm_bindgen]
+pub fn bench_bytecode_throughput() -> String {
+    player::run_bytecode_benchmark()
+}
+
+/// Begin recording a speedscope profile of Lingo VM execution (handlers +
+/// bytecode ops). Clears any previously recorded events.
+#[wasm_bindgen]
+pub fn start_profiling_recording() {
+    player::profiling::start_recording();
+}
+
+/// Stop recording. Buffered events stay available for `export_profiling_speedscope`.
+#[wasm_bindgen]
+pub fn stop_profiling_recording() {
+    player::profiling::stop_recording();
+}
+
+/// True while a profiling recording is active.
+#[wasm_bindgen]
+pub fn is_profiling_recording() -> bool {
+    player::profiling::is_recording()
+}
+
+/// Discard all buffered profiling events.
+#[wasm_bindgen]
+pub fn clear_profiling_recording() {
+    player::profiling::clear_recording();
+}
+
+/// Serialise the recorded events to a speedscope "evented" profile JSON string,
+/// ready to be saved as a `.speedscope.json` file and opened in speedscope.
+#[wasm_bindgen]
+pub fn export_profiling_speedscope() -> String {
+    player::profiling::export_speedscope_json()
 }
 
 #[wasm_bindgen]
@@ -1112,7 +1155,7 @@ pub fn trigger_lingo_callback(sprite_num: i32, handler_name: String, args: JsVal
 
     player_dispatch_with_result(PlayerVMCommand::TriggerFlashCallback {
         sprite_num,
-        handler_name,
+        handler_name: Symbol::from_str(&handler_name),
         args: arg_refs,
     })
 }
@@ -1178,14 +1221,14 @@ fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_c
                 continue;
             }
 
-            let key_ref = player::player_alloc_datum(Datum::Symbol(key));
+            let key_ref = player::player_alloc_datum(Datum::Symbol(Symbol::from_str(&key)));
             let val_ref = js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member);
             props.push_back((key_ref, val_ref));
         }
 
         // Store the type as a #type property if present
         if let Some(t) = flash_type {
-            let key_ref = player::player_alloc_datum(Datum::Symbol("#type".to_string()));
+            let key_ref = player::player_alloc_datum(Datum::Symbol(Symbol::from_str("#type")));
             let val_ref = player::player_alloc_datum(Datum::String(t));
             props.push_front((key_ref, val_ref));
         }
@@ -1224,7 +1267,7 @@ pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler
     player_dispatch_with_result(PlayerVMCommand::TriggerLingoCallbackOnScript {
         cast_lib,
         cast_member,
-        handler_name,
+        handler_name: Symbol::from_str(&handler_name),
         args: arg_refs,
     })
 }
@@ -1272,7 +1315,7 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
         // - parses as i32 → Int
         // - otherwise → String (downstream handlers can `value()` / `integer()`)
         let datum = if let Some(sym) = tok.strip_prefix('#') {
-            Datum::Symbol(sym.to_string())
+            Datum::Symbol(Symbol::from_str(sym))
         } else if let Ok(n) = tok.parse::<i32>() {
             Datum::Int(n)
         } else {
@@ -1284,7 +1327,7 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
     player_dispatch(PlayerVMCommand::DispatchFlashEvent {
         cast_lib,
         cast_member,
-        handler_name,
+        handler_name: Symbol::from_str(&handler_name),
         args: arg_refs,
     });
     true
@@ -1313,7 +1356,7 @@ pub fn set_lingo_script_property(cast_lib: i32, cast_member: i32, prop_name: Str
     player_dispatch_with_result(PlayerVMCommand::SetLingoScriptProperty {
         cast_lib,
         cast_member,
-        prop_name,
+        prop_name: Symbol::from_str(&prop_name),
         value: value_ref,
     })
 }
@@ -1512,7 +1555,7 @@ fn build_zip_with_glb(
     obj_name: &str, obj_data: &[u8],
     mtl_name: &str, mtl_data: &[u8],
     glb_name: &str, glb_data: &[u8],
-    textures: &std::collections::HashMap<String, Vec<u8>>,
+    textures: &std::collections::HashMap<crate::player::symbols::symbol::Symbol, Vec<u8>>,
 ) -> Vec<u8> {
     let mut files: Vec<(String, &[u8])> = Vec::new();
     files.push((obj_name.to_string(), obj_data));
@@ -1520,6 +1563,7 @@ fn build_zip_with_glb(
     files.push((glb_name.to_string(), glb_data));
 
     for (tex_name, image_data) in textures {
+        let tex_name = tex_name.as_str();
         let ext = if image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8 {
             "jpg"
         } else if image_data.len() >= 2 && image_data[0] == 0x89 && image_data[1] == 0x50 {
