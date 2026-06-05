@@ -3022,73 +3022,78 @@ pub async fn player_call_script_handler_raw_args(
         // negligible (reserve_player + Vec index aren't the hot cost). On a
         // mismatch the frame is stale — unwind it via the normal Done teardown
         // (pop_scope is underflow-safe for exactly this stale-resume case).
-        let cur_gen = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).map(|s| s.generation)
+        // Single per-opcode player read: the scope generation (for the
+        // stale-scope guard above), the bytecode_index, and whether any
+        // debugger state is active (a breakpoint exists or a step mode is set).
+        // When nothing is debugging, this one read is the only added cost — the
+        // breakpoint scan + pause below are skipped entirely.
+        let (cur_gen, bytecode_index, debugger_active) = reserve_player_ref(|player| {
+            let scope = player.scopes.get(scope_ref);
+            let scope_gen = scope.map(|s| s.generation);
+            let bi = scope.map(|s| s.bytecode_index).unwrap_or(0);
+            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
+                || !matches!(player.step_mode, StepMode::None);
+            (scope_gen, bi, debugging)
         });
         if cur_gen != Some(scope_generation) {
             break FrameTransfer::Done;
         }
 
-        // NOTE: the per-opcode breakpoint/step-mode check below is currently
-        // disabled (commented out). Reading `bytecode_index` + debugger state
-        // here was pure per-opcode overhead — a global player access, a scope
-        // lookup, and a breakpoint-list scan on EVERY opcode — feeding only the
-        // dead block, so it has been removed from the hot path. When re-enabling
-        // the debugger, restore the reads inside the `if debugger_active { ... }`
-        // block (each branch already does its own `reserve_player_ref`).
+        // Per-opcode breakpoint / step-mode check. `handler_ref` is
+        // reconstructed from the current frame's (script_member_ref,
+        // handler_name) — the trampoline doesn't thread the original
+        // ScriptHandlerRef through, but ScriptHandlerRef IS that pair.
+        if debugger_active {
+            if let Some(breakpoint) = reserve_player_ref(|player| {
+                player
+                    .breakpoint_manager
+                    .find_breakpoint_for_bytecode(
+                        unsafe { &(*ctx.script_ptr).name },
+                        handler_name.as_str(),
+                        bytecode_index,
+                    )
+                    .cloned()
+            }) {
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.clone(),
+                    (script_member_ref.clone(), handler_name),
+                    bytecode_index,
+                )
+                .await;
+            }
 
-        // Only check breakpoints and step mode if the debugger is actually active
-        // if debugger_active {
-        //     if let Some(breakpoint) = reserve_player_ref(|player| {
-        //         player
-        //             .breakpoint_manager
-        //             .find_breakpoint_for_bytecode(
-        //                 unsafe { &(&*script_ptr).name },
-        //                 &handler_name,
-        //                 bytecode_index,
-        //             )
-        //             .cloned()
-        //     }) {
-        //         player_trigger_breakpoint(
-        //             breakpoint,
-        //             script_member_ref.to_owned(),
-        //             handler_ref.to_owned(),
-        //             bytecode_index,
-        //         )
-        //         .await;
-        //     }
+            let should_step_break = reserve_player_ref(|player| {
+                match &player.step_mode {
+                    StepMode::None => false,
+                    StepMode::Into => true,
+                    StepMode::IntoLine { skip_bytecode_indices } => {
+                        !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Over => player.scope_count <= player.step_scope_depth,
+                    StepMode::OverLine { skip_bytecode_indices } => {
+                        player.scope_count <= player.step_scope_depth
+                            && !skip_bytecode_indices.contains(&bytecode_index)
+                    }
+                    StepMode::Out => player.scope_count < player.step_scope_depth,
+                }
+            });
 
-        //     let should_step_break = reserve_player_ref(|player| {
-        //         match &player.step_mode {
-        //             StepMode::None => false,
-        //             StepMode::Into => true,
-        //             StepMode::IntoLine { skip_bytecode_indices } => {
-        //                 !skip_bytecode_indices.contains(&bytecode_index)
-        //             }
-        //             StepMode::Over => player.scope_count <= player.step_scope_depth,
-        //             StepMode::OverLine { skip_bytecode_indices } => {
-        //                 player.scope_count <= player.step_scope_depth
-        //                     && !skip_bytecode_indices.contains(&bytecode_index)
-        //             }
-        //             StepMode::Out => player.scope_count < player.step_scope_depth,
-        //         }
-        //     });
-
-        //     if should_step_break {
-        //         let breakpoint = Breakpoint {
-        //             script_name: unsafe { (&*script_ptr).name.clone() },
-        //             handler_name: handler_name.clone(),
-        //             bytecode_index,
-        //         };
-        //         player_trigger_breakpoint(
-        //             breakpoint,
-        //             script_member_ref.to_owned(),
-        //             handler_ref.to_owned(),
-        //             bytecode_index,
-        //         )
-        //         .await;
-        //     }
-        // }
+            if should_step_break {
+                let breakpoint = Breakpoint {
+                    script_name: unsafe { (*ctx.script_ptr).name.clone() },
+                    handler_name: handler_name.to_string(),
+                    bytecode_index,
+                };
+                player_trigger_breakpoint(
+                    breakpoint,
+                    script_member_ref.clone(),
+                    (script_member_ref.clone(), handler_name),
+                    bytecode_index,
+                )
+                .await;
+            }
+        }
 
         // Synchronous fast path: execute non-async opcodes directly, avoiding
         // the per-op async future/poll cost. Only the handful of genuinely-async
