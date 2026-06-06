@@ -160,7 +160,7 @@ impl SoundChannelDatumHandlers {
                         "playFile requires a member argument".to_string(),
                     ));
                 }
-                Self::handle_play_file(player, datum, &args[0])?;
+                Self::handle_play_file(player, datum, &args[0], 1)?;
                 Ok(datum.clone())
             }
             "playnext" => {
@@ -452,15 +452,22 @@ impl SoundChannelDatumHandlers {
         player: &mut DirPlayer,
         datum: &DatumRef,
         member: &DatumRef,
+        loop_count: i32,
     ) -> Result<(), ScriptError> {
         // Get the channel as Rc<RefCell<SoundChannel>> (do NOT borrow)
         let channel_rc = Self::get_sound_channel_mut(player, datum)?;
 
-        // Reset loop_count to play-once (1) so stale loopCount settings don't leak
+        // Apply the caller's loop count (overwriting any stale value from a
+        // previous sound). `puppet_sound` passes the value derived from the
+        // member's loop flag (0 = loop forever, 1 = play once); direct
+        // `playFile` passes 1. Previously this was hardcoded to 1, which
+        // clobbered the loop count `puppet_sound` had just set and broke
+        // looping for score / puppetSound sounds whose member has the loop
+        // flag enabled (e.g. mobilesdisco's intro music in sound channel 1).
         {
             let mut ch = channel_rc.borrow_mut();
-            ch.loop_count = 1;
-            ch.loops_remaining = 1;
+            ch.loop_count = loop_count;
+            ch.loops_remaining = loop_count;
         }
 
         // Call the associated function with the Rc
@@ -474,9 +481,8 @@ impl SoundChannelDatumHandlers {
         datum: &DatumRef,
         member_ref: &DatumRef,
     ) -> Result<DatumRef, ScriptError> {
-        // Don't get the channel at all - just call play_member directly
-        // which will get the channel internally
-        Self::handle_play_file(player, datum, member_ref)?;
+        // Direct `sound playFile` plays the external file once.
+        Self::handle_play_file(player, datum, member_ref, 1)?;
         Ok(DatumRef::Void)
     }
 
