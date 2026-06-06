@@ -862,6 +862,7 @@ impl Score {
 
                 // Reset size flags when sprite re-enters.
                 sprite.has_size_tweened = false;
+                sprite.explicit_lingo_size = false;
                 let has_explicit_size = data.width != 0 || data.height != 0;
                 sprite.has_size_changed = has_explicit_size;
                 // Score data dimensions are authoritative - dont let bitmap intrinsic
@@ -3249,8 +3250,16 @@ pub fn sprite_get_prop(
         }))),
         "castNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| {
-                CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
-                    as i32
+                // Director 4 predates multiple cast libraries: `the castNum of
+                // sprite` is the bare member number, and scripts round-trip it
+                // through `cast <n>` (e.g. the Animator behavior). D5+ uses the
+                // slot-encoded value (cast_lib << 16 | member).
+                if player.movie.dir_version < 500 {
+                    y.cast_member
+                } else {
+                    CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
+                        as i32
+                }
             })
         }))),
         "scriptNum" => {
@@ -3879,6 +3888,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.width = value?;
                 sprite.has_size_changed = true;
+                // Explicit Lingo size is authoritative — bypass the bbox
+                // heuristic and the bitmap-owned-size override.
+                sprite.explicit_lingo_size = true;
+                sprite.bitmap_size_owned_by_sprite = false;
                 Ok(())
             },
         ),
@@ -3888,6 +3901,8 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.height = value?;
                 sprite.has_size_changed = true;
+                sprite.explicit_lingo_size = true;
+                sprite.bitmap_size_owned_by_sprite = false;
                 Ok(())
             },
         ),
@@ -4106,6 +4121,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             }
                         }
                         sprite.has_size_changed = false;
+                        // A `member` assignment that resets to intrinsic size
+                        // also clears any prior explicit Lingo sizing.
+                        sprite.explicit_lingo_size = false;
                     }
                 }
 
@@ -4880,7 +4898,27 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             //  4. Neither flag set  → dimensions are inherited/default and may be
             //     an approximate bounding box. Apply heuristics to decide.
 
-            let (sprite_width, sprite_height, _size_path) = if sprite.has_size_tweened {
+            let (sprite_width, sprite_height, _size_path) = if sprite.explicit_lingo_size
+                && sprite.width > 0 && sprite.height > 0 {
+                // A Lingo script explicitly set `the width/height of sprite`.
+                // This is authoritative: use it verbatim and skip every
+                // bbox/sentinel heuristic below (those exist to disambiguate
+                // SCORE-authored sizes, which can be approximate). hackey's
+                // pseudo-3D `Translate` scales sprites by distance with
+                // integer-rounded proportional dims — the rounding made them
+                // look non-proportional, so the bbox catch-all wrongly snapped
+                // them back to the bitmap's native size and nothing shrank.
+                (sprite.width, sprite.height, "LINGO_EXPLICIT")
+            } else if sprite.width <= 2
+                && sprite.height <= 2 && bitmap_width >= 4 && bitmap_height >= 4 {
+                // Degenerate "use natural size" sentinel: a 1x1 / 2x2 score box
+                // on a real bitmap is never an intentional display size.
+                // Handled before the aspect-based bbox tests, which miss it for
+                // SQUARE bitmaps (a 1x1 box is "proportional" to any square, so
+                // it slips past the non-proportional check and renders 1px
+                // tiny). netjack icons #38/#66/#100/#109 hit this.
+                (bitmap_width, bitmap_height, "NATURAL_SENTINEL")
+            } else if sprite.has_size_tweened {
                 (sprite.width, sprite.height, "TWEENED")
             } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
@@ -4964,7 +5002,38 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     && bitmap_width.max(bitmap_height) >= 8;
                 let size_ok = (bitmap_width >= 10 && bitmap_height >= 10) || sprite_much_larger;
 
-                let is_bbox = if expand_w || expand_h
+                // Strong non-proportional downscale → intentional scaling, not
+                // a bbox approximation. Both sprite dims are <=60% of the
+                // bitmap AND the aspect is clearly skewed (>~15% off
+                // proportional). A bbox approximation stays close to the image
+                // size or is roughly proportional, so it never lands here —
+                // e.g. #5 (24x11 of 42x20) is near-proportional and stays
+                // BBOX. Catches a 373x92 logo squished into a 105x20 score box
+                // (netjack sprite 20, which otherwise rendered at native size
+                // off the top of the stage). Mutually exclusive with the
+                // expand/wide/crop rules above (all require one dim within 3px
+                // of the bitmap), so it is safe to test first.
+                // Guard: the sprite box must be a plausible display size
+                // (>=8px each). Tiny boxes (1x1, 2x2) are "use natural size"
+                // sentinels/defaults — Director stores them when a sprite was
+                // placed without an explicit resize — not an intentional
+                // scale. Those stay BBOX so card/coin bitmaps (netjack #66,
+                // #100, #109) render at native size instead of 1px tiny.
+                let strong_downscale_sprite = sprite.width >= 8
+                    && sprite.height >= 8
+                    && sprite.width < bitmap_width
+                    && sprite.height < bitmap_height
+                    && 5 * sprite.width <= 3 * bitmap_width
+                    && 5 * sprite.height <= 3 * bitmap_height
+                    && {
+                        let a = sprite.width as i64 * bitmap_height as i64;
+                        let b = sprite.height as i64 * bitmap_width as i64;
+                        20 * a.min(b) < 17 * a.max(b)
+                    };
+
+                let is_bbox = if strong_downscale_sprite {
+                    false
+                } else if expand_w || expand_h
                     || extend_h_shrink_w || extend_w_shrink_h
                     || wide_h_shrink || tall_w_shrink || wide_w_shrink {
                     true
