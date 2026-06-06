@@ -2403,19 +2403,12 @@ impl DirPlayer {
                 1
             }
         };
-        
-        // Set the loop count on the channel BEFORE playing
-        let channel_rc = self.sound_manager
-            .get_channel_mut((channel_num - 1) as usize)
-            .ok_or_else(|| ScriptError::new(format!("Invalid sound channel {}", channel_num)))?;
-        
-        {
-            let mut channel = channel_rc.borrow_mut();
-            channel.loop_count = loop_count;
-            channel.loops_remaining = loop_count;
-        }
-        
-        SoundChannelDatumHandlers::handle_play_file(self, &sound_channel, &member_ref)
+
+        // handle_play_file applies this loop count to the channel right before
+        // it starts the sound. (It used to be set here AND reset to 1 inside
+        // handle_play_file, which clobbered looping — now the derived value is
+        // threaded through.)
+        SoundChannelDatumHandlers::handle_play_file(self, &sound_channel, &member_ref, loop_count)
     }
 
     // Lingo: sound stop channelNum
