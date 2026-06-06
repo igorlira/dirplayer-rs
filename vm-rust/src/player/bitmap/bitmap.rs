@@ -121,9 +121,30 @@ impl BuiltInPalette {
     }
 }
 
+thread_local! {
+    // The movie's default system palette, set at load time from the config's
+    // platform byte. Mac-authored movies (e.g. Director-4 titles like thead)
+    // default to System-Mac; Windows movies to System-Win. These differ at the
+    // high palette indices, which matters for indexed bitmaps and shape pattern
+    // fills (thead's pattern background reads gray under System-Mac but wrong
+    // colours under System-Win). Defaults to System-Win until a movie loads.
+    static DEFAULT_SYSTEM_PALETTE: std::cell::Cell<BuiltInPalette> =
+        const { std::cell::Cell::new(BuiltInPalette::SystemWin) };
+}
+
+/// Set the default system palette from the movie config's platform byte.
+/// Director platform IDs: 1 = Mac, larger values (256+) = Windows.
+pub fn set_default_system_palette_from_platform(platform: u16) {
+    let pal = if platform == 1 {
+        BuiltInPalette::SystemMac
+    } else {
+        BuiltInPalette::SystemWin
+    };
+    DEFAULT_SYSTEM_PALETTE.with(|p| p.set(pal));
+}
+
 pub fn get_system_default_palette() -> BuiltInPalette {
-    // TODO: Properly detect platform from movie file format
-    BuiltInPalette::SystemWin
+    DEFAULT_SYSTEM_PALETTE.with(|p| p.get())
 }
 
 /// Returns the palette index in `palette` whose RGB is closest (smallest

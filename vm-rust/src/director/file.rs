@@ -48,6 +48,7 @@ pub struct DirectorFile {
     pub casts: Vec<CastDef>,
     pub config: ConfigChunk,
     pub score: Option<ScoreChunk>,
+    pub tile_list: Option<super::chunks::tile_list::TileListChunk>,
     pub frame_labels: Option<FrameLabelsChunk>,
     pub score_order: Option<SordChunk>,
     pub media: Option<MediaChunk>,
@@ -132,6 +133,8 @@ impl DirectorFile {
 
         let score = get_score_chunk(reader, &mut chunk_container, &mut rifx);
 
+        let tile_list = get_tile_list_chunk(reader, &mut chunk_container, &mut rifx);
+
         let frame_labels = get_frame_labels_chunk(reader, &mut chunk_container, &mut rifx);
 
         let score_order = get_score_order_chunk(reader, &mut chunk_container, &mut rifx);
@@ -162,6 +165,7 @@ impl DirectorFile {
             cast_entries,
             config,
             score,
+            tile_list,
             frame_labels,
             score_order,
             media,
@@ -403,9 +407,10 @@ fn read_casts(
 
     let cast = get_first_chunk(reader, chunk_container, rifx, FOURCC("CAS*"));
     if let Some(Chunk::Cast(cast)) = cast {
+        let cast_name = (if internal { "Internal" } else { "External" }).to_string();
         casts.push(
             CastDef::from(
-                (if internal { "Internal" } else { "External" }).to_string(),
+                cast_name.clone(),
                 1024,
                 config.min_member,
                 cast.member_ids.to_vec(),
@@ -418,7 +423,23 @@ fn read_casts(
             .unwrap(),
         );
 
-        return Ok((Vec::new(), casts));
+        // Pre-D5 movies (Director 4 and earlier) have no MCsL cast-list chunk:
+        // there is a single implicit internal cast referenced directly by CAS*.
+        // CastManager::load_from_dir builds its CastLib list by iterating
+        // `cast_entries`, so without a synthetic entry here the single D4 cast
+        // is parsed but never instantiated, leaving `cast_manager.casts` empty
+        // (and later `casts[0]` accesses panic). Synthesize one entry whose `id`
+        // matches the CastDef above so load_from_dir links them up.
+        let synthetic_entry = CastListEntry {
+            name: cast_name,
+            file_path: String::new(), // internal cast
+            preload_settings: 0,
+            min_member: config.min_member,
+            max_member: config.max_member,
+            id: 1024,
+        };
+
+        return Ok((vec![synthetic_entry], casts));
     }
 
     debug!("No cast!");
@@ -511,6 +532,18 @@ pub fn get_score_chunk(
         return Some(chunk_data);
     } else {
         panic!("Not a score chunk");
+    }
+}
+
+pub fn get_tile_list_chunk(
+    reader: &mut BinaryReader,
+    chunk_container: &mut ChunkContainer,
+    rifx: &mut RIFXReaderContext,
+) -> Option<super::chunks::tile_list::TileListChunk> {
+    let chunk = get_first_chunk(reader, chunk_container, rifx, FOURCC("VWTL"));
+    match chunk {
+        Some(Chunk::TileList(chunk_data)) => Some(chunk_data),
+        _ => None,
     }
 }
 

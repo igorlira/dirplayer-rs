@@ -1104,7 +1104,18 @@ impl MovieHandlers {
                 let channel = player.get_datum(&args[0]).int_value()?;
                 (channel, args[1].clone())
             };
-            
+
+            // `puppetSound channel, 0` (and the single-arg `puppetSound 0`)
+            // turns off sound puppeting and STOPS the channel — it is not a
+            // request to play cast member 0. Director 4 movies use this idiom
+            // heavily. Routing it through the play path just fails to resolve a
+            // member and logs a spurious error, so handle it as a stop here.
+            let member_datum = player.get_datum(&member_ref);
+            if matches!(&member_datum, Datum::Int(n) if *n <= 0) {
+                player.sound_stop(channel_num)?;
+                return Ok(DatumRef::Void);
+            }
+
             player.puppet_sound(channel_num, member_ref)?;
             Ok(DatumRef::Void)
         })

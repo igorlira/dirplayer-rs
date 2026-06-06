@@ -1984,10 +1984,16 @@ pub fn render_score_to_bitmap_with_offset(
                     continue;
                 }
 
-                // Skip rendering shapes that use member 1:1 (placeholder)
-                if let Some(member_ref) = &sprite.member {
-                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
-                        continue;
+                // Skip rendering shapes that use member 1:1 (placeholder) — but
+                // ONLY for D5+. Director 4 movies legitimately use cast member 1
+                // as a real authored shape (e.g. thead's full-stage pattern
+                // background), and there's no separate placeholder convention in
+                // D4, so this skip would wrongly drop it.
+                if player.movie.dir_version >= 500 {
+                    if let Some(member_ref) = &sprite.member {
+                        if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                            continue;
+                        }
                     }
                 }
 
@@ -2008,13 +2014,46 @@ pub fn render_score_to_bitmap_with_offset(
                     rect.right - offset.0,
                     rect.bottom - offset.1,
                 );
-                if offset.0 != 0 || offset.1 != 0 {
-                    let mut translated_sprite = sprite.clone();
-                    translated_sprite.loc_h -= offset.0;
-                    translated_sprite.loc_v -= offset.1;
-                    bitmap.draw_shape_with_sprite(&translated_sprite, shape_info, sprite_rect, &palettes, &frame_palette);
-                } else {
-                    bitmap.draw_shape_with_sprite(sprite, shape_info, sprite_rect, &palettes, &frame_palette);
+
+                // VWTL user-defined tile (pattern 57-64 with a custom bitmap
+                // member, e.g. employee's blue/white checker). Tile the member's
+                // region across the shape instead of using the built-in tile.
+                let custom_tile = if shape_info.pattern >= 57 && shape_info.pattern <= 64 {
+                    player.movie.score.custom_tiles
+                        .get((shape_info.pattern - 57) as usize)
+                        .filter(|t| t.is_custom())
+                        .copied()
+                } else { None };
+                let mut drew_custom = false;
+                if let Some(tile) = custom_tile {
+                    let tile_ref = CastMemberRef { cast_lib: tile.cast_lib, cast_member: tile.member };
+                    let src = player.movie.cast_manager.find_member_by_ref(&tile_ref)
+                        .and_then(|m| match &m.member_type {
+                            CastMemberType::Bitmap(b) => Some(b.image_ref),
+                            _ => None,
+                        })
+                        .and_then(|ir| player.bitmap_manager.get_bitmap(ir).cloned());
+                    if let Some(src) = src {
+                        let tile_rect = IntRect::from(
+                            tile.left as i32, tile.top as i32, tile.right as i32, tile.bottom as i32,
+                        );
+                        // Phase the tile to the shape's absolute stage position
+                        // (dst_rect is already in stage coords here).
+                        let abs_origin = (sprite_rect.left, sprite_rect.top);
+                        bitmap.fill_rect_custom_tile(&palettes, &src, tile_rect, sprite_rect.clone(), abs_origin);
+                        drew_custom = true;
+                    }
+                }
+
+                if !drew_custom {
+                    if offset.0 != 0 || offset.1 != 0 {
+                        let mut translated_sprite = sprite.clone();
+                        translated_sprite.loc_h -= offset.0;
+                        translated_sprite.loc_v -= offset.1;
+                        bitmap.draw_shape_with_sprite(&translated_sprite, shape_info, sprite_rect, &palettes, &frame_palette);
+                    } else {
+                        bitmap.draw_shape_with_sprite(sprite, shape_info, sprite_rect, &palettes, &frame_palette);
+                    }
                 }
             }
             CastMemberType::VectorShape(vector_member) => {
@@ -2024,9 +2063,12 @@ pub fn render_score_to_bitmap_with_offset(
                     continue;
                 }
 
-                if let Some(member_ref) = &sprite.member {
-                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
-                        continue;
+                // D5+ only — see the Shape branch above.
+                if player.movie.dir_version >= 500 {
+                    if let Some(member_ref) = &sprite.member {
+                        if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                            continue;
+                        }
                     }
                 }
 
