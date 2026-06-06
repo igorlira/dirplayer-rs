@@ -103,6 +103,13 @@ pub struct Sprite {
     pub has_size_tweened: bool,
     pub has_size_changed: bool,
     pub bitmap_size_owned_by_sprite: bool,
+    /// Set when a Lingo script explicitly assigns `the width/height of sprite`.
+    /// Such a size is authoritative — it must be used verbatim and bypass the
+    /// score-data bbox heuristic in `get_concrete_sprite_rect` (which can
+    /// misread an intentionally-scaled, rounding-skewed proportional size as a
+    /// bounding-box approximation and snap it back to the bitmap's native
+    /// size). Used by hackey's pseudo-3D `Translate` to shrink distant sprites.
+    pub explicit_lingo_size: bool,
     // Base (score-defined) values
     pub base_loc_h: i32,
     pub base_loc_v: i32,
@@ -191,6 +198,7 @@ impl Sprite {
             has_size_tweened: false,
             has_size_changed: false,
             bitmap_size_owned_by_sprite: false,
+            explicit_lingo_size: false,
             base_loc_h: 0,
             base_loc_v: 0,
             base_width: 0,
@@ -262,5 +270,6 @@ impl Sprite {
         self.has_size_tweened = false;
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;
+        self.explicit_lingo_size = false;
     }
 }
