@@ -438,7 +438,9 @@ pub fn get_name<'a>(
 ) -> Option<&'a String> {
     let lctx = get_lctx(player, ctx);
     if let Some(lctx) = lctx {
-        return Some(&lctx.names[name_id as usize]);
+        // name_id 0xFFFF / out-of-range = no name; return None instead of
+        // indexing past the names table (D4 anonymous-handler slots).
+        return lctx.names.get(name_id as usize);
     }
     None
 }

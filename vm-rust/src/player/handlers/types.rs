@@ -1443,6 +1443,14 @@ impl TypeHandlers {
             DatumType::ScriptInstanceRef => {
                 ScriptInstanceDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
             }
+            // On a LINEAR list, getaProp(list, n) is an indexed access
+            // (1-based), equivalent to getAt — Director treats the second arg
+            // as a position. hackey/ChannelSurf does
+            // `getaProp(getaProp(Whom, i), #z)`: the inner call indexes the
+            // list-of-proplists by integer, the outer looks up #z.
+            DatumType::List => {
+                ListDatumHandlers::get_at(datum_ref, &vec![args.get(1).unwrap().clone()])
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot getaProp prop of type: {} (value: {})",
                 datum_type.type_str(),

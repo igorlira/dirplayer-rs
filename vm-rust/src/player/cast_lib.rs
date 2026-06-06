@@ -351,16 +351,28 @@ impl CastLib {
             if let Some(script_def) = script_def {
                 let mut handler_names = Vec::new();
                 let mut handler_name_map = FxHashMap::default();
-                for handler in &script_def.handlers {
-                    let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
+                let names = &self.lctx.as_ref().unwrap().names;
+                for (idx, handler) in script_def.handlers.iter().enumerate() {
+                    // name_id 0xFFFF (and any out-of-range id) marks an
+                    // anonymous handler slot — Director leaves these in the
+                    // handler vector (netjack D4 has one). It must still occupy
+                    // its position: `LocalCall` / `get_own_handler_ref_at`
+                    // index handler_names BY POSITION, so skipping would
+                    // misalign every later handler. Give it a unique synthetic
+                    // name (registered in the map too) so it stays callable by
+                    // index without indexing past the names table.
+                    let handler_name = match names.get(handler.name_id as usize) {
+                        Some(n) => n.clone(),
+                        None => format!("__anon_handler_{}", idx),
+                    };
                     handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-                    handler_names.push(handler_name.to_owned());
+                    handler_names.push(handler_name);
                 }
 
                 let property_names = script_def
                     .property_name_ids
                     .iter()
-                    .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+                    .filter_map(|id| names.get(*id as usize).map(|n| n.to_owned()));
                 let mut properties = FxHashMap::default();
                 for name in property_names {
                     properties.insert(CiString::from(name), DatumRef::Void);
@@ -501,17 +513,24 @@ impl CastLib {
         // Build handler map
         let mut handler_names = Vec::new();
         let mut handler_name_map = FxHashMap::default();
-        for handler in &script_chunk.handlers {
-            let handler_name = &self.lctx.as_ref().unwrap().names[handler.name_id as usize];
+        let names = &self.lctx.as_ref().unwrap().names;
+        for (idx, handler) in script_chunk.handlers.iter().enumerate() {
+            // Anonymous handler slots (name_id 0xFFFF / out of range) must keep
+            // their position — LocalCall indexes handler_names by position.
+            // Give them a unique synthetic name instead of skipping.
+            let handler_name = match names.get(handler.name_id as usize) {
+                Some(n) => n.clone(),
+                None => format!("__anon_handler_{}", idx),
+            };
             handler_name_map.insert(CiString::from(handler_name.clone()), Rc::new(handler.clone()));
-            handler_names.push(handler_name.to_owned());
+            handler_names.push(handler_name);
         }
 
         // Build properties
         let property_names = script_chunk
             .property_name_ids
             .iter()
-            .map(|id| self.lctx.as_ref().unwrap().names[*id as usize].to_owned());
+            .filter_map(|id| names.get(*id as usize).map(|n| n.to_owned()));
         let mut properties = FxHashMap::default();
         for name in property_names {
             properties.insert(CiString::from(name), DatumRef::Void);
