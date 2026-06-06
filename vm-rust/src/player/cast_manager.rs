@@ -251,12 +251,19 @@ impl CastManager {
     }
 
     pub fn get_cast_or_null(&self, number: u32) -> Option<&CastLib> {
-        return self.casts.get(number as usize - 1);
+        // cast_lib 0 is Director's "default / unspecified cast" sentinel
+        // (e.g. members authored in a Director-4 movie that has only the single
+        // internal cast). Resolve it to the first cast rather than underflowing
+        // `0 - 1`. Cast libs are otherwise 1-indexed.
+        let index = if number == 0 { 0 } else { number as usize - 1 };
+        return self.casts.get(index);
     }
 
     pub fn get_cast_mut(&mut self, number: u32) -> &mut CastLib {
         let n_casts = self.casts.len();
-        match self.casts.get_mut(number as usize - 1) {
+        // See get_cast_or_null: cast_lib 0 == default cast (the first one).
+        let index = if number == 0 { 0 } else { number as usize - 1 };
+        match self.casts.get_mut(index) {
             Some(cast) => cast,
             None => panic!(
                 "Cast index out of bounds: {} (# casts={})",

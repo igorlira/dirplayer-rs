@@ -17,6 +17,7 @@ pub mod palette;
 pub mod pfr1;
 pub mod score;
 pub mod score_order;
+pub mod tile_list;
 pub mod script;
 pub mod script_names;
 pub mod sound;
@@ -72,6 +73,7 @@ pub enum Chunk {
     FrameLabels(FrameLabelsChunk),
     Score(ScoreChunk),
     ScoreOrder(SordChunk),
+    TileList(tile_list::TileListChunk),
     Text(TextChunk),
     Bitmap(BitmapChunk),
     Palette(PaletteChunk),
@@ -248,6 +250,12 @@ pub fn make_chunk(
         "Sord" => {
             return Ok(Chunk::ScoreOrder(SordChunk::from_reader(
                 &mut chunk_reader,
+            )?))
+        }
+        "VWTL" => {
+            return Ok(Chunk::TileList(tile_list::TileListChunk::from_reader(
+                &mut chunk_reader,
+                version,
             )?))
         }
         "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(&mut chunk_reader, version)?)),

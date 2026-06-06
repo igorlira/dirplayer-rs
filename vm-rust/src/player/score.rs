@@ -129,6 +129,10 @@ pub struct Score {
     pub keyframes_cache: Arc<HashMap<u16, ChannelKeyframes>>,
     /// Sprite detail behaviors indexed by spriteListIdx (D6+)
     pub sprite_details: HashMap<u32, crate::director::chunks::score::SpriteDetailInfo>,
+    /// User-defined tile patterns (VWTL). Shape `pattern` 57-64 maps to index
+    /// 0-7; a non-zero `member` overrides the built-in tile with a region of
+    /// that bitmap cast member (e.g. employee's blue/white checker background).
+    pub custom_tiles: Vec<crate::director::chunks::tile_list::TilePatternEntry>,
     /// Track the last frame where we cleared sound triggers (to prevent double-clearing)
     pub last_sound_clear_frame: Option<u32>,
     /// D5 movies need per-frame sprite property updates from channel_initialization_data
@@ -254,6 +258,7 @@ impl Score {
             sound_channel_triggered: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
+            custom_tiles: Vec::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
             channels_with_frame_interval_spans: HashSet::new(),
@@ -941,6 +946,56 @@ impl Score {
                 sprite.trails = data.trails;
                 sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = convert_raw_blend(data.blend, dir_version);
+
+                // Attach a sprite-script behavior that appears mid-span. D5
+                // sprites can change member per frame and bring a scriptId with
+                // them; begin_sprites only attaches at span-enter (using the
+                // span's START frame data), so a script that shows up on a
+                // later frame would never bind. 'hackeys clickbutton (script 13,
+                // `on mouseDown` → click=3) appears on channel 6 at frame 2
+                // when the channel switches from member 21 to member 22+script
+                // 13 — without this, clicking never registers and the kick
+                // never fires. Guarded against re-attachment because the
+                // per-frame deltas re-fire every loop of `go the frame`.
+                if dir_version < 600 && data.sprite_list_idx_lo != 0 {
+                    let script_cast_lib = if data.sprite_list_idx_hi == 0
+                        || data.sprite_list_idx_hi == 65535 {
+                        1
+                    } else {
+                        data.sprite_list_idx_hi as i32
+                    };
+                    let script_member = data.sprite_list_idx_lo as i32;
+                    let script_ref = CastMemberRef {
+                        cast_lib: script_cast_lib,
+                        cast_member: script_member,
+                    };
+                    let already_attached = reserve_player_ref(|player| {
+                        self.get_sprite(sprite_num).map_or(false, |s| {
+                            s.script_instance_list.iter().any(|inst_ref| {
+                                player.allocator.get_script_instance(inst_ref).script == script_ref
+                            })
+                        })
+                    });
+                    if !already_attached {
+                        if let Some((instance_ref, _datum)) =
+                            Self::create_behavior(script_cast_lib, script_member, None)
+                        {
+                            reserve_player_mut(|player| {
+                                let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
+                                let _ = script_set_prop(
+                                    player,
+                                    &instance_ref,
+                                    &"spriteNum".to_string(),
+                                    &sprite_num_ref,
+                                    false,
+                                );
+                            });
+                            self.get_sprite_mut(sprite_num)
+                                .script_instance_list
+                                .push(instance_ref);
+                        }
+                    }
+                }
             }
         }
 
@@ -2650,8 +2705,13 @@ impl Score {
     fn generate_sprite_spans_from_channel_data(&mut self, dir_version: u16) {
         use std::collections::HashMap;
 
-        // Group by channel: find min/max frame for each channel with data
-        let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
+        // Collect the exact frames each channel actually holds a sprite. We do
+        // NOT collapse to min/max — a channel is commonly reused by different
+        // sprites with EMPTY frames in between (sprite A in 1-10, nothing in
+        // 11-20, sprite B in 21-30). A single 1-30 span would keep the sprite
+        // visible across the 11-20 gap (norman shows sprites that shouldn't be
+        // on the frame). Instead build one span per CONTIGUOUS run of frames.
+        let mut channel_frames: HashMap<u32, Vec<u32>> = HashMap::new();
 
         // Collect frame script data (channel 0) separately
         // Each frame may have a different script, so we track per-frame
@@ -2679,29 +2739,29 @@ impl Score {
 
             let channel_number = get_channel_number_from_index(*channel_idx as u32);
             let frame_num = *frame_idx + 1; // frame_idx is 0-based, frames are 1-based
-
-            channel_frames
-                .entry(channel_number)
-                .and_modify(|(min_frame, max_frame)| {
-                    if frame_num < *min_frame {
-                        *min_frame = frame_num;
-                    }
-                    if frame_num > *max_frame {
-                        *max_frame = frame_num;
-                    }
-                })
-                .or_insert((frame_num, frame_num));
+            channel_frames.entry(channel_number).or_default().push(frame_num);
         }
 
-        // Create sprite spans for each channel
-        for (channel_number, (start_frame, end_frame)) in channel_frames {
-            let sprite_span = ScoreSpriteSpan {
-                channel_number,
-                start_frame,
-                end_frame,
-                scripts: Vec::new(), // Filmloop sprites don't have behavior scripts in this context
-            };
-            self.sprite_spans.push(sprite_span);
+        // Create a sprite span for each contiguous run of frames per channel.
+        for (channel_number, mut frames) in channel_frames {
+            frames.sort_unstable();
+            frames.dedup();
+            let mut i = 0;
+            while i < frames.len() {
+                let start_frame = frames[i];
+                let mut end_frame = start_frame;
+                while i + 1 < frames.len() && frames[i + 1] == end_frame + 1 {
+                    end_frame = frames[i + 1];
+                    i += 1;
+                }
+                self.sprite_spans.push(ScoreSpriteSpan {
+                    channel_number,
+                    start_frame,
+                    end_frame,
+                    scripts: Vec::new(),
+                });
+                i += 1;
+            }
         }
 
         // Create frame script spans (channel 0)
@@ -2893,6 +2953,9 @@ impl Score {
     }
 
     pub fn load_from_dir(&mut self, dir: &DirectorFile) {
+        self.custom_tiles = dir.tile_list.as_ref()
+            .map(|t| t.tiles.clone())
+            .unwrap_or_default();
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();

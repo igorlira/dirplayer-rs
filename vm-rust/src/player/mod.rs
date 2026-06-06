@@ -370,6 +370,11 @@ pub struct DirPlayer {
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
+    /// Runtime overrides for `the scriptText of member`. Director exposes a
+    /// member's Lingo source as a settable string on ANY member type; some
+    /// movies (e.g. freeT) use it as scratch data storage. We don't compile
+    /// Lingo, so we just round-trip the string here keyed by member ref.
+    pub script_text_overrides: FxHashMap<CastMemberRef, String>,
     /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
     /// return values derived from this path, while actual file fetching uses the real URL.
     /// URLs the script builds from `the moviePath` (e.g. `postNetText(the moviePath & "x.aspx")`)
@@ -541,6 +546,7 @@ impl DirPlayer {
             actor_list_generation: 0,
             behavior_channel_cache_generation: 0,
             active_stage_filmloop_cache_generation: 0,
+            script_text_overrides: FxHashMap::default(),
             script_instance_list_cache: FxHashMap::default(),
             script_instance_list_cache_owner: FxHashMap::default(),
             script_instance_list_generation: FxHashMap::default(),
@@ -630,6 +636,11 @@ impl DirPlayer {
     }
 
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
+        // Pick the platform-correct default system palette before loading. Mac
+        // movies (Director 4 titles like thead) default to System-Mac, Windows
+        // movies to System-Win; these differ at high indices and decide how
+        // indexed bitmaps / shape pattern fills resolve. Read before `dir` moves.
+        crate::player::bitmap::bitmap::set_default_system_palette_from_platform(dir.config.platform);
         self.movie
             .load_from_file(
                 dir,
@@ -1848,6 +1859,10 @@ impl DirPlayer {
                 let val = compute_mouse_char(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             },
+            "mouseLine" => {
+                let val = compute_mouse_line(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            },
             "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
             "rollover" => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
@@ -2148,6 +2163,10 @@ impl DirPlayer {
             "mouseV" => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
             "mouseChar" => {
                 let val = compute_mouse_char(self);
+                Ok(self.alloc_datum(Datum::Int(val)))
+            }
+            "mouseLine" => {
+                let val = compute_mouse_line(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             }
             "mouseDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
@@ -2706,6 +2725,23 @@ pub async fn player_call_global_handler(
         return xtra::manager::call_xtra_static_async_handler(handler_name, args).await;
     }
     BuiltInHandlerManager::call_handler(handler_name, args)
+}
+
+/// True if an active movie/static script defines a handler named
+/// `handler_name`. Used to decide, for the D4 `name(receiver, ..)` call form
+/// (ObjCallV4), whether `name` is a movie handler that should take priority
+/// over treating the first arg as a method receiver.
+pub fn player_global_handler_exists(player: &DirPlayer, handler_name: &str) -> bool {
+    get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
+        .iter()
+        .any(|script_ref| {
+            player
+                .movie
+                .cast_manager
+                .get_script_by_ref(script_ref)
+                .and_then(|x| x.get_own_handler_ref(handler_name))
+                .is_some()
+        })
 }
 
 #[inline(always)]
@@ -3946,6 +3982,43 @@ pub async fn run_single_frame() -> (bool, bool) {
 /// Used by Fugue No.4's Narrative member script:
 ///   if the textStyle of char the mouseChar of member nar = "underline"
 /// to detect clicks on inline underlined links.
+/// `the mouseLine` — the RETURN-delimited line number (1-based) under the mouse
+/// in the field/text sprite it's over, or -1 if not over text. Reuses the
+/// char-index hit-test, then counts line breaks before that char. Used by the
+/// client movie's question list (clicking a question reads `the mouseLine`).
+fn compute_mouse_line(player: &mut DirPlayer) -> i32 {
+    let char_index = compute_mouse_char(player);
+    if char_index <= 0 {
+        return -1;
+    }
+    let (mx, my) = player.mouse_loc;
+    let sprite_num = match score::get_sprite_at(player, mx, my, false) {
+        Some(n) => n,
+        None => return -1,
+    };
+    let sprite = match player.movie.score.get_sprite(sprite_num as i16) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let member_ref = match sprite.member.as_ref() {
+        Some(r) => r,
+        None => return -1,
+    };
+    let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+        Some(m) => m,
+        None => return -1,
+    };
+    let text = match &member.member_type {
+        CastMemberType::Field(f) => f.text.clone(),
+        CastMemberType::Text(t) => t.text.clone(),
+        _ => return -1,
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let upto = (char_index as usize).saturating_sub(1).min(chars.len());
+    let line = chars[..upto].iter().filter(|&&c| c == '\r' || c == '\n').count() + 1;
+    line as i32
+}
+
 fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
     let (mx, my) = player.mouse_loc;
     let sprite_num = match score::get_sprite_at(player, mx, my, false) {
@@ -4323,6 +4396,22 @@ pub async fn run_frame_loop() {
         if !is_playing {
             stop_movie_sequence().await;
             return;
+        }
+
+        // Dispatch the movie-level `idle` event. Director sends `idle`
+        // continuously while the playhead waits on a frame, and many movies —
+        // especially Director 4 titles like thead's playback Controller —
+        // drive ALL of their animation from `on idle` in a movie script
+        // (stepping sprite castNums each tick). Without it nothing animates.
+        // Goes to the frame script + movie scripts (Director's idle hierarchy);
+        // a no-op for movies that define no `idle` handler.
+        {
+            let active = reserve_player_ref(|player| player.is_playing && !player.is_script_paused);
+            if active {
+                if let Err(err) = player_invoke_frame_and_movie_scripts("idle", &vec![]).await {
+                    warn!("idle dispatch failed: {}", err.message);
+                }
+            }
         }
 
         // Tick the sound manager so per-channel fade-in / fade-out

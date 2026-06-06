@@ -90,7 +90,21 @@ impl CastMemberChunk {
 
             // these bytes are common but stored in the specific data
             let mut specific_data_left = specific_data_len;
-            member_type = MemberType::from(reader.read_u8().unwrap() as u32);
+            // Director 4 (and earlier) uses the CLASSIC cast-member type codes,
+            // which diverge from dirplayer's `MemberType` enum (modern numbering)
+            // starting at 8: D4 has 8=Shape, 9=Movie, whereas the enum has
+            // 8=Flash, 9=Shape. Flash / Shockwave3D members postdate D4, so a
+            // raw 8 here is a QuickDraw Shape (e.g. thead's pattern-filled
+            // background), not Flash. Codes 1-7 and 10+ already match. Remap the
+            // two divergent codes; everything else passes through unchanged.
+            let raw_type = reader.read_u8().unwrap() as u32;
+            member_type = match raw_type {
+                8 => MemberType::Shape,
+                // D4 "Movie" (linked/embedded movie) — dirplayer has no Movie
+                // member type; it shares the film-loop/video memory format.
+                9 => MemberType::FilmLoop,
+                other => MemberType::from(other),
+            };
             specific_data_left -= 1;
             if specific_data_left != 0 {
                 has_flags1 = true;

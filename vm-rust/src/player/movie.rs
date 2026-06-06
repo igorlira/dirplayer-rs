@@ -148,7 +148,7 @@ impl Movie {
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
             "productversion" => Ok(Datum::String("11.0".to_string())),
-            "moviename" => Ok(Datum::String(self.file_name.to_owned())),
+            "moviename" | "movie" => Ok(Datum::String(self.file_name.to_owned())),
             "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
             "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
@@ -288,6 +288,9 @@ impl Movie {
             },
             "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
             "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
+            // No-op system prop: nothing to preload-abort in dirplayer.
+            // Return the Director default (FALSE) so read-backs don't error.
+            "preLoadEventAbort" => Ok(datum_bool(false)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         })
     }
@@ -392,8 +395,12 @@ impl Movie {
                 self.puppet_tempo = value.int_value()? as u32;
                 Ok(())
             },
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks" => {
-                // Read-only / no-op in practice; ignore sets like Director does
+            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks"
+            | "preLoadEventAbort" => {
+                // Read-only / no-op in practice; ignore sets like Director does.
+                // preLoadEventAbort gates whether a preload event handler may
+                // abort preloading — dirplayer loads synchronously, so there
+                // is nothing to abort (netjack's startMovie sets it).
                 Ok(())
             },
             "stageColor" => {

@@ -1092,6 +1092,16 @@ impl WebGL2Renderer {
                 shape_info: crate::director::enums::ShapeInfo,
                 fg_color: (u8, u8, u8),
                 bg_color: (u8, u8, u8),
+                // Pre-resolved 256-colour palette table for tile patterns
+                // (shape pattern 57-64). Some only when the shape uses a tile;
+                // tile pixels are palette indices resolved through this table
+                // (the movie's frame palette). See builtin_tiles.
+                tile_palette: Option<Vec<(u8, u8, u8)>>,
+                // VWTL user-defined tile: source bitmap + region to tile + the
+                // sprite's absolute stage origin (to phase the tile to the stage
+                // grid, so the checker's blue/white cells aren't swapped). Takes
+                // precedence over the built-in tile/pattern when present.
+                custom_tile: Option<(Bitmap, crate::player::geometry::IntRect, (i32, i32))>,
             },
             VectorShapeBitmap {
                 width: u32,
@@ -1320,8 +1330,12 @@ impl WebGL2Renderer {
                         return;
                     }
 
-                    // Skip rendering shapes that use member 1:1 (placeholder)
-                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                    // Skip rendering shapes that use member 1:1 (placeholder) —
+                    // D5+ only. Director 4 uses member 1 as a real shape (e.g.
+                    // thead's pattern-filled background); dropping it leaves the
+                    // stage colour showing through. See the CPU path in rendering.rs.
+                    if player.movie.dir_version >= 500
+                        && member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
                         return;
                     }
 
@@ -1340,19 +1354,63 @@ impl WebGL2Renderer {
                         8,
                     );
 
+                    // Tile patterns (57-64) need a per-index palette table,
+                    // resolved through the frame palette (so tile index 247
+                    // becomes the same red as the foreColor, etc.).
+                    let tile_palette = if crate::player::bitmap::builtin_tiles::tile_for_pattern(
+                        shape_member.shape_info.pattern,
+                    )
+                    .is_some()
+                    {
+                        Some(crate::player::bitmap::bitmap::resolve_palette_table(
+                            &palettes,
+                            &frame_palette,
+                            8,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    // VWTL custom tile (pattern 57-64 with a defined bitmap
+                    // member): resolve the source bitmap + region to tile.
+                    let custom_tile = {
+                        let pat = shape_member.shape_info.pattern;
+                        if pat >= 57 && pat <= 64 {
+                            player.movie.score.custom_tiles
+                                .get((pat - 57) as usize)
+                                .filter(|t| t.is_custom())
+                                .and_then(|t| {
+                                    let tref = CastMemberRef { cast_lib: t.cast_lib, cast_member: t.member };
+                                    player.movie.cast_manager.find_member_by_ref(&tref)
+                                        .and_then(|m| match &m.member_type {
+                                            CastMemberType::Bitmap(b) => Some(b.image_ref),
+                                            _ => None,
+                                        })
+                                        .and_then(|ir| player.bitmap_manager.get_bitmap(ir).cloned())
+                                        .map(|src| (src, crate::player::geometry::IntRect::from(
+                                            t.left as i32, t.top as i32, t.right as i32, t.bottom as i32),
+                                            (sprite_rect.left, sprite_rect.top)))
+                                })
+                        } else { None }
+                    };
+
                     TextureSource::ShapeBitmap {
                         width: sprite_width as u32,
                         height: sprite_height as u32,
                         shape_info: shape_member.shape_info.clone(),
                         fg_color: fg_rgb,
                         bg_color: bg_rgb,
+                        tile_palette,
+                        custom_tile,
                     }
                 }
                 CastMemberType::VectorShape(vector_member) => {
                     if sprite_width <= 1 || sprite_height <= 1 {
                         return;
                     }
-                    if member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
+                    // D5+ only — see the Shape branch above.
+                    if player.movie.dir_version >= 500
+                        && member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
                         return;
                     }
                     TextureSource::VectorShapeBitmap {
@@ -3109,7 +3167,7 @@ impl WebGL2Renderer {
                 texture
             }
             TextureSource::ShapeBitmap {
-                width, height, shape_info, fg_color, bg_color,
+                width, height, shape_info, fg_color, bg_color, tile_palette, custom_tile,
             } => {
                 use crate::director::enums::ShapeType;
 
@@ -3134,7 +3192,41 @@ impl WebGL2Renderer {
                 match shape_info.shape_type {
                     ShapeType::Rect => {
                         if filled {
-                            shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                            // VWTL custom tile (a bitmap region) takes precedence.
+                            // The shape is a local texture (0,0,w,h), so phase the
+                            // tile by the sprite's stage origin.
+                            if let Some((src, tile_rect, origin)) = custom_tile.as_ref() {
+                                shape_bitmap.fill_rect_custom_tile(
+                                    &palettes, src, tile_rect.clone(),
+                                    crate::player::geometry::IntRect::from(0, 0, w, h),
+                                    *origin,
+                                );
+                            } else
+                            // Tile patterns (57-64): blit the tile's palette
+                            // indices through the pre-resolved frame palette.
+                            if let (Some(tile), Some(cache)) = (
+                                crate::player::bitmap::builtin_tiles::tile_for_pattern(shape_info.pattern),
+                                tile_palette.as_ref(),
+                            ) {
+                                let tw = tile.w as i32;
+                                let th = tile.h as i32;
+                                for yy in 0..h {
+                                    let row = (yy.rem_euclid(th)) as usize * tile.w as usize;
+                                    for xx in 0..w {
+                                        let tx = (xx.rem_euclid(tw)) as usize;
+                                        let color = cache[tile.px[row + tx] as usize];
+                                        shape_bitmap.set_pixel(xx, yy, color, &palettes);
+                                    }
+                                }
+                            } else if let Some(pat) =
+                                crate::player::bitmap::quickdraw_patterns::quickdraw_pattern(shape_info.pattern)
+                            {
+                                // 1-bit QuickDraw patterns (1-56): set bit = fore,
+                                // clear = back. Recoloured, no palette remap.
+                                shape_bitmap.fill_rect_pattern_1bit(0, 0, w, h, pat, fg_color, bg_color, &palettes, 1.0);
+                            } else {
+                                shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                            }
                         }
                         if thickness > 0 {
                             for t in 0..thickness {

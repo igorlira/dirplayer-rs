@@ -1632,6 +1632,35 @@ impl SoundChannel {
             }
         }
 
+        // Case 1b: Integer member number. Director 4 movies routinely call
+        // `puppetSound channel, N` (or `sound playFile`/`puppetSound N`) with a
+        // bare cast-member NUMBER rather than a `member(...)` reference. This
+        // must be handled before the string case below, because
+        // `Int::string_value()` succeeds (yielding e.g. "1025") and would
+        // otherwise be misrouted into a by-name lookup that never matches.
+        // (`puppetSound 0` means "stop puppeting" and is handled upstream.)
+        if let Datum::Int(member_num) = datum {
+            if *member_num <= 0 {
+                return None;
+            }
+            let member_ref = match player
+                .movie
+                .cast_manager
+                .find_member_ref_by_number(*member_num as u32)
+            {
+                Some(r) => r,
+                None => return None,
+            };
+            let cast_member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
+                Some(m) => m,
+                None => return None,
+            };
+            match &cast_member.member_type {
+                CastMemberType::Sound(sound_member) => return Some(sound_member.clone()),
+                _ => return None,
+            }
+        }
+
         // Case 2: String member name lookup
         if let Ok(member_name) = datum.string_value() {
             // Find member by name
@@ -2096,7 +2125,10 @@ impl SoundChannel {
         } else {
             let mut this = self_rc.borrow_mut();
             this.status = SoundStatus::Idle;
-            error!("❌ start_sound failed - couldn't get sound member");
+            error!(
+                "❌ start_sound failed - couldn't get sound member (datum type: {})",
+                datum.type_str()
+            );
         }
     }
 
