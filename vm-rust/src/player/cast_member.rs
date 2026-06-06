@@ -212,6 +212,43 @@ impl CastMember {
     }
 }
 
+/// Convert a Lingo textStyle/fontStyle string (e.g. "bold,underline",
+/// "plain") into a QuickDraw style byte. bit0=bold(0x01),
+/// bit1=italic(0x02), bit2=underline(0x04). "plain"/"normal"/unknown
+/// tokens contribute no bits.
+pub fn text_style_string_to_byte(s: &str) -> u8 {
+    let mut style = 0u8;
+    for part in s.split(',') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "bold" => style |= 0x01,
+            "italic" => style |= 0x02,
+            "underline" => style |= 0x04,
+            _ => {}
+        }
+    }
+    style
+}
+
+/// Ensure a formatting-run boundary exists at byte `pos` by splitting the
+/// run that straddles it (cloning all props, only changing start_position).
+/// No-op at pos 0 or when a boundary already exists there.
+fn ensure_run_boundary(
+    runs: &mut Vec<crate::director::chunks::text::StxtFormattingRun>,
+    pos: u32,
+) {
+    if pos == 0 {
+        return;
+    }
+    if let Some(idx) = runs.iter().rposition(|r| r.start_position <= pos) {
+        if runs[idx].start_position == pos {
+            return;
+        }
+        let mut copy = runs[idx].clone();
+        copy.start_position = pos;
+        runs.insert(idx + 1, copy);
+    }
+}
+
 impl FieldMember {
     pub fn new() -> FieldMember {
         FieldMember {
@@ -273,6 +310,51 @@ impl FieldMember {
         self.sel_start = caret;
         self.sel_end = caret;
         self.sel_anchor = caret;
+    }
+
+    /// Apply a QuickDraw style byte over the byte range [byte_start,
+    /// byte_end) of this field's STXT formatting runs, splitting runs at the
+    /// boundaries as needed. Director's `set the textStyle of line N of
+    /// field` / `set the textStyle of field` REPLACE the style of the
+    /// affected characters (they do not merge attributes). The renderer
+    /// (webgl2 builds StyledSpans from these runs) and the `the textStyle
+    /// of` getter both read formatting_runs, so this updates display and
+    /// script reads together. The client (issue-188) movie's `markLine`
+    /// handler relies on this to highlight the clicked topic line and clear
+    /// the previous one.
+    pub fn apply_style_to_byte_range(&mut self, byte_start: u32, byte_end: u32, new_style: u8) {
+        use crate::director::chunks::text::StxtFormattingRun;
+        let text_len = self.text.len() as u32;
+        let end = byte_end.min(text_len);
+        let start = byte_start.min(end);
+        if start >= end {
+            return;
+        }
+        // A field authored with uniform styling may have no runs; synthesize
+        // a base run from the member-wide font so partial styling has
+        // something to split.
+        if self.formatting_runs.is_empty() {
+            self.formatting_runs.push(StxtFormattingRun {
+                start_position: 0,
+                height: self.font_size.max(1),
+                ascent: self.font_size,
+                font_id: self.font_id.unwrap_or(0),
+                style: text_style_string_to_byte(&self.font_style),
+                font_size: self.font_size.max(1),
+                color_r: 0,
+                color_g: 0,
+                color_b: 0,
+            });
+        }
+        ensure_run_boundary(&mut self.formatting_runs, start);
+        if end < text_len {
+            ensure_run_boundary(&mut self.formatting_runs, end);
+        }
+        for r in self.formatting_runs.iter_mut() {
+            if r.start_position >= start && r.start_position < end {
+                r.style = new_style;
+            }
+        }
     }
 
     pub fn from_field_info(field_info: &FieldInfo) -> FieldMember {
@@ -2413,6 +2495,7 @@ impl CastMember {
             Chunk::FrameLabels(_) => "FrameLabels",
             Chunk::Score(_) => "Score",
             Chunk::ScoreOrder(_) => "ScoreOrder",
+            Chunk::TileList(_) => "TileList",
             Chunk::Text(_) => "Text",
             Chunk::Bitmap(_) => "Bitmap",
             Chunk::Palette(_) => "Palette",
