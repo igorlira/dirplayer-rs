@@ -686,11 +686,23 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontStyle" => borrow_member_mut(
+            // Whole-field style set (`set the textStyle of field X to "plain"`).
+            // Update both the member-wide font_style string AND every STXT
+            // formatting run, so the change is visible (the renderer reads the
+            // runs) and the `the textStyle of` getter agrees. The client
+            // (issue-188) movie's `markLine` clears all line highlights via
+            // `set the textStyle of field fieldname to "plain"`.
+            "fontStyle" | "textStyle" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().font_style = value?;
+                    use crate::player::cast_member::text_style_string_to_byte;
+                    let s = value?;
+                    let style_byte = text_style_string_to_byte(&s);
+                    let field = cast_member.member_type.as_field_mut().unwrap();
+                    field.font_style = s;
+                    let len = field.text.len() as u32;
+                    field.apply_style_to_byte_range(0, len, style_byte);
                     Ok(())
                 },
             ),
