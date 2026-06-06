@@ -1201,6 +1201,18 @@ impl TypeHandlers {
         // instead, with a clearer "Xtra X not found" message.
         reserve_player_mut(|player| {
             let xtra_name = player.get_datum(&args[0]).string_value()?;
+            let xtra_name = xtra_name.trim().replace(".x32", "");
+
+            // Validate xtra name format: [a-zA-Z0-9_-](\.x32)?
+            let is_valid = xtra_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !is_valid {
+                return Err(ScriptError::new(format!(
+                    "Invalid xtra name '{}'",
+                    xtra_name
+                )));
+            }
             if !is_xtra_registered(&xtra_name) {
                 debug!(
                     "Xtra '{}' not yet registered — deferring lookup to new() / on-demand load",
