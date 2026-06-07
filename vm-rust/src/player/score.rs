@@ -582,11 +582,21 @@ impl Score {
                         // Just clear the exited flag so they remain active.
                         sprite.exited = false;
                         false
-                    } else if sprite.visible {
+                    } else {
+                        // Non-puppet sprites that EXITED their span are cleaned up
+                        // regardless of visibility. The previous `if sprite.visible`
+                        // gate left an invisible exited sprite with its stale
+                        // behavior instance + `entered`/`exited` flags, so on
+                        // re-entry its span never re-entered and beginSprite never
+                        // re-fired. spectral-wizard's Help scroll bar hides sprite
+                        // 15 (`sprite(15).visible = 0`) for short pages; on the
+                        // second visit that sprite kept its first-visit instance
+                        // (myState=#done), so its InstallElement was skipped and the
+                        // shared `ourMaxScroll` stayed empty → CustomScrollbar_SetScroll
+                        // crashed on `ourMaxScroll[1]`. Visibility is independent of
+                        // span membership, so an exited sprite must reset either way.
                         sprite.reset();
                         true
-                    } else {
-                        false
                     }
                 };
                 // Invalidate the cached scriptInstanceList so stale ScriptInstanceRefs
