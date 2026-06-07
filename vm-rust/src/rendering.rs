@@ -3248,6 +3248,28 @@ impl PlayerCanvasRenderer {
         let bitmap = &mut self.bitmap;
         render_stage_to_bitmap(player, bitmap, self.debug_selected_channel_num);
 
+        // Composite the script-owned stage framebuffer over the sprite render
+        // for "imaging Lingo" movies that draw straight into `(the stage).image`
+        // (see stage.rs `image` getter). Only once a script has actually drawn
+        // into it (`stage_image_dirty`).
+        if player.stage_image_dirty {
+            if let Some(stage_ref) = player.stage_image {
+                if let Some(src) = player.bitmap_manager.get_bitmap(stage_ref) {
+                    let palettes = player.movie.cast_manager.palettes();
+                    let w = bitmap.width as i32;
+                    let h = bitmap.height as i32;
+                    bitmap.copy_pixels(
+                        &palettes,
+                        src,
+                        IntRect::from(0, 0, w, h),
+                        IntRect::from(0, 0, src.width as i32, src.height as i32),
+                        &HashMap::new(),
+                        None,
+                    );
+                }
+            }
+        }
+
         #[cfg(feature = "alloc-debug-overlay")]
         if let Some(font) = player.font_manager.get_system_font() {
             let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();

@@ -101,6 +101,9 @@ pub struct WebGL2Renderer {
     trails_texture: Option<web_sys::WebGlTexture>,
     /// Size of the trails FBO texture
     trails_size: (u32, u32),
+    /// Reused texture for compositing the script-owned stage framebuffer
+    /// (`(the stage).image` imaging-Lingo overlay). Re-uploaded each frame.
+    stage_image_texture: Option<web_sys::WebGlTexture>,
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
     native_cursor_cache: crate::cursor::NativeCursorCache,
@@ -179,6 +182,7 @@ impl WebGL2Renderer {
             trails_fbo: None,
             trails_texture: None,
             trails_size: (0, 0),
+            stage_image_texture: None,
             scene3d: scene3d::Scene3dRenderer::new(),
             native_cursor_cache: None,
         })
@@ -348,6 +352,83 @@ impl WebGL2Renderer {
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
     }
 
+    /// Composite the script-owned stage framebuffer (`(the stage).image`) as a
+    /// full-screen quad over the sprite render. No-op until a script has drawn
+    /// into it (`stage_image_dirty`). The bitmap is re-uploaded each frame
+    /// because its contents change as the movie redraws.
+    fn draw_stage_image_overlay(&mut self, player: &mut DirPlayer) {
+        if !player.stage_image_dirty {
+            return;
+        }
+        let stage_ref = match player.stage_image {
+            Some(r) => r,
+            None => return,
+        };
+        let (sw, sh, data) = match player.bitmap_manager.get_bitmap(stage_ref) {
+            Some(b) => (b.width as u32, b.height as u32, b.data.clone()),
+            None => return,
+        };
+        if sw == 0 || sh == 0 {
+            return;
+        }
+
+        // Lazily create the reused texture, then upload the current pixels.
+        if self.stage_image_texture.is_none() {
+            self.stage_image_texture = self.context.create_texture().ok();
+        }
+        let texture = match &self.stage_image_texture {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        if self.context.upload_texture_rgba(&texture, sw, sh, &data).is_err() {
+            return;
+        }
+
+        let (width, height) = self.size;
+        let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
+        let program = match self.shader_manager.get_program(effective_ink) {
+            Some(p) => p,
+            None => return,
+        };
+        self.context.set_blend_alpha();
+
+        let gl = self.context.gl();
+        self.quad.bind(gl);
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+        if let Some(ref loc) = program.u_texture {
+            gl.uniform1i(Some(loc), 0);
+        }
+        if let Some(ref loc) = program.u_sprite_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, width as f32, height as f32);
+        }
+        if let Some(ref loc) = program.u_tex_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
+        }
+        if let Some(ref loc) = program.u_flip {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation_center {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_blend {
+            gl.uniform1f(Some(loc), 1.0);
+        }
+
+        self.quad.draw(gl);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        self.quad.unbind(gl);
+    }
+
     /// Draw the current frame
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
@@ -467,6 +548,11 @@ impl WebGL2Renderer {
             // No trails sprites - clean up FBO
             self.destroy_trails_fbo();
         }
+
+        // Composite the script-owned stage framebuffer over the sprite render
+        // for "imaging Lingo" movies that draw into `(the stage).image`
+        // (see stage.rs `image` getter). Only once a script has drawn into it.
+        self.draw_stage_image_overlay(player);
 
         // Update native CSS cursor (no per-frame draw needed)
         self.update_native_cursor(player);
@@ -1910,6 +1996,46 @@ impl WebGL2Renderer {
                         }).collect())
                     };
 
+                    // Ink 4 (NotCopy): Director displays the inverse of the Copy
+                    // colors. The RenderedText path composites with the Copy
+                    // shader (white bg keyed to alpha), so the inversion can't
+                    // happen in-shader — bake it into the text colors instead.
+                    // spectral-wizard's HELP title stacks an ink-4 copy of the
+                    // cream `help_header` behind the cream one to form a black
+                    // drop shadow (FFFBF0 → ~00040F).
+                    let (styled_spans_with_defaults, text_fg_color) = if ink == 4 {
+                        let inv_spans = styled_spans_with_defaults.map(|spans| {
+                            spans.into_iter().map(|mut s| {
+                                if let Some(c) = s.style.color {
+                                    s.style.color = Some(!c & 0xFFFFFF);
+                                }
+                                s
+                            }).collect::<Vec<_>>()
+                        });
+                        let inv_fg = match &text_fg_color {
+                            ColorRef::Rgb(r, g, b) => ColorRef::Rgb(255 - r, 255 - g, 255 - b),
+                            other => other.clone(),
+                        };
+                        (inv_spans, inv_fg)
+                    } else {
+                        (styled_spans_with_defaults, text_fg_color)
+                    };
+
+                    // Apply `scrollTop` the same way the field path does: shift
+                    // the draw origin upward by scroll_top so a scrollable text
+                    // member shows the scrolled-to portion (the MM custom scroll
+                    // bar sets help_text to boxType #fixed and drives scrollTop).
+                    // Positive scroll_top → negative effective top_spacing → the
+                    // first lines clip above the box top. Folding it into
+                    // top_spacing (which the cache key hashes) re-rasterizes the
+                    // texture on every scroll. keep_authored_height is already
+                    // forced below for non-#adjust box types, so the bitmap stays
+                    // at the box height instead of growing with the content.
+                    let text_scroll_top =
+                        text_member.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0);
+                    let effective_top_spacing = (text_member.top_spacing as i32 - text_scroll_top)
+                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
                     // Build cache key from the final styled spans that will actually be rendered.
                     let styled_spans_ref = styled_spans_with_defaults.as_ref().map(|s| s.as_slice());
                     let text_has_focus = player.keyboard_focus_sprite == channel_num;
@@ -1934,7 +2060,7 @@ impl WebGL2Renderer {
                         font_size,
                         font_style,
                         text_member.fixed_line_space,
-                        text_member.top_spacing,
+                        effective_top_spacing,
                     );
                     // For #fixed (and #limit/#scroll) text members the
                     // authored member.height is the rendering box; content
@@ -2066,7 +2192,7 @@ impl WebGL2Renderer {
                         font_style,
                         font_id: None,
                         line_spacing: text_member.fixed_line_space,
-                        top_spacing: text_member.top_spacing,
+                        top_spacing: effective_top_spacing,
                         bottom_spacing: text_member.bottom_spacing,
                         width,
                         height,
@@ -6214,23 +6340,24 @@ impl WebGL2Renderer {
             &PaletteRef::BuiltIn(get_system_default_palette()),
             8,
         );
-        // For transparency inks, NEVER fill the background.
-        // The text bitmap already has alpha=0 for background, alpha>0 for text.
-        // These inks rely on the alpha channel for transparency:
-        // - Ink 7 (Not Ghost): discards alpha=0 pixels via matte
-        // - Ink 8 (Matte): discards alpha<0.01 pixels in shader
-        // - Ink 9 (Mask): uses alpha as mask
-        // - Ink 36 (BgTransparent): composited with alpha blending
-        // Filling background with bg_color at alpha=255 would make the entire
-        // text area opaque, producing solid colored rectangles instead of text.
-        let is_transparency_ink = ink == 3 || ink == 7 || ink == 8 || ink == 9 || ink == 36;
+        // Only ink 0 (Copy) paints the member's opaque background. Every other
+        // ink lets the background fall through (relying on the text bitmap's
+        // alpha=0 background / alpha>0 glyphs), which is exactly what the
+        // comment below already documents: ink 0 = bg drawn, otherwise not.
+        //
+        // The previous `!is_transparency_ink` heuristic only excluded a small
+        // set (3,7,8,9,36) and so force-filled an opaque white box under every
+        // other ink — including ink 4 (NotCopy), which spectral-wizard's HELP
+        // title uses for its drop shadow: the same cream `help_header` member,
+        // NotCopy-inverted to black and offset behind the cream copy. The
+        // bogus white fill from the shadow sprite covered the whole title.
+        // (Transparent/Reverse/blend inks on text were similarly wrong.)
+        //
         // White bg fields use ink 36 (BgTransparent) when the author wants the
-        // bg to fall through (e.g. text/field members composited over a 3D
-        // scene). Under any non-transparent ink (e.g. ink 0 Copy on Coke
-        // Studios' `nav_vego_search_field` v-ego search box) the white bg has
-        // to be drawn — otherwise the field appears as transparent text on
-        // whatever's behind it. Don't second-guess the ink here.
-        let has_bg_fill = !is_transparency_ink;
+        // bg to fall through (e.g. text/field members over a 3D scene). Coke
+        // Studios' `nav_vego_search_field` v-ego search box uses ink 0 Copy and
+        // needs its white bg drawn — preserved here.
+        let has_bg_fill = ink == 0;
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).
