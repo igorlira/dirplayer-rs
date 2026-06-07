@@ -196,16 +196,41 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
         }
         "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
         "image" => {
-            let mut captured_bitmap = None;
+            // `(the stage).image` is a *live, writable* handle to the stage
+            // framebuffer (Director 11.5 Scripting Dictionary — drawing into
+            // it via draw()/copyPixels()/fill() appears on screen). We back it
+            // with one persistent bitmap reused across calls, so a cached
+            // `theStage = (the stage).image` keeps accumulating draws (the
+            // "imaging Lingo" engine pattern used by spectral-wizard et al.).
+            //
+            // While no script has drawn into it (`stage_image_dirty == false`),
+            // we refresh its contents from the current render on every access
+            // — this preserves the read-only snapshot behavior camera-capture
+            // movies rely on. Once a draw marks it dirty, the renderer
+            // composites it over the sprite output and we leave its pixels
+            // alone here.
+            let has_clean_existing = match player.stage_image {
+                Some(existing) => {
+                    player.bitmap_manager.get_bitmap(existing).is_some()
+                        && player.stage_image_dirty
+                }
+                None => false,
+            };
+            // A dirty existing image is returned as-is; only build a fresh
+            // render snapshot when we need to create or refresh (clean) it.
+            // (capture_stage_bitmap runs a full draw_frame, so skip it when
+            // possible.)
+            if has_clean_existing {
+                return Ok(Datum::BitmapRef(player.stage_image.unwrap()));
+            }
+
+            let mut snapshot = None;
             with_renderer_mut(|renderer_opt| {
                 if let Some(renderer) = renderer_opt {
-                    captured_bitmap = Some(renderer.capture_stage_bitmap(player));
+                    snapshot = Some(renderer.capture_stage_bitmap(player));
                 }
             });
-
-            let new_bitmap = if let Some(bitmap) = captured_bitmap {
-                bitmap
-            } else {
+            let mut snapshot = snapshot.unwrap_or_else(|| {
                 let layout = stage_layout(player);
                 let w = layout.stage_rect[2] - layout.stage_rect[0];
                 let h = layout.stage_rect[3] - layout.stage_rect[1];
@@ -219,14 +244,34 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
                 );
                 render_stage_to_bitmap(player, &mut bitmap, None);
                 bitmap
-            };
-            // Ephemeral: a fresh stage snapshot per call. Once no DatumRef
-            // wraps it (e.g. after the script's `(the stage).image` Lingo
-            // expression goes out of scope) the bitmap is freed. RemoteControl
-            // CameraScreen scripts call this every frame — without ephemeral
-            // tracking each call leaks ~movie_w*movie_h*4 bytes forever.
-            let bitmap_id = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
-            Ok(Datum::BitmapRef(bitmap_id))
+            });
+            // The stage framebuffer is OPAQUE — Director's `(the stage).image`
+            // has no alpha channel. `capture_stage_bitmap` flags its result
+            // use_alpha=true, but if the persistent stage image keeps that
+            // flag, `copyPixels` of an alpha source onto it writes transparent
+            // pixels verbatim (as black) instead of skipping them — imaging-
+            // Lingo movies that blit an alpha bubble/dialog onto the stage
+            // (spectral-wizard: `theStage.copyPixels(talkBoxBuffer)`) then get
+            // a black box around the shape. Force opaque so the alpha source's
+            // transparent pixels are skipped and the scene shows through.
+            snapshot.use_alpha = false;
+
+            match player.stage_image {
+                Some(existing) if player.bitmap_manager.get_bitmap(existing).is_some() => {
+                    // Clean existing image — refresh from the live render so
+                    // camera-capture reads see current sprite content.
+                    if let Some(dst) = player.bitmap_manager.get_bitmap_mut(existing) {
+                        *dst = snapshot;
+                    }
+                    Ok(Datum::BitmapRef(existing))
+                }
+                _ => {
+                    let bitmap_id = player.bitmap_manager.add_bitmap(snapshot);
+                    player.stage_image = Some(bitmap_id);
+                    player.stage_image_dirty = false;
+                    Ok(Datum::BitmapRef(bitmap_id))
+                }
+            }
         }
         "name" => Ok(Datum::String("stage".to_string())),
         _ => return Err(ScriptError::new(format!("Invalid stage property {}", prop))),
