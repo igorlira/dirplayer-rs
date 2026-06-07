@@ -204,12 +204,25 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         Rule::rgb_num_color => {
             let mut inner = pair.into_inner();
             reserve_player_mut(|player| {
-                let r = inner.next().ok_or_else(|| ScriptError::new("Expected red component".to_string()))?.as_str().parse::<u8>()
-                    .map_err(|e| ScriptError::new(format!("Invalid red: {}", e)))?;
-                let g = inner.next().ok_or_else(|| ScriptError::new("Expected green component".to_string()))?.as_str().parse::<u8>()
-                    .map_err(|e| ScriptError::new(format!("Invalid green: {}", e)))?;
-                let b = inner.next().ok_or_else(|| ScriptError::new("Expected blue component".to_string()))?.as_str().parse::<u8>()
-                    .map_err(|e| ScriptError::new(format!("Invalid blue: {}", e)))?;
+                // Trim each component: Director accepts whitespace inside the
+                // parens, e.g. `rgb( 255, 255, 255 )` (spectral-wizard's
+                // customHyperlink behavior params are authored this way). Parse
+                // as i32 then clamp to 0..=255 to tolerate negatives / >255,
+                // matching the LingoExpr-building rgb parser below.
+                let mut comp = |label: &str| -> Result<u8, ScriptError> {
+                    let s = inner
+                        .next()
+                        .ok_or_else(|| ScriptError::new(format!("Expected {} component", label)))?
+                        .as_str()
+                        .trim();
+                    let v = s
+                        .parse::<i32>()
+                        .map_err(|e| ScriptError::new(format!("Invalid {}: {}", label, e)))?;
+                    Ok(v.clamp(0, 255) as u8)
+                };
+                let r = comp("red")?;
+                let g = comp("green")?;
+                let b = comp("blue")?;
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
             })
         }

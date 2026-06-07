@@ -22,7 +22,7 @@ use super::{
     },
     cast_member::{
         BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, SoundMember,
-        TextMember,
+        TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -395,7 +395,9 @@ impl CastLib {
         member_type: &str,
         bitmap_manager: &mut BitmapManager,
     ) -> Result<CastMemberRef, ScriptError> {
-        let member = match member_type {
+        // Director symbols are case-insensitive (`new(#vectorShape)` ==
+        // `new(#vectorshape)`), so match member-type names through `match_ci!`.
+        let member = match_ci!(member_type, {
             "field" => Ok(CastMember::new(
                 number,
                 CastMemberType::Field(FieldMember::new()),
@@ -424,10 +426,18 @@ impl CastLib {
                         info: BitmapInfo::default(),
                     }),
                 ))
-            }
+            },
             "palette" => Ok(CastMember::new(
                 number,
                 CastMemberType::Palette(PaletteMember::new()),
+            )),
+            // `new(#vectorShape)` creates an empty vector shape; the script
+            // populates vertices via `addVertex` and sets fill/stroke/gradient
+            // props (Director 11.5 Scripting Dictionary). spectral-wizard's
+            // parent_grad builds gradient backgrounds this way at runtime.
+            "vectorshape" => Ok(CastMember::new(
+                number,
+                CastMemberType::VectorShape(VectorShapeMember::new()),
             )),
             // `new(#sound, castLib)` creates an empty sound member; its media is
             // populated later, typically via `importFileInto` (Director 11.5
@@ -454,7 +464,7 @@ impl CastLib {
                 "Cannot create member of type {}",
                 member_type
             ))),
-        }?;
+        })?;
         self.insert_member(number, member);
         JsApi::dispatch_cast_member_list_changed(self.number);
         Ok(cast_member_ref(self.number as i32, number as i32))

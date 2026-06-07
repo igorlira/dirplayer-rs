@@ -183,6 +183,26 @@ impl SpriteDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let name_lower = handler_name.to_lowercase();
         match name_lower.as_str() {
+            // `sprite(N).pointToChar(point)` — 1-based char index at a stage
+            // coordinate within the sprite's text/field member, or -1 if the
+            // point isn't within the text (Director 11.5 Scripting Dictionary).
+            // Shares the hit-test core with `the mouseChar` / the global
+            // `pointToChar()` builtin.
+            "pointtochar" => {
+                reserve_player_mut(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "pointToChar requires 1 argument (point)".to_string(),
+                        ));
+                    }
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let (pt_vals, _f) = player.get_datum(&args[0]).to_point_inline()?;
+                    let result = crate::player::compute_char_at(
+                        player, sprite_num, pt_vals[0] as i32, pt_vals[1] as i32,
+                    );
+                    Ok(player.alloc_datum(Datum::Int(result)))
+                })
+            }
             "intersects" => {
                 reserve_player_mut(|player| {
                     if args.is_empty() {

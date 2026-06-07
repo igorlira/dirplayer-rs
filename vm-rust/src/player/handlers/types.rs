@@ -1180,6 +1180,12 @@ impl TypeHandlers {
             let result = match value {
                 Datum::Int(i) => Datum::Int(i.abs()),
                 Datum::Float(f) => Datum::Float(f.abs()),
+                // Director coerces VOID to 0 in numeric contexts, so
+                // `abs(VOID)` is `abs(0)` = 0. Movies routinely read
+                // uninitialized properties (e.g. a player's vX/vY before the
+                // first physics step in spectral-wizard's colliPlayer) and
+                // pass them straight into abs(); Director tolerates this.
+                Datum::Void => Datum::Int(0),
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot get abs of type: {}",
@@ -1522,6 +1528,97 @@ impl TypeHandlers {
             let rect = IntRect { left: l, top: t, right: r, bottom: b };
 
             Ok(player.alloc_datum(rect.to_datum()))
+        })
+    }
+
+    /// `inflate(rect, widthChange, heightChange)` — expands (or, with
+    /// negatives, shrinks) a rect by `widthChange` on the left and right and
+    /// `heightChange` on the top and bottom: left/top decrease, right/bottom
+    /// increase, so total width grows by 2*widthChange. Returns a new rect.
+    ///
+    /// NOTE: `inflate` is NOT in the bundled Director 11.5 Scripting Dictionary
+    /// (verified via the director-reference skill — the dict documents only
+    /// `rect()`, `map()`, `union()`, `intersect()`). This is the standard
+    /// Director rect-inflate contract, inferred from documented behavior and
+    /// the MM custom scroll bar's InstallElement, which pads the dragger active
+    /// zone with `inflate(zone, 32, 32)` (an outward expansion).
+    pub fn inflate(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 3 {
+                return Err(ScriptError::new(
+                    "inflate requires 3 arguments (rect, widthChange, heightChange)".to_string(),
+                ));
+            }
+            let (vals, _f) = player.get_datum(&args[0]).to_rect_inline()?;
+            let dw = player.get_datum(&args[1]).int_value()?;
+            let dh = player.get_datum(&args[2]).int_value()?;
+            let rect = IntRect {
+                left: vals[0] as i32 - dw,
+                top: vals[1] as i32 - dh,
+                right: vals[2] as i32 + dw,
+                bottom: vals[3] as i32 + dh,
+            };
+            Ok(player.alloc_datum(rect.to_datum()))
+        })
+    }
+
+    /// `pointToChar(spriteRef, point)` (also `sprite.pointToChar(point)`) —
+    /// Director 11.5 Scripting Dictionary: "returns an integer representing the
+    /// character position located within the text or field sprite at a
+    /// specified screen coordinate, or returns -1 if the point is not within
+    /// the text." 1-based. Shares the hit-test core with `the mouseChar`.
+    /// Used by the customHyperlink behavior to find the char under the mouse.
+    pub fn point_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 2 {
+                return Err(ScriptError::new(
+                    "pointToChar requires 2 arguments (sprite, point)".to_string(),
+                ));
+            }
+            let sprite_num = player.get_datum(&args[0]).to_sprite_ref()?;
+            let (pt_vals, _f) = player.get_datum(&args[1]).to_point_inline()?;
+            let result =
+                crate::player::compute_char_at(player, sprite_num, pt_vals[0] as i32, pt_vals[1] as i32);
+            Ok(player.alloc_datum(Datum::Int(result)))
+        })
+    }
+
+    /// `scrollByLine(member, amount)` — global form of `member.scrollByLine()`
+    /// (Director 11.5 Scripting Dictionary p.618). Scrolls a field/text member
+    /// by `amount` lines (positive = down). The MM custom scroll bar calls this
+    /// global form from its `move`/`MoveBar` handlers.
+    pub fn scroll_by_line(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 2 {
+                return Err(ScriptError::new(
+                    "scrollByLine requires 2 arguments (member, amount)".to_string(),
+                ));
+            }
+            let member_ref = player.get_datum(&args[0]).to_member_ref()?;
+            let amount = player.get_datum(&args[1]).to_float()?;
+            crate::player::handlers::datum_handlers::cast_member::text::scroll_member_by_lines(
+                player, &member_ref, amount,
+            );
+            Ok(DatumRef::Void)
+        })
+    }
+
+    /// `scrollByPage(member, amount)` — global form of `member.scrollByPage()`
+    /// (Director 11.5 Scripting Dictionary p.619). Scrolls a field/text member
+    /// by `amount` pages (a page = the lines visible in the member's box).
+    pub fn scroll_by_page(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 2 {
+                return Err(ScriptError::new(
+                    "scrollByPage requires 2 arguments (member, amount)".to_string(),
+                ));
+            }
+            let member_ref = player.get_datum(&args[0]).to_member_ref()?;
+            let amount = player.get_datum(&args[1]).to_float()?;
+            crate::player::handlers::datum_handlers::cast_member::text::scroll_member_by_pages(
+                player, &member_ref, amount,
+            );
+            Ok(DatumRef::Void)
         })
     }
 
