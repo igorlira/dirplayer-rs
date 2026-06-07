@@ -175,27 +175,20 @@ impl FieldMemberHandlers {
             // the field scrolls up." Fugue No.4's `fixSplitLines` passes
             // fractional amounts (±0.1) for sub-line nudges to align the
             // scroll position to a clean line boundary.
+            // `member.scrollByLine(amount)` / `member.scrollByPage(amount)` —
+            // Director 11.5 Scripting Dictionary p.618/619. Shared core in
+            // text.rs so field and text members (and the global builtin forms)
+            // behave identically.
             "scrollByLine" => {
                 let amount = player.get_datum(&args[0]).to_float()?;
                 let member_ref = player.get_datum(datum).to_member_ref()?;
-                let line_h = {
-                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref).unwrap();
-                    let field = member.member_type.as_field().unwrap();
-                    if field.fixed_line_space > 0 {
-                        field.fixed_line_space as f64
-                    } else if field.font_size > 0 {
-                        field.font_size as f64
-                    } else {
-                        12.0
-                    }
-                };
-                let delta_px = (amount * line_h).round() as i32;
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                    if let Some(field) = member.member_type.as_field_mut() {
-                        let new_st = (field.scroll_top as i32 + delta_px).max(0) as u16;
-                        field.scroll_top = new_st;
-                    }
-                }
+                super::text::scroll_member_by_lines(player, &member_ref, amount);
+                Ok(DatumRef::Void)
+            }
+            "scrollByPage" => {
+                let amount = player.get_datum(&args[0]).to_float()?;
+                let member_ref = player.get_datum(datum).to_member_ref()?;
+                super::text::scroll_member_by_pages(player, &member_ref, amount);
                 Ok(DatumRef::Void)
             }
             // Director 11.5 Scripting Dictionary p.443 / p.449.
@@ -250,7 +243,49 @@ impl FieldMemberHandlers {
             "width" => Ok(Datum::Int(field.width as i32)),
             "alignment" => Ok(Datum::String(field.alignment.to_owned())),
             "wordWrap" => Ok(datum_bool(field.word_wrap)),
-            "fixedLineSpace" | "lineHeight" => Ok(Datum::Int(field.fixed_line_space as i32)),
+            // `the fixedLineSpace` is the raw fixed line-spacing override
+            // (0 = "use the font's natural line height").
+            "fixedLineSpace" => Ok(Datum::Int(field.fixed_line_space as i32)),
+            // `the lineHeight` is the ACTUAL rendered line height: the fixed
+            // override when set, otherwise derived from the font/size. A
+            // runtime `new(#field)` has fixedLineSpace = 0, so returning the
+            // raw 0 here made spectral-wizard's getDefaultFixedLineSpace return
+            // -1 and collapse every dialog box to a sliver. (Director 11.5
+            // Scripting Dictionary distinguishes lineHeight from fixedLineSpace.)
+            "lineHeight" => {
+                if field.fixed_line_space > 0 {
+                    Ok(Datum::Int(field.fixed_line_space as i32))
+                } else {
+                    let font_name = field.font.clone();
+                    let font_size = Some(field.font_size);
+                    let top_spacing = field.top_spacing;
+                    // `field` (and its `member` borrow of cast_manager) is no
+                    // longer used past this point in the arm, so the font
+                    // manager can be borrowed — same pattern as rect/height.
+                    let font = if !font_name.is_empty() {
+                        player.font_manager.get_font_with_cast_and_bitmap(
+                            &font_name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            font_size,
+                            None,
+                        )
+                    } else {
+                        None
+                    };
+                    let font = if let Some(f) = font {
+                        f
+                    } else {
+                        player.font_manager.get_system_font().ok_or_else(|| {
+                            ScriptError::new("System font not available".to_string())
+                        })?
+                    };
+                    // Measure a single line (tall ascender + descender) at the
+                    // natural line height (fixed_line_space = 0).
+                    let (_w, h) = measure_text("Wg", &font, None, 0, top_spacing, 0);
+                    Ok(Datum::Int(h as i32))
+                }
+            }
             "topSpacing" => Ok(Datum::Int(field.top_spacing as i32)),
             "boxType" => Ok(Datum::String(field.box_type.to_owned())),
             "antialias" => Ok(datum_bool(field.anti_alias)),

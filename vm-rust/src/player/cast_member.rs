@@ -170,6 +170,10 @@ pub struct TextMember {
     /// given text offset is the one whose `position` is the largest
     /// value ≤ that offset. See `line_spacing_at()` helper.
     pub par_runs: Vec<crate::director::chunks::xmedia_styled_text::ParRun>,
+    /// Hyperlink ranges from XMED Section 0x0129, as 1-based inclusive
+    /// `[startChar, endChar]` pairs (Director's `the hyperlinks of member`
+    /// format). Empty for members with no links.
+    pub hyperlinks: Vec<(i32, i32)>,
     pub info: Option<TextInfo>,
     /// Embedded 3D world for Director's "3D Text" feature (text extrusion).
     /// Lazily initialized when 3D methods (.model(), .camera(), etc.) are called.
@@ -365,6 +369,7 @@ impl TextMember {
             html_styled_spans: Vec::new(),
             par_infos: Vec::new(),
             par_runs: Vec::new(),
+            hyperlinks: Vec::new(),
             info: None,
             w3d: None,
             sel_start: 0,
@@ -694,6 +699,10 @@ pub struct VectorShapeMember {
     pub reg_point_vertex: i32,    // default 0     (FLSH offset TBD)
     pub direct_to_stage: bool,    // default false (FLSH offset TBD)
     pub origin_mode: String,      // default "center" (FLSH offset TBD)
+    /// Count of trailing `#newCurve` markers in the vertex list (sub-path
+    /// breaks). Preserved so the `vertexList` getter round-trips Director's
+    /// output (e.g. ui_pratbubbla has 4).
+    pub new_curve_count: usize,
 }
 
 impl VectorShapeMember {
@@ -720,6 +729,80 @@ impl VectorShapeMember {
     /// the bitmap that backs `member.image`.
     pub fn bbox_width(&self) -> f32 { self.bbox_right - self.bbox_left }
     pub fn bbox_height(&self) -> f32 { self.bbox_bottom - self.bbox_top }
+
+    /// An empty vector shape, as produced by Lingo `new(#vectorShape)`
+    /// (Director 11.5 Scripting Dictionary). No vertices yet; the script
+    /// populates them via `addVertex` and sets fill/stroke/gradient props.
+    /// `member_width`/`member_height` stay 0 so `width()`/`height()` fall
+    /// back to the (vertex-derived) bbox once vertices are added.
+    pub fn new() -> VectorShapeMember {
+        VectorShapeMember {
+            stroke_color: (0, 0, 0),
+            fill_color: (0, 0, 0),
+            bg_color: (255, 255, 255),
+            end_color: (0, 0, 0),
+            stroke_width: 1.0,
+            fill_mode: 0, // #none
+            closed: false,
+            vertices: Vec::new(),
+            bbox_left: 0.0,
+            bbox_top: 0.0,
+            bbox_right: 0.0,
+            bbox_bottom: 0.0,
+            member_width: 0,
+            member_height: 0,
+            reg_point: (0, 0),
+            gradient_type: "linear".to_string(),
+            fill_scale: 100.0,
+            fill_direction: 0.0,
+            fill_offset: (0, 0),
+            fill_cycles: 1,
+            scale_mode: "showAll".to_string(),
+            scale: 100.0,
+            antialias: true,
+            center_reg_point: false,
+            reg_point_vertex: 0,
+            direct_to_stage: false,
+            origin_mode: "center".to_string(),
+            new_curve_count: 0,
+        }
+    }
+
+    /// Recompute the bounding box from the current vertices + Bezier
+    /// control points + stroke padding. Must be called after any runtime
+    /// mutation of `vertices` (e.g. `addVertex`) so the `.image` rasterizer
+    /// and `width()`/`height()` fallbacks stay correct. Mirrors the bbox
+    /// computation in `From<VectorShapeInfo>`.
+    pub fn recompute_bbox(&mut self) {
+        let mut left = f32::MAX;
+        let mut top = f32::MAX;
+        let mut right = f32::MIN;
+        let mut bottom = f32::MIN;
+        for v in &self.vertices {
+            for &(cx, cy) in &[
+                (v.x, v.y),
+                (v.x + v.handle1_x, v.y + v.handle1_y),
+                (v.x + v.handle2_x, v.y + v.handle2_y),
+            ] {
+                left = left.min(cx);
+                top = top.min(cy);
+                right = right.max(cx);
+                bottom = bottom.max(cy);
+            }
+        }
+        if self.vertices.is_empty() {
+            self.bbox_left = 0.0;
+            self.bbox_top = 0.0;
+            self.bbox_right = 0.0;
+            self.bbox_bottom = 0.0;
+            return;
+        }
+        let pad = self.stroke_width / 2.0;
+        self.bbox_left = left - pad;
+        self.bbox_top = top - pad;
+        self.bbox_right = right + pad;
+        self.bbox_bottom = bottom + pad;
+    }
 }
 
 impl From<crate::director::enums::VectorShapeInfo> for VectorShapeMember {
@@ -789,6 +872,7 @@ impl From<crate::director::enums::VectorShapeInfo> for VectorShapeMember {
             reg_point_vertex: info.reg_point_vertex,
             direct_to_stage: info.direct_to_stage,
             origin_mode: info.origin_mode,
+            new_curve_count: info.new_curve_count,
         }
     }
 }
@@ -3912,6 +3996,7 @@ impl CastMember {
             tab_stops: Vec::new(),
             par_infos: styled_text.par_infos.clone(),
             par_runs: styled_text.par_runs.clone(),
+            hyperlinks: styled_text.hyperlinks.clone(),
             html_styled_spans: styled_text.styled_spans,
             info: Some(text_info),
             w3d: None,

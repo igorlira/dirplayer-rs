@@ -55,7 +55,12 @@ impl StringDatumUtils {
         match prop_name {
             "length" => Ok(Datum::Int(value.chars().count() as i32)),
             "ilk" => Ok(Datum::Symbol("string".to_owned())),
-            "string" => Ok(Datum::String(value.to_owned())),
+            // `.text` yields the textual content. For a plain string (and for
+            // a resolved string chunk falling through here) it's the string
+            // itself — same as `.string`. spectral-wizard's
+            // getDefaultFixedLineSpace reads `member(..).char[1..1].ref.text`
+            // to copy a character into a probe field.
+            "string" | "text" => Ok(Datum::String(value.to_owned())),
             "value" => {
                 // Normalise (strip comments + trim unbalanced brackets) before
                 // parsing, then evaluate as a Lingo expression.
@@ -257,7 +262,7 @@ pub fn string_get_items(value: &str, delimiter: char) -> Vec<String> {
     }
 }
 
-fn is_director_whitespace(byte: char) -> bool {
+pub fn is_director_whitespace(byte: char) -> bool {
     if byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == 2 as char {
         return true;
     } else {
@@ -272,6 +277,31 @@ pub fn string_get_words(value: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Character-offset ranges `(start, end_exclusive)` of each word in `value`,
+/// consistent with `string_get_words` (a word is a maximal run of
+/// non-`is_director_whitespace` chars). Indices are CHAR indices. Used by
+/// in-place word deletion, which must preserve the surrounding whitespace
+/// Director leaves untouched (rejoining tokens with a single space loses it).
+pub fn word_char_ranges(value: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut count = 0usize;
+    for (i, c) in value.chars().enumerate() {
+        if is_director_whitespace(c) {
+            if let Some(st) = start.take() {
+                ranges.push((st, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+        count = i + 1;
+    }
+    if let Some(st) = start {
+        ranges.push((st, count));
+    }
+    ranges
 }
 
 pub fn string_get_lines(value: &str) -> Vec<String> {
