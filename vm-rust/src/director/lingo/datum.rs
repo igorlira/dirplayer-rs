@@ -59,6 +59,7 @@ pub enum DatumType {
     Transform3d,
     HavokObjectRef,
     PhysXObjectRef,
+    VectorVertexRef,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -254,6 +255,12 @@ pub enum Datum {
     Transform3d([f64; 16]),
     HavokObjectRef(HavokObjectRef),
     PhysXObjectRef(PhysXObjectRef),
+    /// A writable reference to a single vertex of a `#vectorShape` member,
+    /// produced by `getPropRef` for `member.vertex[i]`. Carries the owning
+    /// member and the 0-based vertex index so `.handle1` / `.handle2` /
+    /// `.vertex` reads and writes resolve straight back into the member's
+    /// vertex list (Director 11.5 Scripting Dictionary, `vertex`).
+    VectorVertexRef(CastMemberRef, usize),
 }
 
 impl DatumType {
@@ -307,6 +314,7 @@ impl DatumType {
             DatumType::Transform3d => "transform",
             DatumType::HavokObjectRef => "havok_object_ref",
             DatumType::PhysXObjectRef => "physx_object_ref",
+            DatumType::VectorVertexRef => "vector_vertex_ref",
         }
     }
 }
@@ -358,6 +366,7 @@ impl Datum {
             Datum::Transform3d(_) => DatumType::Transform3d,
             Datum::HavokObjectRef(_) => DatumType::HavokObjectRef,
             Datum::PhysXObjectRef(_) => DatumType::PhysXObjectRef,
+            Datum::VectorVertexRef(..) => DatumType::VectorVertexRef,
         }
     }
 

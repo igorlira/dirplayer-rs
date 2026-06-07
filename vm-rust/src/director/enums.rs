@@ -561,16 +561,21 @@ pub struct VectorShapeVertex {
     pub handle2_y: f32,
 }
 
-/// Which slot of a `VectorShapeVertex` a parsed FLSH point refers to.
-/// FLSH tags the points within the FIRST vertex with their symbol names
-/// (`#vertex`, `#handle1`, `#handle2`); subsequent vertices use opaque
-/// 4-byte hash keys. We learn the role-by-position layout from the first
-/// vertex and re-use it for the rest.
+/// Which slot of a vector-shape entry a parsed FLSH point refers to.
+/// FLSH keys each point by symbol: the FIRST time a symbol appears it is
+/// written by name (`#vertex`, `#handle1`, `#handle2`, `#newCurve`); every
+/// later use is an opaque reference `0x8000_000N` (N = order of first
+/// occurrence). We discriminate the two encodings by the high bit of the
+/// 4-byte field after the point's `0x02` type marker (a string length is
+/// always small; a reference always has bit 31 set) and build a symbol
+/// table as names are first seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VertexRole {
     Vertex,
     Handle1,
     Handle2,
+    /// A `#newCurve` marker — starts a new sub-path/curve. Carries no vertex.
+    NewCurve,
     Unknown,
 }
 
@@ -631,6 +636,10 @@ pub struct VectorShapeInfo {
     pub reg_point_vertex: i32, // not persisted; default 0
     pub direct_to_stage: bool,
     pub origin_mode: String,   // "center" | "topLeft" | "point"
+    /// Number of `#newCurve` markers in the vertex list (sub-path breaks).
+    /// Director's `vertexList` ends with one `[#newCurve]` entry per extra
+    /// curve; ui_pratbubbla has 4 trailing markers.
+    pub new_curve_count: usize,
 }
 
 impl From<&[u8]> for VectorShapeInfo {
@@ -704,53 +713,54 @@ impl From<&[u8]> for VectorShapeInfo {
         // We learn the role-by-position from the first vertex and reuse
         // it for the rest (positional fallback works because every vertex
         // within one shape uses the same point ordering).
-        let num_vertices = read_u32(228) as usize;
-        let mut vertices: Vec<VectorShapeVertex> = Vec::with_capacity(num_vertices);
+        let num_entries = read_u32(228) as usize;
+        let mut vertices: Vec<VectorShapeVertex> = Vec::with_capacity(num_entries);
+        let mut new_curve_count = 0usize;
         let mut pos = 224 + 8; // skip list marker + count
-        let mut role_by_position: Vec<VertexRole> = Vec::new();
+        // Symbol table: index = reference low bits (`0x8000_000N` → N), value =
+        // the role first written by name at that index. Built as names appear.
+        let mut symbol_roles: Vec<VertexRole> = Vec::new();
 
-        for i in 0..num_vertices {
+        for _ in 0..num_entries {
             if pos + 8 > data.len() {
                 break;
             }
-            // Per-vertex header: type(4) + item_count(4)
+            // Per-entry header: type(4) + item_count(4). type 0x0a = vertex,
+            // 0x07 = #newCurve. The header type is authoritative: a #newCurve
+            // entry can have item_count 0 (an empty marker) or 1 (the named
+            // "newCurve" item), and parsing an empty one as a vertex would
+            // inject a spurious point(0,0) into the outline (a stray spike).
+            let entry_type = read_u32(pos);
             let item_count = read_u32(pos + 4) as usize;
             pos += 8;
 
             let mut vertex = (0i32, 0i32);
             let mut handle1 = (0i32, 0i32);
             let mut handle2 = (0i32, 0i32);
+            let mut is_new_curve = entry_type == 0x07;
 
-            for slot_idx in 0..item_count {
-                let (role, point) = if i == 0 {
-                    let (key_name, point) = parse_string_keyed_point(data, &mut pos);
-                    let role = match key_name.as_str() {
-                        "vertex" => VertexRole::Vertex,
-                        "handle1" => VertexRole::Handle1,
-                        "handle2" => VertexRole::Handle2,
-                        _ => VertexRole::Unknown,
-                    };
-                    role_by_position.push(role);
-                    (role, point)
-                } else {
-                    let (_key_hash, point) = parse_hash_keyed_point(data, &mut pos);
-                    let role = role_by_position
-                        .get(slot_idx)
-                        .copied()
-                        .unwrap_or(VertexRole::Unknown);
-                    (role, point)
-                };
-                assign_role(&mut vertex, &mut handle1, &mut handle2, role, point);
+            // Always parse the items so `pos` advances correctly, even for a
+            // #newCurve entry (whose item names the symbol on first use).
+            for _ in 0..item_count {
+                let (role, point) = parse_keyed_point(data, &mut pos, &mut symbol_roles);
+                match role {
+                    VertexRole::NewCurve => is_new_curve = true,
+                    _ => assign_role(&mut vertex, &mut handle1, &mut handle2, role, point),
+                }
             }
 
-            vertices.push(VectorShapeVertex {
-                x: vertex.0 as f32,
-                y: vertex.1 as f32,
-                handle1_x: handle1.0 as f32,
-                handle1_y: handle1.1 as f32,
-                handle2_x: handle2.0 as f32,
-                handle2_y: handle2.1 as f32,
-            });
+            if is_new_curve {
+                new_curve_count += 1;
+            } else {
+                vertices.push(VectorShapeVertex {
+                    x: vertex.0 as f32,
+                    y: vertex.1 as f32,
+                    handle1_x: handle1.0 as f32,
+                    handle1_y: handle1.1 as f32,
+                    handle2_x: handle2.0 as f32,
+                    handle2_y: handle2.1 as f32,
+                });
+            }
         }
 
         debug!(
@@ -789,13 +799,29 @@ impl From<&[u8]> for VectorShapeInfo {
             reg_point_vertex: 0,
             direct_to_stage,
             origin_mode,
+            new_curve_count,
         }
     }
 }
 
-/// Parse a string-keyed point entry: `type(4) + strlen(4) + string + datasize(4) + locV(4) + locH(4)`.
-/// FLSH stores points as (locV, locH) — QuickDraw .y/.x order. Returns (key_name, (x, y)).
-fn parse_string_keyed_point(data: &[u8], pos: &mut usize) -> (String, (i32, i32)) {
+/// Parse one keyed item, auto-detecting the key encoding.
+///
+/// Layout after the `0x02` type marker:
+///  - string-keyed (first use of a symbol): `strlen(4) + name [+ datasize(4) + locV(4) + locH(4)]`
+///  - reference-keyed (later uses):          `ref(4)=0x8000_000N [+ datasize(4) + locV(4) + locH(4)]`
+///
+/// We discriminate by bit 31 of that field (a length is small; a reference
+/// has bit 31 set). A newly-named symbol is appended to `symbol_roles` so a
+/// later `0x8000_000N` reference resolves to the same role. Coordinate-bearing
+/// items (#vertex/#handle1/#handle2) carry the trailing
+/// `datasize(4) + locV(4) + locH(4)`; the `#newCurve` marker does NOT — reading
+/// those phantom 12 bytes for it desyncs the rest of the list. FLSH stores the
+/// point as (locV, locH) — QuickDraw .y/.x order. Returns (role, (x, y)).
+fn parse_keyed_point(
+    data: &[u8],
+    pos: &mut usize,
+    symbol_roles: &mut Vec<VertexRole>,
+) -> (VertexRole, (i32, i32)) {
     let read_u32 = |p: usize| -> u32 {
         if p + 4 <= data.len() {
             u32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
@@ -807,46 +833,42 @@ fn parse_string_keyed_point(data: &[u8], pos: &mut usize) -> (String, (i32, i32)
         } else { 0 }
     };
 
-    *pos += 4;                                              // type marker (always 0x02)
-    let str_len = read_u32(*pos) as usize;
+    *pos += 4; // type marker (always 0x02)
+    let disc = read_u32(*pos);
     *pos += 4;
-    let key_name = if *pos + str_len <= data.len() {
-        String::from_utf8_lossy(&data[*pos..*pos + str_len]).to_string()
+    let role = if disc & 0x8000_0000 != 0 {
+        // Reference to a previously-named symbol.
+        let idx = (disc & 0x7FFF_FFFF) as usize;
+        symbol_roles.get(idx).copied().unwrap_or(VertexRole::Unknown)
     } else {
-        String::new()
+        // First use of a symbol: `disc` is the name length.
+        let str_len = disc as usize;
+        let key_name = if *pos + str_len <= data.len() {
+            String::from_utf8_lossy(&data[*pos..*pos + str_len]).to_string()
+        } else {
+            String::new()
+        };
+        *pos += str_len;
+        let role = match key_name.as_str() {
+            "vertex" => VertexRole::Vertex,
+            "handle1" => VertexRole::Handle1,
+            "handle2" => VertexRole::Handle2,
+            "newCurve" => VertexRole::NewCurve,
+            _ => VertexRole::Unknown,
+        };
+        symbol_roles.push(role);
+        role
     };
-    *pos += str_len;
-    *pos += 4;                                              // datasize (always 8)
+    // The #newCurve marker has no coordinate payload — stop after the key.
+    if role == VertexRole::NewCurve {
+        return (role, (0, 0));
+    }
+    *pos += 4; // datasize (always 8)
     let loc_v = read_i32(*pos);
     *pos += 4;
     let loc_h = read_i32(*pos);
     *pos += 4;
-    (key_name, (loc_h, loc_v))
-}
-
-/// Parse a hash-keyed point entry: `type(4) + hash(4) + datasize(4) + locV(4) + locH(4)`.
-/// Returns (key_hash, (x, y)) so the caller can dispatch via the hash→role table.
-fn parse_hash_keyed_point(data: &[u8], pos: &mut usize) -> (u32, (i32, i32)) {
-    let read_u32 = |p: usize| -> u32 {
-        if p + 4 <= data.len() {
-            u32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
-        } else { 0 }
-    };
-    let read_i32 = |p: usize| -> i32 {
-        if p + 4 <= data.len() {
-            i32::from_be_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
-        } else { 0 }
-    };
-
-    *pos += 4;                                              // type marker (always 0x02)
-    let key_hash = read_u32(*pos);
-    *pos += 4;
-    *pos += 4;                                              // datasize (always 8)
-    let loc_v = read_i32(*pos);
-    *pos += 4;
-    let loc_h = read_i32(*pos);
-    *pos += 4;
-    (key_hash, (loc_h, loc_v))
+    (role, (loc_h, loc_v))
 }
 
 fn assign_role(
@@ -860,7 +882,7 @@ fn assign_role(
         VertexRole::Vertex => *vertex = point,
         VertexRole::Handle1 => *handle1 = point,
         VertexRole::Handle2 => *handle2 = point,
-        VertexRole::Unknown => { /* ignored */ }
+        VertexRole::NewCurve | VertexRole::Unknown => { /* ignored */ }
     }
 }
 
