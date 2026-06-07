@@ -209,8 +209,20 @@ impl Movie {
             },
             "rightMouseDown" => Ok(datum_bool(self.right_mouse_down)),
             "rightMouseUp" => Ok(datum_bool(!self.right_mouse_down)),
-            "traceScript" => Ok(datum_bool(self.trace_script)),
+            // `the trace` toggles the same Lingo-tracing facility as the Trace
+            // button / `the traceScript` (Director 11.5 Scripting Dictionary).
+            "trace" | "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
+            // `the windowList` is the Player property listing all open
+            // movie-in-a-window (MIAW) windows (Director 11.5 Scripting
+            // Dictionary). dirplayer has no MIAW support, so it's always empty —
+            // `count(the windowList)` is then 0, matching a player with only the
+            // Stage open.
+            "windowList" => Ok(Datum::List(
+                crate::director::lingo::datum::DatumType::List,
+                VecDeque::new(),
+                false,
+            )),
             "rollOver" => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
@@ -220,6 +232,11 @@ impl Movie {
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
             "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            // `_system.colorDepth` — monitor color depth (Director 11.5
+            // Scripting Dictionary, valid values 1/2/4/8/16/32). The web
+            // canvas is true-color, so report 32. Setting it is a no-op
+            // (see set_prop), matching a monitor that can't change depth.
+            "colorDepth" => Ok(Datum::Int(32)),
             "active3dRenderer" => Ok(Datum::String("#openGL".to_string())),
             "scriptExecutionStyle" => Ok(Datum::Int(9)),
             "xtraList" => {
@@ -337,7 +354,9 @@ impl Movie {
                     )),
                 }
             },
-            "traceScript" => {
+            // `the trace` is an alias for the Trace-button / `the traceScript`
+            // tracing toggle (Director 11.5 Scripting Dictionary).
+            "trace" | "traceScript" => {
                 self.trace_script = value.int_value()? != 0;
                 Ok(())
             },

@@ -116,6 +116,18 @@ impl ListDatumHandlers {
             let index = position - 1;
             let item_ref = &args[1];
 
+            // Non-positive positions: `index < list_vec.len()` is true for a
+            // negative index, so without this guard `list_vec[(-1) as usize]`
+            // indexes with a huge value and VecDeque panics (crashing the whole
+            // VM). Director's lists are 1-based and it tolerates setAt at
+            // position <= 0 as a no-op rather than erroring — spectral-wizard's
+            // generic `customHyperlink` behavior relies on this with
+            // `pVisited[pHyperLinks.count] = 0` when a member has no links
+            // (count 0 → `pVisited[0] = 0`). Silently ignore.
+            if index < 0 {
+                return Ok(DatumRef::Void);
+            }
+
             if index < list_vec.len() as i32 {
                 list_vec[index as usize] = item_ref.clone();
             } else {
