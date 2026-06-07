@@ -196,6 +196,9 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::PhysXObjectRef(pr) => {
             format!("{}(\"{}\")", pr.object_type, pr.name)
         }
+        Datum::VectorVertexRef(member_ref, index) => {
+            format!("vertex[{}] of member({}, {})", index + 1, member_ref.cast_member, member_ref.cast_lib)
+        }
     }
 }
 

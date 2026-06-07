@@ -2202,6 +2202,12 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("physxObject"));
             map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", px_ref.object_type, px_ref.name)));
         }
+        Datum::VectorVertexRef(member_ref, index) => {
+            map.str_set("type", &safe_js_string("vectorVertexRef"));
+            map.str_set("value", &safe_js_string(&format!(
+                "vertex[{}] of member({}, {})", index + 1, member_ref.cast_member, member_ref.cast_lib
+            )));
+        }
     }
     return map.to_js_object();
 }
