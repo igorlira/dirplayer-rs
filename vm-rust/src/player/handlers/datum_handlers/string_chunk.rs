@@ -177,18 +177,39 @@ impl StringChunkUtils {
                 Ok(new_chunks.join(&delimiter))
             },
             StringChunkType::Word => {
-                let chunk_list = 
-                    Self::resolve_chunk_list(string, chunk_expr.chunk_type.clone(), chunk_expr.item_delimiter)?;
-                let (start, end) = 
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
-
-                if chunk_list.len() == 0 {
+                // Delete the word(s) in place, preserving the surrounding
+                // whitespace Director leaves untouched. Tokenizing and
+                // rejoining with single spaces (the old approach) collapses
+                // leading/interior whitespace — e.g. `delete word 1 of
+                // " text \"x\""` must yield " \"x\"" (leading space kept) so a
+                // following `delete char 1` can strip it. The MM custom scroll
+                // bar's findSprite relies on exactly this to recover a member
+                // name from a `"sprite N: type \"name\""` string.
+                let ranges = super::string::word_char_ranges(string);
+                let n = ranges.len();
+                if n == 0 {
                     return Ok(string.to_owned());
                 }
-
-                let mut new_chunks = chunk_list;
-                new_chunks.drain(start..end);
-                Ok(new_chunks.join(" "))
+                let (start, end) = Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), n);
+                let start = start.min(n);
+                let end = end.min(n);
+                if start >= end {
+                    return Ok(string.to_owned());
+                }
+                // Director also removes one delimiter (a whitespace run): the
+                // following one if a word survives after the range, else the
+                // preceding one; if no other words exist, just the content.
+                let (char_start, char_end) = if end < n {
+                    (ranges[start].0, ranges[end].0)
+                } else if start > 0 {
+                    (ranges[start - 1].1, ranges[end - 1].1)
+                } else {
+                    (ranges[start].0, ranges[end - 1].1)
+                };
+                let (byte_start, byte_end) = char_range_to_byte_range(string, char_start, char_end);
+                let mut new_string = string.to_owned();
+                new_string.replace_range(byte_start..byte_end, "");
+                Ok(new_string)
             },
             StringChunkType::Line => {
                 let chunk_list = 
@@ -751,40 +772,14 @@ impl StringChunkHandlers {
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         match prop {
-            "font" | "fontStyle" | "color" | "hyperlink" => {
+            // All per-run style props target ONLY the chunk's character range
+            // (via apply_styled_span_range). fontSize previously set the whole
+            // member + every span, so `member.line[2].fontSize = 18` blew the
+            // size up for the entire member — spectral-wizard's help_text set
+            // its body to 14 then only line 2 (the "> Story" header) to 18, but
+            // the whole body rendered at 18.
+            "font" | "fontStyle" | "color" | "hyperlink" | "fontSize" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
-            }
-            "fontSize" => {
-                let new_val = player.get_datum(value_ref).int_value()?;
-                let datum = player.get_datum(datum_ref).clone();
-                if let Datum::StringChunk(source, _, _) = datum {
-                    let mut current_source = source;
-                    loop {
-                        match current_source {
-                            StringChunkSource::Member(member_ref) => {
-                                if let Some(member) = player.movie.cast_manager.find_member_by_ref_mut(&member_ref) {
-                                    if let CastMemberType::Text(ref mut text) = member.member_type {
-                                        text.font_size = new_val as u16;
-                                        for span in text.html_styled_spans.iter_mut() {
-                                            span.style.font_size = Some(new_val);
-                                        }
-                                    } else if let CastMemberType::Field(ref mut field) = member.member_type {
-                                        field.font_size = new_val as u16;
-                                    }
-                                }
-                                break;
-                            }
-                            StringChunkSource::Datum(ref source_datum_ref) => {
-                                let source_datum = player.get_datum(source_datum_ref).clone();
-                                if let Datum::StringChunk(inner_source, _, _) = source_datum {
-                                    current_source = inner_source;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
             }
             "charSpacing" => {
                 // Update the source member's char_spacing
@@ -849,6 +844,7 @@ impl StringChunkHandlers {
         // Build the style modifier from the incoming value.
         enum StyleChange {
             Font(String),
+            FontSize(i32),
             FontStyle { bold: bool, italic: bool, underline: bool },
             Color(u32),
             /// Director chapter 15 `hyperlink` — per-character link target
@@ -858,6 +854,7 @@ impl StringChunkHandlers {
         let value_datum = player.get_datum(value_ref).clone();
         let change = match prop {
             "font" => StyleChange::Font(value_datum.string_value()?),
+            "fontSize" => StyleChange::FontSize(value_datum.int_value()?),
             "hyperlink" => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
             "fontStyle" => {
                 // Director accepts either a single symbol (#bold) or a list
@@ -942,6 +939,7 @@ impl StringChunkHandlers {
                     default_style,
                     |style| match &change {
                         StyleChange::Font(f) => style.font_face = Some(f.clone()),
+                        StyleChange::FontSize(sz) => style.font_size = Some(*sz),
                         StyleChange::FontStyle { bold, italic, underline } => {
                             style.bold = *bold;
                             style.italic = *italic;
@@ -963,6 +961,10 @@ impl StringChunkHandlers {
                 // styled runs.
                 match &change {
                     StyleChange::Font(f) => field.font = f.clone(),
+                    // FieldMember has a single member-wide font size (no per-run
+                    // styled spans), so a chunk fontSize write falls back to the
+                    // whole member — matches Director's field behaviour.
+                    StyleChange::FontSize(sz) => field.font_size = (*sz).max(0) as u16,
                     StyleChange::FontStyle { bold, italic, underline } => {
                         let mut parts: Vec<&str> = Vec::new();
                         if *bold { parts.push("bold"); }
@@ -1232,5 +1234,40 @@ fn resolve_word_char_range(text: &str, start: i32, end: i32) -> (usize, usize) {
         (range_start, range_start)
     } else {
         (range_start, range_end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+
+    fn del_word(s: &str, start: i32, end: i32) -> String {
+        let expr = StringChunkExpr {
+            chunk_type: StringChunkType::Word,
+            start,
+            end,
+            item_delimiter: ',',
+        };
+        StringChunkUtils::string_by_deleting_chunk(s, &expr).unwrap()
+    }
+
+    #[test]
+    fn delete_word_preserves_leading_whitespace() {
+        // The MM custom scroll bar findSprite parse: ` text "name"` →
+        // delete word 1 must keep the leading space so the next delete char 1
+        // removes the space (not the opening quote).
+        assert_eq!(del_word(" text \"name\"", 1, 0), " \"name\"");
+    }
+
+    #[test]
+    fn delete_word_basic_and_delimiters() {
+        // Removes word + the following whitespace run.
+        assert_eq!(del_word("a b c", 1, 0), "b c");
+        assert_eq!(del_word("a b c", 2, 0), "a c");
+        // Last word: removes the preceding whitespace too.
+        assert_eq!(del_word("a b c", 3, 0), "a b");
+        // Interior runs of whitespace: only the deleted gap goes.
+        assert_eq!(del_word("a   b   c", 2, 0), "a   c");
     }
 }

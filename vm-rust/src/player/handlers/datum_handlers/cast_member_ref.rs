@@ -458,6 +458,9 @@ impl CastMemberRefHandlers {
                 CastMemberType::PhysXPhysics(_) => {
                     PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 }
+                CastMemberType::VectorShape(_) => {
+                    VectorShapeMemberHandlers::call(player, datum, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for member type {:?}",
                     handler_name, cast_member.member_type.member_type_id()
@@ -1198,6 +1201,22 @@ impl CastMemberRefHandlers {
                     |_| {},
                     |cast_member, _| {
                         cast_member.color = value.to_color_ref()?.to_owned();
+                        // Director's `the color of member` recolors the WHOLE
+                        // text member, overriding per-run/span colors. Clear the
+                        // styled spans' explicit colors so `.image` (and the
+                        // renderer) fall back to the new member color. Without
+                        // this, spectral-wizard's LOADING dialog —
+                        // putTextImageWithShadow sets member.color to the shadow
+                        // then white between two `.image` reads — kept the spans'
+                        // authored black and rendered the text black both times.
+                        // Mirrors the text.rs member-prop setter. Per-line
+                        // `member.line[i].color` setters run afterward and
+                        // re-apply concrete colors where the script wants them.
+                        if let Some(text) = cast_member.member_type.as_text_mut() {
+                            for span in &mut text.html_styled_spans {
+                                span.style.color = None;
+                            }
+                        }
                         Ok(())
                     },
                 ),
