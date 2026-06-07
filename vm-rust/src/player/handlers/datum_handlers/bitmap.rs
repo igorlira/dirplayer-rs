@@ -21,6 +21,23 @@ impl BitmapDatumHandlers {
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // If a mutating op targets the persistent stage framebuffer, mark it
+        // dirty so the renderer begins compositing it over the sprite output
+        // (the "imaging Lingo" engine pattern — see stage.rs `image` getter).
+        if matches!(
+            handler_name,
+            "fill" | "draw" | "setPixel" | "copyPixels" | "applyFilter"
+                | "setAlpha" | "floodFill"
+        ) {
+            reserve_player_mut(|player| {
+                if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
+                    if player.stage_image == Some(*bref) {
+                        player.stage_image_dirty = true;
+                    }
+                }
+                Ok::<(), ScriptError>(())
+            })?;
+        }
         match handler_name {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
@@ -677,7 +694,7 @@ impl BitmapDatumHandlers {
     pub fn fill(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum);
-            let (rect_i32, color_ref) = if args.len() == 2 {
+            let (rect_i32, color_ref, shape) = if args.len() == 2 {
                 let (rect_vals, _flags) = player.get_datum(&args[0]).to_rect_inline()?;
                 let params = player.get_datum(&args[1]);
                 let (color, shape) = match params {
@@ -713,17 +730,12 @@ impl BitmapDatumHandlers {
                     }
                 };
                 
-                if shape != "rect" {
-                    log::warn!("Unsupported shapeType '{}' for bitmap fill handler, skipping", shape);
-                    return Ok(datum.clone()); // Silently ignore unsupported shape types for now
-                }
-
                 let x1 = rect_vals[0] as i32;
                 let y1 = rect_vals[1] as i32;
                 let x2 = rect_vals[2] as i32;
                 let y2 = rect_vals[3] as i32;
 
-                ((x1, y1, x2, y2), color)
+                ((x1, y1, x2, y2), color, shape)
             } else if args.len() == 5 {
                 let x = player.get_datum(&args[0]).int_value()?;
                 let y = player.get_datum(&args[1]).int_value()?;
@@ -747,7 +759,7 @@ impl BitmapDatumHandlers {
                         ))
                     }
                 };
-                ((x, y, width, height), color)
+                ((x, y, width, height), color, "rect".to_string())
             } else {
                 return Err(ScriptError::new(
                     "Invalid number of arguments for fill".to_string(),
@@ -767,7 +779,17 @@ impl BitmapDatumHandlers {
                 bitmap.original_bit_depth,
             );
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
-            bitmap.fill_rect(x1, y1, x2, y2, color, &palettes, 1.0);
+            // `image.fill(rect, [#color:.., #shapeType:..])` supports filled
+            // rect / oval / roundRect (Director 11.5 Scripting Dictionary).
+            // The worldMap reveals completed levels by punching white #oval
+            // holes into a grey overlay (`wmGreyBuffer.fill(dR, [#color:
+            // rgb(255,255,255), #shapeType: #oval])`) then keying them out
+            // with ink 36 — so without oval support the whole map stays grey.
+            match shape.as_str() {
+                "oval" => bitmap.fill_ellipse(x1, y1, x2, y2, color, &palettes, 1.0),
+                "roundRect" => bitmap.fill_round_rect(x1, y1, x2, y2, 12, color, &palettes, 1.0),
+                _ => bitmap.fill_rect(x1, y1, x2, y2, color, &palettes, 1.0),
+            }
             Ok(datum.clone())
         })
     }
