@@ -726,9 +726,14 @@ function getVariable(spriteNum: number, path: string): string | null {
 function setVariable(spriteNum: number, path: string, value: string): boolean {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) {
-    console.warn(`ruffleSetVariable: no instance for sprite#${spriteNum}`);
-    return false;
+  // The instance may not exist / be ready yet: a script can push values into
+  // the SWF (e.g. spectral-wizard's loader writing `playerScore`) before the
+  // renderer has lazily created the Flash instance and finished AS init.
+  // Queue the write and replay it on ready (in frame order with goto/play/etc)
+  // instead of dropping it. Same pre-instance pattern as gotoFrame/play/stop.
+  if (!instance || !instance.ready) {
+    queueOp(spriteNum, { kind: 'setVariable', path, value });
+    return true; // optimistic — the write will land once the instance is ready
   }
 
   try {
@@ -760,7 +765,8 @@ type PendingOp =
   | { kind: 'gotoLabel'; label: string }
   | { kind: 'play' }
   | { kind: 'stop' }
-  | { kind: 'rewind' };
+  | { kind: 'rewind' }
+  | { kind: 'setVariable'; path: string; value: string };
 const pendingOps = new Map<number, PendingOp[]>();
 
 /**
@@ -937,6 +943,9 @@ function flushPendingGoto(spriteNum: number): void {
         case 'rewind':
           pinTarget.delete(spriteNum);
           instance.rufflePlayer.GotoFrame(1, true);
+          break;
+        case 'setVariable':
+          instance.rufflePlayer.SetVariable(translateLevel0(op.path), op.value);
           break;
       }
     } catch (e) {
