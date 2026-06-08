@@ -77,13 +77,28 @@ function parseDataExternalParams(element: HTMLElement): Record<string, string> {
   return params;
 }
 
+// Standard <embed>/HTML attributes the browser itself consumes. Everything
+// else on a Director <embed> is a Shockwave plugin parameter — not just the
+// sw1..sw9 / swRemote / swStretchStyle family but also the underscore-prefixed
+// specials (`_runMode`, `_player`, `_frame`, …) and bare ones like bgColor /
+// PlayerVersion. Real Shockwave exposes all of them via externalParamValue(),
+// so forward all non-standard attributes verbatim. (data-* is handled
+// separately by parseDataExternalParams.)
+const EMBED_STANDARD_ATTRS = new Set([
+  'src', 'width', 'height', 'type', 'pluginspage', 'name', 'align',
+  'hspace', 'vspace', 'border', 'class', 'id', 'style', 'title',
+  'tabindex', 'hidden', 'role',
+]);
+
 function parseEmbedExternalParams(element: HTMLEmbedElement): Record<string, string> {
   const params: Record<string, string> = {};
   for (const attr of Array.from(element.attributes)) {
     const name = attr.name;
-    if (/^sw\d+$/i.test(name) || /^sw[a-z]/i.test(name)) {
-      params[name] = attr.value;
+    const lower = name.toLowerCase();
+    if (EMBED_STANDARD_ATTRS.has(lower) || lower.startsWith('data-')) {
+      continue;
     }
+    params[name] = attr.value;
   }
   return params;
 }
@@ -94,9 +109,14 @@ function parseObjectExternalParams(params: Record<string, string | null>): Recor
     if (value == null) {
       continue;
     }
-    if (/^sw\d+$/i.test(name) || /^sw[a-z]/i.test(name)) {
-      externalParams[name] = value;
+    // `src` is the movie URL (handled separately by replaceDirObject); every
+    // other <param> tag is a plugin parameter the movie may read via
+    // externalParamValue() — forward them all, not just sw*-prefixed ones,
+    // so `_runMode`, bgColor, PlayerVersion, etc. reach the movie.
+    if (name.toLowerCase() === 'src') {
+      continue;
     }
+    externalParams[name] = value;
   }
   return externalParams;
 }
