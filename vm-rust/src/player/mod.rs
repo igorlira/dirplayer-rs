@@ -663,10 +663,8 @@ impl DirPlayer {
             .filter(|s| !s.is_empty())
             .cloned()
             .or_else(|| {
-                self.external_params
-                    .get("_moviePath")
+                self.external_param_ci("_moviePath")
                     .filter(|s| !s.is_empty())
-                    .cloned()
             });
         let path_to_apply: Option<(String, bool /* is_label */)> = label_value
             .map(|s| (s, true))
@@ -1751,6 +1749,21 @@ impl DirPlayer {
         result
     }
 
+    /// Case-insensitive lookup into `external_params`. The browser lowercases
+    /// every HTML `<embed>` attribute name, so a movie's `_runMode` /
+    /// `_moviePath` param arrives as `_runmode` / `_moviepath` when delivered
+    /// via the Shockwave polyfill's `<embed>` path. Director treats external
+    /// parameter names case-insensitively (see `external_param_value`), so the
+    /// internal lookups for these special params must too — otherwise an exact
+    /// `.get("_runMode")` misses and the movie silently falls back to defaults
+    /// (e.g. runMode "Plugin", which trips server-license checks).
+    fn external_param_ci(&self, key: &str) -> Option<String> {
+        self.external_params
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.clone())
+    }
+
     fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
         match_ci!(prop, {
             "datumStats" => {
@@ -1918,8 +1931,7 @@ impl DirPlayer {
                     (
                         self.alloc_datum(Datum::Symbol("runMode".to_string())),
                         self.alloc_datum(Datum::String(
-                            self.external_params.get("_runMode")
-                                .cloned()
+                            self.external_param_ci("_runMode")
                                 .unwrap_or_else(|| "Plugin".to_string())
                         ))
                     ),
@@ -1997,8 +2009,7 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             },
             "runMode" => {
-                let mode = self.external_params.get("_runMode")
-                    .cloned()
+                let mode = self.external_param_ci("_runMode")
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
             },
@@ -2016,10 +2027,8 @@ impl DirPlayer {
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
             "moviePath" => {
-                let label = self.external_params
-                    .get("_moviePath")
+                let label = self.external_param_ci("_moviePath")
                     .filter(|s| !s.is_empty())
-                    .cloned()
                     .or_else(|| {
                         self.movie_path_label
                             .as_ref()
@@ -2056,10 +2065,8 @@ impl DirPlayer {
             // companion intercept, `movieName` would still come from the
             // actually-loaded file, breaking the concatenation.
             "movieName" => {
-                let label = self.external_params
-                    .get("_moviePath")
+                let label = self.external_param_ci("_moviePath")
                     .filter(|s| !s.is_empty())
-                    .cloned()
                     .or_else(|| {
                         self.movie_path_label
                             .as_ref()
@@ -2107,8 +2114,7 @@ impl DirPlayer {
             "traceScript" => Ok(self.alloc_datum(datum_bool(false))), // TODO
             "productVersion" => Ok(self.alloc_datum(Datum::String("11.0".to_string()))), // TODO
             "runMode" => {
-                let mode = self.external_params.get("_runMode")
-                    .cloned()
+                let mode = self.external_param_ci("_runMode")
                     .unwrap_or_else(|| "Plugin".to_string());
                 Ok(self.alloc_datum(Datum::String(mode)))
             }
