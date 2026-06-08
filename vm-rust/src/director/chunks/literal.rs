@@ -70,7 +70,11 @@ impl LiteralStore {
                 let length = reader.read_u32().unwrap() as usize;
                 match record.literal_type {
                     LiteralType::String => {
-                        value = Datum::String(reader.read_string(length - 1).unwrap());
+                        // Lingo script string literals are Mac Roman on every
+                        // platform (e.g. `§` = byte 0xA4, which Win-1252 would
+                        // mis-decode as `¤`). Decode UTF-8 first, then Mac
+                        // Roman — matching ProjectorRays' Lscr string handling.
+                        value = Datum::String(reader.read_string_macroman(length - 1).unwrap());
                     }
                     LiteralType::Float => {
                         let float_val = if length == 8 {

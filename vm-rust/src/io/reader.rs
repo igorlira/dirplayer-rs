@@ -2,13 +2,14 @@ use std::io::Read;
 
 use binary_reader::BinaryReader;
 
-use crate::io::encoding::decode_text_auto;
+use crate::io::encoding::{decode_text_auto, decode_text_auto_macroman};
 
 pub trait DirectorExt {
     fn read_var_int(&mut self) -> Result<i32, std::io::Error>;
     fn read_zlib_bytes(&mut self, length: usize) -> Result<Vec<u8>, std::io::Error>;
     fn read_pascal_string(&mut self) -> Result<String, std::io::Error>;
     fn read_string(&mut self, len: usize) -> Result<String, std::io::Error>;
+    fn read_string_macroman(&mut self, len: usize) -> Result<String, std::io::Error>;
     fn read_apple_float_80(&mut self) -> Result<f64, String>;
     fn eof(&self) -> bool;
     fn bytes_left(&self) -> usize;
@@ -66,6 +67,17 @@ impl DirectorExt for BinaryReader {
         // path. Older movies keep working; D11 Unicode authoring works.
         let bytes = self.read_bytes(len).unwrap();
         return Ok(decode_text_auto(&bytes));
+    }
+
+    fn read_string_macroman(&mut self, len: usize) -> Result<String, std::io::Error> {
+        // Lingo SCRIPT string literals are stored in Mac Roman on every
+        // platform (Director's canonical script-text encoding), so a
+        // Windows-packaged movie can still carry e.g. `§` as byte 0xA4
+        // (Mac Roman) which Win-1252 would mis-read as `¤`. Decode UTF-8
+        // first (D11+ Unicode), then fall back to Mac Roman rather than
+        // Win-1252. See `decode_text_auto_macroman`.
+        let bytes = self.read_bytes(len).unwrap();
+        return Ok(decode_text_auto_macroman(&bytes));
     }
 
     fn read_apple_float_80(&mut self) -> Result<f64, String> {
