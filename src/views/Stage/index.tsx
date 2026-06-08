@@ -45,11 +45,16 @@ const MAX_SCALE = 10;
 // per source pixel, causing pixel-walking. Snapping to round(1.25)/1.25=0.8
 // gives 1:1 physical pixel mapping instead.
 // Only applied when upscaling (physicalScale >= 1); downscaling is left alone.
+// The snap must never produce a scale LARGER than the requested (fit) scale,
+// or the stage overflows the viewport. At 150% DPI (DPR=1.5) a fit scale of 1.0
+// gives physicalScale=1.5; Math.round(1.5)=2 would snap UP to 2/1.5=1.333 and
+// zoom the stage to 133% (too zoomed). Clamp to `scale` so we only ever snap
+// DOWN to a crisp value, otherwise fall back to the raw scale (exact fit).
 function getEffectiveScale(scale: number): number {
   const dpr = (typeof window !== "undefined" ? window.devicePixelRatio : null) ?? 1;
   const physicalScale = scale * dpr;
   if (physicalScale < 1) return scale;
-  return Math.round(physicalScale) / dpr;
+  return Math.min(Math.round(physicalScale) / dpr, scale);
 }
 
 function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
