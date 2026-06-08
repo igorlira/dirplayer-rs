@@ -50,24 +50,45 @@ impl VectorShapeMemberHandlers {
         // `player.alloc_datum` calls — also a borrow conflict with
         // `cast_member`. Snapshot the data, drop the borrow, then build.
         if prop.eq_ignore_ascii_case("vertexList") {
-            // Director omits #handle1 / #handle2 keys for plain polygon
-            // vertices (both handles == 0,0) and includes them only for
-            // Bezier vertices. Verified against figure8 Slider Groove —
-            // its 4 plain vertices come back as `[#vertex: point(...)]`
-            // without handle keys.
+            // Director decides handle emission per *shape*, not per vertex: a
+            // bezier shape lists #handle1/#handle2 on EVERY vertex (even when
+            // they're point(0,0)), while a plain polygon shape (all handles
+            // zero — e.g. figure8 Slider Groove) lists none. So treat the
+            // shape as bezier if ANY vertex has a non-zero handle.
+            let shape_is_bezier = vs.vertices.iter().any(|v| {
+                v.handle1_x != 0.0 || v.handle1_y != 0.0
+                    || v.handle2_x != 0.0 || v.handle2_y != 0.0
+            });
             let verts: Vec<(i32, i32, i32, i32, i32, i32, bool)> = vs
                 .vertices
                 .iter()
                 .map(|v| {
-                    let h1x = v.handle1_x as i32;
-                    let h1y = v.handle1_y as i32;
-                    let h2x = v.handle2_x as i32;
-                    let h2y = v.handle2_y as i32;
-                    let is_bezier = !(h1x == 0 && h1y == 0 && h2x == 0 && h2y == 0);
-                    (v.x as i32, v.y as i32, h1x, h1y, h2x, h2y, is_bezier)
+                    (
+                        v.x as i32, v.y as i32,
+                        v.handle1_x as i32, v.handle1_y as i32,
+                        v.handle2_x as i32, v.handle2_y as i32,
+                        shape_is_bezier,
+                    )
                 })
                 .collect();
-            return Self::build_vertex_list(player, verts);
+            let new_curve_count = vs.new_curve_count;
+            return Self::build_vertex_list(player, verts, new_curve_count);
+        }
+
+        // `member.vertex` (chunk expression) — Director returns the list of
+        // vertex *locations* as points; `member.vertex[i]` then indexes it
+        // and `member.vertex.count` reads its length (Director 11.5 Scripting
+        // Dictionary, `vertex`). Handle1/handle2 are reached via the
+        // getPropRef path (`member.vertex[i].handle1`), not here. Snapshot
+        // the coords, drop the borrow, then allocate the point list.
+        if prop.eq_ignore_ascii_case("vertex") {
+            let pts: Vec<(f32, f32)> =
+                vs.vertices.iter().map(|v| (v.x, v.y)).collect();
+            let list: VecDeque<DatumRef> = pts
+                .iter()
+                .map(|(x, y)| player.alloc_datum(Datum::Point([*x as f64, *y as f64], 0)))
+                .collect();
+            return Ok(Datum::List(DatumType::List, list, false));
         }
 
         match_ci!(prop, {
@@ -129,6 +150,306 @@ impl VectorShapeMemberHandlers {
         })
     }
 
+    /// Method-call surface for `#vectorShape` members (`addVertex`,
+    /// `deleteVertex`, `moveVertex`, plus the indexed `vertex[i]` get/set
+    /// reference path). Director's Lingo is case-insensitive on handler
+    /// names, so they're matched via `match_ci!`. `erase` is handled
+    /// generically by `CastMemberRefHandlers` (it deletes the member), so it
+    /// is not routed here.
+    pub fn call(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        handler_name: &str,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let member_ref = match player.get_datum(datum) {
+            Datum::CastMember(r) => r.to_owned(),
+            _ => return Err(ScriptError::new(
+                "Cannot call vectorShape handler on non-cast-member".to_string(),
+            )),
+        };
+        match_ci!(handler_name, {
+            // addVertex(indexToAddAt, point {, h1H, h1V, h2H, h2V})
+            // Inserts a vertex at the given 1-based index (Director 11.5
+            // Scripting Dictionary). Optional trailing ints are the two
+            // Bezier control-handle offsets, relative to the vertex.
+            "addVertex" => Self::add_vertex(player, &member_ref, args),
+            // deleteVertex(index) — removes the vertex at the 1-based index.
+            "deleteVertex" => Self::delete_vertex(player, &member_ref, args),
+            // moveVertex(index, dx, dy) — offsets an existing vertex.
+            "moveVertex" => Self::move_vertex(player, &member_ref, args),
+            // `member.vertex[i]` by reference (compiled as
+            // getPropRef(member, #vertex, i)) — returns a writable
+            // VectorVertexRef so `.handle1`/`.handle2`/`.vertex` reads and
+            // writes resolve back into the member (handled in
+            // player_get_obj_prop / player_set_obj_prop). The plain
+            // `getPropRef(member, #vertexList)` form (no index) has no
+            // chunk semantics, so it falls through to a normal prop read.
+            "getPropRef" => Self::get_vertex_ref(player, &member_ref, args),
+            // `member.vertex[i] = value` (compiled as
+            // setProp(member, #vertex, i, value)). Sets the vertex location
+            // from a point value (or a full [#vertex/#handle1/#handle2]
+            // property list, mirroring vertexList entries).
+            "setProp" => Self::set_vertex_by_index(player, &member_ref, args),
+            _ => Err(ScriptError::new(format!(
+                "No handler {} for vectorShape member", handler_name
+            ))),
+        })
+    }
+
+    /// getPropRef(member, #vertex, i) → a writable `VectorVertexRef`.
+    /// Only `#vertex` has indexed-reference semantics; any other prop name
+    /// (or a missing index) returns an error so the caller's getPropRef
+    /// fallback resolves it as a normal by-value property instead.
+    fn get_vertex_ref(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        if args.len() < 2 {
+            return Err(ScriptError::new(
+                "vectorShape getPropRef without an index".to_string(),
+            ));
+        }
+        let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
+        if !prop.eq_ignore_ascii_case("vertex") {
+            return Err(ScriptError::new(format!(
+                "vectorShape getPropRef unsupported for {}", prop
+            )));
+        }
+        let index = player.get_datum(&args[1]).int_value()?;
+        let count = Self::vertex_count(player, member_ref)?;
+        let pos = (index - 1).max(0) as usize;
+        if pos >= count {
+            return Err(ScriptError::new(format!(
+                "vertex index {} out of range (count {})", index, count
+            )));
+        }
+        Ok(player.alloc_datum(Datum::VectorVertexRef(member_ref.clone(), pos)))
+    }
+
+    /// setProp(member, #vertex, i, value) — set the i-th vertex location
+    /// (point value) or replace the whole vertex (property-list value).
+    fn set_vertex_by_index(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        if args.len() < 3 {
+            return Err(ScriptError::new(format!(
+                "No handler setProp for vectorShape member"
+            )));
+        }
+        let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
+        if !prop.eq_ignore_ascii_case("vertex") {
+            return Err(ScriptError::new(format!(
+                "vectorShape setProp unsupported for {}", prop
+            )));
+        }
+        let index = player.get_datum(&args[1]).int_value()?;
+        let (pt, _) = player.get_datum(&args[2]).to_point_inline()?;
+        let pos = (index - 1).max(0) as usize;
+        Self::with_vs_mut(player, member_ref, |vs| {
+            if let Some(v) = vs.vertices.get_mut(pos) {
+                v.x = pt[0] as f32;
+                v.y = pt[1] as f32;
+                Ok(())
+            } else {
+                Err(ScriptError::new(format!(
+                    "vertex index {} out of range", index
+                )))
+            }
+        })?;
+        Ok(DatumRef::Void)
+    }
+
+    /// Number of vertices in the referenced vectorShape member.
+    pub fn vertex_count(
+        player: &DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<usize, ScriptError> {
+        let cast_member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)
+            .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+        match &cast_member.member_type {
+            CastMemberType::VectorShape(vs) => Ok(vs.vertices.len()),
+            _ => Err(ScriptError::new("Expected vectorShape member".to_string())),
+        }
+    }
+
+    /// Read a `VectorVertexRef` sub-property (`vertex` / `handle1` /
+    /// `handle2`) as a point. Used by `player_get_obj_prop`.
+    pub fn get_vertex_ref_prop(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        index: usize,
+        prop: &str,
+    ) -> Result<Datum, ScriptError> {
+        let cast_member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)
+            .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+        let vs = match &cast_member.member_type {
+            CastMemberType::VectorShape(vs) => vs,
+            _ => return Err(ScriptError::new("Expected vectorShape member".to_string())),
+        };
+        let v = vs.vertices.get(index).ok_or_else(|| {
+            ScriptError::new(format!("vertex index {} out of range", index + 1))
+        })?;
+        let pt = match_ci!(prop, {
+            "vertex"  => (v.x, v.y),
+            "handle1" => (v.handle1_x, v.handle1_y),
+            "handle2" => (v.handle2_x, v.handle2_y),
+            _ => return Err(ScriptError::new(format!(
+                "VectorVertexRef has no property {}", prop
+            ))),
+        });
+        Ok(Datum::Point([pt.0 as f64, pt.1 as f64], 0))
+    }
+
+    /// Write a `VectorVertexRef` sub-property (`vertex` / `handle1` /
+    /// `handle2`) from a point and recompute the bbox. Used by
+    /// `player_set_obj_prop`.
+    pub fn set_vertex_ref_prop(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        index: usize,
+        prop: &str,
+        value: &Datum,
+    ) -> Result<(), ScriptError> {
+        let (pt, _) = value.to_point_inline()?;
+        let prop = prop.to_owned();
+        Self::with_vs_mut(player, member_ref, |vs| {
+            let v = vs.vertices.get_mut(index).ok_or_else(|| {
+                ScriptError::new(format!("vertex index {} out of range", index + 1))
+            })?;
+            match_ci!(prop.as_str(), {
+                "vertex"  => { v.x = pt[0] as f32; v.y = pt[1] as f32; },
+                "handle1" => { v.handle1_x = pt[0] as f32; v.handle1_y = pt[1] as f32; },
+                "handle2" => { v.handle2_x = pt[0] as f32; v.handle2_y = pt[1] as f32; },
+                _ => return Err(ScriptError::new(format!(
+                    "VectorVertexRef has no property {}", prop
+                ))),
+            });
+            Ok(())
+        })
+    }
+
+    /// Borrow the member's `VectorShapeMember`, run `f`, then recompute the
+    /// bbox so the rasterizer / `width()`/`height()` stay correct.
+    fn with_vs_mut<F>(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        f: F,
+    ) -> Result<(), ScriptError>
+    where
+        F: FnOnce(&mut crate::player::cast_member::VectorShapeMember) -> Result<(), ScriptError>,
+    {
+        let cast_member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref_mut(member_ref)
+            .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+        let vs = match &mut cast_member.member_type {
+            CastMemberType::VectorShape(vs) => vs,
+            _ => return Err(ScriptError::new("Expected vectorShape member".to_string())),
+        };
+        f(vs)?;
+        vs.recompute_bbox();
+        Ok(())
+    }
+
+    fn add_vertex(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        if args.len() < 2 {
+            return Err(ScriptError::new(
+                "addVertex requires (index, point)".to_string(),
+            ));
+        }
+        let index = player.get_datum(&args[0]).int_value()?;
+        let (pt, _) = player.get_datum(&args[1]).to_point_inline()?;
+        // Optional Bezier control-handle offsets (relative to the vertex).
+        let read_i = |i: usize| -> i32 {
+            args.get(i)
+                .map(|a| player.get_datum(a).int_value().unwrap_or(0))
+                .unwrap_or(0)
+        };
+        let (h1x, h1y, h2x, h2y) =
+            (read_i(2) as f32, read_i(3) as f32, read_i(4) as f32, read_i(5) as f32);
+        let vertex = crate::director::enums::VectorShapeVertex {
+            x: pt[0] as f32,
+            y: pt[1] as f32,
+            handle1_x: h1x,
+            handle1_y: h1y,
+            handle2_x: h2x,
+            handle2_y: h2y,
+        };
+        let mut new_count = 0;
+        Self::with_vs_mut(player, member_ref, |vs| {
+            // Director uses a 1-based insert index; clamp into [0, len] so
+            // index 1 prepends and index > count appends (matches Director
+            // tolerating an out-of-range index by appending).
+            let pos = ((index - 1).max(0) as usize).min(vs.vertices.len());
+            vs.vertices.insert(pos, vertex);
+            new_count = vs.vertices.len();
+            Ok(())
+        })?;
+        Ok(player.alloc_datum(Datum::Int(new_count as i32)))
+    }
+
+    fn delete_vertex(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Err(ScriptError::new("deleteVertex requires (index)".to_string()));
+        }
+        let index = player.get_datum(&args[0]).int_value()?;
+        let mut removed = false;
+        Self::with_vs_mut(player, member_ref, |vs| {
+            let pos = (index - 1).max(0) as usize;
+            if pos < vs.vertices.len() {
+                vs.vertices.remove(pos);
+                removed = true;
+            }
+            Ok(())
+        })?;
+        Ok(player.alloc_datum(datum_bool(removed)))
+    }
+
+    fn move_vertex(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        if args.len() < 3 {
+            return Err(ScriptError::new(
+                "moveVertex requires (index, dx, dy)".to_string(),
+            ));
+        }
+        let index = player.get_datum(&args[0]).int_value()?;
+        let dx = player.get_datum(&args[1]).int_value()? as f32;
+        let dy = player.get_datum(&args[2]).int_value()? as f32;
+        let mut moved = false;
+        Self::with_vs_mut(player, member_ref, |vs| {
+            let pos = (index - 1).max(0) as usize;
+            if let Some(v) = vs.vertices.get_mut(pos) {
+                v.x += dx;
+                v.y += dy;
+                moved = true;
+            }
+            Ok(())
+        })?;
+        Ok(player.alloc_datum(datum_bool(moved)))
+    }
+
     pub fn set_prop(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
@@ -151,6 +472,96 @@ impl VectorShapeMemberHandlers {
                 vs.reg_point = (vals[0] as i16, vals[1] as i16);
             }
             return Ok(());
+        }
+
+        // `member.vertexList = <list>` — replace the whole vertex list.
+        // Director's vertexList is `[[#vertex: point, #handle1: point,
+        // #handle2: point], ...]` (Director 11.5 Scripting Dictionary);
+        // #handle1/#handle2 are optional control-point offsets relative to
+        // the vertex. Parse the list (resolving sub-datums from `player`)
+        // BEFORE taking the mutable member borrow, then assign + recompute
+        // the bbox so the rasterizer / width()/height() stay correct.
+        // parent_talkBox restores a backed-up shape via
+        // `vsMem.vertexList = bupMem.vertexList`.
+        if prop.eq_ignore_ascii_case("vertexList") {
+            let items = match &value {
+                Datum::List(_, items, _) => items.clone(),
+                _ => return Err(ScriptError::new(
+                    "vertexList expects a list".to_string(),
+                )),
+            };
+            let mut verts: Vec<crate::director::enums::VectorShapeVertex> =
+                Vec::with_capacity(items.len());
+            let mut new_curve_count = 0usize;
+            for item_ref in &items {
+                let entry = player.get_datum(item_ref);
+                // A `[#newCurve]` marker is a linear list holding the symbol
+                // (not a prop-list). Count it and move on.
+                if let Datum::List(_, elems, _) = &entry {
+                    let is_new_curve = elems.iter().any(|e| {
+                        player.get_datum(e).string_value()
+                            .map_or(false, |s| s.eq_ignore_ascii_case("newCurve"))
+                    });
+                    if is_new_curve {
+                        new_curve_count += 1;
+                        continue;
+                    }
+                }
+                let pairs = match entry {
+                    Datum::PropList(pairs, _) => pairs.clone(),
+                    _ => return Err(ScriptError::new(
+                        "vertexList entry must be a property list".to_string(),
+                    )),
+                };
+                // Tolerate a #newCurve key inside a prop-list form too (older
+                // round-trips) — count it and skip the point parsing.
+                let is_new_curve = pairs.iter().any(|(k_ref, _)| {
+                    player.get_datum(k_ref).string_value()
+                        .map_or(false, |k| k.eq_ignore_ascii_case("newCurve"))
+                });
+                if is_new_curve {
+                    new_curve_count += 1;
+                    continue;
+                }
+                let mut v = crate::director::enums::VectorShapeVertex {
+                    x: 0.0, y: 0.0,
+                    handle1_x: 0.0, handle1_y: 0.0,
+                    handle2_x: 0.0, handle2_y: 0.0,
+                };
+                for (k_ref, val_ref) in &pairs {
+                    // Keys are symbols (#vertex); string_value handles both
+                    // Symbol and String forms.
+                    let key = player.get_datum(k_ref).string_value().unwrap_or_default();
+                    // Skip keys whose value isn't a point (defensive).
+                    let pt = match player.get_datum(val_ref).to_point_inline() {
+                        Ok((pt, _)) => pt,
+                        Err(_) => continue,
+                    };
+                    match_ci!(key.as_str(), {
+                        "vertex"  => { v.x = pt[0] as f32; v.y = pt[1] as f32; },
+                        "handle1" => { v.handle1_x = pt[0] as f32; v.handle1_y = pt[1] as f32; },
+                        "handle2" => { v.handle2_x = pt[0] as f32; v.handle2_y = pt[1] as f32; },
+                        _ => {},
+                    });
+                }
+                verts.push(v);
+            }
+            let cast_member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref_mut(member_ref)
+                .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+            match &mut cast_member.member_type {
+                CastMemberType::VectorShape(vs) => {
+                    vs.vertices = verts;
+                    vs.new_curve_count = new_curve_count;
+                    vs.recompute_bbox();
+                    return Ok(());
+                }
+                _ => return Err(ScriptError::new(
+                    "Expected vectorShape member".to_string(),
+                )),
+            }
         }
 
         // VectorShapeMember stores colors as flat (u8, u8, u8) RGB tuples
@@ -305,8 +716,9 @@ impl VectorShapeMemberHandlers {
     fn build_vertex_list(
         player: &mut DirPlayer,
         verts: Vec<(i32, i32, i32, i32, i32, i32, bool)>,
+        new_curve_count: usize,
     ) -> Result<Datum, ScriptError> {
-        let list: VecDeque<DatumRef> = verts
+        let mut list: VecDeque<DatumRef> = verts
             .iter()
             .map(|(vx, vy, h1x, h1y, h2x, h2y, is_bezier)| {
                 let vertex_key = player.alloc_datum(Datum::Symbol("vertex".to_string()));
@@ -327,6 +739,18 @@ impl VectorShapeMemberHandlers {
                 player.alloc_datum(prop_list)
             })
             .collect();
+        // Trailing `[#newCurve]` markers (sub-path breaks). Director prints
+        // these as a linear list holding just the symbol — `[#newCurve]` — not
+        // a prop-list, so emit Datum::List([#newCurve]) to round-trip exactly.
+        for _ in 0..new_curve_count {
+            let sym = player.alloc_datum(Datum::Symbol("newCurve".to_string()));
+            let marker = player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from(vec![sym]),
+                false,
+            ));
+            list.push_back(marker);
+        }
         Ok(Datum::List(DatumType::List, list, false))
     }
 
@@ -342,7 +766,7 @@ impl VectorShapeMemberHandlers {
     ) -> Result<Datum, ScriptError> {
         // Snapshot everything we need from the cast member before we
         // need `&mut player.bitmap_manager`.
-        let (w, h, fill, end, bg, fill_mode, closed, poly,
+        let (w, h, fill, end, bg, stroke, stroke_width, fill_mode, closed, poly,
              gradient_type, fill_scale, fill_offset) = {
             let cast_member = player
                 .movie
@@ -356,11 +780,36 @@ impl VectorShapeMemberHandlers {
             // For .image rasterization we want the vertex bbox dims (the
             // pixel extent the polygon actually occupies), NOT the
             // authored member.width/height which include extra padding.
-            let w = vs.bbox_width().ceil() as u16;
-            let h = vs.bbox_height().ceil() as u16;
+            //
+            // Guard against an absurd bbox: a corrupt/uninitialized vertex
+            // can make bbox_width/height enormous, and `f32 as u16`
+            // saturates to 65535 — a 65535² bitmap then overruns bitvec's
+            // mask capacity and panics. No legitimate vector shape in a
+            // Director movie is anywhere near this; clamp and log so the
+            // player keeps running and we can see the offending member/bbox.
+            const MAX_VS_IMAGE_DIM: f32 = 4096.0;
+            let raw_w = vs.bbox_width().ceil();
+            let raw_h = vs.bbox_height().ceil();
+            if raw_w > MAX_VS_IMAGE_DIM || raw_h > MAX_VS_IMAGE_DIM
+                || !raw_w.is_finite() || !raw_h.is_finite()
+            {
+                log::warn!(
+                    "[vectorShape .image] member ({}, {}) has absurd bbox \
+                     {}x{} (left={} top={} right={} bottom={}, {} verts) — \
+                     clamping to {}px to avoid an oversized-bitmap panic",
+                    member_ref.cast_lib, member_ref.cast_member,
+                    raw_w, raw_h,
+                    vs.bbox_left, vs.bbox_top, vs.bbox_right, vs.bbox_bottom,
+                    vs.vertices.len(), MAX_VS_IMAGE_DIM,
+                );
+            }
+            let w = raw_w.clamp(0.0, MAX_VS_IMAGE_DIM) as u16;
+            let h = raw_h.clamp(0.0, MAX_VS_IMAGE_DIM) as u16;
             let fill = vs.fill_color;
             let end = vs.end_color;
             let bg = vs.bg_color;
+            let stroke = vs.stroke_color;
+            let stroke_width = vs.stroke_width;
             let fill_mode = vs.fill_mode;
             let closed = vs.closed;
             let bbox_left = vs.bbox_left;
@@ -368,13 +817,50 @@ impl VectorShapeMemberHandlers {
             let gradient_type = vs.gradient_type.clone();
             let fill_scale = vs.fill_scale;
             let fill_offset = vs.fill_offset;
-            // Translate vertices into bitmap-local coords.
-            let poly: Vec<(f32, f32)> = vs
+            // Tessellate the closed cubic-Bezier outline into a dense polygon
+            // in bitmap-local coords. Each vertex carries two control-handle
+            // offsets: handle1 = outgoing (toward the next vertex), handle2 =
+            // incoming (from the previous vertex). For edge V[i]→V[i+1] the
+            // cubic is V[i], V[i]+h1, V[i+1]+h2, V[i+1]. Without this the
+            // rounded bubble/dialog shapes render as straight-edged polygons
+            // (the "drawn by a child" look). Verified against ui_pratbubbla.
+            let local: Vec<(f32, f32, f32, f32, f32, f32)> = vs
                 .vertices
                 .iter()
-                .map(|v| (v.x - bbox_left, v.y - bbox_top))
+                .map(|v| (
+                    v.x - bbox_left, v.y - bbox_top,
+                    v.handle1_x, v.handle1_y,
+                    v.handle2_x, v.handle2_y,
+                ))
                 .collect();
-            (w, h, fill, end, bg, fill_mode, closed, poly,
+            let has_curves = local.iter().any(|v| {
+                v.2 != 0.0 || v.3 != 0.0 || v.4 != 0.0 || v.5 != 0.0
+            });
+            let poly: Vec<(f32, f32)> = if has_curves && local.len() >= 2 {
+                const SEGS: usize = 12; // samples per Bezier edge
+                let n = local.len();
+                let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * SEGS);
+                for i in 0..n {
+                    let a = local[i];
+                    let b = local[(i + 1) % n];
+                    let p0 = (a.0, a.1);
+                    let p1 = (a.0 + a.2, a.1 + a.3);          // V[i] + handle1 (out)
+                    let p2 = (b.0 + b.4, b.1 + b.5);          // V[i+1] + handle2 (in)
+                    let p3 = (b.0, b.1);
+                    // Sample t in [0,1); the next edge contributes its own p0.
+                    for s in 0..SEGS {
+                        let t = s as f32 / SEGS as f32;
+                        let mt = 1.0 - t;
+                        let x = mt*mt*mt*p0.0 + 3.0*mt*mt*t*p1.0 + 3.0*mt*t*t*p2.0 + t*t*t*p3.0;
+                        let y = mt*mt*mt*p0.1 + 3.0*mt*mt*t*p1.1 + 3.0*mt*t*t*p2.1 + t*t*t*p3.1;
+                        out.push((x, y));
+                    }
+                }
+                out
+            } else {
+                local.iter().map(|v| (v.0, v.1)).collect()
+            };
+            (w, h, fill, end, bg, stroke, stroke_width, fill_mode, closed, poly,
              gradient_type, fill_scale, fill_offset)
         };
 
@@ -386,19 +872,23 @@ impl VectorShapeMemberHandlers {
             0,
             PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
         );
+        // The vector-shape image carries an alpha channel: inside the shape is
+        // opaque (the fill), outside is transparent. spectral-wizard's
+        // parent_talkBox builds the speech bubble via `_img.extractAlpha()` +
+        // `useAlpha`, so the area outside the polygon MUST be alpha 0 or the
+        // bubble's bounding box renders as a solid black rectangle.
+        bitmap.use_alpha = true;
         let bw = bitmap.width as usize;
         let bh = bitmap.height as usize;
 
-        // Pre-fill with BLACK, not vs.bg_color. Director's vector-shape
-        // .image always rasterizes onto a black backdrop regardless of
-        // `the backgroundColor of member` — verified empirically:
-        // `member("floor_shape_preview").backgroundColor` returns
-        // rgb(255,255,255) but `image.getPixel(2, 2)` returns rgb(0,0,0).
-        // CS catalog scripts rely on this: they composite floor preview
-        // shapes onto bitmaps with `[#ink: 5, #color: rgb(0,0,0), ...]`,
-        // using black as the transparency key. Filling with vs.bg_color
-        // (white) made the entire 106×46 rect contribute to the multiply
-        // blend and washed the destination to gray.
+        // Pre-fill with TRANSPARENT BLACK. The RGB stays black (not vs.bg_color):
+        // Director's vector-shape .image rasterizes onto a black backdrop
+        // regardless of `the backgroundColor of member` — verified empirically
+        // (`member("floor_shape_preview").backgroundColor` is rgb(255,255,255)
+        // but `image.getPixel(2,2)` returns rgb(0,0,0)), and CS catalog scripts
+        // key on that black via `[#ink: 5, #color: rgb(0,0,0), ...]`. The alpha
+        // is 0 so alpha-aware consumers (extractAlpha / useAlpha) treat the
+        // outside as transparent; color-key (ink 5) consumers still see black.
         let _ = bg;
         for y in 0..bh {
             for x in 0..bw {
@@ -406,7 +896,7 @@ impl VectorShapeMemberHandlers {
                 bitmap.data[i] = 0;
                 bitmap.data[i + 1] = 0;
                 bitmap.data[i + 2] = 0;
-                bitmap.data[i + 3] = 0xFF;
+                bitmap.data[i + 3] = 0x00;
             }
         }
 
@@ -507,6 +997,28 @@ impl VectorShapeMemberHandlers {
                     bitmap.data[i + 2] = c.2;
                     bitmap.data[i + 3] = 0xFF;
                 }
+            }
+        }
+
+        // Anti-aliased stroke along the (tessellated) outline. Without this,
+        // `member.image` produced only the fill — the talkbox / dialog shapes
+        // lost their black border (the old opaque-black bbox used to hide its
+        // absence). `blend_pixel_aa` accumulates alpha, so stroke pixels get
+        // opaque even where they sit outside the fill (alpha 0). Mirrors the
+        // stroke pass in drawing.rs::draw_vector_shape.
+        if stroke_width > 0.0 && poly.len() >= 2 {
+            let palettes = player.movie.cast_manager.palettes();
+            let half_w = stroke_width / 2.0;
+            let n = poly.len();
+            let seg_count = if closed { n } else { n - 1 };
+            for i in 0..seg_count {
+                let (x1, y1) = poly[i];
+                let (x2, y2) = poly[(i + 1) % n];
+                bitmap.draw_line_aa(x1, y1, x2, y2, half_w, stroke, &palettes, 1.0);
+            }
+            // Round caps/joins at each point so corners stay smooth.
+            for &(px, py) in &poly {
+                bitmap.draw_circle_aa(px, py, half_w, stroke, &palettes, 1.0);
             }
         }
 

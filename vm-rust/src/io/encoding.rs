@@ -126,3 +126,73 @@ pub fn decode_text_auto(bytes: &[u8]) -> String {
         Err(_) => decode_win1252(bytes),
     }
 }
+
+/// Mac Roman byte → Unicode codepoint table for bytes 0x80-0xFF.
+///
+/// Director historically stored Lingo SCRIPT string literals (the Lscr
+/// literal store) in Mac Roman regardless of the authoring/packaging
+/// platform — Director originated on the Mac and kept Mac Roman as the
+/// canonical script-text encoding. So a Windows-packaged (XFIR) movie can
+/// still carry Mac Roman bytes in its script literals: e.g. the section
+/// sign `§` is byte 0xA4 in Mac Roman (it is `¤` in Win-1252). The
+/// reference decompiler (ProjectorRays) likewise decodes Lscr strings as
+/// Mac Roman. Member/field text is a separate concern (UTF-8 or Win-1252)
+/// and is NOT decoded with this table.
+///
+/// Values follow Apple's canonical `ROMAN.TXT` mapping (post-euro: 0xDB =
+/// €). 0xF0 is the Apple-logo PUA codepoint U+F8FF.
+const MACROMAN_HIGH: [char; 128] = [
+    '\u{00C4}', '\u{00C5}', '\u{00C7}', '\u{00C9}', '\u{00D1}', '\u{00D6}', '\u{00DC}', '\u{00E1}', // 80-87
+    '\u{00E0}', '\u{00E2}', '\u{00E4}', '\u{00E3}', '\u{00E5}', '\u{00E7}', '\u{00E9}', '\u{00E8}', // 88-8F
+    '\u{00EA}', '\u{00EB}', '\u{00ED}', '\u{00EC}', '\u{00EE}', '\u{00EF}', '\u{00F1}', '\u{00F3}', // 90-97
+    '\u{00F2}', '\u{00F4}', '\u{00F6}', '\u{00F5}', '\u{00FA}', '\u{00F9}', '\u{00FB}', '\u{00FC}', // 98-9F
+    '\u{2020}', '\u{00B0}', '\u{00A2}', '\u{00A3}', '\u{00A7}', '\u{2022}', '\u{00B6}', '\u{00DF}', // A0-A7
+    '\u{00AE}', '\u{00A9}', '\u{2122}', '\u{00B4}', '\u{00A8}', '\u{2260}', '\u{00C6}', '\u{00D8}', // A8-AF
+    '\u{221E}', '\u{00B1}', '\u{2264}', '\u{2265}', '\u{00A5}', '\u{00B5}', '\u{2202}', '\u{2211}', // B0-B7
+    '\u{220F}', '\u{03C0}', '\u{222B}', '\u{00AA}', '\u{00BA}', '\u{03A9}', '\u{00E6}', '\u{00F8}', // B8-BF
+    '\u{00BF}', '\u{00A1}', '\u{00AC}', '\u{221A}', '\u{0192}', '\u{2248}', '\u{2206}', '\u{00AB}', // C0-C7
+    '\u{00BB}', '\u{2026}', '\u{00A0}', '\u{00C0}', '\u{00C3}', '\u{00D5}', '\u{0152}', '\u{0153}', // C8-CF
+    '\u{2013}', '\u{2014}', '\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}', '\u{00F7}', '\u{25CA}', // D0-D7
+    '\u{00FF}', '\u{0178}', '\u{2044}', '\u{20AC}', '\u{2039}', '\u{203A}', '\u{FB01}', '\u{FB02}', // D8-DF
+    '\u{2021}', '\u{00B7}', '\u{201A}', '\u{201E}', '\u{2030}', '\u{00C2}', '\u{00CA}', '\u{00C1}', // E0-E7
+    '\u{00CB}', '\u{00C8}', '\u{00CD}', '\u{00CE}', '\u{00CF}', '\u{00CC}', '\u{00D3}', '\u{00D4}', // E8-EF
+    '\u{F8FF}', '\u{00D2}', '\u{00DA}', '\u{00DB}', '\u{00D9}', '\u{0131}', '\u{02C6}', '\u{02DC}', // F0-F7
+    '\u{00AF}', '\u{02D8}', '\u{02D9}', '\u{02DA}', '\u{00B8}', '\u{02DD}', '\u{02DB}', '\u{02C7}', // F8-FF
+];
+
+/// Decode a single Mac Roman byte into its Unicode `char`.
+#[inline]
+pub fn macroman_byte_to_char(byte: u8) -> char {
+    if byte < 0x80 {
+        byte as char
+    } else {
+        MACROMAN_HIGH[(byte - 0x80) as usize]
+    }
+}
+
+/// Decode a slice of Mac Roman bytes into a Rust `String`.
+pub fn decode_macroman(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len());
+    for &b in bytes {
+        s.push(macroman_byte_to_char(b));
+    }
+    s
+}
+
+/// Like [`decode_text_auto`] but falls back to **Mac Roman** instead of
+/// Windows-1252 when the bytes aren't valid UTF-8. Use this for Lingo
+/// script string literals, which Director stores in Mac Roman on every
+/// platform (see [`MACROMAN_HIGH`]). Pure-ASCII and genuine UTF-8 (D11+
+/// Unicode authoring) still decode correctly via the strict-UTF-8 first
+/// pass; only the single-byte fallback differs.
+pub fn decode_text_auto_macroman(bytes: &[u8]) -> String {
+    let bytes = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &bytes[3..]
+    } else {
+        bytes
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => decode_macroman(bytes),
+    }
+}

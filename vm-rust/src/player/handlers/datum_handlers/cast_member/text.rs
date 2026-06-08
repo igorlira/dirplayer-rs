@@ -32,6 +32,85 @@ pub(crate) fn line_step_px(fixed_line_space: u16, font_size: u16) -> i32 {
     if fixed_line_space > 0 { fixed_line_space as i32 } else { font_size as i32 }
 }
 
+/// Effective line height (px) used for scroll math on a field or text member:
+/// the fixed-line-space override, else the font size, else 12. Mirrors the
+/// fallback the field `scrollByLine` path used before it was shared.
+pub(crate) fn scroll_line_height(fixed_line_space: u16, font_size: u16) -> i32 {
+    if fixed_line_space > 0 {
+        fixed_line_space as i32
+    } else if font_size > 0 {
+        font_size as i32
+    } else {
+        12
+    }
+}
+
+/// Read `(fixed_line_space, font_size, height_px)` from a field or text member,
+/// or `None` for any other member type. `height_px` is the member's box height
+/// (used to size a "page" for `scrollByPage`).
+fn member_scroll_metrics(
+    player: &crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+) -> Option<(u16, u16, i32)> {
+    use crate::player::cast_member::CastMemberType;
+    let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+    match &member.member_type {
+        CastMemberType::Field(f) => Some((f.fixed_line_space, f.font_size, f.height as i32)),
+        CastMemberType::Text(t) => Some((t.fixed_line_space, t.font_size, t.height as i32)),
+        _ => None,
+    }
+}
+
+/// Shared core for `member.scrollByLine(amount)` / global `scrollByLine`
+/// (Director 11.5 Scripting Dictionary): scroll a field/text member by `amount`
+/// lines (positive = down, negative = up). Fractional amounts are honored
+/// (Fugue No.4 nudges by ±0.1). `scrollTop` is clamped at 0; the upper bound is
+/// left to callers (the MM scroll bar clamps to its own maxScroll).
+pub(crate) fn scroll_member_by_lines(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+    amount: f64,
+) {
+    let (fls, fs, _h) = match member_scroll_metrics(player, member_ref) {
+        Some(m) => m,
+        None => return,
+    };
+    let line_h = scroll_line_height(fls, fs) as f64;
+    let delta_px = (amount * line_h).round() as i32;
+    use crate::player::cast_member::CastMemberType;
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+        match &mut member.member_type {
+            CastMemberType::Field(field) => {
+                field.scroll_top = (field.scroll_top as i32 + delta_px).max(0) as u16;
+            }
+            CastMemberType::Text(text) => {
+                if let Some(info) = text.info.as_mut() {
+                    info.scroll_top = (info.scroll_top as i32 + delta_px).max(0) as u32;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Shared core for `member.scrollByPage(amount)` / global `scrollByPage`
+/// (Director 11.5 Scripting Dictionary): scroll by `amount` pages, where a page
+/// is the number of text lines visible in the member's box. Implemented as a
+/// line scroll of `amount * visibleLines`.
+pub(crate) fn scroll_member_by_pages(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+    amount: f64,
+) {
+    let (fls, fs, height) = match member_scroll_metrics(player, member_ref) {
+        Some(m) => m,
+        None => return,
+    };
+    let line_h = scroll_line_height(fls, fs);
+    let visible_lines = (height / line_h.max(1)).max(1);
+    scroll_member_by_lines(player, member_ref, amount * visible_lines as f64);
+}
+
 /// Count the lines of a Director-style string. Director uses bare `\r` as
 /// its line separator; `str::lines()` only handles `\n` and `\r\n`, so a
 /// `\r`-separated text reads as a single line. We treat each `\r`, `\n`, or
@@ -149,6 +228,19 @@ impl TextMemberHandlers {
 
                 let index = get_text_index_at_pos(&text.text, &params, x, y);
                 Ok(player.alloc_datum(Datum::Int((index + 1) as i32)))
+            }
+            // `member.scrollByLine(amount)` / `member.scrollByPage(amount)` —
+            // Director 11.5 Scripting Dictionary p.618/619. Shared core handles
+            // both field and text members (see scroll_member_by_lines).
+            "scrollByLine" => {
+                let amount = player.get_datum(&args[0]).to_float()?;
+                scroll_member_by_lines(player, &member_ref, amount);
+                Ok(DatumRef::Void)
+            }
+            "scrollByPage" => {
+                let amount = player.get_datum(&args[0]).to_float()?;
+                scroll_member_by_pages(player, &member_ref, amount);
+                Ok(DatumRef::Void)
             }
             // Director 11.5 Scripting Dictionary p.443 / p.449.
             //
@@ -1922,6 +2014,26 @@ impl TextMemberHandlers {
                 }
                 Ok(Datum::List(DatumType::List, items, false))
             }
+            // `member.hyperlinks` — Director returns a linear list of
+            // [startChar, endChar] ranges, one per hyperlink (Director 11.5
+            // Scripting Dictionary). Parsed from XMED Section 0x0129 into
+            // 1-based inclusive pairs; empty for members with no links. Used by
+            // the `customHyperlink` behavior (help_menu navigation).
+            "hyperlinks" => {
+                let items: VecDeque<DatumRef> = text_data.hyperlinks
+                    .iter()
+                    .map(|(start, end)| {
+                        let s = player.alloc_datum(Datum::Int(*start));
+                        let e = player.alloc_datum(Datum::Int(*end));
+                        player.alloc_datum(Datum::List(
+                            DatumType::List,
+                            VecDeque::from(vec![s, e]),
+                            false,
+                        ))
+                    })
+                    .collect();
+                Ok(Datum::List(DatumType::List, items, false))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for text",
                 prop
@@ -2295,6 +2407,19 @@ impl TextMemberHandlers {
                         cast_member.color = crate::player::sprite::ColorRef::Rgb(r, g, b);
                     } else {
                         cast_member.color = crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
+                    }
+                    // Director's `the color of member` recolors the WHOLE text,
+                    // overriding per-run/span colors. Clear the styled spans'
+                    // explicit colors so the renderer falls back to the new
+                    // member color (otherwise multi-span text — e.g. spectral-
+                    // wizard's LOADING dialog with two differently-sized lines —
+                    // keeps its authored black and ignores the white the script
+                    // sets). Per-line `member.line[i].color` setters run after
+                    // and re-apply concrete colors where needed.
+                    if let Some(text) = cast_member.member_type.as_text_mut() {
+                        for span in &mut text.html_styled_spans {
+                            span.style.color = None;
+                        }
                     }
                     Ok(())
                 },

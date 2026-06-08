@@ -1972,7 +1972,15 @@ pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32
             // conversion — making `locToCharPos < text.length` FALSE and
             // breaking PageNext's "is there more content below?" probe at
             // scrollTop=0.
-            if y >= line_y && y < line_y + line_step && x < line_width {
+            //
+            // No `x < line_width` guard: if y is on this line we've already
+            // passed every char (the per-char checks return first while
+            // x < line_width), so reaching the \r means x is at/past the end
+            // of the line's text — resolve to this line's end rather than
+            // falling through to the whole member's last char. Otherwise a
+            // hover in the empty space right of a short line (help_menu's menu
+            // words) maps to the final link (FAQ).
+            if y >= line_y && y < line_y + line_step {
                 return index;
             }
             line_width = 0;

@@ -1410,6 +1410,10 @@ impl BuiltInHandlerManager {
             "max" => TypeHandlers::max(args),
             "sort" => TypeHandlers::sort(args),
             "intersect" => TypeHandlers::intersect(args),
+            "inflate" => TypeHandlers::inflate(args),
+            "pointtochar" => TypeHandlers::point_to_char(args),
+            "scrollbyline" => TypeHandlers::scroll_by_line(args),
+            "scrollbypage" => TypeHandlers::scroll_by_page(args),
             "rollover" => MovieHandlers::rollover(args),
             "getpropat" => TypeHandlers::get_prop_at(args),
             "puppetsound" => MovieHandlers::puppet_sound(args),
@@ -1760,7 +1764,17 @@ impl BuiltInHandlerManager {
                         } else {
                             line_idx as i32
                         };
-                        let y = top_spacing as i32 + visual_line * line_step;
+                        // See branch B: a trailing newline's location is the line
+                        // it creates, so charPosToLoc(char.count) on text ending
+                        // in \r gives the full height for GetMaxScroll. Gated to
+                        // the last char + a newline so letter-terminated text
+                        // returns the char's line top (Coke Studios' shrink loop
+                        // requires charPosToLoc(1).locV == charPosToLoc(len).locV
+                        // for single-line text — see branch B note).
+                        let trailing_nl_a = index + 1 >= text.chars().count()
+                            && matches!(text.chars().nth(index), Some('\r') | Some('\n'));
+                        let y = top_spacing as i32
+                            + (visual_line + if trailing_nl_a { 1 } else { 0 }) * line_step;
 
                         Ok(player.alloc_datum(Datum::Point([width as f64, y as f64], 0)))
                     } else {
@@ -1911,7 +1925,22 @@ impl BuiltInHandlerManager {
                             // get_text_char_pos (which handles char-level
                             // x correctly). y: from visual_idx * line_step.
                             let (x_pos, _y_unused) = crate::player::font::get_text_char_pos(&text, &params, index);
-                            let y_pos = top_spacing.saturating_add(visual_idx as i16 * line_step);
+                            // A trailing newline's location is the line it
+                            // CREATES (the next one), not the line it ends — so
+                            // charPosToLoc(char.count) on text ending in \r gives
+                            // the full height for GetMaxScroll (spectral-wizard's
+                            // help-story scroll). Gated to the last char AND a
+                            // newline: charPosToLoc(textLength) on letter-
+                            // terminated text must return that char's line TOP so
+                            // it equals charPosToLoc(1).locV for single-line text.
+                            // Coke Studios' window shrink-to-one-line loop spins
+                            // `while charPosToLoc(m,1).locV <> charPosToLoc(m,len).locV`
+                            // — a non-newline-gated bump never converged → freeze.
+                            let trailing_nl_b = index + 1 >= text.chars().count()
+                                && matches!(text.chars().nth(index), Some('\r') | Some('\n'));
+                            let y_pos = top_spacing.saturating_add(
+                                (visual_idx as i16 + if trailing_nl_b { 1 } else { 0 }) * line_step,
+                            );
                             (x_pos, y_pos)
                         };
 
@@ -2056,9 +2085,52 @@ impl BuiltInHandlerManager {
         reserve_player_mut(|player| {
             let arg_datum = player.get_datum(&args[0]);
 
+            // An INTEGER argument is a direct key code (this is how games store
+            // their configurable keys — spectral-wizard's `settingsKeys` uses
+            // SW codes like #jump:7 (X), #attack:6 (Z), #down:125). Handle it
+            // BEFORE the string path: `Datum::Int(7).string_value()` is "7",
+            // which the length-1 branch below would misread as the *character*
+            // '7' and look up the digit-7 key — so keyPressed(7) checked the
+            // wrong key and jump/attack never fired. Single-/double-digit codes
+            // were the visible failures; multi-digit ones (arrows) happened to
+            // round-trip through the number-parse branch.
+            if let crate::director::lingo::datum::Datum::Int(code) = arg_datum {
+                let code = *code;
+                // An ASCII letter code (A-Z/a-z) maps through the char table;
+                // any other integer is used as the SW key code verbatim.
+                let key_code = if (65..=90).contains(&code) || (97..=122).contains(&code) {
+                    let ch = (code as u8 as char).to_lowercase().next().unwrap();
+                    *keyboard_map::get_char_to_keycode_map().get(&ch).unwrap_or(&(code as u16))
+                } else {
+                    code as u16
+                };
+                let is_pressed = player
+                    .keyboard_manager
+                    .down_keys
+                    .iter()
+                    .any(|key| key.code == key_code);
+                return Ok(player.alloc_datum(datum_bool(is_pressed)));
+            }
+
             let key_code = if let Ok(key_str) = arg_datum.string_value() {
-                // STRING: First check if it's a single character
-                if key_str.len() == 1 {
+                // Named key constants. Director's SPACE/RETURN/TAB/... are
+                // character constants, but movies pass them to keyPressed in a
+                // form that reaches us as the symbolic name (e.g. spectral-
+                // wizard's `keyPressed("SPACE")` from `keyPressed(SPACE)`).
+                // Map the common names to Mac virtual key codes.
+                if let Some(code) = match key_str.to_ascii_uppercase().as_str() {
+                    "SPACE" => Some(49u16),
+                    "RETURN" => Some(36),
+                    "ENTER" => Some(76),
+                    "TAB" => Some(48),
+                    "BACKSPACE" => Some(51),
+                    "ESCAPE" | "ESC" => Some(53),
+                    _ => None,
+                } {
+                    code
+                }
+                // STRING: check if it's a single character
+                else if key_str.len() == 1 {
                     // Single character - convert to Director key code
                     let ch = key_str
                         .chars()

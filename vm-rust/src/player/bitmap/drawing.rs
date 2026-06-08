@@ -105,21 +105,23 @@ fn director_blend_ink0(
     src_alpha: f32,
     blend: f32,
 ) -> (u8, u8, u8) {
-    // Premultiply source by its own alpha
-    let sr = src.0 as f32 * src_alpha;
-    let sg = src.1 as f32 * src_alpha;
-    let sb = src.2 as f32 * src_alpha;
-
-    let dr = dst.0 as f32;
-    let dg = dst.1 as f32;
-    let db = dst.2 as f32;
-
-    let inv = 1.0 - blend;
-
+    // Straight-alpha source-over compositing: the source pixel's own alpha and
+    // the #blend parameter combine into ONE effective coverage, and the
+    // destination's complementary weight must use that SAME coverage.
+    //
+    // The previous formula weighted dst by (1 - blend) while only premultiplying
+    // src by src_alpha — so a partial-alpha (anti-aliased) edge at e.g.
+    // src_alpha=0.5, blend=1.0 produced `src*0.5` with ZERO destination
+    // contribution, i.e. the edge darkened toward black (a halo) instead of
+    // blending with what's behind it. spectral-wizard's splashName title
+    // fade-in (`copyPixels(..., [#blend: theBlendItems])`, blend ramping 0→100)
+    // showed that black fringe against the scrolling menu background.
+    let eff = (src_alpha * blend).clamp(0.0, 1.0);
+    let inv = 1.0 - eff;
     (
-        (dr * inv + sr * blend).round().clamp(0.0, 255.0) as u8,
-        (dg * inv + sg * blend).round().clamp(0.0, 255.0) as u8,
-        (db * inv + sb * blend).round().clamp(0.0, 255.0) as u8,
+        (dst.0 as f32 * inv + src.0 as f32 * eff).round().clamp(0.0, 255.0) as u8,
+        (dst.1 as f32 * inv + src.1 as f32 * eff).round().clamp(0.0, 255.0) as u8,
+        (dst.2 as f32 * inv + src.2 as f32 * eff).round().clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -1208,7 +1210,7 @@ impl Bitmap {
     }
 
     /// Draw an anti-aliased thick line segment using signed distance from the line.
-    fn draw_line_aa(
+    pub(crate) fn draw_line_aa(
         &mut self,
         x1: f32, y1: f32,
         x2: f32, y2: f32,
@@ -1253,7 +1255,7 @@ impl Bitmap {
     }
 
     /// Draw an anti-aliased filled circle for round line joins/caps.
-    fn draw_circle_aa(
+    pub(crate) fn draw_circle_aa(
         &mut self,
         cx: f32, cy: f32,
         radius: f32,
@@ -1811,7 +1813,24 @@ impl Bitmap {
                 if sx < 0 || sx >= src.width as i32 || sy < 0 || sy >= src.height as i32 {
                     continue;
                 }
-                let (r, g, bl, _) = src.get_pixel_color_with_alpha(palettes, sx as u16, sy as u16);
+                let (r, g, bl, a) = src.get_pixel_color_with_alpha(palettes, sx as u16, sy as u16);
+                // Honor the source's per-pixel alpha for 32-bit useAlpha images,
+                // otherwise the rotated/warped blit paints the transparent
+                // background as opaque. The player's rope-swing frames
+                // (hero1_s1/s2 — 32-bit, useAlpha) are drawn through this quad
+                // path; without this their black background showed as a solid
+                // box around the hero. Fully transparent → skip; partial →
+                // alpha-blend over the destination; opaque → straight copy.
+                if src.use_alpha {
+                    if a == 0 {
+                        continue;
+                    } else if a < 255 {
+                        let dst = self.get_pixel_color(palettes, x as u16, y as u16);
+                        let blended = blend_color_alpha(dst, (r, g, bl), a as f32 / 255.0);
+                        self.set_pixel(x, y, blended, palettes);
+                        continue;
+                    }
+                }
                 self.set_pixel(x, y, (r, g, bl), palettes);
             }
         }
@@ -2465,10 +2484,19 @@ impl Bitmap {
 
                     let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
-                    let blended = if alpha >= 0.999 {
+                    // Honor the per-pixel source alpha for use_alpha bitmaps,
+                    // combined with the #blend factor. Without this a soft
+                    // (semi-transparent) glow — e.g. the rune/coin shine in
+                    // `inventory_goldBall*`, drawn with ink 36 — rendered as a
+                    // hard opaque grey halo because only the whole-blit #blend
+                    // was applied. Non-alpha 32-bit bitmaps keep src_a = 1.0,
+                    // so their color-key behavior is unchanged.
+                    let src_a = if src.use_alpha { a as f32 / 255.0 } else { 1.0 };
+                    let eff = src_a * alpha;
+                    let blended = if eff >= 0.999 {
                         src_color
                     } else {
-                        blend_color_alpha(dst_color, src_color, alpha)
+                        blend_color_alpha(dst_color, src_color, eff)
                     };
 
                     self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);

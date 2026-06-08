@@ -134,6 +134,13 @@ pub struct XmedStyledText {
     /// style is style[3] = Verdana 9. `None` when char-run sections
     /// don't point at a parsed style.
     pub default_font_name: Option<String>,
+    /// Hyperlink ranges from Section 0x0129 (`hyperlink_key`), as 1-based
+    /// inclusive `[startChar, endChar]` pairs (Director's `the hyperlinks of
+    /// member` format). Empty when the member has no links. Each XMED record
+    /// stores a 0-based half-open range + a URL target; we convert to
+    /// `[start+1, end]` here (verified against help_menu, whose menu words
+    /// line up exactly).
+    pub hyperlinks: Vec<(i32, i32)>,
 }
 
 /// Section 1 data - document header with page/field properties
@@ -787,6 +794,16 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         })
         .collect();
 
+    // Hyperlink section — `hyperlink_key` (Paige enum 296 = raw header key
+    // 0x0128). NOTE the key: PgWalkStyle prints sections as `rawKey+1`, so its
+    // log shows this section as "0x0129", but dirplayer's `sections` map is
+    // keyed by the *raw* header value (0x0128). The companion 0x0129 (raw;
+    // PgWalkStyle "0x012A") is `hyperlink_target_key`/url-image, not the range
+    // table.
+    let hyperlinks = sections.get(&0x0128)
+        .map(|s| parse_hyperlinks(s, doc_version))
+        .unwrap_or_default();
+
     Ok(XmedStyledText {
         text: text_data.text,
         styled_spans,
@@ -809,7 +826,53 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         bg_color: section1_data.bg_color,
         default_font_size,
         default_font_name,
+        hyperlinks,
     })
+}
+
+/// Parse Section 0x0129 (`hyperlink_key`) into 1-based inclusive
+/// `[startChar, endChar]` ranges. Ported from PgWalkStyle's
+/// `ProcessHyperlinkSection` (which mirrors Paige's `pgReadHyperlinkProc`) and
+/// validated against help_menu. Each record:
+///   start, end                 — applied_range (UnpackNum, 0-based half-open)
+///   4 style shorts             — active/state1/state2/state3 (UnpackNum)
+///   version-gated id fields     — gated on the doc version (`int4`)
+///   urlLen + URL bytes         — link target (UnpackNum + ptr-bytes block)
+/// We keep only the range, converted to Director's 1-based `[start+1, end]`.
+fn parse_hyperlinks(data: &[u8], doc_version: i32) -> Vec<(i32, i32)> {
+    let mut packer = Packer::new(data.to_vec());
+    let mut links: Vec<(i32, i32)> = Vec::new();
+    // Guard against malformed data with a generous cap.
+    while packer.remaining() > 2 && links.len() < 256 {
+        let start = packer.unpack_num();
+        let end = packer.unpack_num();
+        let _active_style = packer.unpack_num();
+        let _state1 = packer.unpack_num();
+        let _state2 = packer.unpack_num();
+        let _state3 = packer.unpack_num();
+
+        // Version-gated id fields (unique_id, target_id, type, refcon).
+        if doc_version >= 131087 {
+            packer.unpack_num();
+            packer.unpack_num();
+            if doc_version >= 131088 { packer.unpack_num(); }
+            if doc_version >= 196610 { packer.unpack_num(); }
+        }
+
+        let url_len = packer.unpack_num();
+        if url_len > 0 {
+            // Consume the URL block so the next record aligns: 0x00 marker +
+            // hex-encoded size + 0x2C separator + `size` data bytes.
+            packer.consume_ptr_bytes();
+        }
+
+        // Drop degenerate records (e.g. the trailing url_image section
+        // misrouting) and convert to Director's 1-based inclusive range.
+        if end > start {
+            links.push((start + 1, end));
+        }
+    }
+    links
 }
 
 /// Parse Section 3 - Text Content
@@ -1041,6 +1104,41 @@ impl Packer {
     /// Unpack a single number from the packed data
     fn unpack_num(&mut self) -> i32 {
         self.unpack_num_debug(false)
+    }
+
+    /// Consume a packed pointer-bytes block and return its bytes (Paige
+    /// `pgUnpackPtrBytes`): a `0x00` marker, a hex-ASCII size, a `0x2C`
+    /// separator, then `size` raw data bytes. Used for hyperlink URL targets.
+    /// Returns the data bytes (may be empty) and advances `pos` past the block.
+    fn consume_ptr_bytes(&mut self) -> Vec<u8> {
+        if self.pos >= self.data.len() || self.data[self.pos] != 0 {
+            return Vec::new();
+        }
+        self.pos += 1; // 0x00 marker
+        // Hex-ASCII size (optional leading '-', digits 0-9/A-F).
+        let mut size: i32 = 0;
+        let mut negative = false;
+        if self.pos < self.data.len() && self.data[self.pos] == b'-' {
+            negative = true;
+            self.pos += 1;
+        }
+        while self.pos < self.data.len() {
+            let b = self.data[self.pos];
+            let digit = match b {
+                b'0'..=b'9' => (b - b'0') as i32,
+                b'A'..=b'F' => (b - b'A' + 10) as i32,
+                _ => break,
+            };
+            size = size * 16 + digit;
+            self.pos += 1;
+        }
+        if negative { size = -size; }
+        self.pos += 1; // 0x2C separator (the `+1` in PgUnpackHex's hexLen)
+        let size = size.max(0) as usize;
+        let end = (self.pos + size).min(self.data.len());
+        let bytes = self.data[self.pos..end].to_vec();
+        self.pos = end;
+        bytes
     }
 
     /// Debug version of unpack_num that can log details

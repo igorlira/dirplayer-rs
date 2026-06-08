@@ -14,6 +14,22 @@ impl PlayerDatumHandlers {
         match handler_name {
             "count" => Self::count(args),
             "cursor" => TypeHandlers::cursor(args),
+            // `_key.keyPressed()` — no-arg form returns the currently-pressed
+            // key character (Director 11.5: `_key.keyPressed() = SPACE`); the
+            // single-arg form `_key.keyPressed(charOrCode)` tests a specific
+            // key and is shared with the top-level `keyPressed()` builtin.
+            // parent_dialog's updateDialog (the key-rebind UI) calls the
+            // no-arg form: `nn = _key.keyPressed()`.
+            "keyPressed" | "keypressed" => {
+                if args.is_empty() {
+                    reserve_player_mut(|player| {
+                        let k = player.keyboard_manager.key_pressed();
+                        Ok(player.alloc_datum(Datum::String(k)))
+                    })
+                } else {
+                    crate::player::handlers::manager::BuiltInHandlerManager::key_pressed(args)
+                }
+            }
             _ => reserve_player_ref(|player| {
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,

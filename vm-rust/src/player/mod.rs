@@ -228,6 +228,17 @@ pub struct DirPlayer {
     pub title: String,
     pub bg_color: ColorRef,
     pub stage_draw_rect: Option<[f64; 4]>,
+    /// Persistent script-owned stage framebuffer for "imaging Lingo" movies
+    /// that draw directly into `(the stage).image` (e.g. spectral-wizard).
+    /// Created lazily on first `(the stage).image` access and returned as the
+    /// same BitmapRef every call, so a cached `theStage = (the stage).image`
+    /// keeps accumulating draws. `None` until first access.
+    pub stage_image: Option<bitmap::manager::BitmapRef>,
+    /// Set true once a draw op (copyPixels/fill/etc.) targets `stage_image`.
+    /// Only then does the renderer composite it over the sprite output —
+    /// this keeps read-only camera-capture movies (which never draw) on the
+    /// old per-call snapshot behavior.
+    pub stage_image_dirty: bool,
     pub center_stage: bool,
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
@@ -467,6 +478,8 @@ impl DirPlayer {
             title: "".to_string(),
             bg_color: ColorRef::Rgb(0, 0, 0),
             stage_draw_rect: None,
+            stage_image: None,
+            stage_image_dirty: false,
             center_stage: true,
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
@@ -1005,6 +1018,19 @@ impl DirPlayer {
         // Always advance logic (scripts, behaviors)
         self.next_frame = None;
         self.movie.current_frame = next_frame;
+
+        // Leaving a frame drops the "imaging Lingo" stage overlay. An imaging
+        // engine (spectral-wizard) draws its game/menu/worldmap into
+        // `(the stage).image` on ONE looping frame (`go(the frame)` keeps the
+        // same frame → overlay persists). When it actually changes frames —
+        // e.g. Game Over does `go("highscore")` to a sprite-based frame — the
+        // stale game framebuffer would otherwise keep compositing over the new
+        // frame's sprites (a black screen). Clear the dirty flag on a real
+        // frame change; the next frame re-dirties it only if it draws into the
+        // stage image again.
+        if prev_frame != next_frame {
+            self.stage_image_dirty = false;
+        }
 
         // NOTE: Filmloop frames are advanced solely by update_filmloop_frames() in the main loop.
         // Do NOT call advance_filmloop_frames() here - it would cause double advancement since
@@ -3950,10 +3976,20 @@ pub async fn run_single_frame() -> (bool, bool) {
 fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
     let (mx, my) = player.mouse_loc;
     let sprite_num = match score::get_sprite_at(player, mx, my, false) {
-        Some(n) => n,
+        Some(n) => n as i16,
         None => return -1,
     };
-    let sprite = match player.movie.score.get_sprite(sprite_num as i16) {
+    compute_char_at(player, sprite_num, mx, my)
+}
+
+/// Shared core for `the mouseChar` and the `pointToChar()` builtin. Returns the
+/// 1-based character index within `sprite_num`'s text/field member at the stage
+/// coordinate `(mx, my)`, or -1 if the sprite holds no text/field member, the
+/// point is outside the sprite's rect, or it falls past the end of the text.
+/// Matches the Director 11.5 Scripting Dictionary `pointToChar()` contract
+/// ("returns -1 if the point is not within the text").
+pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32) -> i32 {
+    let sprite = match player.movie.score.get_sprite(sprite_num) {
         Some(s) => s,
         None => return -1,
     };
@@ -3973,13 +4009,13 @@ fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
     // mean clicks were resolved against system Arial widths while the
     // renderer drew with the field's PFR Arial. The two layouts diverged
     // by enough to land Fugue No.4 clicks on the wrong underlined run.
-    let (text, line_spacing, top_spacing, wrap_width, scroll_top, word_wrap, font_name, font_size, formatting_runs) =
+    let (text, line_spacing, top_spacing, wrap_width, scroll_top, word_wrap, font_name, font_size, formatting_runs, is_text) =
         match &member.member_type {
             CastMemberType::Field(f) => (
                 f.text.clone(), f.fixed_line_space, f.top_spacing,
                 f.width as i32, f.scroll_top as i32, f.word_wrap,
                 f.font.clone(), f.font_size,
-                f.formatting_runs.clone(),
+                f.formatting_runs.clone(), false,
             ),
             CastMemberType::Text(t) => (
                 t.text.clone(), t.fixed_line_space, t.top_spacing,
@@ -3987,7 +4023,7 @@ fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
                 t.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0),
                 t.word_wrap,
                 t.font.clone(), t.font_size,
-                Vec::new(),
+                Vec::new(), true,
             ),
             _ => return -1,
         };
@@ -4004,7 +4040,7 @@ fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
     // through `member`) before we touch `player.font_manager` /
     // `player.bitmap_manager` mutably below.
     drop(member);
-    let rect = score::get_sprite_rect_in_context(player, sprite_num as i16);
+    let rect = score::get_sprite_rect_in_context(player, sprite_num);
     let local_x = mx - rect.0 as i32;
     let local_y = my - rect.1 as i32;
     if local_x < 0 || local_y < 0
@@ -4220,10 +4256,31 @@ fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
         }
         chosen_idx
     } else {
+        // Text members render via the native (Canvas2D) path, where the line
+        // STEP is `fixedLineSpace` itself when set (see
+        // render_native_text_to_bitmap: `effective_line_height = fixed_line_space`),
+        // NOT `font_size + fixedLineSpace`. Passing line_spacing on top of the
+        // font-derived line height (as fields/bitmap path want) double-counts
+        // and makes the y→line mapping drift by a full item per few lines —
+        // e.g. spectral-wizard's help_menu mapped a bottom-of-list hover to a
+        // mid-list link. So for text members override line_height to the native
+        // value and zero the extra spacing.
+        let (line_height_override, eff_line_spacing) = if is_text {
+            let lh: u16 = if line_spacing > 0 {
+                line_spacing
+            } else if font.font_size > 0 {
+                font.font_size
+            } else {
+                font.char_height
+            };
+            (Some(lh), 0u16)
+        } else {
+            (None, line_spacing)
+        };
         let params = crate::player::font::DrawTextParams {
             font: &font,
-            line_height: None,
-            line_spacing,
+            line_height: line_height_override,
+            line_spacing: eff_line_spacing,
             top_spacing,
             char_spacing: 0,
             member_width: if word_wrap && wrap_width > 0 { Some(wrap_width as i16) } else { None },

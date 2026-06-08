@@ -468,6 +468,12 @@ pub async fn player_set_obj_prop(
             // TODO should we really pass a clone of the value here?
             CastMemberRefHandlers::set_prop(&member_ref, prop_name, value_clone)
         }
+        // `member.vertex[i].handle1 = point` etc. — write a sub-property of a
+        // vectorShape vertex reference straight back into the member.
+        Datum::VectorVertexRef(member_ref, index) => reserve_player_mut(|player| {
+            crate::player::handlers::datum_handlers::cast_member::vector_shape::VectorShapeMemberHandlers
+                ::set_vertex_ref_prop(player, &member_ref, index, prop_name, &value_clone)
+        }),
         Datum::Stage => reserve_player_mut(|player| set_stage_prop(player, &prop_name, value_ref)),
         Datum::BitmapRef(bitmap_ref) => reserve_player_mut(|player| {
             BitmapDatumHandlers::set_bitmap_ref_prop(player, bitmap_ref, prop_name, value_ref)
@@ -616,6 +622,13 @@ pub fn get_obj_prop(
         }
         Datum::CastMember(member_ref) => {
             let result = CastMemberRefHandlers::get_prop(player, &member_ref, prop_name)?;
+            Ok(player.alloc_datum(result))
+        }
+        // `member.vertex[i].handle1` etc. — read a sub-property of a
+        // vectorShape vertex reference (produced by getPropRef).
+        Datum::VectorVertexRef(member_ref, index) => {
+            let result = crate::player::handlers::datum_handlers::cast_member::vector_shape::VectorShapeMemberHandlers
+                ::get_vertex_ref_prop(player, &member_ref, index, prop_name)?;
             Ok(player.alloc_datum(result))
         }
         Datum::ScriptInstanceRef(script_instance_id) => {
