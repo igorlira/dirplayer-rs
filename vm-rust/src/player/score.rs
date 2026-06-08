@@ -577,20 +577,33 @@ impl Score {
                         // Just clear the exited flag so they remain active.
                         sprite.exited = false;
                         false
-                    } else {
-                        // Non-puppet sprites that EXITED their span are cleaned up
-                        // regardless of visibility. The previous `if sprite.visible`
-                        // gate left an invisible exited sprite with its stale
-                        // behavior instance + `entered`/`exited` flags, so on
-                        // re-entry its span never re-entered and beginSprite never
-                        // re-fired. spectral-wizard's Help scroll bar hides sprite
-                        // 15 (`sprite(15).visible = 0`) for short pages; on the
-                        // second visit that sprite kept its first-visit instance
-                        // (myState=#done), so its InstallElement was skipped and the
-                        // shared `ourMaxScroll` stayed empty → CustomScrollbar_SetScroll
-                        // crashed on `ourMaxScroll[1]`. Visibility is independent of
-                        // span membership, so an exited sprite must reset either way.
+                    } else if sprite.visible {
+                        // Visible non-puppet sprite leaving its span → full reset.
                         sprite.reset();
+                        true
+                    } else {
+                        // Invisible non-puppet exited sprite: clear ONLY the
+                        // behavior lifecycle (instances + entered/exited) so a
+                        // re-entered span re-creates the behavior and re-fires
+                        // beginSprite — but PRESERVE the visual state (visible,
+                        // member, loc). A full reset() forces `visible = true`
+                        // and drops the member, which is wrong here for two
+                        // reasons:
+                        //  - spectral-wizard's Help scroll bar hides sprite 15
+                        //    (`sprite(15).visible = 0`) for short pages; on the
+                        //    second visit its stale first-visit instance lingered
+                        //    (myState=#done), InstallElement was skipped, and the
+                        //    shared `ourMaxScroll` stayed empty → SetScroll crashed
+                        //    on `ourMaxScroll[1]`. It needs the lifecycle cleared.
+                        //  - Pinball keeps its flipper-frame sprites deliberately
+                        //    hidden until interaction; forcing them visible drew
+                        //    every animation frame at once. It needs `visible=0`
+                        //    preserved.
+                        // Clearing the lifecycle satisfies the first; preserving
+                        // the visual state satisfies the second.
+                        sprite.script_instance_list.clear();
+                        sprite.entered = false;
+                        sprite.exited = false;
                         true
                     }
                 };
