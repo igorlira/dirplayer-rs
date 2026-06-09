@@ -960,6 +960,17 @@ impl FontMemberHandlers {
         // caret/selection overlay can place rects in the same positions later.
         let mut line_positions: Vec<(f64, f64)> = Vec::new();
 
+        // Per-styled-run color regions, in logical (1x) coords. The canvas is
+        // drawn at 2x via ctx.scale, and output pixel (cx,cy) maps back to
+        // logical (cx,cy), so these rects can be matched directly against
+        // output pixels in the downscale below. This lets each STXT run keep
+        // its own color (the red "- 50 POINTS - Get Stung!" line in SpongeBob's
+        // Scoring field) instead of the whole field using one color. Font
+        // size/face/bold/italic/underline are already per-segment (set_font /
+        // underline above); only color needed this per-pixel routing because
+        // the text is rendered white-on-black for coverage.
+        let mut seg_color_rects: Vec<(f64, f64, f64, f64, (u8, u8, u8))> = Vec::new();
+
         let mut y = top_spacing.max(0) as f64;
         let mut prev_par_idx: Option<u16> = None;
         for line in &lines {
@@ -1057,6 +1068,17 @@ impl FontMemberHandlers {
                 // Always render in WHITE on the black canvas for coverage measurement
                 ctx.set_fill_style_str("rgb(255,255,255)");
                 let _ = ctx.fill_text(&segment.text, x, y);
+
+                // Record this segment's color region (logical coords, baseline
+                // is "top" so the glyph cell is [y, y+size_px]) for per-run
+                // color lookup during the downscale.
+                seg_color_rects.push((
+                    x,
+                    x + segment.width,
+                    y,
+                    y + segment.style.size_px,
+                    segment.style.color,
+                ));
 
                 if segment.style.underline {
                     let underline_y = y + segment.style.size_px - 1.0;
@@ -1199,9 +1221,19 @@ impl FontMemberHandlers {
                 // background = transparent (preserved from bitmap pre-fill).
                 let dest_idx = (dest_y as usize * bitmap.width as usize + dest_x as usize) * 4;
                 if dest_idx + 3 < bitmap.data.len() {
-                    let fg_r = spans.first().and_then(|s| s.style.color).map(|c| ((c >> 16) & 0xFF) as u8).unwrap_or(0);
-                    let fg_g = spans.first().and_then(|s| s.style.color).map(|c| ((c >> 8) & 0xFF) as u8).unwrap_or(0);
-                    let fg_b = spans.first().and_then(|s| s.style.color).map(|c| (c & 0xFF) as u8).unwrap_or(0);
+                    // Per-run color: find the styled segment covering this
+                    // pixel (output coords == logical coords). segment.style.color
+                    // already folds in the field default for runs with no
+                    // explicit color, so unmatched pixels fall back to it too.
+                    let (fg_r, fg_g, fg_b) = {
+                        let fx = cx as f64;
+                        let fy = cy as f64;
+                        seg_color_rects
+                            .iter()
+                            .find(|&&(x0, x1, yt, yb, _)| fx >= x0 && fx < x1 && fy >= yt && fy < yb)
+                            .map(|&(_, _, _, _, c)| c)
+                            .unwrap_or(fallback_color)
+                    };
                     bitmap.data[dest_idx] = fg_r;
                     bitmap.data[dest_idx + 1] = fg_g;
                     bitmap.data[dest_idx + 2] = fg_b;
