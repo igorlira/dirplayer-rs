@@ -268,6 +268,16 @@ impl ScriptDatumHandlers {
                 };
 
             player_handle_scope_return(&result_scope);
+            // Director's `new()` returns the new child instance. The `on new`
+            // handler conventionally ends with `return me`, but if it falls off
+            // the end without returning a value (VOID), Director still returns the
+            // instance — NOT VOID. Only an explicit non-void return overrides.
+            // (SpongeBob "JellyFishin'" nav object: `on new me, targetMovie`
+            // has no `return me`, so navMovieObj was VOID and gotoExitPage /
+            // gotoMainMovieAgain dispatched on Void.)
+            if matches!(result_scope.return_value, DatumRef::Void) {
+                return Ok(datum_ref);
+            }
             return Ok(result_scope.return_value);
         } else {
             return Ok(datum_ref);

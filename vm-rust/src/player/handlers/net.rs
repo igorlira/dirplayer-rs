@@ -114,6 +114,24 @@ impl NetHandlers {
         })
     }
 
+    /// `netStatus msgString` — Director 11.5 Scripting Dictionary: a Command
+    /// that displays `msgString` in the status area of the browser window, and
+    /// "doesn't work in projectors". Modern browsers ignore `window.status`, so
+    /// there is no real status area to write to; we honor the documented VOID
+    /// return and treat it as a no-op (logged at debug for diagnostics — movies
+    /// like SpongeBob "JellyFishin'" call it once per download-progress tick to
+    /// surface "Download N% Complete").
+    pub fn net_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if let Some(msg_ref) = args.get(0) {
+                if let Ok(msg) = player.get_datum(msg_ref).string_value() {
+                    log::debug!("netStatus: {}", msg);
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn net_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let task_id = args

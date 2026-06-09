@@ -315,6 +315,22 @@ impl JsApi {
     /// Collects all chunk IDs that are transitive descendants of `root_id` in the KeyTable,
     /// plus root_id itself. This walks the parent→children relationship recursively:
     /// KeyTable entries map section_id (child) → cast_id (parent).
+    /// Movie-wide structural chunks that belong to the movie, not to any cast.
+    ///
+    /// In a RIFX file the movie-root owner id (1024) is *also* the first
+    /// internal cast's id, and these chunks are owned by 1024. Walking a
+    /// cast's KeyTable descendants from `cast.id` therefore sweeps them up,
+    /// which made `get_movie_top_level_chunks` exclude the entire movie (it
+    /// left only the ownerless ILS/KEY* — SpongeBob "JellyFishin'"). Treating
+    /// these fourccs as never-cast-content keeps them in the movie view and
+    /// out of the cast views.
+    fn is_movie_level_fourcc(fourcc: u32) -> bool {
+        matches!(
+            fourcc_to_string(fourcc).trim(),
+            "DRCF" | "VWCF" | "MCsL" | "Sord" | "VWFI" | "VWLB" | "VWSC" | "FXmp" | "XTRl" | "ccl"
+        )
+    }
+
     fn collect_cast_descendants(
         root_id: u32,
         children_map: &HashMap<u32, Vec<u32>>,
@@ -411,6 +427,17 @@ impl JsApi {
             cast_chunk_ids.insert(*section_id);
         }
 
+        // Drop movie-level structural chunks that got swept in via the
+        // owner-id-1024 collision (see is_movie_level_fourcc) so they don't
+        // show up under this cast.
+        cast_chunk_ids.retain(|id| {
+            chunk_container
+                .chunk_info
+                .get(id)
+                .map(|ci| !Self::is_movie_level_fourcc(ci.fourcc))
+                .unwrap_or(true)
+        });
+
         // Emit all chunks that belong to this cast
         for chunk_id in &cast_chunk_ids {
             let chunk_info = match chunk_container.chunk_info.get(chunk_id) {
@@ -481,6 +508,18 @@ impl JsApi {
                 cast_section_ids.insert(*section_id);
             }
         }
+
+        // Don't exclude movie-level structural chunks (config, score, cast
+        // list, etc.). They're owned by the movie-root id 1024 which collides
+        // with the first cast's id, so the descendant walk above wrongly
+        // captured them — leaving the movie view with only ILS/KEY*.
+        cast_section_ids.retain(|id| {
+            chunk_container
+                .chunk_info
+                .get(id)
+                .map(|ci| !Self::is_movie_level_fourcc(ci.fourcc))
+                .unwrap_or(true)
+        });
 
         // Build owner_map from KeyTable
         let owner_map: HashMap<u32, u32> = key_table

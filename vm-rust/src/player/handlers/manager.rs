@@ -1027,6 +1027,7 @@ impl BuiltInHandlerManager {
             "rect" => TypeHandlers::rect(args),
             "getstreamstatus" => NetHandlers::get_stream_status(args),
             "neterror" => NetHandlers::net_error(args),
+            "netstatus" => NetHandlers::net_status(args),
             "nettextresult" => NetHandlers::net_text_result(args),
             "postnettext" => NetHandlers::post_net_text(args),
             "rgb" => TypeHandlers::rgb(args),
