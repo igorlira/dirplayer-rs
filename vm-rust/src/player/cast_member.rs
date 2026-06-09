@@ -2639,6 +2639,94 @@ impl CastMemberType {
     }
 }
 
+/// Decode an RTE member's RTE2 pre-rendered bitmap into 32-bit RGBA.
+///
+/// Format (matches ScummVM's Director `RTE2::createSurface`):
+/// - Header: width (BE u16), height (BE u16), bpp (BE u16, =4), flags (2) = 8B.
+/// - Body, scanned per row left-to-right. Each step reads a `check` byte:
+///   - `check == 0x1f`: color-change escape — the next 3 bytes are r,g,b for
+///     subsequent pixels.
+///   - otherwise alpha = `check * 255 / max` where `max = (1<<bpp)-1` (15).
+///     - if `check == 0` or `check == max` (the run-coded extremes): read a
+///       `count` byte and emit `count` pixels of that alpha. The special
+///       `check==0, count==0` means end-of-line (rest stays transparent).
+///     - else (intermediate alpha): a single pixel.
+///
+/// `fg` is the default foreground color (from the cast member's info); inline
+/// `0x1f` escapes override it. Returns (width, height, rgba) or None.
+fn decode_rte2_bitmap(data: &[u8], fg: (u8, u8, u8)) -> Option<(u16, u16, Vec<u8>)> {
+    if data.len() < 8 {
+        return None;
+    }
+    let w = ((data[0] as usize) << 8) | data[1] as usize;
+    let h = ((data[2] as usize) << 8) | data[3] as usize;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut bpp = ((data[4] as u32) << 8) | data[5] as u32;
+    if bpp == 0 || bpp > 8 {
+        bpp = 4;
+    }
+    let max = (1u32 << bpp) - 1;
+    let p = &data[8..];
+    let mut rgba = vec![0u8; w * h * 4];
+    let (mut r, mut g, mut b) = fg;
+    let mut i = 0usize;
+    for y in 0..h {
+        let mut x = 0usize;
+        while x < w {
+            if i >= p.len() {
+                break;
+            }
+            let check = p[i] as u32;
+            i += 1;
+            if check == 0x1f {
+                // Color-change escape: next 3 bytes are r,g,b.
+                if i + 2 < p.len() {
+                    r = p[i];
+                    g = p[i + 1];
+                    b = p[i + 2];
+                    i += 3;
+                }
+                continue;
+            }
+            let alpha = (check * 255 / max) as u8;
+            if check == 0 || check == max {
+                // Run-coded extreme: a count byte follows.
+                if i >= p.len() {
+                    break;
+                }
+                let count = p[i];
+                i += 1;
+                if count == 0 && check == 0 {
+                    // End of line — remaining pixels stay transparent.
+                    break;
+                }
+                for _ in 0..count {
+                    if x >= w {
+                        break;
+                    }
+                    let idx = (y * w + x) * 4;
+                    rgba[idx] = r;
+                    rgba[idx + 1] = g;
+                    rgba[idx + 2] = b;
+                    rgba[idx + 3] = alpha;
+                    x += 1;
+                }
+            } else {
+                // Intermediate alpha: single pixel.
+                let idx = (y * w + x) * 4;
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = alpha;
+                x += 1;
+            }
+        }
+    }
+    Some((w as u16, h as u16, rgba))
+}
+
 impl CastMember {
     fn chunk_type_name(c: &Chunk) -> &'static str {
         match c {
@@ -2658,6 +2746,8 @@ impl CastMember {
             Chunk::ScoreOrder(_) => "ScoreOrder",
             Chunk::TileList(_) => "TileList",
             Chunk::Text(_) => "Text",
+            Chunk::RteText(_) => "RteText",
+            Chunk::RteBitmap(_) => "RteBitmap",
             Chunk::Bitmap(_) => "Bitmap",
             Chunk::Palette(_) => "Palette",
             Chunk::Sound(_) => "Sound",
@@ -3699,7 +3789,7 @@ impl CastMember {
                 text_member.script_id = xmed_script_id;
                 text_member.member_script_ref = Some(CastMemberRef {
                     cast_lib: cast_lib as i32,
-                    cast_member: xmed_script_id as i32,
+                    cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                 });
             }
             return Some(CastMember {
@@ -4120,7 +4210,7 @@ impl CastMember {
         let xmed_member_script_ref = if xmed_script_id > 0 {
             Some(CastMemberRef {
                 cast_lib: cast_lib as i32,
-                cast_member: xmed_script_id as i32,
+                cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
             })
         } else {
             None
@@ -4556,7 +4646,7 @@ impl CastMember {
                     field_member.script_id = field_script_id;
                     field_member.member_script_ref = Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: field_script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     });
                 }
 
@@ -4613,7 +4703,7 @@ impl CastMember {
                         .map(|info| info.header.script_id)
                         .unwrap_or(0);
                     let member_script_ref = if script_id > 0 {
-                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: number as i32 })
                     } else { None };
                     debug!("Flash member {} is a Shape (via shape_info), script_id={}", number, script_id);
                     return CastMember {
@@ -4650,7 +4740,7 @@ impl CastMember {
                             .map(|info| info.header.script_id)
                             .unwrap_or(0);
                         let member_script_ref = if script_id > 0 {
-                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: number as i32 })
                         } else { None };
                         debug!("Flash member {} is actually a Shape! script_id={}", number, script_id);
                         return CastMember {
@@ -4906,7 +4996,7 @@ impl CastMember {
                     // Create the behavior script reference
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5023,7 +5113,7 @@ impl CastMember {
                 let member_script_ref = if script_id > 0 {
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5326,7 +5416,7 @@ impl CastMember {
                     let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5345,6 +5435,119 @@ impl CastMember {
                     script_id,
                     member_script_ref: behavior_script_ref,
                 })
+            }
+            MemberType::RTE => {
+                // Rich Text Editor cast member (Director type 12). Children:
+                // RTE0 = style runs (commonly empty), RTE1 = plain text,
+                // RTE2 = a pre-rendered anti-aliased bitmap. Director displays
+                // the RTE2 bitmap, so we decode it and surface the member as a
+                // Bitmap — that gives the exact authored visual (anti-aliased,
+                // correctly colored) AND reuses Bitmap members' existing
+                // cast-member-attached script support (header.script_id), so an
+                // `on mouseUp` navigation handler fires just like Field/Bitmap
+                // buttons. These scripts are not stored as separate Script cast
+                // members. Previously RTE fell through to `_` and became
+                // CastMemberType::Unknown, so the labels were invisible and the
+                // buttons dead (SpongeBob JellyFishin' "next"/"play"/
+                // "instructions").
+
+                let script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+                let member_script_ref = if script_id > 0 {
+                    Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
+                    })
+                } else {
+                    None
+                };
+
+                // Foreground color from cast info specific_data. Layout (34
+                // bytes): rect(0..8), pageRect(8..16), misc(16..25), then an
+                // RGB triple. RTE0 style runs are empty so this is the only
+                // color source. Default to white (visible) if absent.
+                let raw = chunk.specific_data_raw.as_slice();
+                let fg = if raw.len() >= 28 {
+                    (raw[25], raw[26], raw[27])
+                } else {
+                    (255, 255, 255)
+                };
+
+                let rte2 = member_def
+                    .children
+                    .iter()
+                    .find_map(|c| c.as_ref().and_then(|ch| ch.as_rte_bitmap()));
+
+                if let Some((w, h, rgba)) = rte2.and_then(|d| decode_rte2_bitmap(d, fg)) {
+                    let bitmap = Bitmap {
+                        width: w,
+                        height: h,
+                        bit_depth: 32,
+                        original_bit_depth: 32,
+                        data: rgba,
+                        palette_ref: PaletteRef::Default,
+                        matte: None,
+                        use_alpha: true,
+                        trim_white_space: false,
+                        was_trimmed: false,
+                        version: 0,
+                    };
+                    let image_ref = bitmap_manager.add_bitmap(bitmap);
+                    let info = crate::director::enums::BitmapInfo {
+                        width: w,
+                        height: h,
+                        // RTE members register top-left like text (reg point 0,0),
+                        // not bitmap-center, so the score sprite lands correctly.
+                        reg_x: 0,
+                        reg_y: 0,
+                        bit_depth: 32,
+                        use_alpha: true,
+                        ..Default::default()
+                    };
+                    debug!(
+                        "RTE member #{} name='{}' -> Bitmap {}x{} fg={:?} script_id={}",
+                        number,
+                        chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                        w, h, fg, script_id,
+                    );
+                    CastMemberType::Bitmap(BitmapMember {
+                        image_ref,
+                        reg_point: (0, 0),
+                        script_id,
+                        member_script_ref,
+                        info,
+                    })
+                } else {
+                    // No decodable RTE2 — fall back to a TextMember from RTE1
+                    // so text/clicks still work.
+                    let rte_text = member_def
+                        .children
+                        .iter()
+                        .find_map(|c| c.as_ref().and_then(|ch| ch.as_rte_text()))
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut text_member = TextMember::new();
+                    text_member.text = rte_text;
+                    if raw.len() >= 8 {
+                        let be = |i: usize| ((raw[i] as u16) << 8) | (raw[i + 1] as u16);
+                        let w = be(6).saturating_sub(be(2));
+                        let h = be(4).saturating_sub(be(0));
+                        if w > 0 { text_member.width = w; }
+                        if h > 0 { text_member.height = h; }
+                    }
+                    text_member.script_id = script_id;
+                    text_member.member_script_ref = member_script_ref;
+                    debug!(
+                        "RTE member #{} name='{}' (no RTE2) -> TextMember text='{}' script_id={}",
+                        number,
+                        chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                        text_member.text, script_id,
+                    );
+                    CastMemberType::Text(text_member)
+                }
             }
             _ => {
                 // Assuming `chunk.member_type` is an enum backed by a numeric ID

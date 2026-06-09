@@ -342,11 +342,25 @@ impl CastLib {
     }
 
     pub fn insert_member(&mut self, number: u32, member: CastMember) {
-        if let CastMemberType::Script(script_member) = &member.member_type {
+        // Which lctx script should we register under this member's slot, and as
+        // what type? A `Script` cast member registers its own script. A non-Script
+        // member (Field, Text, Bitmap, Button, Shape) may carry an ATTACHED script
+        // via `member_info.header.script_id` — Director lets `script("name")` and
+        // `new(script(...))` resolve to that attached script, and a movie can store
+        // a parent script AS a Field cast member (SpongeBob "JellyFishin'" stores
+        // its "hero parent" parent script as a Field). Register it at the member
+        // slot so `get_script_for_member(number)` finds it. (Member BEHAVIOR scripts
+        // for mouse events are dispatched separately via get_behavior_script_from_lctx.)
+        let registration: Option<(u32, ScriptType)> = match &member.member_type {
+            CastMemberType::Script(s) => Some((s.script_id, s.script_type)),
+            _ => member.get_script_id().map(|sid| (sid, ScriptType::Parent)),
+        };
+
+        if let Some((reg_script_id, reg_script_type)) = registration {
             let script_def = self
                 .lctx
                 .as_ref()
-                .and_then(|lctx| lctx.scripts.get(&script_member.script_id));
+                .and_then(|lctx| lctx.scripts.get(&reg_script_id));
 
             if let Some(script_def) = script_def {
                 let mut handler_names = Vec::new();
@@ -382,7 +396,7 @@ impl CastLib {
                     member_ref: cast_member_ref(self.number as i32, number as i32),
                     name: (&member.name).to_owned(),
                     chunk: script_def.clone(),
-                    script_type: script_member.script_type,
+                    script_type: reg_script_type,
                     handlers: handler_name_map,
                     handler_names,
                     properties: RefCell::new(properties),
