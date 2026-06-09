@@ -438,6 +438,7 @@ impl DirPlayer {
                 click_loc: (0,0),
                 frame_script_instance: None,
                 frame_script_member: None,
+                frame_script_span_start: None,
                 sound_device: String::new(),
             },
             net_manager: NetManager {
@@ -1970,16 +1971,20 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
             },
             "markerList" => {
+                // Director's `the markerList` is a property list keyed by FRAME
+                // NUMBER with the label as the value: `[23: "ts_i04", 232: "Skelly", …]`
+                // (not `["Skelly": 232]`). Keep that order so movie code that reads
+                // `the markerList` (frame → label) works.
                 let labels: Vec<_> = self.movie.score.frame_labels
                     .iter()
-                    .map(|fl| (fl.label.clone(), fl.frame_num))
+                    .map(|fl| (fl.frame_num, fl.label.clone()))
                     .collect();
                 let props: VecDeque<(DatumRef, DatumRef)> = labels
                     .into_iter()
-                    .map(|(label, frame_num)| {
-                        let label = self.alloc_datum(Datum::String(label));
+                    .map(|(frame_num, label)| {
                         let frame_num = self.alloc_datum(Datum::Int(frame_num));
-                        (label, frame_num)
+                        let label = self.alloc_datum(Datum::String(label));
+                        (frame_num, label)
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::PropList(props, false)))

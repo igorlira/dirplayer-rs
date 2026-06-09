@@ -311,6 +311,19 @@ impl Score {
             .and_then(|span| span.scripts.first().cloned());
     }
 
+    /// Start frame of the channel-0 (frame-script) span covering `frame`.
+    /// Identifies the span so the cached frame-script instance can be recreated
+    /// when the playhead crosses into a different span (even of the same behavior
+    /// member, which may carry different parameters).
+    pub fn get_frame_script_span_start(&self, frame: u32) -> Option<u32> {
+        self.sprite_spans
+            .iter()
+            .find(|span| {
+                span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame
+            })
+            .map(|span| span.start_frame)
+    }
+
     /// Create a behavior script instance.
     ///
     /// `default_cast_lib` is used to resolve cast_lib when it's 65535 or -1 (which means
@@ -1926,18 +1939,28 @@ impl Score {
             cast_lib: b.cast_lib as i32,
             cast_member: b.cast_member as i32,
         });
+        // Identity of the channel-0 span at this frame. The same behavior member can
+        // be dropped on several consecutive spans with different parameters (the Game
+        // Loop is `#Nonlooping` on the intro frames and `#CostumeChange`/`#Looping` on
+        // the gameplay frames). Tracking the span start lets us recreate + re-apply
+        // parameters when crossing a span boundary instead of carrying the previous
+        // span's stale `pType` (which made the gameplay `case pType of` fall through →
+        // no `go(the frame)` → the playhead marched through every frame to the end).
+        let new_span_start = self.get_frame_script_span_start(frame_num);
 
-        // Discard the cached instance if the script has changed or no longer applies.
-        // Without this, the previous-span's instance would linger when entering a new
-        // span, and `the frame` inside a different script's beginSprite would see stale state.
+        // Discard the cached instance if the script member OR the span changed (or it
+        // no longer applies). Without this, the previous span's instance lingers when
+        // entering a new span, keeping stale properties/parameters.
         let should_discard = reserve_player_ref(|player| {
             player.movie.frame_script_instance.is_some()
-                && player.movie.frame_script_member != new_script_member
+                && (player.movie.frame_script_member != new_script_member
+                    || player.movie.frame_script_span_start != new_span_start)
         });
         if should_discard {
             reserve_player_mut(|player| {
                 player.movie.frame_script_instance = None;
                 player.movie.frame_script_member = None;
+                player.movie.frame_script_span_start = None;
             });
         }
 
@@ -2039,10 +2062,12 @@ impl Score {
                     });
                 }
 
-                // Cache BOTH the instance and the member ref
+                // Cache the instance, member ref, AND the span it belongs to so we
+                // recreate (and re-apply params) when the playhead enters a new span.
                 reserve_player_mut(|player| {
                     player.movie.frame_script_instance = Some(actual_instance_ref);
                     player.movie.frame_script_member = Some(cast_member_ref);
+                    player.movie.frame_script_span_start = new_span_start;
                 });
 
                 debug!("✓ Frame script instance created and cached");
