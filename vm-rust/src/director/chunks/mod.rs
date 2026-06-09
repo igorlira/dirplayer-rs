@@ -73,6 +73,16 @@ pub enum Chunk {
     Score(ScoreChunk),
     ScoreOrder(SordChunk),
     Text(TextChunk),
+    /// Plain text of a Rich Text Editor (RTE) cast member, stored in the
+    /// member's RTE1 child chunk. RTE0 (style runs) is kept as Raw; the text
+    /// (RTE1) and the pre-rendered bitmap (RTE2) are surfaced via these
+    /// variants so the MemberType::RTE branch in cast_member.rs can build the
+    /// member.
+    RteText(String),
+    /// Pre-rendered anti-aliased bitmap of an RTE member (RTE2 chunk): an
+    /// 8-byte header (width/height BE u16 + flags) followed by a custom
+    /// row-RLE of 4-bit coverage values. Decoded in cast_member.rs.
+    RteBitmap(Vec<u8>),
     Bitmap(BitmapChunk),
     Palette(PaletteChunk),
     Sound(SoundChunk),
@@ -92,6 +102,20 @@ impl Chunk {
     pub fn as_text(&self) -> Option<&TextChunk> {
         match self {
             Self::Text(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn as_rte_text(&self) -> Option<&str> {
+        match self {
+            Self::RteText(data) => Some(data.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_rte_bitmap(&self) -> Option<&[u8]> {
+        match self {
+            Self::RteBitmap(data) => Some(data.as_slice()),
             _ => None,
         }
     }
@@ -258,6 +282,20 @@ pub fn make_chunk(
             return Ok(Chunk::SndSamples(view.clone()));
         }
         "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
+        "RTE1" => {
+            // Rich Text Editor text content — the raw text of an RTE member.
+            // Labels are typically ASCII; decode leniently and drop a trailing
+            // NUL terminator if present.
+            let mut text = String::from_utf8_lossy(view).into_owned();
+            if text.ends_with('\0') {
+                text.truncate(text.trim_end_matches('\0').len());
+            }
+            return Ok(Chunk::RteText(text));
+        }
+        "RTE2" => {
+            // RTE pre-rendered bitmap — keep raw; decoded in cast_member.rs.
+            return Ok(Chunk::RteBitmap(view.clone()));
+        }
         "BITD" => {
             return Ok(Chunk::Bitmap(BitmapChunk::read(
                 &mut chunk_reader,
