@@ -1121,17 +1121,21 @@ impl Score {
             }
         }
 
-        // D6+ per-frame MEMBER swap within a span. Some D6 movies "score-record"
-        // a sprite that changes its cast member every frame inside a single span
-        // — e.g. SpongeBob "JellyFishin'"'s instructions/controls text field
-        // (sprite 46) cycling members 36→37→38 across frames 36-39. The span
-        // system sets the member only at span entry, so without this the sprite
-        // is stuck on the first page. We update ONLY the member (not pos/size, to
-        // avoid disturbing tweens or Lingo-driven motion) when the current
-        // frame's delta names a different, non-empty member for an
-        // already-entered, non-puppet sprite. Runs after span entry so it also
-        // corrects the entry frame if the span picked a stale member.
-        if dir_version >= 600 {
+        // D6-ONLY per-frame MEMBER swap within a span. Some D6 movies
+        // "score-record" a sprite that changes its cast member every frame
+        // inside a single span — e.g. SpongeBob "JellyFishin'"'s instructions/
+        // controls text field (sprite 46) cycling members 36→37→38 across
+        // frames 36-39. In D6 the span system sets the member only at span
+        // entry, so without this the sprite is stuck on the first page. We
+        // update ONLY the member (not pos/size, to avoid disturbing tweens or
+        // Lingo-driven motion) when the current frame's delta names a
+        // different, non-empty member for an already-entered, non-puppet sprite.
+        //
+        // Restricted to D6 (==600): D7+ (e.g. dir_version 700, raw 1406) carry
+        // per-frame member changes inside the keyframe-bearing 52+ byte spans
+        // we now parse, so applying this delta-based swap there double-updates
+        // and fights the span data. Only D6 lacks those member keyframes.
+        if dir_version == 600 {
             let member_updates: Vec<(i16, CastMemberRef)> = self.channel_initialization_data
                 .iter()
                 .filter_map(|(frame_idx, channel_idx, data)| {
