@@ -2209,12 +2209,31 @@ impl WebGL2Renderer {
                                         Some(field_member.font.clone())
                                     }
                                 });
+                            // Per-run foreground color from the STXT run
+                            // (QuickDraw u16 channels → 8-bit). A pure-black
+                            // run (0,0,0) is Director's "unset/default" — leave
+                            // it None so it inherits the field's effective color
+                            // (sprite/member override, often navy). An explicit
+                            // non-black run color (e.g. the red "- 50 POINTS -
+                            // Get Stung!" line in SpongeBob's Scoring field)
+                            // overrides per-span. Packed 0xRRGGBB to match
+                            // HtmlStyle::color elsewhere.
+                            let run_color: Option<u32> = {
+                                let r = (run.color_r >> 8) as u32;
+                                let g = (run.color_g >> 8) as u32;
+                                let b = (run.color_b >> 8) as u32;
+                                if r == 0 && g == 0 && b == 0 {
+                                    None
+                                } else {
+                                    Some((r << 16) | (g << 8) | b)
+                                }
+                            };
                             spans.push(StyledSpan {
                                 text: span_text,
                                 style: HtmlStyle {
                                     font_face: span_font_face,
                                     font_size: span_font_size,
-                                    color: None,
+                                    color: run_color,
                                     bg_color: None,
                                     bold,
                                     italic,
