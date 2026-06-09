@@ -1211,7 +1211,7 @@ fn render_filmloop_from_channel_data(
 
                 // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
                 // 255 is treated as default/opaque (same as shape/vector paths)
-                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+                let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
@@ -1569,7 +1569,7 @@ fn render_filmloop_from_channel_data(
                     }),
                 );
 
-                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+                let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
 
                 // Mirror the Bitmap arm's flip handling so nested filmloops
                 // honor the child sprite's flipH/flipV bits.
