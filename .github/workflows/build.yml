@@ -12,28 +12,46 @@ permissions:
   statuses: write
 
 jobs:
-  # JOB 1: Jedes OS baut komplett unabhängig voneinander
   build-and-package:
-    name: Build (${{ matrix.os-name }})
+    name: Build (${{ matrix.os-name }} - ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # Verhindert, dass ein OS ein anderes abbricht!
+      fail-fast: false 
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
-            # Erzeugt getrennte Installer für x64, x86 (ia32) und ARM64
-            build-args: --win --x64 --ia32 --arm64
+            arch: x64
+            build-args: --win --x64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
+          - os: windows-latest
+            os-name: Windows
+            arch: arm64
+            build-args: --win --arm64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
+
+          # --- MACOS BUILDS (Als separate ZIPs, ohne universal-Zwang) ---
           - os: macos-latest
             os-name: macOS
-            # Erzeugt eine universelle ZIP-Datei (enthält x64 + ARM64), benötigt kein Signing
-            build-args: --mac zip --universal
+            arch: x64
+            build-args: --mac zip --x64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
+          - os: macos-latest
+            os-name: macOS
+            arch: arm64
+            build-args: --mac zip --arm64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
+
+          # --- LINUX BUILDS ---
           - os: ubuntu-latest
             os-name: Linux
-            # Erzeugt getrennte AppImages für x64 und ARM64 (.deb wurde entfernt)
-            build-args: --linux AppImage --x64 --arm64
+            arch: x64
+            build-args: --linux AppImage --x64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          - os: ubuntu-latest
+            os-name: Linux
+            arch: arm64
+            build-args: --linux AppImage --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
@@ -101,20 +119,18 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false # Verhindert Fehler wegen fehlender Mac-Zertifikate
+          CSC_IDENTITY_AUTO_DISCOVERY: false 
 
-      # Speichert alle erzeugten Einzelformate sicher bei GitHub ab
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dirplayer-builds-${{ matrix.os-name }}
+          name: dirplayer-builds-${{ matrix.os-name }}-${{ matrix.arch }}
           path: |
             dist/*.exe
             dist/*.zip
             dist/*.AppImage
           retention-days: 1
 
-  # JOB 2: Sammelt am Ende alles ein, was überlebt hat, und macht das Release
   create-release:
     name: Publish Multi-OS Release Draft
     needs: build-and-package
@@ -131,7 +147,6 @@ jobs:
       - name: Move files to flat directory
         run: |
           mkdir final-dist
-          # Findet alle .exe, .zip und .AppImage Dateien (für alle CPU-Typen einzeln)
           find release-artifacts/ -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
         shell: bash
 
