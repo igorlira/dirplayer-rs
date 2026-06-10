@@ -104,6 +104,7 @@ jobs:
           if [ -z "$TEST_ASSETS_URL" ]; then echo "Skipping assets: URL secret missing"; exit 0; fi
           curl -fSL "$TEST_ASSETS_URL" -o assets.zip
           unzip -qo assets.zip -d public/
+        shell: bash
 
       # Core Rust Engine Tests (From File #2)
       - name: Run Core Rust Unit Tests
