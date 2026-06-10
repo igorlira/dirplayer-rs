@@ -62,10 +62,11 @@ jobs:
         run: cargo install wasm-pack
         shell: bash
 
-      # Ruffle explicitly looks for specific native wasm-bindgen tools in system paths
+      # Installs the correct matching version AND explicitly forces it onto the GitHub system PATH
       - name: Install Ruffle Wasm Compiler Prerequisites
         run: |
-          cargo install wasm-bindgen-cli --version 0.2.120
+          cargo install wasm-bindgen-cli --version 0.2.108
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
         shell: bash
 
       - name: Set up Node.js
@@ -74,7 +75,7 @@ jobs:
           node-version: 20
           cache: npm
 
-      # System level tools for Linux packaging & headless image rendering
+      # Linux Setup
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -83,25 +84,22 @@ jobs:
           sudo fc-cache -fv
         shell: bash
 
-      # Native binary install for Mac via Homebrew
+      # Mac Setup
       - name: Install Mac System Dependencies
         if: matrix.os == 'macos-latest'
         run: brew install binaryen
         shell: bash
 
-      # Native binary install for Windows via Chocolatey
+      # Windows Setup (No more Choco! Uses npm package cleanly)
       - name: Install Windows System Dependencies
         if: matrix.os == 'windows-latest'
-        run: choco install binaryen
+        run: |
+          npm install -g wasm-opt
+          echo "$(npm config get prefix)" >> $GITHUB_PATH
         shell: bash
 
       - name: Install NPM Dependencies
         run: npm ci
-        shell: bash
-
-      # Verifies if wasm-opt is officially visible on the machine runner path
-      - name: Check Wasm Optimizer Path
-        run: wasm-opt --version
         shell: bash
 
       - name: Install Playwright Chromium (For E2E Testing)
