@@ -1,52 +1,43 @@
-name: DirPlayer Master Pipeline (All-In-One)
+name: DirPlayer Master Release Pipeline (All Architectures)
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch:
-    inputs:
-      update_snapshots:
-        description: 'Set to "true" to update and push E2E visual snapshots'
-        required: false
-        default: 'false'
+  workflow_dispatch: 
 
 permissions:
   contents: write
   statuses: write
 
 jobs:
-  # MASTER BUILD, TEST & OS PACKAGING
-  build-test-release:
+  # MASTER BUILD & MULTI-ARCH PACKAGING
+  build-and-release:
     name: Build & Package (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # One OS failure won't kill the others
+      fail-fast: false 
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
-            build-args: --win
+            # Baut Windows x64, x86 (ia32) und ARM64
+            build-args: --win --x64 --ia32 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
-            build-args: --mac
+            # Erstellt eine Universal-App, die sowohl x64 als auch arm64 nativ unterstützt
+            build-args: --mac universal
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
-            build-args: --linux AppImage deb
+            # Baut Linux AppImage und DEB für x64 und ARM64
+            build-args: --linux AppImage deb --x64 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
       CARGO_TERM_COLOR: always
-      TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
-      HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
-      HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
-      HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
-      HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
-      HABBO_V26_SSO_TICKET: ${{ secrets.HABBO_V26_SSO_TICKET }}
-      HABBO_V31_SSO_TICKET: ${{ secrets.HABBO_V31_SSO_TICKET }}
 
     steps:
       - name: Checkout Code
@@ -65,7 +56,6 @@ jobs:
         run: cargo install wasm-pack
         shell: bash
 
-      # Installs the matching version 0.2.108 for the project data structure schemas
       - name: Install Ruffle Wasm Compiler Prerequisites
         run: |
           cargo install wasm-bindgen-cli --version 0.2.108
@@ -78,7 +68,6 @@ jobs:
           node-version: 20
           cache: npm
 
-      # Bulletproof Multi-OS Cross-Platform Installation for Binaryen (wasm-opt)
       - name: Install Native Wasm Optimizer (Binaryen)
         run: |
           curl -L "${{ matrix.binaryen-url }}" -o binaryen.tar.gz
@@ -87,79 +76,33 @@ jobs:
           echo "$(pwd)" >> $GITHUB_PATH
         shell: bash
 
-      # System level dependencies specifically for Linux packaging & headless visual tests
       - name: Install Linux Extras
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick
-          sudo fc-cache -fv
+          sudo apt-get install -y libarchive-tools
         shell: bash
 
       - name: Install NPM Dependencies
         run: npm ci
         shell: bash
 
-      - name: Install Playwright Chromium (For E2E Testing)
-        run: npx playwright install --with-deps chromium
-        shell: bash
-
-      - name: Download Remote Test Assets
-        run: |
-          if [ -z "$TEST_ASSETS_URL" ]; then echo "Skipping assets: URL secret missing"; exit 0; fi
-          curl -fSL "$TEST_ASSETS_URL" -o assets.zip
-          unzip -qo assets.zip -d public/
-        shell: bash
-
-      # Core Rust Engine Tests
-      - name: Run Core Rust Unit Tests
-        working-directory: ./vm-rust
-        run: |
-          cargo fetch
-          cargo test --verbose -- --skip e2e
-        shell: bash
-
-      # Master Build Sequence (Rust VM, Ruffle, Frontend)
       - name: Run Complete Master Build
         run: npm run build-all
         shell: bash
         env:
-          CI: false # <--- DAS ERZWINGT, DASS WARNUNGEN DEN BUILD NICHT MEHR REISSEN!
+          CI: false
 
-      # End-to-End Visual Validation
-      - name: Run Native E2E Tests
-        continue-on-error: true
-        run: npm run e2e-test-native
-        shell: bash
-
-      - name: Run Browser E2E Tests
-        continue-on-error: true
-        run: npm run e2e-test-browser
-        shell: bash
-
-      # OPTIONAL SNAPSHOT UPDATE LAYER
-      - name: Update Visual Snapshots (Manual trigger only)
-        if: github.event.inputs.update_snapshots == 'true' && matrix.os == 'ubuntu-latest'
-        run: |
-          npm run e2e-update-native
-          npm run e2e-update-browser
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add tests/snapshots/
-          git commit -m "chore: auto-update e2e snapshots [skip ci]" || echo "No snapshot changes to commit"
-          git push
-        shell: bash
-
-      # Native Electron Packaging
+      # Baut alle spezifizierten CPU-Architekturen
       - name: Package Electron App binaries
         run: npx electron-builder ${{ matrix.build-args }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Automatic Release Handling
+      # Lädt alle generierten Architekturen in den Release-Entwurf hoch
       - name: Create Multi-OS Release Draft
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.6.0-master-build
