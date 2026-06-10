@@ -95,9 +95,19 @@ impl FlowControlBytecodeHandler {
             };
             let args: Vec<DatumRef> = arg_list_datum.to_list()?.iter().cloned().collect();
 
-            let mut handler_ref = script
-                .get_own_handler_ref_at(player.get_ctx_current_bytecode(&ctx).obj as usize)
-                .unwrap();
+            let handler_index = player.get_ctx_current_bytecode(&ctx).obj as usize;
+            let mut handler_ref = match script.get_own_handler_ref_at(handler_index) {
+                Some(h) => h,
+                None => {
+                    return Err(ScriptError::new(format!(
+                        "local_call: no own handler at index {} (script={}:{}, has {} handlers)",
+                        handler_index,
+                        script.member_ref.cast_lib,
+                        script.member_ref.cast_member,
+                        script.handler_names.len()
+                    )));
+                }
+            };
             let handler_name = &handler_ref.1;
 
             // if first arg is a script or script instance and has a handler by the same name
@@ -243,7 +253,7 @@ impl FlowControlBytecodeHandler {
         // object referenced by the symbol. The first arg is typically a symbol that
         // needs to be resolved to a global variable to find the actual object.
         // Stack: [..., ArgList([receiver, args...]), Symbol(handlerName)]
-        let (obj_ref, handler_name, args, is_no_ret) = reserve_player_mut(|player| {
+        let (obj_ref, handler_name, args, is_no_ret, route_to_global) = reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             let handler_name_ref = scope.stack.pop().ok_or_else(|| ScriptError::new("obj_call_v4: stack underflow (handler name)".to_string()))?;
             let arg_list_ref = scope.stack.pop().ok_or_else(|| ScriptError::new("obj_call_v4: stack underflow (arg list)".to_string()))?;
@@ -268,9 +278,33 @@ impl FlowControlBytecodeHandler {
                 }
             }
 
-            Ok((obj, handler_name, args, is_no_ret))
+            // Decide whether this is a real method call (receiver is a script
+            // object) or the D4 `name(receiver, ..)` form of a MOVIE HANDLER
+            // call where the first arg just happens to be the receiver. Director
+            // gives a movie handler priority when the receiver isn't an object
+            // with that method. hackey's `vector(HERE, there)` compiles to
+            // ObjCallV4 with HERE (a list) as receiver, but `vector` is a movie
+            // handler (`on vector HERE, there`) — calling it as a list method
+            // failed with "No handler vector for list datum".
+            let is_object_receiver = matches!(
+                player.get_datum(&obj),
+                Datum::ScriptInstanceRef(_) | Datum::ScriptRef(_)
+            );
+            let route_to_global = !is_object_receiver
+                && crate::player::player_global_handler_exists(player, &handler_name);
+
+            Ok((obj, handler_name, args, is_no_ret, route_to_global))
         })?;
-        let result = player_call_datum_handler(&obj_ref, &handler_name, &args).await?;
+        let result = if route_to_global {
+            // Movie-handler call: pass the receiver as the first argument so
+            // `on vector HERE, there` receives (HERE, there).
+            let mut full_args = Vec::with_capacity(args.len() + 1);
+            full_args.push(obj_ref.clone());
+            full_args.extend(args.iter().cloned());
+            crate::player::player_call_global_handler(&handler_name, &full_args).await?
+        } else {
+            player_call_datum_handler(&obj_ref, &handler_name, &args).await?
+        };
         reserve_player_mut(|player| {
             player.last_handler_result = result.clone();
             if !is_no_ret {

@@ -129,6 +129,10 @@ pub struct Score {
     pub keyframes_cache: Arc<HashMap<u16, ChannelKeyframes>>,
     /// Sprite detail behaviors indexed by spriteListIdx (D6+)
     pub sprite_details: HashMap<u32, crate::director::chunks::score::SpriteDetailInfo>,
+    /// User-defined tile patterns (VWTL). Shape `pattern` 57-64 maps to index
+    /// 0-7; a non-zero `member` overrides the built-in tile with a region of
+    /// that bitmap cast member (e.g. employee's blue/white checker background).
+    pub custom_tiles: Vec<crate::director::chunks::tile_list::TilePatternEntry>,
     /// Track the last frame where we cleared sound triggers (to prevent double-clearing)
     pub last_sound_clear_frame: Option<u32>,
     /// D5 movies need per-frame sprite property updates from channel_initialization_data
@@ -254,6 +258,7 @@ impl Score {
             sound_channel_triggered: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
             sprite_details: HashMap::new(),
+            custom_tiles: Vec::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
             channels_with_frame_interval_spans: HashSet::new(),
@@ -857,6 +862,7 @@ impl Score {
 
                 // Reset size flags when sprite re-enters.
                 sprite.has_size_tweened = false;
+                sprite.explicit_lingo_size = false;
                 let has_explicit_size = data.width != 0 || data.height != 0;
                 sprite.has_size_changed = has_explicit_size;
                 // Score data dimensions are authoritative - dont let bitmap intrinsic
@@ -941,6 +947,56 @@ impl Score {
                 sprite.trails = data.trails;
                 sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = convert_raw_blend(data.blend, dir_version);
+
+                // Attach a sprite-script behavior that appears mid-span. D5
+                // sprites can change member per frame and bring a scriptId with
+                // them; begin_sprites only attaches at span-enter (using the
+                // span's START frame data), so a script that shows up on a
+                // later frame would never bind. 'hackeys clickbutton (script 13,
+                // `on mouseDown` → click=3) appears on channel 6 at frame 2
+                // when the channel switches from member 21 to member 22+script
+                // 13 — without this, clicking never registers and the kick
+                // never fires. Guarded against re-attachment because the
+                // per-frame deltas re-fire every loop of `go the frame`.
+                if dir_version < 600 && data.sprite_list_idx_lo != 0 {
+                    let script_cast_lib = if data.sprite_list_idx_hi == 0
+                        || data.sprite_list_idx_hi == 65535 {
+                        1
+                    } else {
+                        data.sprite_list_idx_hi as i32
+                    };
+                    let script_member = data.sprite_list_idx_lo as i32;
+                    let script_ref = CastMemberRef {
+                        cast_lib: script_cast_lib,
+                        cast_member: script_member,
+                    };
+                    let already_attached = reserve_player_ref(|player| {
+                        self.get_sprite(sprite_num).map_or(false, |s| {
+                            s.script_instance_list.iter().any(|inst_ref| {
+                                player.allocator.get_script_instance(inst_ref).script == script_ref
+                            })
+                        })
+                    });
+                    if !already_attached {
+                        if let Some((instance_ref, _datum)) =
+                            Self::create_behavior(script_cast_lib, script_member, None)
+                        {
+                            reserve_player_mut(|player| {
+                                let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
+                                let _ = script_set_prop(
+                                    player,
+                                    &instance_ref,
+                                    &"spriteNum".to_string(),
+                                    &sprite_num_ref,
+                                    false,
+                                );
+                            });
+                            self.get_sprite_mut(sprite_num)
+                                .script_instance_list
+                                .push(instance_ref);
+                        }
+                    }
+                }
             }
         }
 
@@ -2650,8 +2706,13 @@ impl Score {
     fn generate_sprite_spans_from_channel_data(&mut self, dir_version: u16) {
         use std::collections::HashMap;
 
-        // Group by channel: find min/max frame for each channel with data
-        let mut channel_frames: HashMap<u32, (u32, u32)> = HashMap::new();
+        // Collect the exact frames each channel actually holds a sprite. We do
+        // NOT collapse to min/max — a channel is commonly reused by different
+        // sprites with EMPTY frames in between (sprite A in 1-10, nothing in
+        // 11-20, sprite B in 21-30). A single 1-30 span would keep the sprite
+        // visible across the 11-20 gap (norman shows sprites that shouldn't be
+        // on the frame). Instead build one span per CONTIGUOUS run of frames.
+        let mut channel_frames: HashMap<u32, Vec<u32>> = HashMap::new();
 
         // Collect frame script data (channel 0) separately
         // Each frame may have a different script, so we track per-frame
@@ -2679,29 +2740,29 @@ impl Score {
 
             let channel_number = get_channel_number_from_index(*channel_idx as u32);
             let frame_num = *frame_idx + 1; // frame_idx is 0-based, frames are 1-based
-
-            channel_frames
-                .entry(channel_number)
-                .and_modify(|(min_frame, max_frame)| {
-                    if frame_num < *min_frame {
-                        *min_frame = frame_num;
-                    }
-                    if frame_num > *max_frame {
-                        *max_frame = frame_num;
-                    }
-                })
-                .or_insert((frame_num, frame_num));
+            channel_frames.entry(channel_number).or_default().push(frame_num);
         }
 
-        // Create sprite spans for each channel
-        for (channel_number, (start_frame, end_frame)) in channel_frames {
-            let sprite_span = ScoreSpriteSpan {
-                channel_number,
-                start_frame,
-                end_frame,
-                scripts: Vec::new(), // Filmloop sprites don't have behavior scripts in this context
-            };
-            self.sprite_spans.push(sprite_span);
+        // Create a sprite span for each contiguous run of frames per channel.
+        for (channel_number, mut frames) in channel_frames {
+            frames.sort_unstable();
+            frames.dedup();
+            let mut i = 0;
+            while i < frames.len() {
+                let start_frame = frames[i];
+                let mut end_frame = start_frame;
+                while i + 1 < frames.len() && frames[i + 1] == end_frame + 1 {
+                    end_frame = frames[i + 1];
+                    i += 1;
+                }
+                self.sprite_spans.push(ScoreSpriteSpan {
+                    channel_number,
+                    start_frame,
+                    end_frame,
+                    scripts: Vec::new(),
+                });
+                i += 1;
+            }
         }
 
         // Create frame script spans (channel 0)
@@ -2893,6 +2954,9 @@ impl Score {
     }
 
     pub fn load_from_dir(&mut self, dir: &DirectorFile) {
+        self.custom_tiles = dir.tile_list.as_ref()
+            .map(|t| t.tiles.clone())
+            .unwrap_or_default();
         let frame_labels_chunk = dir.frame_labels.as_ref();
         if frame_labels_chunk.is_some() {
             self.frame_labels = frame_labels_chunk.unwrap().labels.clone();
@@ -3186,8 +3250,16 @@ pub fn sprite_get_prop(
         }))),
         "castNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| {
-                CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
-                    as i32
+                // Director 4 predates multiple cast libraries: `the castNum of
+                // sprite` is the bare member number, and scripts round-trip it
+                // through `cast <n>` (e.g. the Animator behavior). D5+ uses the
+                // slot-encoded value (cast_lib << 16 | member).
+                if player.movie.dir_version < 500 {
+                    y.cast_member
+                } else {
+                    CastMemberRefHandlers::get_cast_slot_number(y.cast_lib as u32, y.cast_member as u32)
+                        as i32
+                }
             })
         }))),
         "scriptNum" => {
@@ -3816,6 +3888,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.width = value?;
                 sprite.has_size_changed = true;
+                // Explicit Lingo size is authoritative — bypass the bbox
+                // heuristic and the bitmap-owned-size override.
+                sprite.explicit_lingo_size = true;
+                sprite.bitmap_size_owned_by_sprite = false;
                 Ok(())
             },
         ),
@@ -3825,6 +3901,8 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.height = value?;
                 sprite.has_size_changed = true;
+                sprite.explicit_lingo_size = true;
+                sprite.bitmap_size_owned_by_sprite = false;
                 Ok(())
             },
         ),
@@ -4043,6 +4121,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                             }
                         }
                         sprite.has_size_changed = false;
+                        // A `member` assignment that resets to intrinsic size
+                        // also clears any prior explicit Lingo sizing.
+                        sprite.explicit_lingo_size = false;
                     }
                 }
 
@@ -4817,7 +4898,27 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             //  4. Neither flag set  → dimensions are inherited/default and may be
             //     an approximate bounding box. Apply heuristics to decide.
 
-            let (sprite_width, sprite_height, _size_path) = if sprite.has_size_tweened {
+            let (sprite_width, sprite_height, _size_path) = if sprite.explicit_lingo_size
+                && sprite.width > 0 && sprite.height > 0 {
+                // A Lingo script explicitly set `the width/height of sprite`.
+                // This is authoritative: use it verbatim and skip every
+                // bbox/sentinel heuristic below (those exist to disambiguate
+                // SCORE-authored sizes, which can be approximate). hackey's
+                // pseudo-3D `Translate` scales sprites by distance with
+                // integer-rounded proportional dims — the rounding made them
+                // look non-proportional, so the bbox catch-all wrongly snapped
+                // them back to the bitmap's native size and nothing shrank.
+                (sprite.width, sprite.height, "LINGO_EXPLICIT")
+            } else if sprite.width <= 2
+                && sprite.height <= 2 && bitmap_width >= 4 && bitmap_height >= 4 {
+                // Degenerate "use natural size" sentinel: a 1x1 / 2x2 score box
+                // on a real bitmap is never an intentional display size.
+                // Handled before the aspect-based bbox tests, which miss it for
+                // SQUARE bitmaps (a 1x1 box is "proportional" to any square, so
+                // it slips past the non-proportional check and renders 1px
+                // tiny). netjack icons #38/#66/#100/#109 hit this.
+                (bitmap_width, bitmap_height, "NATURAL_SENTINEL")
+            } else if sprite.has_size_tweened {
                 (sprite.width, sprite.height, "TWEENED")
             } else if sprite.bitmap_size_owned_by_sprite
                 && bitmap_width >= 10 && bitmap_height >= 10 {
@@ -4901,7 +5002,38 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     && bitmap_width.max(bitmap_height) >= 8;
                 let size_ok = (bitmap_width >= 10 && bitmap_height >= 10) || sprite_much_larger;
 
-                let is_bbox = if expand_w || expand_h
+                // Strong non-proportional downscale → intentional scaling, not
+                // a bbox approximation. Both sprite dims are <=60% of the
+                // bitmap AND the aspect is clearly skewed (>~15% off
+                // proportional). A bbox approximation stays close to the image
+                // size or is roughly proportional, so it never lands here —
+                // e.g. #5 (24x11 of 42x20) is near-proportional and stays
+                // BBOX. Catches a 373x92 logo squished into a 105x20 score box
+                // (netjack sprite 20, which otherwise rendered at native size
+                // off the top of the stage). Mutually exclusive with the
+                // expand/wide/crop rules above (all require one dim within 3px
+                // of the bitmap), so it is safe to test first.
+                // Guard: the sprite box must be a plausible display size
+                // (>=8px each). Tiny boxes (1x1, 2x2) are "use natural size"
+                // sentinels/defaults — Director stores them when a sprite was
+                // placed without an explicit resize — not an intentional
+                // scale. Those stay BBOX so card/coin bitmaps (netjack #66,
+                // #100, #109) render at native size instead of 1px tiny.
+                let strong_downscale_sprite = sprite.width >= 8
+                    && sprite.height >= 8
+                    && sprite.width < bitmap_width
+                    && sprite.height < bitmap_height
+                    && 5 * sprite.width <= 3 * bitmap_width
+                    && 5 * sprite.height <= 3 * bitmap_height
+                    && {
+                        let a = sprite.width as i64 * bitmap_height as i64;
+                        let b = sprite.height as i64 * bitmap_width as i64;
+                        20 * a.min(b) < 17 * a.max(b)
+                    };
+
+                let is_bbox = if strong_downscale_sprite {
+                    false
+                } else if expand_w || expand_h
                     || extend_h_shrink_w || extend_w_shrink_h
                     || wide_h_shrink || tall_w_shrink || wide_w_shrink {
                     true

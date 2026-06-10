@@ -204,8 +204,11 @@ impl StaticBytecodeHandlerManager {
             OpCode::Ret => FlowControlBytecodeHandler::ret(ctx),
             OpCode::JmpIfZ => FlowControlBytecodeHandler::jmp_if_zero(ctx),
             OpCode::Jmp => FlowControlBytecodeHandler::jmp(ctx),
-            OpCode::GetGlobal => GetSetBytecodeHandler::get_global(ctx),
-            OpCode::SetGlobal => GetSetBytecodeHandler::set_global(ctx),
+            // GetGlobal2 (0x48) / SetGlobal2 (0x4e) are alternate encodings of
+            // GetGlobal/SetGlobal emitted by older (D4) compilers; same
+            // semantics. hackey initMain uses setGlobal2.
+            OpCode::GetGlobal | OpCode::GetGlobal2 => GetSetBytecodeHandler::get_global(ctx),
+            OpCode::SetGlobal | OpCode::SetGlobal2 => GetSetBytecodeHandler::set_global(ctx),
             OpCode::PushCons => StackBytecodeHandler::push_cons(ctx),
             OpCode::PushZero => StackBytecodeHandler::push_zero(ctx),
             OpCode::GetField => GetSetBytecodeHandler::get_field(ctx),
@@ -401,7 +404,7 @@ pub async fn player_execute_bytecode<'a>(
     // Trace assignment results after execution (for specific opcodes)
     if should_trace && result.is_ok() {
         match opcode {
-            OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetParam => {
+            OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetGlobal2 | OpCode::SetParam => {
                 reserve_player_mut(|player| {
                     let scope = player.scopes.get(ctx.scope_ref).unwrap();
                     let handler = unsafe { &*ctx.handler_def_ptr };
@@ -428,7 +431,7 @@ pub async fn player_execute_bytecode<'a>(
                                 .unwrap_or("UNKNOWN")
                                 .to_string()
                         }
-                        OpCode::SetGlobal => {
+                        OpCode::SetGlobal | OpCode::SetGlobal2 => {
                             lctx.names
                                 .get(bytecode.obj as usize)
                                 .map(|s| s.as_str())

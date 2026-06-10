@@ -1674,7 +1674,11 @@ impl JsApi {
             let handler_map = js_sys::Map::new();
             let bytecode_array = js_sys::Array::new();
             let args_array = js_sys::Array::new();
-            let name = &lctx.names[handler.name_id as usize];
+            // name_id 0xFFFF (or any out-of-range id) is an anonymous handler
+            // slot; show a placeholder rather than indexing past the names
+            // table (panicked on a netjack D4 script).
+            let anon = "<anonymous>".to_string();
+            let name = lctx.names.get(handler.name_id as usize).unwrap_or(&anon);
 
             for bytecode in &handler.bytecode_array {
                 let bytecode_map = js_sys::Map::new();
@@ -1689,7 +1693,9 @@ impl JsApi {
             }
 
             for arg in &handler.argument_name_ids {
-                args_array.push(&lctx.names[*arg as usize].to_js_value());
+                if let Some(arg_name) = lctx.names.get(*arg as usize) {
+                    args_array.push(&arg_name.to_js_value());
+                }
             }
 
             handler_map.str_set("name", &name.to_js_value());

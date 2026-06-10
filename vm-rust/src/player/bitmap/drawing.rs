@@ -804,6 +804,131 @@ impl Bitmap {
         }
     }
 
+    /// Fill a rect with a Director built-in tile pattern (shape `pattern` 57-64).
+    /// The tile stores palette INDICES; they're resolved through `palette_ref`
+    /// (the movie's current palette) exactly like an 8-bit bitmap — so the same
+    /// indices that look gray in the Mac palette render in the movie's colours
+    /// (e.g. thead's magenta background, whose tile uses index 247 = foreColor).
+    /// Tiling is aligned to the shape's top-left corner.
+    pub fn fill_rect_tiled(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        tile: &crate::player::bitmap::builtin_tiles::BuiltinTile,
+        palettes: &PaletteMap,
+        palette_ref: &PaletteRef,
+        alpha: f32,
+    ) {
+        if alpha == 0.0 || tile.w == 0 || tile.h == 0 {
+            return;
+        }
+        let cache = resolve_palette_table(palettes, palette_ref, self.original_bit_depth);
+        let tw = tile.w as i32;
+        let th = tile.h as i32;
+        for y in y1..y2 {
+            let ty = (y - y1).rem_euclid(th) as usize;
+            let row = ty * tile.w as usize;
+            for x in x1..x2 {
+                let tx = (x - x1).rem_euclid(tw) as usize;
+                let idx = tile.px[row + tx] as usize;
+                let color = cache[idx];
+                let blended = if alpha == 1.0 {
+                    color
+                } else {
+                    let dst = self.get_pixel_color(palettes, x as u16, y as u16);
+                    blend_color_alpha(dst, color, alpha)
+                };
+                self.set_pixel(x, y, blended, palettes);
+            }
+        }
+    }
+
+    /// Fill `dst_rect` by tiling a region (`tile_rect`) of another bitmap (a
+    /// VWTL user-defined tile — shape pattern 57-64 with a custom member). Edge
+    /// tiles are clipped. Used for movies like employee whose pattern-58
+    /// background is a 32x32 slice of a blue/white checker bitmap.
+    /// `abs_origin` is the absolute stage coordinate of `dst_rect`'s top-left,
+    /// so the tile is phased to the absolute grid (Director aligns tiles to the
+    /// stage, not the shape — a half-cell offset here would swap the checker's
+    /// blue/white squares). For the CPU path `dst_rect` is already in stage
+    /// coords so pass its top-left; for webgl2 (a local texture) pass the
+    /// sprite's stage position.
+    pub fn fill_rect_custom_tile(
+        &mut self,
+        palettes: &PaletteMap,
+        src: &Bitmap,
+        tile_rect: IntRect,
+        dst_rect: IntRect,
+        abs_origin: (i32, i32),
+    ) {
+        let tw = tile_rect.right - tile_rect.left;
+        let th = tile_rect.bottom - tile_rect.top;
+        if tw <= 0 || th <= 0 {
+            return;
+        }
+        let params: std::collections::HashMap<String, Datum> = std::collections::HashMap::new();
+        let mut y = dst_rect.top;
+        while y < dst_rect.bottom {
+            // Source row within the tile for this absolute scanline.
+            let abs_y = abs_origin.1 + (y - dst_rect.top);
+            let sy = abs_y.rem_euclid(th);
+            let cell_h = (th - sy).min(dst_rect.bottom - y);
+            let mut x = dst_rect.left;
+            while x < dst_rect.right {
+                let abs_x = abs_origin.0 + (x - dst_rect.left);
+                let sx = abs_x.rem_euclid(tw);
+                let cell_w = (tw - sx).min(dst_rect.right - x);
+                let dst = IntRect::from(x, y, x + cell_w, y + cell_h);
+                let sr = IntRect::from(
+                    tile_rect.left + sx,
+                    tile_rect.top + sy,
+                    tile_rect.left + sx + cell_w,
+                    tile_rect.top + sy + cell_h,
+                );
+                self.copy_pixels(palettes, src, dst, sr, &params, None);
+                x += cell_w;
+            }
+            y += cell_h;
+        }
+    }
+
+    /// Fill a rect with a Director 1-bit QuickDraw shape pattern (pattern 1-56).
+    /// The 8x8 pattern repeats across the rect; a set bit draws `fore`, a clear
+    /// bit draws `back`. Recoloured by the shape's fore/back — no palette needed.
+    /// Aligned to the shape's top-left corner.
+    pub fn fill_rect_pattern_1bit(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        pattern: &[u8; 8],
+        fore: (u8, u8, u8),
+        back: (u8, u8, u8),
+        palettes: &PaletteMap,
+        alpha: f32,
+    ) {
+        if alpha == 0.0 {
+            return;
+        }
+        for y in y1..y2 {
+            let row = pattern[(y - y1).rem_euclid(8) as usize];
+            for x in x1..x2 {
+                let bit = (row >> (7 - (x - x1).rem_euclid(8))) & 1;
+                let color = if bit != 0 { fore } else { back };
+                let blended = if alpha == 1.0 {
+                    color
+                } else {
+                    let dst = self.get_pixel_color(palettes, x as u16, y as u16);
+                    blend_color_alpha(dst, color, alpha)
+                };
+                self.set_pixel(x, y, blended, palettes);
+            }
+        }
+    }
+
     /// Draw a filled ellipse inscribed in the given bounding box.
     /// Uses midpoint ellipse algorithm with horizontal scanline filling.
     pub fn fill_ellipse(
@@ -3592,6 +3717,13 @@ impl Bitmap {
             palette_ref,
             self.original_bit_depth,
         );
+        // Background colour — used as the "off" pixels of a 1-bit shape pattern.
+        let bg_rgb = resolve_color_ref(
+            palettes,
+            &sprite.bg_color,
+            palette_ref,
+            self.original_bit_depth,
+        );
 
         let filled = shape_info.fill_type != 0;
         // Per ScummVM: for outlined shapes, line_thickness of 1 means invisible (subtract 1)
@@ -3615,7 +3747,20 @@ impl Bitmap {
             match shape_info.shape_type {
                 ShapeType::Rect => {
                     if filled {
-                        self.fill_rect(x1, y1, x2, y2, fg_rgb, palettes, alpha);
+                        // Director shape patterns: 1-56 = 1-bit QuickDraw patterns
+                        // (recoloured fore/back; 1 = solid), 57-64 = tiled bitmaps
+                        // (thead's pattern-63 background). 0/other = solid foreColor.
+                        if let Some(tile) =
+                            crate::player::bitmap::builtin_tiles::tile_for_pattern(shape_info.pattern)
+                        {
+                            self.fill_rect_tiled(x1, y1, x2, y2, tile, palettes, palette_ref, alpha);
+                        } else if let Some(pat) =
+                            crate::player::bitmap::quickdraw_patterns::quickdraw_pattern(shape_info.pattern)
+                        {
+                            self.fill_rect_pattern_1bit(x1, y1, x2, y2, pat, fg_rgb, bg_rgb, palettes, alpha);
+                        } else {
+                            self.fill_rect(x1, y1, x2, y2, fg_rgb, palettes, alpha);
+                        }
                     }
                     if thickness > 0 {
                         for t in 0..thickness {

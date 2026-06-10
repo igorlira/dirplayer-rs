@@ -909,7 +909,11 @@ impl BuiltInHandlerManager {
             "findempty" => CastHandlers::find_empty(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
-            "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep" => Ok(DatumRef::Void),
+            "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep"
+            // Cast/movie preload + unload commands: dirplayer loads everything
+            // synchronously up front, so there is nothing to (un)cache. Accept
+            // as no-ops (netjack startMovie calls preLoadCast).
+            | "preloadcast" | "unloadcast" | "preloadmovie" | "unload" => Ok(DatumRef::Void),
             "puppettempo" => MovieHandlers::puppet_tempo(args),
             "objectp" => TypeHandlers::objectp(args),
             "voidp" => TypeHandlers::voidp(args),
@@ -932,6 +936,10 @@ impl BuiltInHandlerManager {
             "setat" => Self::set_at(args),
             "ilk" => TypeHandlers::ilk(args),
             "member" => MovieHandlers::member(args),
+            // Director 4 syntax: `cast(N)` / `the X of cast(N)` references a
+            // member in the single (internal) cast. Equivalent to `member(N)`
+            // in D5+. Movies authored in D4 still use it.
+            "cast" => MovieHandlers::member(args),
             "space" => StringHandlers::space(args),
             "integer" => TypeHandlers::integer(args),
             "string" => StringHandlers::string(args),

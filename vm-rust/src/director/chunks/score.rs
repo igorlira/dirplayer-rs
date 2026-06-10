@@ -333,6 +333,100 @@ impl ScoreFrameChannelData {
         })
     }
 
+    /// Read a D4 sprite record (movie version 400-499, sprite_record_size=20).
+    /// This layout is DISTINCT from D5 — see ScummVM `readSpriteDataD4`
+    /// (engines/director/frame.cpp). Applying the D5 layout (`read_d5`) to a
+    /// D4 movie misreads every field, which is why D4 movies rendered as
+    /// garbage / blank before this path existed.
+    ///   [0]:    scriptID hi byte (unused in D4)
+    ///   [1]:    spriteType (u8)
+    ///   [2]:    foreColor (u8)
+    ///   [3]:    backColor (u8)
+    ///   [4]:    thickness (u8)
+    ///   [5]:    inkData (u8: bits 0-5=ink, bit 6=trails, bit 7=stretch)
+    ///   [6-7]:  castId / member (u16 BE) — D4 has a single cast lib (no castLib field)
+    ///   [8-9]:  startPoint.y / posY (i16 BE)
+    ///   [10-11]: startPoint.x / posX (i16 BE)
+    ///   [12-13]: height (i16 BE)
+    ///   [14-15]: width (i16 BE)
+    ///   [16-17]: scriptId / member (u16 BE)
+    ///   [18]:   colorcode (u8: low4=scoreColor, bit 6=editable, bit 7=moveable)
+    ///   [19]:   blendAmount (u8)
+    pub fn read_d4(reader: &mut BinaryReader, _sprite_record_size: u16) -> Result<ScoreFrameChannelData, String> {
+        let _script_id_hi = reader.read_u8()
+            .map_err(|e| format!("D4: scriptIdHi: {:?}", e))?;             // byte 0
+        let sprite_type = reader.read_u8()
+            .map_err(|e| format!("D4: spriteType: {:?}", e))?;            // byte 1
+        let fore_color = reader.read_u8()
+            .map_err(|e| format!("D4: foreColor: {:?}", e))?;             // byte 2
+        let back_color = reader.read_u8()
+            .map_err(|e| format!("D4: backColor: {:?}", e))?;             // byte 3
+        let thickness = reader.read_u8()
+            .map_err(|e| format!("D4: thickness: {:?}", e))?;             // byte 4
+        let ink_data = reader.read_u8()
+            .map_err(|e| format!("D4: inkData: {:?}", e))?;               // byte 5
+        let ink_val = ink_data & 0x3f;
+        let trails = (ink_data & 0x40) != 0;
+        let stretch = (ink_data & 0x80) != 0;
+        let cast_member = reader.read_u16()
+            .map_err(|e| format!("D4: castId: {:?}", e))?;                // bytes 6-7
+        let pos_y = reader.read_u16()
+            .map_err(|e| format!("D4: posY: {:?}", e))? as i16;           // bytes 8-9
+        let pos_x = reader.read_u16()
+            .map_err(|e| format!("D4: posX: {:?}", e))? as i16;           // bytes 10-11
+        let height = reader.read_u16()
+            .map_err(|e| format!("D4: height: {:?}", e))?;                // bytes 12-13
+        let width = reader.read_u16()
+            .map_err(|e| format!("D4: width: {:?}", e))?;                 // bytes 14-15
+        let script_member = reader.read_u16()
+            .map_err(|e| format!("D4: scriptId: {:?}", e))?;              // bytes 16-17
+        let colorcode = reader.read_u8()
+            .map_err(|e| format!("D4: colorcode: {:?}", e))?;             // byte 18
+        let editable = (colorcode & 0x40) != 0;  // bit 6
+        let moveable = (colorcode & 0x80) != 0;  // bit 7
+        let blend_raw = reader.read_u8()
+            .map_err(|e| format!("D4: blend: {:?}", e))?;                 // byte 19
+
+        Ok(ScoreFrameChannelData {
+            sprite_type,
+            ink: ink_val,
+            fore_color,
+            back_color,
+            // D4 movies have a single internal cast, which dirplayer loads as
+            // cast number 1. The D4 sprite record has no castLib field, so pin
+            // it to 1 (cast_lib 0 would underflow `get_cast_mut(0)` and panic).
+            cast_lib: 1,
+            cast_member,
+            // No separate script castLib in D4; stash the script member so a
+            // sprite-script reference is still available downstream.
+            sprite_list_idx_hi: 0,
+            sprite_list_idx_lo: script_member,
+            pos_y,
+            pos_x,
+            height,
+            width,
+            color_flag: 0,
+            fore_color_g: 0,
+            back_color_g: 0,
+            fore_color_b: 0,
+            back_color_b: 0,
+            blend: blend_raw,
+            rotation: 0.0,
+            skew: 0.0,
+            moveable,
+            editable,
+            trails,
+            stretch,
+            color_code_low4: colorcode & 0x0f,
+            // D4 stores line thickness in its own byte (offset 4), not the
+            // D8+ per-frame-flags slot.
+            sprite_flags: thickness,
+            reserved_23: 0,
+            reserved_28: 0,
+            reserved_32: 0,
+        })
+    }
+
     pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameChannelData, String> {
         // Legacy: assume large record size for backward compat with afterburner D8+ files
         Self::read_with_size(reader, 36)
@@ -479,7 +573,7 @@ impl TempoChannelData {
 
 impl ScoreFrameData {
     #[allow(unused_variables)]
-    pub fn read(reader: &mut BinaryReader) -> Result<ScoreFrameData, String> {
+    pub fn read(reader: &mut BinaryReader, dir_version: u16) -> Result<ScoreFrameData, String> {
         let mut header = Self::read_header(reader)?;
 
         // "numOfFrames in the header is often incorrect"
@@ -582,12 +676,21 @@ impl ScoreFrameData {
             frame_index = frame_index + 1;
         }
 
-        // D4/D5 (frames_version <= 7): first 48 bytes are packed main channels
-        // (script, sound types, transition, tempo, sounds, palette, etc.),
-        // followed by sprite channels at sprite_record_size bytes each.
-        // D6+ (frames_version > 7): all channels are uniform at sprite_record_size each.
-        let main_channels_size: usize = if header.frames_version <= 7 { 48 } else { 0 };
-        let is_d5 = main_channels_size > 0;
+        // The score frame layout is selected by the MOVIE version, not by
+        // frames_version — Director 4 and Director 5 BOTH have frames_version<=7
+        // but use incompatible sprite/main-channel layouts (ScummVM dispatches
+        // on movie version in frame.cpp). D4 and D5 differ in both the main
+        // channel block size and the per-sprite field order:
+        //   D4 (400-499): 40-byte main channels + 20-byte D4 sprite records
+        //   D5 (500-599): 48-byte main channels + 24-byte D5 sprite records
+        //   D6+ (600+):   no packed main channels; all channels uniform.
+        let is_d4 = dir_version >= 400 && dir_version < 500;
+        let is_d5 = dir_version >= 500 && dir_version < 600;
+        // Fall back on frames_version for the (rare) case where dir_version is
+        // unset: pre-D6 movies always have frames_version<=7. Treat such a
+        // movie as D5 (the historical default) rather than misreading it as D6+.
+        let is_d5 = is_d5 || (!is_d4 && dir_version < 400 && header.frames_version <= 7);
+        let main_channels_size: usize = if is_d4 { 40 } else if is_d5 { 48 } else { 0 };
 
         let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data) = {
             let mut frame_channel_data = vec![];
@@ -601,7 +704,123 @@ impl ScoreFrameData {
             for frame_index in 0..header.frame_count {
                 let frame_start = (frame_index as usize) * frame_size;
 
-                if is_d5 {
+                if is_d4 {
+                    // D4: Main channels packed in first 40 bytes.
+                    // Layout (ScummVM readMainChannelsD4, frame.cpp):
+                    //   0 unk  1 soundType1  2 transFlags  3 transChunkSize
+                    //   4 tempo  5 transType  6-7 sound1  8-9 sound2
+                    //   10 soundType2  11 skipFrame  12 blend  13 colorTempo
+                    //   14 colorSound1  15 colorSound2  16-17 actionId(frame script)
+                    //   18 colorScript  19 colorTrans  20-21 palette ...
+                    // Sprite channels then start at byte 40, 20 bytes each (D4 layout).
+
+                    // Frame script (actionId) at bytes 16-17 (member only; D4's
+                    // single internal cast is cast number 1)
+                    channel_reader.jmp(frame_start + 16);
+                    let action_member = channel_reader.read_u16().unwrap_or(0);
+                    if action_member != 0 {
+                        frame_channel_data.push((frame_index, 0_u16, ScoreFrameChannelData {
+                            sprite_type: 0,
+                            ink: 0,
+                            fore_color: 0,
+                            back_color: 0,
+                            cast_lib: 1,
+                            cast_member: action_member,
+                            sprite_list_idx_hi: 0,
+                            sprite_list_idx_lo: 0,
+                            pos_y: 0,
+                            pos_x: 0,
+                            height: 0,
+                            width: 0,
+                            color_flag: 0,
+                            fore_color_g: 0,
+                            back_color_g: 0,
+                            fore_color_b: 0,
+                            back_color_b: 0,
+                            blend: 0,
+                            rotation: 0.0,
+                            skew: 0.0,
+                            moveable: false,
+                            editable: false,
+                            trails: false,
+                            stretch: false,
+                            color_code_low4: 0,
+                            sprite_flags: 0,
+                            reserved_23: 0,
+                            reserved_28: 0,
+                            reserved_32: 0,
+                        }));
+                    }
+
+                    // Tempo at byte 4
+                    channel_reader.jmp(frame_start + 4);
+                    let tempo_val = channel_reader.read_u8().unwrap_or(0);
+                    if tempo_val > 0 {
+                        tempo_channel_data.push((frame_index, TempoChannelData {
+                            tempo: tempo_val,
+                            tempo_cue_point: 0,
+                            sprite_list_idx: 0,
+                            color_tempo: 0,
+                            wait_flags: 0,
+                            channel_flags: 0,
+                            frame_data: 0,
+                        }));
+                    }
+
+                    // Sound 1: member at bytes 6-7
+                    channel_reader.jmp(frame_start + 6);
+                    let sound1_member = channel_reader.read_u16().unwrap_or(0);
+                    if sound1_member != 0 {
+                        debug!("D4 Sound 1 in frame {}: cast_member={}", frame_index, sound1_member);
+                        sound_channel_data.push((frame_index, 3, SoundChannelData {
+                            cast_member: sound1_member as u8,
+                        }));
+                    }
+
+                    // Sound 2: member at bytes 8-9
+                    channel_reader.jmp(frame_start + 8);
+                    let sound2_member = channel_reader.read_u16().unwrap_or(0);
+                    if sound2_member != 0 {
+                        debug!("D4 Sound 2 in frame {}: cast_member={}", frame_index, sound2_member);
+                        sound_channel_data.push((frame_index, 4, SoundChannelData {
+                            cast_member: sound2_member as u8,
+                        }));
+                    }
+
+                    // Palette: member at bytes 20-21 (signed; <0 is a builtin palette id)
+                    channel_reader.jmp(frame_start + 20);
+                    let palette_member = channel_reader.read_i16().unwrap_or(0);
+                    if palette_member != 0 {
+                        // D4's single internal cast is cast number 1 (negative
+                        // member = built-in palette, where cast_lib is ignored).
+                        palette_channel_data.push((frame_index, 1, palette_member));
+                    }
+
+                    // Sprite channels start at byte 40 within the frame, 20 bytes each.
+                    let num_sprites = (frame_size - main_channels_size) / (header.sprite_record_size as usize);
+                    for sprite_idx in 0..num_sprites {
+                        let channel_index = (sprite_idx + 6) as u16;
+                        let pos = frame_start + main_channels_size + sprite_idx * (header.sprite_record_size as usize);
+
+                        channel_reader.jmp(pos);
+                        let data = ScoreFrameChannelData::read_d4(&mut channel_reader, header.sprite_record_size)?;
+
+                        let has_sprite_data = data.cast_member != 0
+                            || data.blend != 0
+                            || data.width != 0
+                            || data.height != 0
+                            || data.pos_x != 0
+                            || data.pos_y != 0
+                            || data.ink != 0
+                            || data.sprite_type != 0;
+
+                        if has_sprite_data {
+                            debug!("D4 frame_index={frame_index} channel_index={channel_index} cast_member={} sprite_type={} ink={} pos_y={} pos_x={} height={} width={} blend={}",
+                                data.cast_member, data.sprite_type, data.ink, data.pos_y, data.pos_x, data.height, data.width, data.blend);
+                            frame_channel_data.push((frame_index, channel_index, data));
+                        }
+                    }
+                } else if is_d5 {
                     // D5: Main channels packed in first 48 bytes
                     // Layout: actionId.castLib(2) actionId.member(2)
                     //         sound1.castLib(2) sound1.member(2)
@@ -1180,7 +1399,7 @@ impl ScoreChunk {
             let frame_data = if !entries.is_empty() && !entries[0].is_empty() {
                 let mut delta_reader = BinaryReader::from_vec(&entries[0]);
                 delta_reader.set_endian(Endian::Big);
-                ScoreFrameData::read(&mut delta_reader)?
+                ScoreFrameData::read(&mut delta_reader, dir_version)?
             } else {
                 ScoreFrameData::default()
             };
@@ -1202,7 +1421,7 @@ impl ScoreChunk {
                 dir_version
             );
 
-            let frame_data = ScoreFrameData::read(reader)?;
+            let frame_data = ScoreFrameData::read(reader, dir_version)?;
 
             Ok(ScoreChunk {
                 header: ScoreChunkHeader::default(),
@@ -1922,5 +2141,80 @@ impl FrameLabelsChunk {
             .collect::<Result<Vec<_>, String>>()?;
 
         Ok(FrameLabelsChunk { labels })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binary_reader::{BinaryReader, Endian};
+
+    /// Real sprite channel 0 from thead.dir (a Director 4.0.4 movie), frame 0.
+    /// Decoded from the VWSC delta stream. With the correct D4 layout this is
+    /// a 169x145 bitmap sprite (castId 1); the old D5 layout misread every
+    /// field, which is what kept these movies from playing. See
+    /// memory/d4-score-uses-d5-layout.md.
+    #[test]
+    fn d4_sprite_record_layout() {
+        let bytes: [u8; 20] = [
+            0x00, // 0  scriptId hi (unused)
+            0x10, // 1  spriteType = 16
+            0xf7, // 2  foreColor = 247
+            0x00, // 3  backColor = 0
+            0x02, // 4  thickness = 2
+            0x80, // 5  inkData -> ink 0, stretch set
+            0x00, 0x01, // 6-7  castId = 1
+            0xff, 0xff, // 8-9  posY = -1
+            0xff, 0xff, // 10-11 posX = -1
+            0x00, 0x91, // 12-13 height = 145
+            0x00, 0xa9, // 14-15 width = 169
+            0x00, 0x00, // 16-17 scriptId = 0
+            0x00, // 18 colorcode
+            0x00, // 19 blend
+        ];
+        let mut reader = BinaryReader::from_u8(&bytes);
+        reader.set_endian(Endian::Big);
+        let d = ScoreFrameChannelData::read_d4(&mut reader, 20).unwrap();
+
+        assert_eq!(d.sprite_type, 16);
+        assert_eq!(d.fore_color, 247);
+        assert_eq!(d.back_color, 0);
+        assert_eq!(d.ink, 0);
+        assert!(d.stretch);
+        assert!(!d.trails);
+        assert_eq!(d.cast_lib, 1); // D4 single internal cast = cast number 1
+        assert_eq!(d.cast_member, 1);
+        assert_eq!(d.pos_y, -1);
+        assert_eq!(d.pos_x, -1);
+        assert_eq!(d.height, 145);
+        assert_eq!(d.width, 169);
+        assert_eq!(d.sprite_flags, 2); // D4 line thickness
+        assert_eq!(d.blend, 0);
+        // Whole record consumed, no overread (D4 record is exactly 20 bytes).
+        assert_eq!(reader.pos, 20);
+    }
+
+    /// Guard the field offsets that the D5 layout gets WRONG for D4 input:
+    /// reading these same bytes as D5 would put spriteType=0x00, ink=0x10,
+    /// castId at bytes 4-5 (0x0280), etc. This asserts we are NOT doing that.
+    #[test]
+    fn d4_is_not_d5() {
+        let bytes: [u8; 24] = [
+            0x00, 0x10, 0xf7, 0x00, 0x02, 0x80, 0x00, 0x01,
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x91, 0x00, 0xa9,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut r4 = BinaryReader::from_u8(&bytes);
+        r4.set_endian(Endian::Big);
+        let d4 = ScoreFrameChannelData::read_d4(&mut r4, 20).unwrap();
+
+        let mut r5 = BinaryReader::from_u8(&bytes);
+        r5.set_endian(Endian::Big);
+        let d5 = ScoreFrameChannelData::read_d5(&mut r5, 24).unwrap();
+
+        // D4 sees a real 169x145 castId-1 sprite; D5 sees garbage.
+        assert_eq!(d4.cast_member, 1);
+        assert_ne!(d5.cast_member, d4.cast_member);
+        assert_ne!((d5.width, d5.height), (d4.width, d4.height));
     }
 }

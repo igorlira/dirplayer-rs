@@ -319,8 +319,14 @@ impl GetSetBytecodeHandler {
                         }
                     }
                 }
-                0x0a => {
-                    // Cast member property with chunk expression (e.g. set the foreColor of word X of member Y)
+                0x0a | 0x0c => {
+                    // Property with chunk expression. 0x0a = of a `member`
+                    // (e.g. set the foreColor of word X of member Y); 0x0c =
+                    // of a `field` (e.g. set the textStyle of line N of field
+                    // X). Same stack layout: cast_lib (only if dir>=500),
+                    // then the member/field id, then the 8 chunk-range
+                    // values. The D4 client (issue-188) movie's `markLine`
+                    // handler uses 0x0c to highlight the clicked topic line.
                     let cast_lib_datum = if player.movie.dir_version >= 500 {
                         let r = {
                             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -335,13 +341,25 @@ impl GetSetBytecodeHandler {
                         scope.stack.pop().unwrap()
                     };
                     let member_id_datum = player.get_datum(&member_id_ref).clone();
-                    // Pop 8 chunk ref values
-                    {
+                    // Pop the 8 chunk-range values. Top of stack is last_line,
+                    // then first_line, last_item, first_item, last_word,
+                    // first_word, last_char, first_char (bottom).
+                    let chunk_refs = {
                         let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                        let mut v = Vec::with_capacity(8);
                         for _ in 0..8 {
-                            scope.stack.pop().unwrap();
+                            v.push(scope.stack.pop().unwrap());
                         }
-                    }
+                        v
+                    };
+                    let last_line = player.get_datum(&chunk_refs[0]).int_value().unwrap_or(0);
+                    let first_line = player.get_datum(&chunk_refs[1]).int_value().unwrap_or(0);
+                    let last_item = player.get_datum(&chunk_refs[2]).int_value().unwrap_or(0);
+                    let first_item = player.get_datum(&chunk_refs[3]).int_value().unwrap_or(0);
+                    let last_word = player.get_datum(&chunk_refs[4]).int_value().unwrap_or(0);
+                    let first_word = player.get_datum(&chunk_refs[5]).int_value().unwrap_or(0);
+                    let last_char = player.get_datum(&chunk_refs[6]).int_value().unwrap_or(0);
+                    let first_char = player.get_datum(&chunk_refs[7]).int_value().unwrap_or(0);
                     let prop_name = get_cast_member_prop_name(property_id as u16).to_string();
                     let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
                         &member_id_datum,
@@ -350,7 +368,64 @@ impl GetSetBytecodeHandler {
                     )?;
                     match member_ref {
                         Some(member_ref) => {
-                            CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+                            let chunk_expr: Option<StringChunkExpr> = if first_char != 0 || last_char != 0 {
+                                Some(StringChunkExpr { chunk_type: StringChunkType::Char, start: first_char, end: last_char, item_delimiter: player.movie.item_delimiter })
+                            } else if first_word != 0 || last_word != 0 {
+                                Some(StringChunkExpr { chunk_type: StringChunkType::Word, start: first_word, end: last_word, item_delimiter: player.movie.item_delimiter })
+                            } else if first_item != 0 || last_item != 0 {
+                                Some(StringChunkExpr { chunk_type: StringChunkType::Item, start: first_item, end: last_item, item_delimiter: player.movie.item_delimiter })
+                            } else if first_line != 0 || last_line != 0 {
+                                Some(StringChunkExpr { chunk_type: StringChunkType::Line, start: first_line, end: last_line, item_delimiter: player.movie.item_delimiter })
+                            } else {
+                                None
+                            };
+
+                            let lc = prop_name.to_ascii_lowercase();
+                            let is_style_prop = lc == "textstyle" || lc == "fontstyle";
+                            // Per-character style set (`set the textStyle of
+                            // line N of field` and friends): translate the
+                            // chunk to a byte range and rewrite the field's
+                            // STXT formatting runs. Whole-field set (no chunk
+                            // expr) also resets font_style so the getter and
+                            // any later uniform read agree.
+                            let handled = if is_style_prop {
+                                use crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers;
+                                use crate::player::cast_member::{CastMemberType, text_style_string_to_byte};
+                                let new_style = text_style_string_to_byte(&value.string_value().unwrap_or_default());
+                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                    if let CastMemberType::Field(field) = &mut member.member_type {
+                                        let text = field.text.clone();
+                                        let (char_start, char_end) = match &chunk_expr {
+                                            Some(ce) => StringChunkHandlers::resolve_chunk_char_range(&text, ce),
+                                            None => (0usize, text.chars().count()),
+                                        };
+                                        // STXT runs use BYTE positions; map the
+                                        // char range to byte offsets (text may
+                                        // contain multi-byte UTF-8 chars).
+                                        let byte_start = text.char_indices().nth(char_start).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
+                                        let byte_end = text.char_indices().nth(char_end).map(|(b, _)| b).unwrap_or_else(|| text.len()) as u32;
+                                        field.apply_style_to_byte_range(byte_start, byte_end, new_style);
+                                        if chunk_expr.is_none() {
+                                            field.font_style = value.string_value().unwrap_or_else(|_| "plain".to_string());
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            if !handled {
+                                // Non-style prop, or not a field: fall back to
+                                // the member-wide setter (chunk info ignored,
+                                // matching the prior behaviour for these).
+                                CastMemberRefHandlers::set_prop(&member_ref, &prop_name, value)?;
+                            }
                             Ok(HandlerExecutionResult::Advance)
                         }
                         None => {
@@ -392,20 +467,6 @@ impl GetSetBytecodeHandler {
                             Ok(HandlerExecutionResult::Advance)
                         }
                     }
-                }
-                0x0a => {
-                    // Set property on a string chunk of a cast member
-                    // e.g. set the textStyle of line 1 of member "X" to "bold"
-                    // Stack: [zeros..., chunk_num, chunk_type, member_name, cast_lib, value, prop_id] (prop_id already popped)
-                    // Pop remaining stack items
-                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                    // Pop: cast_lib(0), member_name, chunk_type(0), chunk_num(1), and 6 zeros
-                    for _ in 0..10 {
-                        if scope.stack.is_empty() { break; }
-                        scope.stack.pop();
-                    }
-                    warn!("kOpSet 0x0a (string chunk of member) not fully implemented, ignoring");
-                    Ok(HandlerExecutionResult::Advance)
                 }
                 _ => Err(ScriptError::new(format!(
                     "Invalid propertyType/propertyID for kOpSet: {}",
@@ -958,9 +1019,17 @@ impl GetSetBytecodeHandler {
                         Ok(player.alloc_datum(Datum::Void))
                     }
                 }
-            } else if prop_type == 0x0a {
+            } else if prop_type == 0x0a || prop_type == 0x0c {
                 // Cast member property with chunk expression (e.g. the
-                // textStyle of char X of member Y). The previous version
+                // textStyle of char X of member Y). prop_type 0x0c is the
+                // FIELD analog (`the textStyle of line N of field X`) — same
+                // stack layout (cast_lib only if dir>=500, then the
+                // field/member id, then the 8 chunk-range values). In D4 the
+                // client movie's `markLine` handler reads `the textStyle of
+                // line curline of field fieldname` via 0x0c; resolving the
+                // field name string through find_member_ref_by_identifiers
+                // reaches the same Field/Text member, so both types share
+                // this path. The previous version
                 // discarded all 8 chunk refs and read the MEMBER-wide
                 // property, which made `the textStyle of char N of member`
                 // collapse to the member's overall font_style — Fugue No.4

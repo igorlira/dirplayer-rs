@@ -161,7 +161,7 @@ impl StackExpressionTracker {
             // VARIABLE ACCESS - GLOBAL
             // ============================================================
             
-            OpCode::GetGlobal => {
+            OpCode::GetGlobal | OpCode::GetGlobal2 => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     self.push_expr(name.to_string());
                     format!("<{}>", name)
@@ -171,7 +171,7 @@ impl StackExpressionTracker {
                 }
             }
 
-            OpCode::SetGlobal => {
+            OpCode::SetGlobal | OpCode::SetGlobal2 => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     if let Some(value) = self.stack.last() {
                         format!("<{} = {}>", name, value)

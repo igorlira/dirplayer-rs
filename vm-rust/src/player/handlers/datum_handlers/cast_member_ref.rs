@@ -89,10 +89,16 @@ impl CastMemberRefHandlers {
     }
 
     pub fn member_ref_from_slot_number(slot_number: u32) -> CastMemberRef {
-        CastMemberRef {
-            cast_lib: (slot_number >> 16) as i32,
-            cast_member: (slot_number & 0xFFFF) as i32,
-        }
+        let cast_lib = (slot_number >> 16) as i32;
+        let cast_member = (slot_number & 0xFFFF) as i32;
+        // A "slot number" encodes (cast_lib << 16) | member. A bare member
+        // number (high 16 bits zero, e.g. `the castNum of sprite = 10` in a
+        // Director-4 movie, or `member N` with no cast lib) therefore has
+        // cast_lib 0 — which is not a valid 1-indexed cast and would fail to
+        // resolve (find_member_by_slot_number rejects cast_lib <= 0). Treat it
+        // as the default/internal cast (1). slot 0 stays the null ref [0,0].
+        let cast_lib = if cast_lib == 0 && cast_member != 0 { 1 } else { cast_lib };
+        CastMemberRef { cast_lib, cast_member }
     }
 
     /// Check if a cast member handler needs async dispatch.
@@ -623,6 +629,15 @@ impl CastMemberRefHandlers {
             let rp = member.reg_point;
             return Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0));
         }
+        // `the scriptText of member` is valid on ANY member type (it's the
+        // member's Lingo source, empty if none). Handle it commonly so it
+        // doesn't fall through to a type handler that rejects it (e.g. sound,
+        // which is how freeT's checkForWin read `the scriptText of cast(9)`).
+        if prop == "scriptText" {
+            return Ok(Datum::String(
+                player.script_text_overrides.get(cast_member_ref).cloned().unwrap_or_default(),
+            ));
+        }
         match &member_type {
             CastMemberTypeId::Bitmap => {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
@@ -921,6 +936,18 @@ impl CastMemberRefHandlers {
             Some(t) => t,
             None => return Ok(()), // Member was erased, silently ignore
         };
+
+        // `the scriptText of member` is settable on ANY member type. We don't
+        // compile Lingo, but movies (freeT) use it as scratch storage, so
+        // round-trip the string keyed by member ref (read back by the getter).
+        if prop.eq_ignore_ascii_case("scriptText") {
+            return reserve_player_mut(|player| {
+                player
+                    .script_text_overrides
+                    .insert(member_ref.clone(), value.string_value()?);
+                Ok(())
+            });
+        }
 
         if prop.eq_ignore_ascii_case("regPoint") {
             return reserve_player_mut(|player| {
