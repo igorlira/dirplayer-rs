@@ -1646,6 +1646,15 @@ pub struct HavokRigidBody {
     pub is_convex: bool,
     /// Half-extents of the mesh bounding box, for box inertia computation.
     pub inertia_half_extents: [f64; 3],
+    /// True once the body has received a hover/drive force (applyForce /
+    /// applyForceAtPoint). Such bodies (e.g. the SuperSonic car) keep the
+    /// original collision path; force-free objects use the box-stacking path.
+    pub driven: bool,
+    /// Authored per-axis model scale from the W3D transform, preserved so the
+    /// rendered model keeps its size when physics writes back its transform
+    /// (the finaldrive car is authored at 0.296×; losing it makes the RaycastCar
+    /// compute wheel/hover points at the wrong scale and tumble).
+    pub sync_scale: [f64; 3],
     // --- Full Havok engine state (ported from C# reference) ---
     /// Orientation quaternion [w, x, y, z]. Internal physics state.
     pub orientation: [f64; 4],
@@ -1704,6 +1713,8 @@ impl HavokRigidBody {
             is_fixed: false,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            driven: false,
+            sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
             inertia_tensor: i_tensor,
@@ -1739,6 +1750,8 @@ impl HavokRigidBody {
             is_fixed: true,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            driven: false,
+            sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: 0.0,
             inertia_tensor: [0.0; 9],
@@ -1751,6 +1764,20 @@ impl HavokRigidBody {
             resting_normal: None,
         }
     }
+}
+
+/// Cable / point-to-point distance constraint: keeps `body_index`'s attach
+/// point at `length` from a fixed world `anchor` (a pendulum), so e.g. the
+/// lamp hangs and swings instead of falling.
+#[derive(Clone, Debug)]
+pub struct HavokCable {
+    pub body_index: usize,
+    /// Fixed world anchor (Director units).
+    pub anchor: [f64; 3],
+    /// Attachment point on the body, body-local (Director units).
+    pub attach_local: [f64; 3],
+    /// Constraint distance (Director units).
+    pub length: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -1869,6 +1896,10 @@ pub struct HavokPhysicsState {
     pub springs: Vec<HavokSpring>,
     pub linear_dashpots: Vec<HavokLinearDashpot>,
     pub angular_dashpots: Vec<HavokAngularDashpot>,
+    /// Cable / point-to-point constraints (e.g. the hanging lamp). Distinct
+    /// from `springs` so they don't flip the scene out of the passive
+    /// collision path.
+    pub cable_constraints: Vec<HavokCable>,
     pub collision_interests: Vec<HavokCollisionInterest>,
     pub step_callbacks: Vec<(String, crate::player::DatumRef)>,  // (handler_name, script_instance)
     pub disabled_collision_pairs: Vec<(String, String)>,
@@ -1903,6 +1934,7 @@ impl Clone for HavokPhysicsState {
             drag_params: self.drag_params,
             rigid_bodies: self.rigid_bodies.clone(),
             springs: self.springs.clone(),
+            cable_constraints: self.cable_constraints.clone(),
             linear_dashpots: self.linear_dashpots.clone(),
             angular_dashpots: self.angular_dashpots.clone(),
             collision_interests: self.collision_interests.clone(),
@@ -1943,6 +1975,7 @@ impl Default for HavokPhysicsState {
             drag_params: [0.0, 0.0],
             rigid_bodies: Vec::new(),
             springs: Vec::new(),
+            cable_constraints: Vec::new(),
             linear_dashpots: Vec::new(),
             angular_dashpots: Vec::new(),
             collision_interests: Vec::new(),

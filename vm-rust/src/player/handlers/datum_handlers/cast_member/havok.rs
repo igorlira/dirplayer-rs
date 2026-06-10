@@ -13,6 +13,41 @@ use crate::{
     },
 };
 
+/// Build a large static quad collision mesh for an (infinite) Havok plane
+/// primitive, centred at `center` with surface normal `n_world` (both in
+/// Director world units). Two triangles, wound so their geometric normal
+/// matches `n_world` (pointing toward the bodies that rest on it).
+fn build_plane_quad(
+    name: &str,
+    center: [f64; 3],
+    n_world: [f64; 3],
+) -> Option<super::havok_physics::CollisionMesh> {
+    use super::havok_physics::{v3_add, v3_cross, v3_normalized, v3_scale, v3_sub};
+    let n = v3_normalized(n_world);
+    if n[0] == 0.0 && n[1] == 0.0 && n[2] == 0.0 { return None; }
+    // Half-size large enough to act as floor/wall for any reasonable room.
+    const S: f64 = 5000.0;
+    let helper = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let t1 = v3_normalized(v3_cross(n, helper));
+    let t2 = v3_normalized(v3_cross(n, t1)); // cross(t1, t2) == n
+    let a = v3_scale(t1, S);
+    let b = v3_scale(t2, S);
+    let v0 = v3_sub(v3_sub(center, a), b);
+    let v1 = v3_sub(v3_add(center, a), b);
+    let v2 = v3_add(v3_add(center, a), b);
+    let v3 = v3_add(v3_sub(center, a), b);
+    let mut cmesh = super::havok_physics::CollisionMesh {
+        name: name.to_string(),
+        vertices: vec![v0, v1, v2, v3],
+        triangles: vec![[0, 1, 2], [0, 2, 3]],
+        aabb_min: [0.0; 3],
+        aabb_max: [0.0; 3],
+        body_index: None, // static scenery
+    };
+    cmesh.compute_aabb();
+    Some(cmesh)
+}
+
 pub struct HavokPhysicsMemberHandlers {}
 
 impl HavokPhysicsMemberHandlers {
@@ -554,15 +589,27 @@ impl HavokPhysicsMemberHandlers {
             for mesh in &hke.meshes {
                 if mesh.vertices.is_empty() || mesh.triangles.is_empty() { continue; }
                 let model_xform = model_transforms.get(&mesh.name.to_lowercase());
+                let xform_rt: Option<[f64; 12]> = model_xform.map(|t| {
+                    let mut c0 = [t[0] as f64, t[1] as f64, t[2] as f64];
+                    let mut c1 = [t[4] as f64, t[5] as f64, t[6] as f64];
+                    let mut c2 = [t[8] as f64, t[9] as f64, t[10] as f64];
+                    let n0 = (c0[0]*c0[0]+c0[1]*c0[1]+c0[2]*c0[2]).sqrt();
+                    let n1 = (c1[0]*c1[0]+c1[1]*c1[1]+c1[2]*c1[2]).sqrt();
+                    let n2 = (c2[0]*c2[0]+c2[1]*c2[1]+c2[2]*c2[2]).sqrt();
+                    if n0 > 1e-9 { for k in 0..3 { c0[k] /= n0; } }
+                    if n1 > 1e-9 { for k in 0..3 { c1[k] /= n1; } }
+                    if n2 > 1e-9 { for k in 0..3 { c2[k] /= n2; } }
+                    [c0[0],c0[1],c0[2], c1[0],c1[1],c1[2], c2[0],c2[1],c2[2], t[12] as f64, t[13] as f64, t[14] as f64]
+                });
                 let vertices: Vec<[f64; 3]> = mesh.vertices.iter()
                     .map(|v| {
                         let lx = v[0] as f64 * inv_scale;
                         let ly = v[1] as f64 * inv_scale;
                         let lz = v[2] as f64 * inv_scale;
-                        if let Some(t) = model_xform {
-                            let wx = t[0] as f64*lx + t[4] as f64*ly + t[8] as f64*lz + t[12] as f64;
-                            let wy = t[1] as f64*lx + t[5] as f64*ly + t[9] as f64*lz + t[13] as f64;
-                            let wz = t[2] as f64*lx + t[6] as f64*ly + t[10] as f64*lz + t[14] as f64;
+                        if let Some(r) = &xform_rt {
+                            let wx = r[0]*lx + r[3]*ly + r[6]*lz + r[9];
+                            let wy = r[1]*lx + r[4]*ly + r[7]*lz + r[10];
+                            let wz = r[2]*lx + r[5]*ly + r[8]*lz + r[11];
                             [wx, wy, wz]
                         } else {
                             [lx, ly, lz]
@@ -584,11 +631,27 @@ impl HavokPhysicsMemberHandlers {
                 if let Some(p) = props {
                     if let Some(r) = p.restitution { rb.restitution = r as f64; }
                     if let Some(f) = p.static_friction { rb.friction = f as f64; }
+                    // Honour the HKE active flag: bodies authored at rest start
+                    // asleep (frozen) and only simulate once disturbed. This is
+                    // why the warehouse stack stays put until the lone active
+                    // crate slides into it.
+                    if mass > 0.0 { if let Some(act) = p.active { rb.active = act; } }
+                    if let Some(v) = p.linear_velocity {
+                        rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
+                    }
                 }
 
-                // Set position from W3D model transform
+                // Set position + authored model scale from the W3D transform.
                 if let Some(t) = model_xform {
                     rb.position = [t[12] as f64, t[13] as f64, t[14] as f64];
+                    let s0 = ((t[0]as f64).powi(2)+(t[1]as f64).powi(2)+(t[2]as f64).powi(2)).sqrt();
+                    let s1 = ((t[4]as f64).powi(2)+(t[5]as f64).powi(2)+(t[6]as f64).powi(2)).sqrt();
+                    let s2 = ((t[8]as f64).powi(2)+(t[9]as f64).powi(2)+(t[10]as f64).powi(2)).sqrt();
+                    rb.sync_scale = [
+                        if s0 > 1e-9 { s0 } else { 1.0 },
+                        if s1 > 1e-9 { s1 } else { 1.0 },
+                        if s2 > 1e-9 { s2 } else { 1.0 },
+                    ];
                 }
                 let rb_index = havok.state.rigid_bodies.len();
                 havok.state.rigid_bodies.push(rb);
@@ -606,10 +669,62 @@ impl HavokPhysicsMemberHandlers {
                     body_index: mesh_body_index,
                 };
                 cmesh.compute_aabb();
+
+                if mass > 0.0 {
+                    let (mut lmn, mut lmx) = ([f64::MAX; 3], [f64::MIN; 3]);
+                    for v in &mesh.vertices {
+                        for i in 0..3 {
+                            let c = v[i] as f64 * inv_scale;
+                            if c < lmn[i] { lmn[i] = c; }
+                            if c > lmx[i] { lmx[i] = c; }
+                        }
+                    }
+                    let he = [0.5*(lmx[0]-lmn[0]).abs(), 0.5*(lmx[1]-lmn[1]).abs(), 0.5*(lmx[2]-lmn[2]).abs()];
+                    // COM = local box centre = body-frame offset from the node
+                    // origin (model base) to the collision-box centre.
+                    let com = [0.5*(lmn[0]+lmx[0]), 0.5*(lmn[1]+lmx[1]), 0.5*(lmn[2]+lmx[2])];
+                    let unit_i = super::havok_physics::box_unit_inertia(he);
+                    let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
+                    super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
+                    let rb = &mut havok.state.rigid_bodies[rb_index];
+                    rb.inertia_half_extents = he;
+                    rb.center_of_mass = com;
+                    rb.unit_inertia_tensor = unit_i;
+                    rb.inertia_tensor = it;
+                    rb.inverse_inertia_tensor = inv_it;
+                    rb.inverse_mass = inv_m;
+                }
+
                 havok.state.collision_meshes.push(cmesh);
             }
 
-            // Create rigid bodies for HKE tail entries that have no collision mesh
+            // Per-ENTRY-mesh half-extents in Director units, plus a shared
+            // fallback box (the first mesh) for bodies whose mesh primitive
+            // references geometry that is only stored once (e.g. the warehouse
+            // crates all reuse the single "Crate01" box).
+            // mesh name -> (half-extents, local centre), both Director units.
+            let mut mesh_geo: std::collections::HashMap<String, ([f64; 3], [f64; 3])> = std::collections::HashMap::new();
+            let mut fallback_geo: Option<([f64; 3], [f64; 3])> = None;
+            for mesh in &hke.meshes {
+                if mesh.vertices.is_empty() { continue; }
+                let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
+                for v in &mesh.vertices {
+                    for i in 0..3 {
+                        let c = v[i] as f64 * inv_scale;
+                        if c < mn[i] { mn[i] = c; }
+                        if c > mx[i] { mx[i] = c; }
+                    }
+                }
+                let he = [0.5*(mx[0]-mn[0]).abs(), 0.5*(mx[1]-mn[1]).abs(), 0.5*(mx[2]-mn[2]).abs()];
+                let center = [0.5*(mn[0]+mx[0]), 0.5*(mn[1]+mx[1]), 0.5*(mn[2]+mx[2])];
+                mesh_geo.insert(mesh.name.to_lowercase(), (he, center));
+                if fallback_geo.is_none() { fallback_geo = Some((he, center)); }
+            }
+
+            // Create rigid bodies for HKE tail entries that have no ENTRY mesh.
+            // Positions come from the matching W3D node transform (so the
+            // physics world aligns with the rendered scene); plane primitives
+            // become large static quad colliders (floor + walls).
             for body_def in &hke.bodies {
                 let already_exists = havok.state.rigid_bodies.iter()
                     .any(|rb| rb.name.eq_ignore_ascii_case(&body_def.name));
@@ -623,10 +738,123 @@ impl HavokPhysicsMemberHandlers {
                 };
                 if let Some(r) = body_def.restitution { rb.restitution = r as f64; }
                 if let Some(f) = body_def.static_friction { rb.friction = f as f64; }
-                if let Some(t) = body_def.translation {
-                    rb.position = [t[0] as f64, t[1] as f64, t[2] as f64];
+                if mass > 0.0 { if let Some(act) = body_def.active { rb.active = act; } }
+                if let Some(v) = body_def.linear_velocity {
+                    rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
                 }
+
+                // World transform: prefer the W3D node (matches the render),
+                // fall back to the HKE translation converted to Director units.
+                let xform = model_transforms.get(&body_def.name.to_lowercase()).copied();
+                if let Some(t) = xform {
+                    rb.position = [t[12] as f64, t[13] as f64, t[14] as f64];
+                } else if let Some(t) = body_def.translation {
+                    rb.position = [t[0] as f64 * inv_scale, t[1] as f64 * inv_scale, t[2] as f64 * inv_scale];
+                }
+
+                // Size + inertia for movable bodies from their primitive geometry.
+                if mass > 0.0 {
+                    let (he, com) = body_def.primitives.iter().find_map(|p| match &p.kind {
+                        super::hke_parser::HkePrimitiveKind::Mesh { mesh_name } =>
+                            mesh_geo.get(&mesh_name.to_lowercase()).copied().or(fallback_geo),
+                        super::hke_parser::HkePrimitiveKind::Sphere { radius } => {
+                            let r = (*radius as f64 * inv_scale).abs();
+                            // Sphere centre offset = its primitive-local translation.
+                            let lt = p.local_translation;
+                            Some(([r, r, r], [lt[0] as f64*inv_scale, lt[1] as f64*inv_scale, lt[2] as f64*inv_scale]))
+                        }
+                        super::hke_parser::HkePrimitiveKind::Plane { .. } => None,
+                    }).or(fallback_geo).unwrap_or(([10.0; 3], [0.0; 3]));
+
+                    let unit_i = super::havok_physics::box_unit_inertia(he);
+                    let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
+                    super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
+                    rb.inertia_half_extents = he;
+                    rb.center_of_mass = com;
+                    rb.unit_inertia_tensor = unit_i;
+                    rb.inertia_tensor = it;
+                    rb.inverse_inertia_tensor = inv_it;
+                    rb.inverse_mass = inv_m;
+                }
+
+                let body_pos = rb.position;
                 havok.state.rigid_bodies.push(rb);
+
+                // Build static quad colliders from plane primitives (floor/walls).
+                if mass <= 0.0 {
+                    for prim in &body_def.primitives {
+                        if let super::hke_parser::HkePrimitiveKind::Plane { normal, .. } = &prim.kind {
+                            // World normal = body rotation * local plane normal.
+                            let n_world = if let Some(t) = xform {
+                                // 3x3 columns of the column-major 4x4.
+                                let n = [
+                                    t[0] as f64*normal[0] as f64 + t[4] as f64*normal[1] as f64 + t[8] as f64*normal[2] as f64,
+                                    t[1] as f64*normal[0] as f64 + t[5] as f64*normal[1] as f64 + t[9] as f64*normal[2] as f64,
+                                    t[2] as f64*normal[0] as f64 + t[6] as f64*normal[1] as f64 + t[10] as f64*normal[2] as f64,
+                                ];
+                                super::havok_physics::v3_normalized(n)
+                            } else if let Some(o) = body_def.orientation {
+                                let q = super::havok_physics::quat_from_axis_angle(
+                                    [o[1] as f64, o[2] as f64, o[3] as f64], o[0] as f64);
+                                super::havok_physics::v3_normalized(
+                                    super::havok_physics::quat_rotate_v(q, [normal[0] as f64, normal[1] as f64, normal[2] as f64]))
+                            } else {
+                                [normal[0] as f64, normal[1] as f64, normal[2] as f64]
+                            };
+
+                            if let Some(cmesh) = build_plane_quad(&body_def.name, body_pos, n_world) {
+                                havok.state.collision_meshes.push(cmesh);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build point-to-point (cable) constraints. Keyed by the HKE constraint
+        // TYPE, not by name — the anchor is body A's world-transformed pivot,
+        // the bob is body B (the movable one, e.g. the lamp). We hold the bob at
+        // its initial distance from the anchor so it hangs where authored and
+        // swings like a pendulum rather than falling.
+        if !havok.state.hke_data.is_empty() {
+            let hke = super::hke_parser::parse_hke(&havok.state.hke_data);
+            for cable in &hke.cables {
+                let idx_b = havok.state.rigid_bodies.iter()
+                    .position(|rb| rb.name.eq_ignore_ascii_case(&cable.body_b));
+                let idx_b = match idx_b { Some(i) => i, None => continue };
+
+                // Anchor = body A's world transform applied to pivot A.
+                let xform_a = model_transforms.get(&cable.body_a.to_lowercase()).copied();
+                let inv_scale = if scale.abs() > 1e-10 { 1.0 / scale } else { 1.0 };
+                let pa = [cable.pivot_a[0] as f64*inv_scale, cable.pivot_a[1] as f64*inv_scale, cable.pivot_a[2] as f64*inv_scale];
+                let anchor = if let Some(t) = xform_a {
+                    [
+                        t[0] as f64*pa[0] + t[4] as f64*pa[1] + t[8] as f64*pa[2] + t[12] as f64,
+                        t[1] as f64*pa[0] + t[5] as f64*pa[1] + t[9] as f64*pa[2] + t[13] as f64,
+                        t[2] as f64*pa[0] + t[6] as f64*pa[1] + t[10] as f64*pa[2] + t[14] as f64,
+                    ]
+                } else {
+                    pa
+                };
+
+                let attach_local = [cable.pivot_b[0] as f64*inv_scale, cable.pivot_b[1] as f64*inv_scale, cable.pivot_b[2] as f64*inv_scale];
+
+                // Bob world attach point at init, and the constraint distance.
+                let rb = &havok.state.rigid_bodies[idx_b];
+                let attach_world = super::havok_physics::v3_add(
+                    rb.position,
+                    super::havok_physics::quat_rotate_v(rb.orientation, attach_local),
+                );
+                let init_dist = super::havok_physics::v3_len(
+                    super::havok_physics::v3_sub(attach_world, anchor));
+                let length = if init_dist > 1e-3 { init_dist } else { (cable.length as f64 * inv_scale).abs() };
+
+                havok.state.cable_constraints.push(crate::player::cast_member::HavokCable {
+                    body_index: idx_b,
+                    anchor,
+                    attach_local,
+                    length,
+                });
             }
         }
 
@@ -661,6 +889,7 @@ impl HavokPhysicsMemberHandlers {
         havok.state.initialized = false;
         havok.state.rigid_bodies.clear();
         havok.state.springs.clear();
+        havok.state.cable_constraints.clear();
         havok.state.linear_dashpots.clear();
         havok.state.angular_dashpots.clear();
         havok.state.collision_meshes.clear();
@@ -742,7 +971,7 @@ impl HavokPhysicsMemberHandlers {
             .filter(|rb| !rb.is_fixed && rb.active)
             .map(|rb| {
                 let t = super::havok_physics::build_sync_transform(
-                    rb.position, rb.orientation, rb.center_of_mass,
+                    rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
                 );
                 (rb.name.clone(), t)
             })
@@ -1027,6 +1256,11 @@ impl HavokPhysicsMemberHandlers {
 
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
+        // A body created by Lingo (makeMovableRigidBody) is a script-driven
+        // vehicle (e.g. the SuperSonic car) — keep it on the original collision
+        // path (hover-driven, no box-stacking). HKE-authored bodies (warehouse
+        // crates, the car-demo chassis) stay on the passive path.
+        rb.driven = true;
         rb.inertia_half_extents = mesh_half_extents;
         rb.unit_inertia_tensor = unit_inertia;
         // Apply mass → finalise inertia / inverseInertia (PPC setMass 0x4c930)
