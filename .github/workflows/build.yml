@@ -1,18 +1,32 @@
-
-name: Release Multi-OS Desktop Apps
+name: Master Build, Test & Release Pipeline
 
 on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
-
+  
 permissions:
   contents: write
+  pull-requests: write
+  statuses: write
 
 jobs:
-  release:
-    name: Build & Release for ${{ matrix.os-name }}
+  label-pr:
+    name: Label Pull Request
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+    steps:
+      - name: Labeler
+        uses: actions/labeler@v5
+
+  # STEP 2: BUILD AND TESTS MATRIX (RUNS EVERYTHING PARALLEL)
+  build-and-test:
+    name: Build & Package (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # <--- THIS STOPS IT FROM GOING BOOM IF ONE FAILS
+      fail-fast: false # One OS failure won't stop the other builds
       matrix:
         include:
           - os: windows-latest
@@ -25,18 +39,29 @@ jobs:
             os-name: Linux
             build-args: --linux AppImage deb
 
+    env:
+      CARGO_TERM_COLOR: always
+      TEST_ASSETS_URL: ${{ secrets.TEST_ASSETS_URL }}
+      HABBO_V7_USERNAME: ${{ secrets.HABBO_V7_USERNAME }}
+      HABBO_V7_PASSWORD: ${{ secrets.HABBO_V7_PASSWORD }}
+      HABBO_V7_INFO_HOST: ${{ secrets.HABBO_V7_INFO_HOST }}
+      HABBO_V7_INFO_PORT: ${{ secrets.HABBO_V7_INFO_PORT }}
+      HABBO_V26_SSO_TICKET: ${{ secrets.HABBO_V26_SSO_TICKET }}
+      HABBO_V31_SSO_TICKET: ${{ secrets.HABBO_V31_SSO_TICKET }}
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install wasm-pack
+      - name: Install `wasm-pack`
         run: cargo install wasm-pack
 
       - name: Set up Node.js
@@ -45,35 +70,61 @@ jobs:
           node-version: 20
           cache: npm
 
-      # Installs the wasm-opt tool globally for all OS types so Ruffle core compiles smoothly
-      - name: Install wasm-opt (Binaryen)
+      - name: Install `wasm-opt` (Binaryen for Ruffle)
         uses: alexandrudima/wasm-opt-action@v2
         with:
           version: 'version_116'
 
-      # Extra system-level dependency required specifically for Linux packaging
-      - name: Install Linux Build Dependencies
+      # Linux-specific requirements for packaging & headless testing
+      - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools
+          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick
+          sudo fc-cache -fv
 
       - name: Install NPM Dependencies
         run: npm ci
 
-      - name: Compile Everything (Rust VM, Ruffle, React)
+      - name: Install Playwright Chromium (For E2E Tests)
+        run: npx playwright install --with-deps chromium
+
+      - name: Download Test Assets
+        run: |
+          if [ -z "$TEST_ASSETS_URL" ]; then echo "Skipping assets: URL secret missing"; exit 0; fi
+          curl -fSL "$TEST_ASSETS_URL" -o assets.zip
+          unzip -qo assets.zip -d public/
+
+      - name: Run Core Rust Unit Tests (Skip Heavy E2E)
+        working-directory: ./vm-rust
+        run: |
+          cargo fetch
+          cargo test --verbose -- --skip e2e
+
+      - name: Run Complete Master Project Build Script
         run: npm run build-all
 
-      - name: Package Electron App
+      - name: Run Native End-to-End Tests
+        continue-on-error: true
+        run: npm run e2e-test-native
+
+      - name: Run Browser End-to-End Tests
+        continue-on-error: true
+        run: npm run e2e-test-browser
+
+      # STEP 3: ARTIFACT PACKAGING VIA ELECTRON-BUILDER
+      - name: Package Desktop Executables
         run: npx electron-builder ${{ matrix.build-args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub Release
+      # STEP 4: AUTOMATICALLY PUBLISH TO GITHUB RELEASES (IF MANUALLY TRIGGERED)
+      - name: Create Multi-OS Release Draft
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.0-multi-os-draft
-          name: "DirPlayer v0.6.0 (Multi-OS Release)"
+          tag_name: v0.6.0-master-build
+          name: "DirPlayer v0.6.0 Master Release"
           draft: true
           files: |
             dist/*.exe
