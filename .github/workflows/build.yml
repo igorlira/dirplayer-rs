@@ -1,9 +1,6 @@
 name: DirPlayer Release
 
 on:
-  push:
-    branches: [ "main" ]
-
   workflow_dispatch: 
 
 permissions:
