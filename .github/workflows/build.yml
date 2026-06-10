@@ -22,15 +22,18 @@ jobs:
         include:
           - os: windows-latest
             os-name: Windows
+            # Erzeugt getrennte Installer für x64, x86 (ia32) und ARM64
             build-args: --win --x64 --ia32 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
-            build-args: --dir # Baut nur das unkomprimierte Verzeichnis ohne Signierungszwang
+            # Erzeugt eine universelle ZIP-Datei (enthält x64 + ARM64), benötigt kein Signing
+            build-args: --mac zip --universal
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
-            build-args: --linux AppImage --x64 --arm64 # .deb entfernt
+            # Erzeugt getrennte AppImages für x64 und ARM64 (.deb wurde entfernt)
+            build-args: --linux AppImage --x64 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
@@ -98,18 +101,17 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false # Deaktiviert die automatische Suche nach Zertifikaten (schaltet Signing ab)
+          CSC_IDENTITY_AUTO_DISCOVERY: false # Verhindert Fehler wegen fehlender Mac-Zertifikate
 
-      # Speichert die fertigen Installer sicher bei GitHub ab
+      # Speichert alle erzeugten Einzelformate sicher bei GitHub ab
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dirplayer-builds-${{ matrix.os-name }}
           path: |
             dist/*.exe
-            dist/*.dmg
+            dist/*.zip
             dist/*.AppImage
-            dist/mac/*.app
           retention-days: 1
 
   # JOB 2: Sammelt am Ende alles ein, was überlebt hat, und macht das Release
@@ -129,7 +131,8 @@ jobs:
       - name: Move files to flat directory
         run: |
           mkdir final-dist
-          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
+          # Findet alle .exe, .zip und .AppImage Dateien (für alle CPU-Typen einzeln)
+          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
         shell: bash
 
       - name: Create GitHub Release Draft
