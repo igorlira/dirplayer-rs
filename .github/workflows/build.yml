@@ -2,17 +2,17 @@
 name: Release Multi-OS Desktop Apps
 
 on:
-  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write # Allows the script to create the release and upload the binaries
+  contents: write
 
 jobs:
   release:
     name: Build & Release for ${{ matrix.os-name }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: false # <--- THIS STOPS IT FROM GOING BOOM IF ONE FAILS
       matrix:
         include:
           - os: windows-latest
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive 
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +44,14 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          
+
+      # Installs the wasm-opt tool globally for all OS types so Ruffle core compiles smoothly
+      - name: Install wasm-opt (Binaryen)
+        uses: alexandrudima/wasm-opt-action@v2
+        with:
+          version: 'version_116'
+
+      # Extra system-level dependency required specifically for Linux packaging
       - name: Install Linux Build Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -65,8 +72,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.7.0-multi-os-draft
-          name: "DirPlayer v0.7.0 (Multi-OS Release)"
+          tag_name: v0.6.0-multi-os-draft
+          name: "DirPlayer v0.6.0 (Multi-OS Release)"
           draft: true
           files: |
             dist/*.exe
