@@ -26,11 +26,11 @@ jobs:
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
-            build-args: --mac universal
+            build-args: --dir # Baut nur das unkomprimierte Verzeichnis ohne Signierungszwang
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
-            build-args: --linux AppImage deb --x64 --arm64
+            build-args: --linux AppImage --x64 --arm64 # .deb entfernt
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
@@ -98,6 +98,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false # Deaktiviert die automatische Suche nach Zertifikaten (schaltet Signing ab)
 
       # Speichert die fertigen Installer sicher bei GitHub ab
       - name: Upload Artifacts
@@ -108,7 +109,7 @@ jobs:
             dist/*.exe
             dist/*.dmg
             dist/*.AppImage
-            dist/*.deb
+            dist/mac/*.app
           retention-days: 1
 
   # JOB 2: Sammelt am Ende alles ein, was überlebt hat, und macht das Release
@@ -120,15 +121,15 @@ jobs:
     steps:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
-        continue-on-error: true # Lädt runter, was da ist, ignoriert fehlerhafte OS-Ordner
         with:
           pattern: dirplayer-builds-*
           path: release-artifacts
+        continue-on-error: true
 
       - name: Move files to flat directory
         run: |
           mkdir final-dist
-          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec cp {} final-dist/ \;
+          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
         shell: bash
 
       - name: Create GitHub Release Draft
