@@ -1,0 +1,78 @@
+
+name: Release Multi-OS Desktop Apps
+
+on:
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+
+permissions:
+  contents: write # Allows the script to create the release and upload the binaries
+
+jobs:
+  release:
+    name: Build & Release for ${{ matrix.os-name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+            build-args: --win
+          - os: macos-latest
+            os-name: macOS
+            build-args: --mac
+          - os: ubuntu-latest
+            os-name: Linux
+            build-args: --linux AppImage deb
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive 
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          
+      - name: Install Linux Build Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
+
+      - name: Install NPM Dependencies
+        run: npm ci
+
+      - name: Compile Everything (Rust VM, Ruffle, React)
+        run: npm run build-all
+
+      - name: Package Electron App
+        run: npx electron-builder ${{ matrix.build-args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.7.0-multi-os-draft
+          name: "DirPlayer v0.7.0 (Multi-OS Release)"
+          draft: true
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
