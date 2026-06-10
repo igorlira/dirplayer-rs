@@ -14,29 +14,15 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
   statuses: write
 
 jobs:
-  # ==========================================
-  # 1. AUTOMATIC PATH LABELER (From File #5)
-  # ==========================================
-  label-pr:
-    name: Label Pull Request
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
-    steps:
-      - name: Labeler
-        uses: actions/labeler@v5
-
-  # ==========================================
-  # 2. MASTER BUILD, TEST & OS PACKAGING
-  # ==========================================
+  # MASTER BUILD, TEST & OS PACKAGING
   build-test-release:
     name: Build & Package (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # Bulletproof: one OS failure won't kill the others
+      fail-fast: false # One OS failure won't kill the others
       matrix:
         include:
           - os: windows-latest
@@ -74,6 +60,13 @@ jobs:
 
       - name: Install `wasm-pack`
         run: cargo install wasm-pack
+        shell: bash
+
+      # Ruffle explicitly looks for specific native wasm-bindgen tools in system paths
+      - name: Install Ruffle Wasm Compiler Prerequisites
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.120
+        shell: bash
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -81,23 +74,39 @@ jobs:
           node-version: 20
           cache: npm
 
-      # System dependencies for Linux packaging & headless image rendering
+      # System level tools for Linux packaging & headless image rendering
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick
+          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick binaryen
           sudo fc-cache -fv
+        shell: bash
+
+      # Native binary install for Mac via Homebrew
+      - name: Install Mac System Dependencies
+        if: matrix.os == 'macos-latest'
+        run: brew install binaryen
+        shell: bash
+
+      # Native binary install for Windows via Chocolatey
+      - name: Install Windows System Dependencies
+        if: matrix.os == 'windows-latest'
+        run: choco install binaryen
+        shell: bash
 
       - name: Install NPM Dependencies
         run: npm ci
+        shell: bash
 
-      # Reliable self-contained wasm-opt fix for Ruffle core compilation
-      - name: Install `wasm-opt` globally
-        run: npm install -g wasm-opt
+      # Verifies if wasm-opt is officially visible on the machine runner path
+      - name: Check Wasm Optimizer Path
+        run: wasm-opt --version
+        shell: bash
 
       - name: Install Playwright Chromium (For E2E Testing)
         run: npx playwright install --with-deps chromium
+        shell: bash
 
       - name: Download Remote Test Assets
         run: |
@@ -106,27 +115,31 @@ jobs:
           unzip -qo assets.zip -d public/
         shell: bash
 
-      # Core Rust Engine Tests (From File #2)
+      # Core Rust Engine Tests
       - name: Run Core Rust Unit Tests
         working-directory: ./vm-rust
         run: |
           cargo fetch
           cargo test --verbose -- --skip e2e
+        shell: bash
 
-      # Master Build Sequence (From package.json)
-      - name: Run Complete Master Build (Rust VM, Ruffle, Frontend)
+      # Master Build Sequence (Rust VM, Ruffle, Frontend)
+      - name: Run Complete Master Build
         run: npm run build-all
+        shell: bash
 
-      # End-to-End Visual Validation (From File #1)
+      # End-to-End Visual Validation
       - name: Run Native E2E Tests
         continue-on-error: true
         run: npm run e2e-test-native
+        shell: bash
 
       - name: Run Browser E2E Tests
         continue-on-error: true
         run: npm run e2e-test-browser
+        shell: bash
 
-      # OPTIONAL SNAPSHOT UPDATE LAYER (From File #3)
+      # OPTIONAL SNAPSHOT UPDATE LAYER
       - name: Update Visual Snapshots (Manual trigger only)
         if: github.event.inputs.update_snapshots == 'true' && matrix.os == 'ubuntu-latest'
         run: |
@@ -137,10 +150,12 @@ jobs:
           git add tests/snapshots/
           git commit -m "chore: auto-update e2e snapshots [skip ci]" || echo "No snapshot changes to commit"
           git push
+        shell: bash
 
-      # Native Electron Packaging (From package.json)
+      # Native Electron Packaging
       - name: Package Electron App binaries
         run: npx electron-builder ${{ matrix.build-args }}
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
