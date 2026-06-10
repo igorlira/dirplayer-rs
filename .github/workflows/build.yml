@@ -28,12 +28,15 @@ jobs:
           - os: windows-latest
             os-name: Windows
             build-args: --win
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
             build-args: --mac
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
             build-args: --linux AppImage deb
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
       CARGO_TERM_COLOR: always
@@ -62,7 +65,7 @@ jobs:
         run: cargo install wasm-pack
         shell: bash
 
-      # Installs the correct matching version AND explicitly forces it onto the GitHub system PATH
+      # Installs the matching version 0.2.108 for the project data structure schemas
       - name: Install Ruffle Wasm Compiler Prerequisites
         run: |
           cargo install wasm-bindgen-cli --version 0.2.108
@@ -75,27 +78,22 @@ jobs:
           node-version: 20
           cache: npm
 
-      # Linux Setup
-      - name: Install Linux System Dependencies
+      # Bulletproof Multi-OS Cross-Platform Installation for Binaryen (wasm-opt)
+      - name: Install Native Wasm Optimizer (Binaryen)
+        run: |
+          curl -L "${{ matrix.binaryen-url }}" -o binaryen.tar.gz
+          tar -xzf binaryen.tar.gz
+          cd binaryen-version_116/bin
+          echo "$(pwd)" >> $GITHUB_PATH
+        shell: bash
+
+      # System level dependencies specifically for Linux packaging & headless visual tests
+      - name: Install Linux Extras
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick binaryen
+          sudo apt-get install -y libarchive-tools ttf-mscorefonts-installer imagemagick
           sudo fc-cache -fv
-        shell: bash
-
-      # Mac Setup
-      - name: Install Mac System Dependencies
-        if: matrix.os == 'macos-latest'
-        run: brew install binaryen
-        shell: bash
-
-      # Windows Setup (No more Choco! Uses npm package cleanly)
-      - name: Install Windows System Dependencies
-        if: matrix.os == 'windows-latest'
-        run: |
-          npm install -g wasm-opt
-          echo "$(npm config get prefix)" >> $GITHUB_PATH
         shell: bash
 
       - name: Install NPM Dependencies
