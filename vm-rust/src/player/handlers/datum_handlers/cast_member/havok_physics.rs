@@ -482,27 +482,53 @@ pub fn find_ground_z(meshes: &[CollisionMesh], x: f64, y: f64, max_z: f64) -> Op
 /// `tolerance` expands the effective collision distance so Havok detects
 /// contacts before actual surface penetration (matching the Xtra behaviour).
 pub fn detect_body_contacts(
-    meshes: &[CollisionMesh], pos: V3, radius: f64, body_idx: usize, tolerance: f64,
+    meshes: &[CollisionMesh], pos: V3, half_extents: V3, body_idx: usize, tolerance: f64, passive: bool,
+    bodies: &[crate::player::cast_member::HavokRigidBody],
 ) -> Vec<CollisionContact> {
-    let eff_radius = radius + tolerance;
+    // Broad-phase cull uses the largest half-extent. NON-passive scenes (the
+    // tuned SuperSonic car) keep the original sphere-radius narrow phase with no
+    // margin, since that's what their handling was calibrated against. Passive
+    // scenes use the box-support narrow phase + contact margin so resting boxes
+    // sit flush and a stack stays coupled.
+    let max_r = half_extents[0].max(half_extents[1]).max(half_extents[2]) + tolerance;
+    let margin = if passive { CONTACT_MARGIN } else { 0.0 };
     let mut contacts = Vec::new();
     for mesh in meshes {
-        if pos[0]+eff_radius < mesh.aabb_min[0] || pos[0]-eff_radius > mesh.aabb_max[0] { continue; }
-        if pos[1]+eff_radius < mesh.aabb_min[1] || pos[1]-eff_radius > mesh.aabb_max[1] { continue; }
-        if pos[2]+eff_radius < mesh.aabb_min[2] || pos[2]-eff_radius > mesh.aabb_max[2] { continue; }
+        // Skip meshes owned by a MOVABLE body: those are baked at the body's
+        // initial position and go stale once it moves (bogus deep collisions;
+        // dynamic bodies interact via box-vs-box instead). A FIXED body's mesh
+        // never moves, so it stays a valid static collider — and its body_index
+        // lets the resolver use that surface's restitution/friction (the
+        // Properties demo's bouncy/slippery floors).
+        if let Some(owner) = mesh.body_index {
+            if !bodies[owner].pinned { continue; }
+        }
+        if pos[0]+max_r < mesh.aabb_min[0] || pos[0]-max_r > mesh.aabb_max[0] { continue; }
+        if pos[1]+max_r < mesh.aabb_min[1] || pos[1]-max_r > mesh.aabb_max[1] { continue; }
+        if pos[2]+max_r < mesh.aabb_min[2] || pos[2]-max_r > mesh.aabb_max[2] { continue; }
         for tri in &mesh.triangles {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
             let v2 = mesh.vertices[tri[2] as usize];
             let normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
             if v3_len_sq(normal) < 1e-10 { continue; }
+            // Passive: exact box support along the triangle normal. Non-passive:
+            // original isotropic sphere radius.
+            let eff_radius = if passive {
+                half_extents[0]*normal[0].abs()
+              + half_extents[1]*normal[1].abs()
+              + half_extents[2]*normal[2].abs()
+              + tolerance
+            } else {
+                max_r
+            };
             let dist = v3_dot(v3_sub(pos, v0), normal);
             if dist.abs() > eff_radius { continue; }
             if dist < -eff_radius * 2.0 { continue; }
             let proj = v3_sub(pos, v3_scale(normal, dist));
             if pt_in_tri_3d(proj, v0, v1, v2) {
                 let depth = eff_radius - dist;
-                if depth > 0.0 {
+                if depth > -margin {
                     contacts.push(CollisionContact {
                         body_a: body_idx,
                         body_b: mesh.body_index,
@@ -646,6 +672,12 @@ fn interp_z(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> f64 {
 // ============================================================
 
 const MAX_RESOLVER_ITERATIONS: usize = 400;
+/// Contact margin (Director units): generate contacts slightly before bodies
+/// actually overlap so a resting stack stays *coupled* (the resolver can carry
+/// friction + impulses between touching boxes and the floor) instead of each
+/// box flickering in and out of contact. Near-contacts (depth <= 0) only affect
+/// velocity — depenetration still requires real penetration.
+const CONTACT_MARGIN: f64 = 2.0;
 /// Default ground material: friction=0.5, restitution=0.3
 const GROUND_FRICTION: f64 = 0.5;
 const GROUND_RESTITUTION: f64 = 0.3;
@@ -720,10 +752,16 @@ fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact)
     let normal_impulse_mag = (target_vn - vn) / eff_inv_mass;
     let mut impulse = v3_scale(contact.normal, normal_impulse_mag);
 
-    // Friction (Coulomb cone) — skip for resting contacts so bodies can
-    // slide on tilted surfaces under gravity without friction impulses
-    // killing their tangential velocity every frame.
-    if friction > 0.0 && !is_resting {
+    // Friction (Coulomb cone). For SuperSonic-style driven scenes we skip it on
+    // resting contacts so the car can slide on tilted surfaces under gravity.
+    // For passive scenes we MUST apply it on resting contacts too, otherwise a
+    // crate that slides flat across the floor never slows down or stops. A
+    // driven body (the car) keeps the original skip-on-resting behaviour.
+    let passive = state.springs.is_empty()
+        && state.linear_dashpots.is_empty()
+        && state.angular_dashpots.is_empty()
+        && !state.rigid_bodies[contact.body_a].driven;
+    if friction > 0.0 && (!is_resting || passive) {
         let tangent_vel = v3_sub(rel_vel, v3_scale(contact.normal, vn));
         let tangent_speed = v3_len(tangent_vel);
         if tangent_speed > 1e-6 {
@@ -1221,19 +1259,31 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         .map(|rb| (rb.force, rb.torque)).collect();
 
     for _sub in 0..n_subs {
-        // Reset forces to scaled game values each substep.
-        // Gravity and drag are added on top in step_single.
+        // Reset forces to game values each substep (gravity/drag added in
+        // step_single). The per-axis force/torque dividers are a SuperSonic-
+        // specific calibration; applying them to OTHER hover cars crushes their
+        // suspension's levelling torque (~0.2%) and tips them over on tilted
+        // roads. Only driven (makeMovableRigidBody) bodies use the calibration;
+        // every other body gets its applied force/torque verbatim.
         for (i, rb) in state.rigid_bodies.iter_mut().enumerate() {
             if i < saved_forces.len() {
+                let (fs, tsp, tsy) = if rb.driven {
+                    (force_scale, torque_scale_pitch_roll, torque_scale_yaw)
+                } else {
+                    // Non-SuperSonic hover cars: scale torque the SAME as force
+                    // (physically consistent) instead of the SuperSonic-only
+                    // pitch/roll/yaw asymmetry that crushed levelling torque.
+                    (force_scale, force_scale, force_scale)
+                };
                 rb.force = [
-                    saved_forces[i].0[0]/force_scale,
-                    saved_forces[i].0[1]/force_scale,
-                    saved_forces[i].0[2]/force_scale,
+                    saved_forces[i].0[0]/fs,
+                    saved_forces[i].0[1]/fs,
+                    saved_forces[i].0[2]/fs,
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/torque_scale_pitch_roll,   // world X ≈ body pitch
-                    saved_forces[i].1[1]/torque_scale_pitch_roll,   // world Y ≈ body roll
-                    saved_forces[i].1[2]/torque_scale_yaw,          // world Z ≈ body yaw
+                    saved_forces[i].1[0]/tsp,   // world X ≈ body pitch
+                    saved_forces[i].1[1]/tsp,   // world Y ≈ body roll
+                    saved_forces[i].1[2]/tsy,   // world Z ≈ body yaw
                 ];
             }
         }
@@ -1255,7 +1305,7 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // breaks the natural lean-into-the-turn dynamic the springs rely on.
     //
     // Mirrors Havok's `applyDamping` helper at PPC 0x4cf00 (x86 `sub_10013770`).
-    const ANGULAR_DRIFT_DAMP: f64 = 0.05;
+    const ANGULAR_DRIFT_DAMP: f64 = 0.1; //0.05;
     let ang_factor = 1.0 - ANGULAR_DRIFT_DAMP;
     for rb in &mut state.rigid_bodies {
         if rb.pinned || !rb.active { continue; }
@@ -1277,6 +1327,17 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
 fn step_single(state: &mut HavokPhysicsState, dt: f64) {
     let mut remaining = dt;
     let mut retries = 0;
+
+    // Passive scenes (standard Havok behaviour: no Lingo springs/dashpots and no
+    // hover/drive-forced body) use discrete collision: integrate the full step,
+    // then resolve + depenetrate. The bisection rollback path rolls back ALL
+    // bodies on ANY collision, which for a pile of resting bodies starves the
+    // simulation of time and freezes it. Bisection stays on for driven scenes
+    // (the SuperSonic car was tuned against it).
+    let passive = state.springs.is_empty()
+        && state.linear_dashpots.is_empty()
+        && state.angular_dashpots.is_empty()
+        && !state.rigid_bodies.iter().any(|rb| rb.driven);
 
     while remaining > MIN_BISECTION_DT * 0.1 {
         // Phase 1: Save state for rollback
@@ -1300,6 +1361,9 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
             integrate_body(rb, remaining);
         }
 
+        // Phase 4a: Cable / point-to-point constraints (pendulum hang+swing).
+        apply_cables(state);
+
         // Phase 4b: Ground constraint (resting contacts)
         apply_ground_constraints(state);
 
@@ -1314,7 +1378,7 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
         let contacts = detect_all_collisions(state);
         let has_collisions = !contacts.is_empty();
 
-        if has_collisions && remaining > MIN_BISECTION_DT && retries < MAX_BISECTION_RETRIES {
+        if !passive && has_collisions && remaining > MIN_BISECTION_DT && retries < MAX_BISECTION_RETRIES {
             // Collision detected — rollback and bisect
             for rb in &mut state.rigid_bodies {
                 if !rb.pinned && rb.active {
@@ -1334,12 +1398,51 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                 // trigger a global bisection rollback including bodies that are
                 // already bouncing away).
                 for c in &contacts {
-                    // Read ground friction before mutable borrow
+                    if c.depth <= 0.0 { continue; }
+
+                    // Is body_b another DYNAMIC body (box-vs-box)? Then split the
+                    // depenetration and the relative normal-velocity removal
+                    // between the two by inverse mass, so a stack settles without
+                    // either box being shoved through its neighbour or the floor.
+                    let b_dynamic = match c.body_b {
+                        Some(j) => !state.rigid_bodies[j].pinned && state.rigid_bodies[j].inverse_mass > 0.0,
+                        None => false,
+                    };
+
+                    if b_dynamic {
+                        let j = c.body_b.unwrap();
+                        // A moving body that penetrates a sleeping one wakes it,
+                        // so the impact propagates through the stack.
+                        state.rigid_bodies[c.body_a].active = true;
+                        state.rigid_bodies[j].active = true;
+                        let ia = state.rigid_bodies[c.body_a].inverse_mass;
+                        let ib = state.rigid_bodies[j].inverse_mass;
+                        let isum = ia + ib;
+                        if isum <= 0.0 { continue; }
+                        let fa = ia / isum;
+                        let fb = ib / isum;
+                        for k in 0..3 {
+                            state.rigid_bodies[c.body_a].position[k] += c.normal[k] * c.depth * fa;
+                            state.rigid_bodies[j].position[k]        -= c.normal[k] * c.depth * fb;
+                        }
+                        let va = state.rigid_bodies[c.body_a].linear_velocity;
+                        let vb = state.rigid_bodies[j].linear_velocity;
+                        let rvn = (va[0]-vb[0])*c.normal[0] + (va[1]-vb[1])*c.normal[1] + (va[2]-vb[2])*c.normal[2];
+                        if rvn < 0.0 {
+                            for k in 0..3 {
+                                state.rigid_bodies[c.body_a].linear_velocity[k] -= rvn * fa * c.normal[k];
+                                state.rigid_bodies[j].linear_velocity[k]        += rvn * fb * c.normal[k];
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Static / fixed-body contact: push body_a out fully.
                     let ground_friction = c.body_b
                         .map(|idx| state.rigid_bodies[idx].friction)
                         .unwrap_or(0.5);
                     let rb = &mut state.rigid_bodies[c.body_a];
-                    if !rb.pinned && rb.inverse_mass > 0.0 && c.depth > 0.0 {
+                    if !rb.pinned && rb.inverse_mass > 0.0 {
                         let vn = rb.linear_velocity[0] * c.normal[0]
                                + rb.linear_velocity[1] * c.normal[1]
                                + rb.linear_velocity[2] * c.normal[2];
@@ -1352,21 +1455,18 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                             rb.linear_velocity[1] -= vn * c.normal[1];
                             rb.linear_velocity[2] -= vn * c.normal[2];
                         }
-                        // Only enter resting contact for low-velocity impacts.
-                        // Bouncy contacts (high restitution) must stay in the
-                        // impulse-based collision system so they can bounce.
+                        // Resting contact only for a body resting on another
+                        // body's OWNED static mesh (SuperSonic car on terrain).
                         if c.body_b.is_some() && vn.abs() < 10.0 {
-                            let (aabb_min, aabb_max) = state.collision_meshes.iter()
-                                .find(|m| m.body_index == c.body_b)
-                                .map(|m| (m.aabb_min, m.aabb_max))
-                                .unwrap_or(([f64::MIN;3], [f64::MAX;3]));
-                            rb.resting_normal = Some(crate::player::cast_member::RestingContact {
-                                normal: c.normal,
-                                plane_point: c.point,
-                                ground_friction,
-                                aabb_min,
-                                aabb_max,
-                            });
+                            if let Some(m) = state.collision_meshes.iter().find(|m| m.body_index == c.body_b) {
+                                rb.resting_normal = Some(crate::player::cast_member::RestingContact {
+                                    normal: c.normal,
+                                    plane_point: c.point,
+                                    ground_friction,
+                                    aabb_min: m.aabb_min,
+                                    aabb_max: m.aabb_max,
+                                });
+                            }
                         }
                     }
                 }
@@ -1387,6 +1487,33 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
             }
             break;
         }
+    }
+}
+
+/// Apply cable / point-to-point constraints as rigid distance constraints
+/// (a pendulum): keep each bob's attach point at `length` from its fixed
+/// anchor, removing radial velocity so it swings under gravity instead of
+/// falling. Position-based so it's stable for a light body like the lamp.
+fn apply_cables(state: &mut HavokPhysicsState) {
+    if state.cable_constraints.is_empty() { return; }
+    let cables = state.cable_constraints.clone();
+    for cable in &cables {
+        let rb = &mut state.rigid_bodies[cable.body_index];
+        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
+
+        let attach_world = v3_add(rb.position, quat_rotate_v(rb.orientation, cable.attach_local));
+        let d = v3_sub(attach_world, cable.anchor);
+        let dist = v3_len(d);
+        if dist < 1e-6 { continue; }
+        let dir = v3_scale(d, 1.0 / dist);
+
+        // Pull the body so its attach point sits exactly `length` from anchor.
+        let correction = dist - cable.length;
+        rb.position = v3_sub(rb.position, v3_scale(dir, correction));
+
+        // Remove radial velocity (rigid rod) — keep only the tangential (swing).
+        let vr = v3_dot(rb.linear_velocity, dir);
+        rb.linear_velocity = v3_sub(rb.linear_velocity, v3_scale(dir, vr));
     }
 }
 
@@ -1526,11 +1653,69 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
     }
 }
 
+/// Dynamic-vs-dynamic collision using an axis-aligned box approximation around
+/// each body's COM. Resolves along the axis of least penetration (minimum
+/// translation vector), which is stable for the near-axis-aligned crates in the
+/// warehouse demo. Returns one contact per overlapping pair.
+fn detect_body_body_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
+    let mut out = Vec::new();
+    let n = state.rigid_bodies.len();
+    for i in 0..n {
+        let a = &state.rigid_bodies[i];
+        if a.pinned || a.inverse_mass <= 0.0 || a.driven { continue; }
+        let ca = v3_add(a.position, quat_rotate_v(a.orientation, a.center_of_mass));
+        for j in (i+1)..n {
+            let b = &state.rigid_bodies[j];
+            if b.pinned || b.inverse_mass <= 0.0 || b.driven { continue; }
+            // At least one body must be awake — two sleeping bodies in resting
+            // contact must NOT interact, or the whole stack would wake itself.
+            if !a.active && !b.active { continue; }
+            let cb = v3_add(b.position, quat_rotate_v(b.orientation, b.center_of_mass));
+
+            // Per-axis overlap of the two AABBs (half-extents summed).
+            let mut min_overlap = f64::MAX;
+            let mut axis = 0usize;
+            let mut sep = false;
+            for k in 0..3 {
+                let sum = a.inertia_half_extents[k] + b.inertia_half_extents[k];
+                let d = ca[k] - cb[k];
+                let ov = sum - d.abs();
+                if ov <= -CONTACT_MARGIN { sep = true; break; }
+                if ov < min_overlap { min_overlap = ov; axis = k; }
+            }
+            if sep { continue; }
+
+            // Normal points from B toward A along the least-penetrated axis.
+            let mut normal = [0.0; 3];
+            normal[axis] = if ca[axis] - cb[axis] >= 0.0 { 1.0 } else { -1.0 };
+            let point = v3_scale(v3_add(ca, cb), 0.5);
+            out.push(CollisionContact {
+                body_a: i,
+                body_b: Some(j),
+                point,
+                normal,
+                depth: min_overlap,
+            });
+        }
+    }
+    out
+}
+
 /// Detect all transient collisions (body vs static mesh walls/obstacles).
 fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
     if state.collision_meshes.is_empty() { return Vec::new(); }
 
     let mut all_contacts = Vec::new();
+
+    // A "passive" scene (no Lingo springs / dashpots) relies entirely on the
+    // engine to keep bodies on the static ground mesh — this is the standard
+    // Havok behaviour library demo (e.g. the warehouse falling-crates scene).
+    // SuperSonic-style scenes register dashpots/springs and instead drive
+    // ground contact from Lingo hover forces, so for those we keep skipping the
+    // upward-facing static-ground contacts (handled by the ground constraint).
+    let passive_scene = state.springs.is_empty()
+        && state.linear_dashpots.is_empty()
+        && state.angular_dashpots.is_empty();
 
     for bi in 0..state.rigid_bodies.len() {
         let rb = &state.rigid_bodies[bi];
@@ -1538,18 +1723,31 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         // Skip bodies in resting contact — handled by apply_surface_contacts
         if rb.resting_normal.is_some() { continue; }
 
-        // Use the body's actual half-extents as collision radius
-        let he = rb.inertia_half_extents;
-        let body_radius = he[0].max(he[1]).max(he[2]);
+        // Per-body decision: a DRIVEN body (the SuperSonic / car-demo car, which
+        // receives hover/drive forces) keeps the original collision path it was
+        // tuned against — even in an otherwise passive scene. Force-free objects
+        // (crates, blocks) use the box-stacking path.
+        let body_passive = passive_scene && !rb.driven;
 
-        let contacts = detect_body_contacts(&state.collision_meshes, rb.position, body_radius, bi, state.tolerance);
+        // Use the body's actual half-extents (box support) for collision.
+        let he = rb.inertia_half_extents;
+        // Box-stacking objects test against the COM-offset box centre (so boxes
+        // rest flush). Driven bodies keep the original origin-centred test.
+        let center = if body_passive {
+            v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+        } else {
+            rb.position
+        };
+
+        let contacts = detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies);
         // Keep only the deepest contact per body to avoid duplicate impulses
         // from coplanar triangles (e.g. two triangles forming a box face).
         let mut best: Option<CollisionContact> = None;
         for c in contacts {
-            // Skip upward-facing ground contacts for unowned scenery meshes.
-            // These are handled by the ground constraint safety net.
-            if c.normal[2] > 0.7 && c.body_b.is_none() { continue; }
+            // Skip upward-facing ground contacts for unowned scenery meshes when
+            // a driven body handles ground via hover forces. Box-stacking
+            // objects must keep these or they fall through the floor.
+            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
             }
@@ -1558,6 +1756,14 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             all_contacts.push(c);
         }
     }
+
+    // Dynamic body vs dynamic body (axis-aligned box approximation) — passive
+    // scenes only. This is what keeps a stack of crates standing. SuperSonic-
+    // style scenes have no dynamic-vs-dynamic stacks and were tuned without it.
+    if passive_scene {
+        all_contacts.extend(detect_body_body_collisions(state));
+    }
+
     all_contacts
 }
 
@@ -1581,7 +1787,7 @@ pub fn quat_to_yaw(q: Quat) -> f64 {
     siny_cosp.atan2(cosy_cosp)
 }
 
-pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3) -> [f32; 16] {
+pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3, scale: V3) -> [f32; 16] {
     // Rotation around the center of mass, not around the visual origin.
     //
     // Convention: `pos` is the "reference position" — the visual origin's world
@@ -1612,10 +1818,14 @@ pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3) -> [f32; 
     let ty = pos[1] + com_local[1] - ry;
     let tz = pos[2] + com_local[2] - rz;
 
+    // Scale the rotation columns by the authored per-axis model scale so the
+    // rendered model keeps its size (RaycastCar wheel/hover points are derived
+    // from this transform).
+    let (s0, s1, s2) = (scale[0], scale[1], scale[2]);
     [
-        m[0] as f32, m[3] as f32, m[6] as f32, 0.0,
-        m[1] as f32, m[4] as f32, m[7] as f32, 0.0,
-        m[2] as f32, m[5] as f32, m[8] as f32, 0.0,
+        (m[0]*s0) as f32, (m[3]*s0) as f32, (m[6]*s0) as f32, 0.0,
+        (m[1]*s1) as f32, (m[4]*s1) as f32, (m[7]*s1) as f32, 0.0,
+        (m[2]*s2) as f32, (m[5]*s2) as f32, (m[8]*s2) as f32, 0.0,
         tx as f32, ty as f32, tz as f32, 1.0,
     ]
 }
