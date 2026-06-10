@@ -1,4 +1,4 @@
-name: DirPlayer Master Release Pipeline (All Architectures)
+name: DirPlayer Master Release Pipeline (Unkaputtbar)
 
 on:
   push:
@@ -12,27 +12,24 @@ permissions:
   statuses: write
 
 jobs:
-  # MASTER BUILD & MULTI-ARCH PACKAGING
-  build-and-release:
-    name: Build & Package (${{ matrix.os-name }})
+  # JOB 1: Jedes OS baut komplett unabhängig voneinander
+  build-and-package:
+    name: Build (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false 
+      fail-fast: false # Verhindert, dass ein OS ein anderes abbricht!
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
-            # Baut Windows x64, x86 (ia32) und ARM64
             build-args: --win --x64 --ia32 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
-            # Erstellt eine Universal-App, die sowohl x64 als auch arm64 nativ unterstützt
             build-args: --mac universal
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
-            # Baut Linux AppImage und DEB für x64 und ARM64
             build-args: --linux AppImage deb --x64 --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
@@ -73,6 +70,9 @@ jobs:
           curl -L "${{ matrix.binaryen-url }}" -o binaryen.tar.gz
           tar -xzf binaryen.tar.gz
           cd binaryen-version_116/bin
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            sudo cp wasm-opt /usr/local/bin/
+          fi
           echo "$(pwd)" >> $GITHUB_PATH
         shell: bash
 
@@ -93,26 +93,50 @@ jobs:
         env:
           CI: false
 
-      # Baut alle spezifizierten CPU-Architekturen
       - name: Package Electron App binaries
         run: npx electron-builder ${{ matrix.build-args }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Lädt alle generierten Architekturen in den Release-Entwurf hoch
-      - name: Create Multi-OS Release Draft
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+      # Speichert die fertigen Installer sicher bei GitHub ab
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dirplayer-builds-${{ matrix.os-name }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+          retention-days: 1
+
+  # JOB 2: Sammelt am Ende alles ein, was überlebt hat, und macht das Release
+  create-release:
+    name: Publish Multi-OS Release Draft
+    needs: build-and-package
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true # Lädt runter, was da ist, ignoriert fehlerhafte OS-Ordner
+        with:
+          pattern: dirplayer-builds-*
+          path: release-artifacts
+
+      - name: Move files to flat directory
+        run: |
+          mkdir final-dist
+          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) -exec cp {} final-dist/ \;
+        shell: bash
+
+      - name: Create GitHub Release Draft
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.6.0-master-build
           name: "DirPlayer v0.6.0 Master Release"
           draft: true
-          files: |
-            dist/*.exe
-            dist/*.dmg
-            dist/*.zip
-            dist/*.AppImage
-            dist/*.deb
+          files: final-dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
