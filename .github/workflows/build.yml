@@ -1,4 +1,4 @@
-name: DirPlayer Master Release Pipeline (Unkaputtbar)
+name: DirPlayer Release
 
 on:
   push:
@@ -29,8 +29,6 @@ jobs:
             arch: arm64
             build-args: --win --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
-
-          # --- MACOS BUILDS (Als separate ZIPs, ohne universal-Zwang) ---
           - os: macos-latest
             os-name: macOS
             arch: x64
@@ -41,8 +39,6 @@ jobs:
             arch: arm64
             build-args: --mac zip --arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
-
-          # --- LINUX BUILDS ---
           - os: ubuntu-latest
             os-name: Linux
             arch: x64
