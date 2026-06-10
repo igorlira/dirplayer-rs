@@ -1,4 +1,4 @@
-name: Master Build, Test & Release Pipeline
+name: DirPlayer Master Pipeline (All-In-One)
 
 on:
   push:
@@ -6,13 +6,21 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
-  
+    inputs:
+      update_snapshots:
+        description: 'Set to "true" to update and push E2E visual snapshots'
+        required: false
+        default: 'false'
+
 permissions:
   contents: write
   pull-requests: write
   statuses: write
 
 jobs:
+  # ==========================================
+  # 1. AUTOMATIC PATH LABELER (From File #5)
+  # ==========================================
   label-pr:
     name: Label Pull Request
     runs-on: ubuntu-latest
@@ -21,12 +29,14 @@ jobs:
       - name: Labeler
         uses: actions/labeler@v5
 
-  # STEP 2: BUILD AND TESTS MATRIX (RUNS EVERYTHING PARALLEL)
-  build-and-test:
+  # ==========================================
+  # 2. MASTER BUILD, TEST & OS PACKAGING
+  # ==========================================
+  build-test-release:
     name: Build & Package (${{ matrix.os-name }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # One OS failure won't stop the other builds
+      fail-fast: false # Bulletproof: one OS failure won't kill the others
       matrix:
         include:
           - os: windows-latest
@@ -55,6 +65,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -70,12 +81,7 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install `wasm-opt` (Binaryen for Ruffle)
-        uses: alexandrudima/wasm-opt-action@v2
-        with:
-          version: 'version_116'
-
-      # Linux-specific requirements for packaging & headless testing
+      # System dependencies for Linux packaging & headless image rendering
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -86,39 +92,58 @@ jobs:
       - name: Install NPM Dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium (For E2E Tests)
+      # Reliable self-contained wasm-opt fix for Ruffle core compilation
+      - name: Install `wasm-opt` globally
+        run: npm install -g wasm-opt
+
+      - name: Install Playwright Chromium (For E2E Testing)
         run: npx playwright install --with-deps chromium
 
-      - name: Download Test Assets
+      - name: Download Remote Test Assets
         run: |
           if [ -z "$TEST_ASSETS_URL" ]; then echo "Skipping assets: URL secret missing"; exit 0; fi
           curl -fSL "$TEST_ASSETS_URL" -o assets.zip
           unzip -qo assets.zip -d public/
 
-      - name: Run Core Rust Unit Tests (Skip Heavy E2E)
+      # Core Rust Engine Tests (From File #2)
+      - name: Run Core Rust Unit Tests
         working-directory: ./vm-rust
         run: |
           cargo fetch
           cargo test --verbose -- --skip e2e
 
-      - name: Run Complete Master Project Build Script
+      # Master Build Sequence (From package.json)
+      - name: Run Complete Master Build (Rust VM, Ruffle, Frontend)
         run: npm run build-all
 
-      - name: Run Native End-to-End Tests
+      # End-to-End Visual Validation (From File #1)
+      - name: Run Native E2E Tests
         continue-on-error: true
         run: npm run e2e-test-native
 
-      - name: Run Browser End-to-End Tests
+      - name: Run Browser E2E Tests
         continue-on-error: true
         run: npm run e2e-test-browser
 
-      # STEP 3: ARTIFACT PACKAGING VIA ELECTRON-BUILDER
-      - name: Package Desktop Executables
+      # OPTIONAL SNAPSHOT UPDATE LAYER (From File #3)
+      - name: Update Visual Snapshots (Manual trigger only)
+        if: github.event.inputs.update_snapshots == 'true' && matrix.os == 'ubuntu-latest'
+        run: |
+          npm run e2e-update-native
+          npm run e2e-update-browser
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add tests/snapshots/
+          git commit -m "chore: auto-update e2e snapshots [skip ci]" || echo "No snapshot changes to commit"
+          git push
+
+      # Native Electron Packaging (From package.json)
+      - name: Package Electron App binaries
         run: npx electron-builder ${{ matrix.build-args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # STEP 4: AUTOMATICALLY PUBLISH TO GITHUB RELEASES (IF MANUALLY TRIGGERED)
+      # Automatic Release Handling
       - name: Create Multi-OS Release Draft
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
