@@ -1,0 +1,153 @@
+name: DirPlayer Release
+
+on:
+  workflow_dispatch: 
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  build-and-package:
+    name: Build (${{ matrix.os-name }} - ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false 
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+            arch: x64
+            build-args: --win --x64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
+          - os: windows-latest
+            os-name: Windows
+            arch: arm64
+            build-args: --win --arm64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
+          - os: macos-latest
+            os-name: macOS
+            arch: x64
+            build-args: --mac zip --x64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
+          - os: macos-latest
+            os-name: macOS
+            arch: arm64
+            build-args: --mac zip --arm64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
+          - os: ubuntu-latest
+            os-name: Linux
+            arch: x64
+            build-args: --linux AppImage --x64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          - os: ubuntu-latest
+            os-name: Linux
+            arch: arm64
+            build-args: --linux AppImage --arm64
+            binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install `wasm-pack`
+        run: cargo install wasm-pack
+        shell: bash
+
+      - name: Install Ruffle Wasm Compiler Prerequisites
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.108
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Native Wasm Optimizer (Binaryen)
+        run: |
+          curl -L "${{ matrix.binaryen-url }}" -o binaryen.tar.gz
+          tar -xzf binaryen.tar.gz
+          cd binaryen-version_116/bin
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            sudo cp wasm-opt /usr/local/bin/
+          fi
+          echo "$(pwd)" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Install Linux Extras
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
+        shell: bash
+
+      - name: Install NPM Dependencies
+        run: npm ci
+        shell: bash
+
+      - name: Run Complete Master Build
+        run: npm run build-all
+        shell: bash
+        env:
+          CI: false
+
+      - name: Package Electron App binaries
+        run: npx electron-builder ${{ matrix.build-args }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false 
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dirplayer-builds-${{ matrix.os-name }}-${{ matrix.arch }}
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.AppImage
+          retention-days: 1
+
+  create-release:
+    name: Publish Multi-OS Release Draft
+    needs: build-and-package
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dirplayer-builds-*
+          path: release-artifacts
+        continue-on-error: true
+
+      - name: Move files to flat directory
+        run: |
+          mkdir final-dist
+          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
+        shell: bash
+
+      - name: Create GitHub Release Draft
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.6.0-master-build
+          name: "DirPlayer v0.6.0 Master Release"
+          draft: true
+          files: final-dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
