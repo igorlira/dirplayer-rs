@@ -33,6 +33,9 @@ pub struct ClodMeshDecoder {
     // Global resolution counter (persists across CLOD blocks)
     global_update_counter: u32,
 
+    // Global resolution of the update currently being decoded (for the corner-history boundary).
+    current_global_resolution: u32,
+
     // Per-mesh cursors (persist across CLOD blocks for multi-mesh)
     mesh_cursors: Option<Vec<usize>>,
 }
@@ -53,6 +56,7 @@ impl ClodMeshDecoder {
             sync_table: None,
             distal_edge_merges: None,
             global_update_counter: 0,
+            current_global_resolution: 0,
             mesh_cursors: None,
         }
     }
@@ -118,6 +122,9 @@ impl ClodMeshDecoder {
         if self.meshes.len() <= 1 {
             // Single mesh path
             for u in 0..update_count {
+                // +1 to match the multi-mesh SyncTable convention (global_res = counter + u + 1),
+                // so the corner-history boundary is consistent across single/multi mesh.
+                self.current_global_resolution = self.global_update_counter + u + 1;
                 if let Err(e) = self.decode_mesh_update(&mut bs, 0) {
                     debug!(
                         "[W3D CLOD] decode failed \"{}\" update {}/{}: {} ({} verts, {} faces so far)",
@@ -141,6 +148,7 @@ impl ClodMeshDecoder {
 
             for u in 0..update_count {
                 let global_res = self.global_update_counter + u + 1;
+                self.current_global_resolution = global_res;
 
                 // Apply distal edge merges at this resolution
                 self.apply_distal_edge_merges_at_resolution(global_res);
@@ -240,21 +248,20 @@ impl ClodMeshDecoder {
         self.meshes[mesh_idx].pending_face_record_surplus +=
             num_patch_records as i32 - num_face_corner_updates as i32;
 
-        // v11.X-style: snapshot AFTER loops but BEFORE batch.
-        // Predictions and split corners read from face_basis_snapshot (patches 0..N-2).
-        // Confirmed correct by Director 12 Lingo queries on both MA and MB models.
-        self.meshes[mesh_idx].face_basis_snapshot = self.meshes[mesh_idx].faces.clone();
-
-        // Apply this update's patch records (batch, after snapshot)
+        // Apply this update's patch records (batch), recording each into the per-corner resolution
+        // history so later predictions can read the corner at the SetResolution(resCounter-1) boundary.
+        let gres = self.current_global_resolution;
         let mesh = &mut self.meshes[mesh_idx];
         let patch_end = mesh.patch_records.len();
         let patch_start = patch_end - num_patch_records as usize;
         for pi in patch_start..patch_end {
-            let fi = mesh.patch_records[pi].face_index as usize;
-            let ci = mesh.patch_records[pi].corner_index as usize;
+            let fi = mesh.patch_records[pi].face_index;
+            let ci = mesh.patch_records[pi].corner_index as u8;
             let nvi = mesh.patch_records[pi].new_vertex_index;
-            if fi < mesh.faces.len() && ci < 3 {
-                mesh.faces[fi][ci] = nvi;
+            if (fi as usize) < mesh.faces.len() && (ci as usize) < 3 {
+                let old_val = mesh.faces[fi as usize][ci as usize];
+                mesh.faces[fi as usize][ci as usize] = nvi;
+                mesh.corner_history.entry((fi, ci)).or_insert_with(|| vec![(0u32, old_val)]).push((gres, nvi));
             }
         }
 
@@ -272,23 +279,18 @@ impl ClodMeshDecoder {
 
         if pred_mode != 4 {
             let pred_idx = bs.read_compressed_u32(5) as usize;
+            let boundary = self.current_global_resolution as i64 - 2;
             let mesh = &self.meshes[mesh_idx];
-            if pred_idx < mesh.sorted_faces.len() {
-                let face_idx = mesh.sorted_faces[pred_idx] as usize;
-                // Use face_basis_snapshot (pre-batch, patches 0..N-2) for predictions.
-                let face_source = if face_idx < mesh.face_basis_snapshot.len() {
-                    &mesh.face_basis_snapshot
-                } else {
-                    &mesh.faces
-                };
-                if face_idx < face_source.len() && (pred_mode as usize) < 3 {
-                    let corner_vert = face_source[face_idx][pred_mode as usize] as usize;
-                    if corner_vert < mesh.positions.len() {
-                        let p = mesh.positions[corner_vert];
-                        pred_x = p[0];
-                        pred_y = p[1];
-                        pred_z = p[2];
-                    }
+            if pred_idx < mesh.sorted_faces.len() && (pred_mode as usize) < 3 {
+                let face_idx = mesh.sorted_faces[pred_idx];
+                // Read the reference corner at the encoder's collapsed-resolution boundary
+                // (SetResolution(resCounter-1) => global_res <= global_res_N - 2), not the live mesh.
+                let corner_vert = mesh.corner_value_as_of(face_idx, pred_mode, boundary) as usize;
+                if corner_vert < mesh.positions.len() {
+                    let p = mesh.positions[corner_vert];
+                    pred_x = p[0];
+                    pred_y = p[1];
+                    pred_z = p[2];
                 }
             }
         }
@@ -314,22 +316,16 @@ impl ClodMeshDecoder {
 
         if norm_pred_mode != 4 {
             let norm_pred_idx = bs.read_compressed_u32(9) as usize;
+            let boundary = self.current_global_resolution as i64 - 2;
             let mesh = &self.meshes[mesh_idx];
-            if norm_pred_idx < mesh.sorted_faces.len() {
-                let face_idx = mesh.sorted_faces[norm_pred_idx] as usize;
-                let face_source = if face_idx < mesh.face_basis_snapshot.len() {
-                    &mesh.face_basis_snapshot
-                } else {
-                    &mesh.faces
-                };
-                if face_idx < face_source.len() && (norm_pred_mode as usize) < 3 {
-                    let corner_vert = face_source[face_idx][norm_pred_mode as usize] as usize;
-                    if corner_vert < mesh.normals.len() {
-                        let n = mesh.normals[corner_vert];
-                        pred_nx = n[0];
-                        pred_ny = n[1];
-                        pred_nz = n[2];
-                    }
+            if norm_pred_idx < mesh.sorted_faces.len() && (norm_pred_mode as usize) < 3 {
+                let face_idx = mesh.sorted_faces[norm_pred_idx];
+                let corner_vert = mesh.corner_value_as_of(face_idx, norm_pred_mode, boundary) as usize;
+                if corner_vert < mesh.normals.len() {
+                    let n = mesh.normals[corner_vert];
+                    pred_nx = n[0];
+                    pred_ny = n[1];
+                    pred_nz = n[2];
                 }
             }
         }
@@ -407,21 +403,15 @@ impl ClodMeshDecoder {
 
             if tc_pred_mode != 4 {
                 let tc_pred_idx = bs.read_compressed_u32(15) as usize;
+                let boundary = self.current_global_resolution as i64 - 2;
                 let mesh = &self.meshes[mesh_idx];
-                if tc_pred_idx < mesh.sorted_faces.len() {
-                    let face_idx = mesh.sorted_faces[tc_pred_idx] as usize;
-                    let face_source = if face_idx < mesh.face_basis_snapshot.len() {
-                        &mesh.face_basis_snapshot
-                    } else {
-                        &mesh.faces
-                    };
-                    if face_idx < face_source.len() && (tc_pred_mode as usize) < 3 {
-                        let corner_vert = face_source[face_idx][tc_pred_mode as usize] as usize;
-                        if layer < mesh.tex_coords.len() && corner_vert < mesh.tex_coords[layer].len() {
-                            let tc = mesh.tex_coords[layer][corner_vert];
-                            pred_u = tc[0];
-                            pred_v = tc[1];
-                        }
+                if tc_pred_idx < mesh.sorted_faces.len() && (tc_pred_mode as usize) < 3 {
+                    let face_idx = mesh.sorted_faces[tc_pred_idx];
+                    let corner_vert = mesh.corner_value_as_of(face_idx, tc_pred_mode, boundary) as usize;
+                    if layer < mesh.tex_coords.len() && corner_vert < mesh.tex_coords[layer].len() {
+                        let tc = mesh.tex_coords[layer][corner_vert];
+                        pred_u = tc[0];
+                        pred_v = tc[1];
                     }
                 }
             }
@@ -537,30 +527,34 @@ impl ClodMeshDecoder {
                     corners[c] = rel_idx + mesh.vertex_count - mesh.new_vert_count;
                 }
                 2 | 3 | 4 => {
-                    // Split from existing face corner
+                    // Split from existing face corner. Same collapsed-resolution boundary as the
+                    // position base (global_res <= global_res_N - 2) — base and connectivity reads
+                    // must share it (they are coupled through the decode cascade).
                     let split_idx = bs.read_compressed_u32(27) as usize;
                     let offset = bs.read_compressed_u32(28);
+                    let boundary = self.current_global_resolution as i64 - 2;
                     let mesh = &self.meshes[mesh_idx];
                     if split_idx < mesh.sorted_faces.len() {
-                        let face_idx = mesh.sorted_faces[split_idx] as usize;
-                        let corner = (corner_type - 2) as usize;
-                        // Use face_basis_snapshot for split corners (patches 0..N-2).
-                        let face_source = if face_idx < mesh.face_basis_snapshot.len() {
-                            &mesh.face_basis_snapshot
-                        } else {
-                            &mesh.faces
-                        };
-                        if face_idx < face_source.len() && corner < 3 {
-                            let base_vertex = face_source[face_idx][corner];
-                            corners[c] = offset + base_vertex;
-                        }
+                        let face_idx = mesh.sorted_faces[split_idx];
+                        let corner = (corner_type - 2) as u8;
+                        let base_vertex = mesh.corner_value_as_of(face_idx, corner, boundary);
+                        corners[c] = offset + base_vertex;
                     }
                 }
                 _ => {}
             }
         }
 
-        self.meshes[mesh_idx].faces.push(corners);
+        // Seed per-corner history at this face's creation resolution (face index = face_count).
+        let new_face_idx = self.meshes[mesh_idx].face_count;
+        let gres = self.current_global_resolution;
+        {
+            let mesh = &mut self.meshes[mesh_idx];
+            mesh.faces.push(corners);
+            for ci in 0u8..3 {
+                mesh.corner_history.insert((new_face_idx, ci), vec![(gres, corners[ci as usize])]);
+            }
+        }
 
         // Update face_write_cursor immediately after writing face (before neighbor mesh reads).
         // The C# does this at CLODMeshDecoder.cs:3043 — critical because neighbor mesh
