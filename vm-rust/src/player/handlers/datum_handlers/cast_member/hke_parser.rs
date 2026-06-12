@@ -18,6 +18,25 @@ pub struct HkeCollisionMesh {
     pub triangles: Vec<[u32; 3]>,
 }
 
+/// A collision primitive attached to a rigid body.
+#[derive(Clone, Debug)]
+pub enum HkePrimitiveKind {
+    /// References a triangle mesh by name (an ENTRY mesh, possibly shared).
+    Mesh { mesh_name: String },
+    /// Infinite plane: local `normal` (unit) at signed `dist` from origin.
+    Plane { normal: [f32; 3], dist: f32 },
+    /// Sphere of `radius` (Havok metres).
+    Sphere { radius: f32 },
+}
+
+#[derive(Clone, Debug)]
+pub struct HkePrimitive {
+    pub kind: HkePrimitiveKind,
+    /// Primitive-local translation relative to the body origin (Havok metres).
+    pub local_translation: [f32; 3],
+    pub mass: f32,
+}
+
 /// Per-body properties parsed from the HKE tail section.
 #[derive(Clone, Debug)]
 pub struct HkeBodyProps {
@@ -27,7 +46,12 @@ pub struct HkeBodyProps {
     pub static_friction: Option<f32>,
     pub dynamic_friction: Option<f32>,
     pub translation: Option<[f32; 3]>,
+    /// Body orientation as axis-angle: `[angle_radians, axisX, axisY, axisZ]`.
+    pub orientation: Option<[f32; 4]>,
+    /// Initial linear velocity (Havok metres/s).
+    pub linear_velocity: Option<[f32; 3]>,
     pub active: Option<bool>,
+    pub primitives: Vec<HkePrimitive>,
 }
 
 /// Drag action parsed from HKE tail.
@@ -37,6 +61,17 @@ pub struct HkeDragAction {
     pub angular_drag: f32,
 }
 
+/// A cable / point-to-point constraint between two bodies (e.g. the hanging
+/// lamp). `pivot_*` are body-local attachment points (Havok metres).
+#[derive(Clone, Debug)]
+pub struct HkeCable {
+    pub body_a: String,
+    pub pivot_a: [f32; 3],
+    pub body_b: String,
+    pub pivot_b: [f32; 3],
+    pub length: f32,
+}
+
 pub struct HkeWorld {
     pub world_name: String,
     pub world_scale: f32,
@@ -44,6 +79,7 @@ pub struct HkeWorld {
     pub drag: Option<HkeDragAction>,
     pub meshes: Vec<HkeCollisionMesh>,
     pub bodies: Vec<HkeBodyProps>,
+    pub cables: Vec<HkeCable>,
 }
 
 // --- Markers and tokens (from C# HkeParser.cs) ---
@@ -90,6 +126,10 @@ const DYNAMIC_FRICTION_TOKEN: [u8; 4] = [0xAE, 0xA1, 0xC1, 0x00];
 const TRANSLATION_TOKEN: [u8; 4] = [0x0E, 0xEC, 0x5F, 0x08];
 const ACTIVE_TOKEN: [u8; 4] = [0xA5, 0x8E, 0x58, 0x04];
 const PRIMITIVE_MASS_TOKEN: [u8; 4] = [0x83, 0x16, 0x05, 0x00];
+const ORIENTATION_TOKEN: [u8; 4] = [0x4E, 0x89, 0x86, 0x04]; // [angle, axisX, axisY, axisZ]
+const LINEAR_VELOCITY_TOKEN: [u8; 4] = [0xD9, 0x4A, 0xA5, 0x0C]; // [vx, vy, vz] m/s
+const PLANE_NORMAL_TOKEN: [u8; 4] = [0x25, 0x06, 0x55, 0x00]; // [nx, ny, nz, dist]
+const SPHERE_RADIUS_TOKEN: [u8; 4] = [0xA3, 0x8E, 0x65, 0x05]; // [radius]
 
 // Subspace tokens
 const SUBSPACE_GRAVITY_TOKEN: [u8; 4] = [0xD9, 0xAE, 0x66, 0x0C];
@@ -106,6 +146,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
         drag: None,
         meshes: Vec::new(),
         bodies: Vec::new(),
+        cables: Vec::new(),
     };
 
     // Parse header
@@ -139,6 +180,9 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
 
     // Parse tail section (rigid bodies, primitives, actions)
     parse_tail(data, tail_start, &mut world);
+
+    // Parse cable / point-to-point constraints (the hanging lamp).
+    parse_cables(data, &mut world);
 
     // Log results
     let movable: Vec<&str> = world.bodies.iter()
@@ -283,6 +327,46 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld) {
     }
 }
 
+// Cable / point-to-point constraint tokens.
+const CABLE_MARKER: [u8; 8] = [0x7E, 0x34, 0x31, 0x07, 0x47, 0x90, 0xA7, 0x05];
+const CABLE_BODY_REF: [u8; 3] = [0x9F, 0x73, 0x04]; // followed by body name
+const CABLE_PIVOT_A: [u8; 4] = [0x61, 0x3A, 0x3E, 0x05]; // "a:" + vec3
+const CABLE_PIVOT_B: [u8; 4] = [0x62, 0x3A, 0x3E, 0x05]; // "b:" + vec3
+const CABLE_LENGTH: [u8; 4] = [0xBE, 0x26, 0xCC, 0x0E];
+
+/// Parse every cable constraint record. Each holds two body references
+/// (`9F 73 04` + name), an "a:"/"b:" pivot vec3, and a length scalar.
+fn parse_cables(data: &[u8], world: &mut HkeWorld) {
+    let mut search = 0;
+    while let Some(m) = find_bytes(data, &CABLE_MARKER, search) {
+        let mut pos = m + CABLE_MARKER.len();
+        let _name = read_null_string(data, &mut pos);
+        // Bound the record at the next cable marker (or end).
+        let end = find_bytes(data, &CABLE_MARKER, pos).unwrap_or(data.len());
+        let seg = &data[pos..end];
+
+        // Two body references, in order (A then B).
+        let mut body_a = String::new();
+        let mut body_b = String::new();
+        let mut bsearch = 0;
+        while let Some(bi) = find_bytes(seg, &CABLE_BODY_REF, bsearch) {
+            let mut np = bi + CABLE_BODY_REF.len();
+            let name = read_null_string(seg, &mut np);
+            if body_a.is_empty() { body_a = name; } else if body_b.is_empty() { body_b = name; }
+            bsearch = bi + CABLE_BODY_REF.len();
+        }
+
+        let pivot_a = try_read_vec3_after_token(seg, &CABLE_PIVOT_A).unwrap_or([0.0; 3]);
+        let pivot_b = try_read_vec3_after_token(seg, &CABLE_PIVOT_B).unwrap_or([0.0; 3]);
+        let length = try_read_f32_after_token(seg, &CABLE_LENGTH).unwrap_or(0.0);
+
+        if !body_b.is_empty() {
+            world.cables.push(HkeCable { body_a, pivot_a, body_b, pivot_b, length });
+        }
+        search = end;
+    }
+}
+
 fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut HkeWorld) {
     *pos += marker_len;
     let name = read_null_string(data, pos);
@@ -298,41 +382,61 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
         static_friction: try_read_f32_after_token(payload, &STATIC_FRICTION_TOKEN),
         dynamic_friction: try_read_f32_after_token(payload, &DYNAMIC_FRICTION_TOKEN),
         translation: try_read_vec3_after_token(payload, &TRANSLATION_TOKEN),
+        orientation: try_read_vec4_after_token(payload, &ORIENTATION_TOKEN),
+        linear_velocity: try_read_vec3_after_token(payload, &LINEAR_VELOCITY_TOKEN),
         active: try_read_bool_after_token(payload, &ACTIVE_TOKEN),
+        primitives: Vec::new(),
     };
 
     *pos = body_end;
 
-    // Parse child primitives and sum their masses
+    // Parse child primitives (geometry + mass).
     while *pos < data.len() {
-        if match_bytes(data, *pos, &PRIMITIVE_MESH_MARKER) {
-            body.total_mass += parse_primitive_mass(data, pos, PRIMITIVE_MESH_MARKER.len());
-            continue;
+        let kind_marker = if match_bytes(data, *pos, &PRIMITIVE_MESH_MARKER) {
+            Some((PRIMITIVE_MESH_MARKER.len(), 0u8))
+        } else if match_bytes(data, *pos, &PRIMITIVE_SPHERE_MARKER) {
+            Some((PRIMITIVE_SPHERE_MARKER.len(), 1u8))
+        } else if match_bytes(data, *pos, &PRIMITIVE_PLANE_MARKER) {
+            Some((PRIMITIVE_PLANE_MARKER.len(), 2u8))
+        } else {
+            None
+        };
+        let (marker_len, kind_id) = match kind_marker { Some(v) => v, None => break };
+
+        if let Some(prim) = parse_primitive(data, pos, marker_len, kind_id) {
+            body.total_mass += prim.mass;
+            body.primitives.push(prim);
         }
-        if match_bytes(data, *pos, &PRIMITIVE_SPHERE_MARKER) {
-            body.total_mass += parse_primitive_mass(data, pos, PRIMITIVE_SPHERE_MARKER.len());
-            continue;
-        }
-        if match_bytes(data, *pos, &PRIMITIVE_PLANE_MARKER) {
-            body.total_mass += parse_primitive_mass(data, pos, PRIMITIVE_PLANE_MARKER.len());
-            continue;
-        }
-        break;
     }
 
     world.bodies.push(body);
 }
 
-fn parse_primitive_mass(data: &[u8], pos: &mut usize, marker_len: usize) -> f32 {
+/// Parse a single collision primitive: name, transform, geometry, mass.
+/// `kind_id`: 0 = mesh, 1 = sphere, 2 = plane.
+fn parse_primitive(data: &[u8], pos: &mut usize, marker_len: usize, kind_id: u8) -> Option<HkePrimitive> {
     *pos += marker_len;
-    let _name = read_null_string(data, pos);
+    let name = read_null_string(data, pos);
 
     let prim_end = find_next_primitive_boundary(data, *pos).unwrap_or(data.len());
     let payload = &data[*pos..prim_end];
     let mass = try_read_f32_after_token(payload, &PRIMITIVE_MASS_TOKEN).unwrap_or(0.0);
+    let local_translation = try_read_vec3_after_token(payload, &TRANSLATION_TOKEN).unwrap_or([0.0; 3]);
+
+    let kind = match kind_id {
+        1 => {
+            let radius = try_read_f32_after_token(payload, &SPHERE_RADIUS_TOKEN).unwrap_or(0.0);
+            HkePrimitiveKind::Sphere { radius }
+        }
+        2 => {
+            let p = try_read_vec4_after_token(payload, &PLANE_NORMAL_TOKEN).unwrap_or([0.0, 0.0, 1.0, 0.0]);
+            HkePrimitiveKind::Plane { normal: [p[0], p[1], p[2]], dist: p[3] }
+        }
+        _ => HkePrimitiveKind::Mesh { mesh_name: name },
+    };
 
     *pos = prim_end;
-    mass
+    Some(HkePrimitive { kind, local_translation, mass })
 }
 
 // --- Token readers ---
@@ -350,6 +454,20 @@ fn try_read_bool_after_token(data: &[u8], token: &[u8; 4]) -> Option<bool> {
     let idx = find_bytes(data, token, 0)?;
     if idx + 4 + 1 <= data.len() {
         Some(data[idx + 4] != 0)
+    } else {
+        None
+    }
+}
+
+fn try_read_vec4_after_token(data: &[u8], token: &[u8; 4]) -> Option<[f32; 4]> {
+    let idx = find_bytes(data, token, 0)?;
+    if idx + 4 + 16 <= data.len() {
+        Some([
+            read_f32(data, idx + 4),
+            read_f32(data, idx + 8),
+            read_f32(data, idx + 12),
+            read_f32(data, idx + 16),
+        ])
     } else {
         None
     }

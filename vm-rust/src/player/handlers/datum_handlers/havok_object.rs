@@ -287,15 +287,15 @@ impl HavokObjectDatumHandlers {
         let sync_data = if needs_w3d_sync {
             havok.state.rigid_bodies.iter()
                 .find(|r| r.name.eq_ignore_ascii_case(rb_name))
-                .map(|rb| (rb.position, rb.orientation, rb.center_of_mass))
+                .map(|rb| (rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale))
         } else { None };
 
         // Sync rigid body position+rotation to W3D model transform (quaternion-based).
         // Goes through set_node_transform so the Lingo-visible persistent datum
         // is also updated, not just node_transforms.
-        if let Some((pos, orientation, com)) = sync_data {
+        if let Some((pos, orientation, com, sscale)) = sync_data {
             let t = crate::player::handlers::datum_handlers::cast_member::havok_physics::build_sync_transform(
-                pos, orientation, com,
+                pos, orientation, com, sscale,
             );
             let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
             crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
@@ -325,6 +325,7 @@ impl HavokObjectDatumHandlers {
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
+                    rb.active = true;
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
                     rb.force[2] += force[2];
@@ -345,6 +346,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_sub, quat_rotate_v, v3_cross};
+                    rb.active = true;
                     // Add linear force (world-space)
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
@@ -375,6 +377,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_add, v3_scale};
+                    rb.active = true;
                     if rb.inverse_mass > 0.0 {
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                     }
@@ -397,6 +400,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform};
+                    rb.active = true;
                     if rb.inverse_mass > 0.0 {
                         // Linear: v += impulse * inverseMass
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
