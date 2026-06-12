@@ -1,5 +1,7 @@
 /// Internal state types for CLOD (Continuous Level of Detail) mesh decoder.
 
+use std::collections::HashMap;
+
 #[derive(Clone, Debug)]
 pub struct UpdateHeader {
     pub num_new_verts: u32,
@@ -70,10 +72,11 @@ pub struct MeshState {
     pub step_records: Vec<StepRecord>,
     pub patch_records: Vec<PatchRecord>,
 
-    // v11.X-style face snapshot: captures mesh.faces AFTER loops but BEFORE batch.
-    // Predictions and split corners read from this snapshot (patches 0..N-2 at step N).
-    // Confirmed correct by Director 12 Lingo queries.
-    pub face_basis_snapshot: Vec<[u32; 3]>,
+    // Per-(face, corner) value history vs global resolution: list of (global_res, value).
+    // Lets a prediction read a reference corner at the encoder's SetResolution(resCounter-1)
+    // collapsed state (global_res <= global_res_N - 2) instead of the live mesh — the general
+    // fix that resolves the warehouse "broken left wall" with no oracle. See clod-director-decoder-trace.
+    pub corner_history: HashMap<(u32, u8), Vec<(u32, u32)>>,
 
     // Sorted faces for current update
     pub sorted_faces: Vec<u32>,
@@ -113,8 +116,28 @@ impl MeshState {
             neighbor_faces: Vec::new(),
             step_records: Vec::with_capacity(max_updates as usize),
             patch_records: Vec::with_capacity(update_data_count as usize),
-            face_basis_snapshot: Vec::new(),
+            corner_history: HashMap::new(),
             sorted_faces: Vec::new(),
+        }
+    }
+
+    /// Read reference corner `(face, corner)` as of resolution boundary `max_gres`
+    /// (all patches with global_res <= max_gres applied). Falls back to the live face value.
+    pub fn corner_value_as_of(&self, face: u32, corner: u8, max_gres: i64) -> u32 {
+        if let Some(hist) = self.corner_history.get(&(face, corner)) {
+            if !hist.is_empty() {
+                let mut val = hist[0].1;
+                for &(g, v) in hist {
+                    if (g as i64) <= max_gres { val = v; } else { break; }
+                }
+                return val;
+            }
+        }
+        let fi = face as usize;
+        if fi < self.faces.len() && (corner as usize) < 3 {
+            self.faces[fi][corner as usize]
+        } else {
+            0
         }
     }
 
