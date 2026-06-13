@@ -163,6 +163,46 @@ impl W3dFileParser {
             });
         }
 
+        // Director adds a default white directional key light ("UIDirectional") only
+        // when the scene has no "aimed" key light of its own — i.e. no directional
+        // AND no spot light. Point and ambient lights do NOT count (a scene of only
+        // point + ambient still gets the default). Verified against Director:
+        //   - estate (point+point+ambient)        → UIDirectional ADDED
+        //   - movie with "Default MAX Light" (dir) → not added
+        //   - movie with Fspot01 (spot)+point      → not added
+        // Without it, a point/ambient-only scene (the estate explore) loses its key
+        // light and faces the points don't reach fall to the ambient floor and render
+        // near-black — the dark "shadows" Shockwave doesn't show. Orientation matches
+        // Director's reported default: color rgb(255,255,255), zAxis (0.8543,-0.0015,0.5198).
+        let has_aimed_key_light = self.scene.lights.iter().any(|l| matches!(
+            l.light_type,
+            W3dLightType::Directional | W3dLightType::Spot
+        ));
+        if !has_aimed_key_light {
+            self.scene.lights.push(W3dLight {
+                name: "UIDirectional".to_string(),
+                light_type: W3dLightType::Directional,
+                color: [1.0, 1.0, 1.0],
+                enabled: true,
+                spot_angle: 90.0,
+                attenuation: [1.0, 0.0, 0.0],
+            });
+            // Only the Z axis (columns 8/9/10) is read for a directional light's
+            // orientation; X/Y axes and position are unused but kept sane.
+            let mut t = [0.0f32; 16];
+            t[0] = 1.0; t[5] = 1.0;
+            t[8] = 0.8543; t[9] = -0.0015; t[10] = 0.5198;
+            t[12] = -397.3754; t[13] = 714.7632; t[14] = -538.8293;
+            t[15] = 1.0;
+            self.scene.nodes.push(W3dNode {
+                name: "UIDirectional".to_string(),
+                node_type: W3dNodeType::Light,
+                parent_name: "World".to_string(),
+                transform: t,
+                ..Default::default()
+            });
+        }
+
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
             self.scene.materials.len(), self.scene.shaders.len(), self.scene.nodes.len(),
             self.scene.lights.len(), self.scene.texture_images.len(),
