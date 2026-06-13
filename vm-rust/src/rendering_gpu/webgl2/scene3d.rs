@@ -4055,6 +4055,11 @@ void main() {
     fn build_projection_matrix(&self, scene: &W3dScene, _fbo_aspect: f32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> [f32; 16] {
+        // Guard against a degenerate render-target aspect (0 / NaN / inf). The
+        // projection is driven by the real sprite/FBO aspect (_fbo_aspect = w/h); a
+        // 0-sized rect (e.g. briefly, before the score sizes a W3D sprite) would give
+        // 0/inf/NaN and collapse the matrix, blanking the scene. Fall back to 4:3.
+        let fbo_aspect = if _fbo_aspect.is_finite() && _fbo_aspect > 0.0 { _fbo_aspect } else { 4.0 / 3.0 };
         let default_cam = "DefaultView".to_string();
         let cam_name = self.active_camera.as_ref().unwrap_or(&default_cam);
         // Find camera node (case-insensitive), fall back to first view node
@@ -4072,12 +4077,12 @@ void main() {
             // size. W3dNode.screen_width/height are an unparsed 640x480 default that
             // never updates, which forced every movie to 4:3 (fine for 4:3 sprites,
             // but horizontally stretched for square sprites like the estate explore).
-            let cam_aspect = _fbo_aspect;
+            let cam_aspect = fbo_aspect;
             // Each camera uses its own FOV/near/far settings
             let (fov, n, f) = (node.fov, n, f);
             (fov.to_radians(), n, f, cam_aspect)
         } else {
-            (34.516f32.to_radians(), 1.0, 10000.0, _fbo_aspect)
+            (34.516f32.to_radians(), 1.0, 10000.0, fbo_aspect)
         };
 
         // Check for orthographic projection mode
