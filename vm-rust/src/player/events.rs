@@ -583,6 +583,87 @@ pub async fn tick_w3d_animations() {
     });
 }
 
+/// Advance every W3D member's #particle systems once per frame. Separate from
+/// tick_w3d_animations because particles run regardless of animation_playing
+/// (that tick early-returns for members with no playing motion). For each
+/// particle model resource we sync the emitter parameters (set via
+/// `resource.emitter.*` into runtime_state.emitters) and the world emit position
+/// (from the model node that references the resource) into the sim, then step it.
+pub async fn tick_w3d_particles() {
+    use crate::player::cast_member::CastMemberType;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_TICK_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = crate::player::testing_shared::now_ms() as u64;
+    let last = LAST_TICK_MS.swap(now_ms, Ordering::Relaxed);
+    let dt = if last == 0 {
+        1.0_f32 / 30.0
+    } else {
+        ((now_ms.saturating_sub(last)) as f32 / 1000.0).min(0.1)
+    };
+    reserve_player_mut(|player| {
+        for cast in player.movie.cast_manager.casts.iter_mut() {
+            for (_, member) in cast.members.iter_mut() {
+                if let CastMemberType::Shockwave3d(w3d) = &mut member.member_type {
+                    if w3d.runtime_state.particles.is_empty() { continue; }
+                    let scene = w3d.parsed_scene.clone();
+                    let names: Vec<String> = w3d.runtime_state.particles.keys().cloned().collect();
+                    for name in names {
+                        // Emitter params (cloned) and the emit position from the model
+                        // node that references this resource — gathered before the
+                        // mutable particle borrow to avoid overlapping borrows.
+                        let em = w3d.runtime_state.emitters.get(&name).cloned();
+                        let world_pos = scene.as_ref().and_then(|sc| {
+                            sc.nodes.iter()
+                                .find(|n| n.model_resource_name.eq_ignore_ascii_case(&name)
+                                    || n.resource_name.eq_ignore_ascii_case(&name))
+                                .map(|n| {
+                                    let t = w3d.runtime_state.node_transforms.get(&n.name)
+                                        .copied()
+                                        .unwrap_or(n.transform);
+                                    [t[12], t[13], t[14]]
+                                })
+                        }).unwrap_or([0.0, 0.0, 0.0]);
+
+                        if let Some(ps) = w3d.runtime_state.particles.get_mut(&name) {
+                            // Emit from emitter.region when a script set it (e.g. the car demos
+                            // track the exhaust pipe via `emitter.region = [exhaust.worldPosition]`),
+                            // otherwise from the model node's world position (the faucet translates
+                            // its ColdWater model). Without this the car smoke emitted at the origin
+                            // and whited out the camera, blanking the whole 3D scene.
+                            ps.emitter_position = match &em {
+                                Some(e) if e.has_region =>
+                                    [e.region[0] as f32, e.region[1] as f32, e.region[2] as f32],
+                                _ => world_pos,
+                            };
+                            if let Some(em) = &em {
+                                let d = em.direction;
+                                let len = (d[0]*d[0] + d[1]*d[1] + d[2]*d[2]).sqrt();
+                                if len > 1e-6 {
+                                    ps.direction = [(d[0]/len) as f32, (d[1]/len) as f32, (d[2]/len) as f32];
+                                }
+                                ps.initial_speed = em.min_speed as f32;
+                                ps.max_speed = em.max_speed.max(em.min_speed) as f32;
+                                ps.speed_range = (em.max_speed - em.min_speed).max(0.0) as f32;
+                                // emitter.angle is the cone half-angle in degrees.
+                                ps.angle_range = (em.angle as f32).to_radians();
+                                ps.stream = em.mode.eq_ignore_ascii_case("stream");
+                                let n = (em.num_particles.max(0) as usize).min(10000);
+                                if n > 0 && ps.max_particles != n {
+                                    ps.initialize(n);
+                                }
+                            }
+                            if ps.positions.is_empty() && ps.max_particles > 0 {
+                                ps.initialize(ps.max_particles);
+                            }
+                            ps.update(dt);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Drain queued PhysX collision reports across all PhysX members and
 /// dispatch them to the script's registered `collisionCallback` handler.
 ///
