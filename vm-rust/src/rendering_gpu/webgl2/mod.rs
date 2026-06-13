@@ -3451,7 +3451,9 @@ impl WebGL2Renderer {
                 texture
             }
             TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
-                // Render primary camera
+                // Render primary camera. Camera backdrops (Director `addBackdrop`,
+                // e.g. the estate sky) are drawn inside render_scene_with_state_ex,
+                // after its clear and before the models — see draw_backdrops_inline.
                 self.scene3d.active_camera = active_camera;
                 if let Err(e) = self.scene3d.render_scene_with_state(
                     &self.context, member_key, &scene, width, height, Some(&runtime_state)
@@ -3493,8 +3495,8 @@ impl WebGL2Renderer {
                     }
                 }
 
-                // TODO: Backdrops should render BEFORE 3D scene (need separate clear logic)
-                // For now, only overlays are rendered (on top of 3D scene)
+                // Backdrops were already drawn before the scene (see render_backdrops_to_fbo
+                // above). Overlays render on top of everything.
 
                 // Render overlays on top of everything
                 for (_, overlays) in &runtime_state.camera_overlays {

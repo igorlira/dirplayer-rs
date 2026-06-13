@@ -1072,6 +1072,52 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
+                "reflectionMap" | "reflectionmap" => {
+                    // 3D shader helper property (Director 11.5 Scripting Dictionary,
+                    // "reflectionMap"): sets the texture used for reflections on the
+                    // model surface. It is applied to the THIRD texture layer and is
+                    // exactly equivalent to:
+                    //   shader.textureList[3]       = tex
+                    //   shader.textureModeList[3]   = #reflection
+                    //   shader.blendFunctionList[3] = #blend
+                    //   shader.blendSourceList[3]   = #constant
+                    //   shader.blendConstantList[3] = 50.0
+                    // (encodings mirror the blend*List setters in this file:
+                    //  tex_mode 4=#reflection, blend_func 3=#blend, blend_src 0=#constant.)
+                    if s3d_ref.object_type != "shader" { return Ok(()); }
+                    let tex_name = match value {
+                        Datum::Shockwave3dObjectRef(r) => r.name.clone(),
+                        Datum::String(s) => s.clone(),
+                        Datum::Void => String::new(),
+                        _ => String::new(),
+                    };
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                    // The reflection texture lives on layer index 2 (Lingo
+                                    // textureList[3]); grow the list so it exists.
+                                    while shader.texture_layers.len() <= 2 {
+                                        shader.texture_layers.push(
+                                            crate::director::chunks::w3d::types::W3dTextureLayer::default(),
+                                        );
+                                    }
+                                    let layer = &mut shader.texture_layers[2];
+                                    layer.name = tex_name;
+                                    layer.tex_mode = 4;     // #reflection
+                                    layer.blend_func = 3;   // #blend
+                                    layer.blend_src = 0;    // #constant
+                                    // Default constant 50% per the dictionary; a later
+                                    // blendConstantList[3] assignment overrides it.
+                                    if layer.blend_const <= 0.0 {
+                                        layer.blend_const = 0.5;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
                 "rootNode" => {
                   if s3d_ref.object_type != "camera" { return Ok(()); }
                     let cam_key = s3d_ref.name.to_ascii_lowercase();
@@ -4434,6 +4480,26 @@ impl Shockwave3dObjectDatumHandlers {
                     name: tex_name.to_string(),
                 })))
             },
+            "reflectionMap" | "reflectionmap" => {
+                // Getter for the reflection helper property: returns the texture on
+                // the third texture layer, or VOID if none (Director 11.5 default).
+                let tex_name = shader
+                    .and_then(|s| s.texture_layers.get(2))
+                    .map(|l| l.name.as_str())
+                    .filter(|n| !n.is_empty());
+                match tex_name {
+                    Some(name) => {
+                        use crate::director::lingo::datum::Shockwave3dObjectRef;
+                        Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                            cast_lib: member_ref.cast_lib,
+                            cast_member: member_ref.cast_member,
+                            object_type: "texture".to_string(),
+                            name: name.to_string(),
+                        })))
+                    }
+                    None => Ok(player.alloc_datum(Datum::Void)),
+                }
+            },
             "textureList" => {
                 // Return a persistent textureList so assignments like
                 // shaderList[m].textureList[n] = tex persist
@@ -4557,6 +4623,19 @@ impl Shockwave3dObjectDatumHandlers {
                 )))
             },
             "blendConstantList" => {
+                // Persist the list so `shader.blendConstantList[i] = N` (e.g. the 30%
+                // override after reflectionMap) is visible to sync_shader_texture_lists
+                // at render time. Without persistence the index-set mutated a throwaway
+                // list and the layer kept the reflectionMap helper's 50% default.
+                let existing_ref = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.shader_blend_constant_lists.get(shader_name))
+                        .cloned()
+                };
+                if let Some(list_ref) = existing_ref {
+                    return Ok(list_ref);
+                }
                 let mut items = VecDeque::new();
                 if let Some(s) = shader {
                     for layer in &s.texture_layers {
@@ -4566,9 +4645,16 @@ impl Shockwave3dObjectDatumHandlers {
                 while items.len() < 8 {
                     items.push_back(player.alloc_datum(Datum::Float(50.0)));
                 }
-                Ok(player.alloc_datum(Datum::List(
+                let list_ref = player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,
-                )))
+                ));
+                let shader_name_owned = shader_name.to_string();
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        w3d.runtime_state.shader_blend_constant_lists.insert(shader_name_owned, list_ref.clone());
+                    }
+                }
+                Ok(list_ref)
             },
             "textureRepeatList" => {
                 let mut items = VecDeque::new();
@@ -5463,6 +5549,7 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
     // Collect (cast_lib, member_num, shader_name, list_ref) tuples
     let mut entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     let mut mode_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
+    let mut blend_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
@@ -5471,6 +5558,36 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                 }
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_mode_lists {
                     mode_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+                for (shader_name, list_ref) in &w3d.runtime_state.shader_blend_constant_lists {
+                    blend_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+            }
+        }
+    }
+
+    // Sync blend constants (0..100) back to shader.texture_layers[].blend_const (0..1).
+    for (cast_lib, cast_member, shader_name, list_ref) in blend_entries {
+        let consts: Vec<f32> = if let Datum::List(_, items, _) = player.get_datum(&list_ref) {
+            items.iter().map(|item_ref| {
+                (player.get_datum(item_ref).to_float().unwrap_or(50.0) as f32 / 100.0).clamp(0.0, 1.0)
+            }).collect()
+        } else {
+            continue;
+        };
+        let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some(scene) = w3d.scene_mut() {
+                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                        use crate::director::chunks::w3d::types::W3dTextureLayer;
+                        while shader.texture_layers.len() < consts.len() {
+                            shader.texture_layers.push(W3dTextureLayer::default());
+                        }
+                        for (i, c) in consts.iter().enumerate() {
+                            shader.texture_layers[i].blend_const = *c;
+                        }
+                    }
                 }
             }
         }

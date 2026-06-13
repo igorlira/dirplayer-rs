@@ -382,6 +382,9 @@ in vec2 v_texcoord2;
 in float v_view_dist;
 in vec4 v_vertex_color;
 
+// Must match the vertex shader's precision (highp, the VS default) — a precision
+// mismatch on a uniform shared across stages is a GLSL ES link error.
+uniform highp mat4 u_view;  // for eye-space reflection (sphere map)
 uniform vec4 u_diffuse_color;
 uniform int u_has_vertex_color;
 uniform vec4 u_ambient_color;
@@ -446,6 +449,54 @@ vec3 blend_layer(vec3 base, vec4 layer_sample, int mode, float intensity) {
         return mix(base, layer_sample.rgb, layer_sample.a * intensity);
     }
     return base;
+}
+
+// Classic OpenGL GL_SPHERE_MAP UV for a reflection / environment map, computed
+// in EYE space (like Director's #reflection mode). worldN = world-space surface
+// normal, worldPos = world-space fragment position. Working in eye space makes
+// every camera-facing surface reflect consistently — a world-space version made
+// the sampled sky region depend on the surface's world orientation, so only
+// windows facing one direction appeared to reflect the backdrop.
+vec2 sphere_map_uv(vec3 worldN, vec3 worldPos) {
+    vec3 n_eye = normalize(mat3(u_view) * worldN);
+    vec3 pos_eye = (u_view * vec4(worldPos, 1.0)).xyz;
+    vec3 incident = normalize(pos_eye);          // eye(origin) → fragment
+    vec3 r = reflect(incident, n_eye);
+    float m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
+    m = max(m, 1e-4);
+    // Flip the V (vertical) coord: the sky texture is stored top-down, so the raw
+    // sphere-map t would render the reflection upside down.
+    return vec2(r.x / m + 0.5, 0.5 - r.y / m);
+}
+
+// Blend a colour toward the fog colour by distance. fog_mode: 0=linear, 1=exp,
+// 2=exp2. Applied to BOTH the textured and non-textured paths so all geometry
+// fogs consistently (the estate movie enables fog; previously the textured path
+// returned before fogging, so the brick house never faded into the fog).
+vec3 apply_fog(vec3 color) {
+    if (u_fog_enabled <= 0) {
+        return color;
+    }
+    // Use the euclidean world distance from the camera, NOT v_view_dist (-view_pos.z).
+    // The eye-space Z sign depends on IFX's view-matrix handedness; if it came out
+    // negative, fog_factor clamped to 1 and fog never showed. length() is always
+    // positive and matches Director's camera-relative fog distance.
+    float dist = length(u_camera_pos - v_position);
+    float fog_factor;
+    if (u_fog_mode == 0) {
+        // #linear: interpolate between near and far (GL_LINEAR).
+        fog_factor = (u_fog_far - dist) / (u_fog_far - u_fog_near);
+    } else if (u_fog_mode == 1) {
+        // #exponential (Director default): GL_EXP, density = ln(100)/far, near ignored.
+        // Matches IFX CIFXRenderDevice::CalcFogDensity (EXPONENTIAL_FOG_CONSTANT/fFar).
+        float density = 4.6051701859880914 / u_fog_far;
+        fog_factor = exp(-density * dist);
+    } else {
+        // #exponential2: GL_EXP2, density = sqrt(ln(100))/far, near ignored.
+        float density = 2.1459660262893472 / u_fog_far;
+        fog_factor = exp(-(density * dist) * (density * dist));
+    }
+    return mix(u_fog_color, color, clamp(fog_factor, 0.0, 1.0));
 }
 
 void main() {
@@ -516,7 +567,12 @@ void main() {
         }
 
         // Apply third texture layer if present
-        if (u_layer2_blend > 0) {
+        if (u_layer2_blend == 5) {
+            // Reflection / environment map (#reflection): sphere-mapped sky blended
+            // over the textured surface at the #constant factor (u_layer2_intensity).
+            vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
+            final_color = mix(final_color, refl, u_layer2_intensity);
+        } else if (u_layer2_blend > 0) {
             vec2 l2_uv = (u_has_texcoord2 > 0) ? v_texcoord2 : v_texcoord;
             vec4 l2_sample = texture(u_layer2_tex, l2_uv);
             float l2_intensity = u_layer2_intensity;
@@ -529,7 +585,7 @@ void main() {
             }
         }
 
-        frag_color = vec4(final_color, u_opacity * tex_sample.a);
+        frag_color = vec4(apply_fog(final_color), u_opacity * tex_sample.a);
         return;
     }
 
@@ -591,20 +647,16 @@ void main() {
         }
     }
 
-    // Apply fog
-    if (u_fog_enabled > 0) {
-        float fog_factor;
-        if (u_fog_mode == 0) {
-            fog_factor = clamp((u_fog_far - v_view_dist) / (u_fog_far - u_fog_near), 0.0, 1.0);
-        } else if (u_fog_mode == 1) {
-            float density = 2.0 / (u_fog_far - u_fog_near);
-            fog_factor = exp(-density * v_view_dist);
-        } else {
-            float density = 2.0 / (u_fog_far - u_fog_near);
-            fog_factor = exp(-density * density * v_view_dist * v_view_dist);
-        }
-        result = mix(u_fog_color, result, clamp(fog_factor, 0.0, 1.0));
+    // Reflection / environment map on an untextured surface — e.g. tinted glass:
+    // material diffuse colour with a sphere-mapped sky reflection mixed in at the
+    // #constant blend factor (reflectionMap helper, u_layer2_blend == 5).
+    if (u_layer2_blend == 5) {
+        vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
+        result = mix(result, refl, u_layer2_intensity);
     }
+
+    // Apply fog (shared with the textured path via apply_fog).
+    result = apply_fog(result);
 
     float alpha = u_opacity * tex_sample.a * u_diffuse_color.a;
     frag_color = vec4(result, alpha);
@@ -1392,6 +1444,9 @@ void main() {
         self.ensure_fbo(context, width, height)?;
         self.ensure_member_data(context, member_key, scene)?;
         self.ensure_checker_texture(&context.gl());
+        // Backdrops are drawn with the overlay quad later in this pass; ensure it
+        // exists now while we still have &mut self (before the shader borrow).
+        self.ensure_overlay_quad(&context.gl());
 
         // Sync lightmap UVs: check scene CLOD mesh tex_coords[1] and upload to GPU if new
         if let Some(gpu_data) = self.member_data.get_mut(&member_key) {
@@ -1529,6 +1584,50 @@ void main() {
         // Skinning defaults to off (enabled when bone data is present)
         gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
         gl.uniform1i(shader.u_texcoord2_direct.as_ref(), 0);
+
+        // Draw camera backdrops (Director `addBackdrop`) BEHIND the scene: after the
+        // colour clear, before any models, with depth test off so all geometry
+        // occludes them. Only on the clearing (primary) pass — extra-camera passes
+        // (clear_fbo=false) must not redraw them. The FBO is already bound, cleared,
+        // and feedback-safe here, which avoids the stale/uninitialised-white that a
+        // separate pre-pass produced. After drawing, the 3D camera matrices and GL
+        // state are restored for the model loop.
+        if clear_fbo {
+            if let Some(rs) = runtime_state {
+                let cam_key = self.active_camera.as_deref()
+                    .unwrap_or("defaultview").to_ascii_lowercase();
+                let backdrops = rs.camera_backdrops.get(&cam_key)
+                    .filter(|b| !b.is_empty())
+                    .or_else(|| {
+                        // The sprite only has an active_camera when the movie called
+                        // addCamera. When it didn't (it just used member.camera[1],
+                        // like the estate explore), active_camera is None and the
+                        // renderer defaults to DefaultView — fall back to whichever
+                        // single camera owns backdrops. With an explicit camera, match
+                        // strictly so a multi-camera movie doesn't cross backdrops.
+                        if self.active_camera.is_none() {
+                            rs.camera_backdrops.values().find(|b| !b.is_empty())
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(backdrops) = backdrops {
+                    self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                    // Restore camera matrices + render state for the model loop.
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
+                    // Re-enable fog for the models (the backdrop disabled it; near/far/
+                    // color/mode were set before the backdrop and are untouched).
+                    gl.uniform1i(shader.u_fog_enabled.as_ref(), if rs.fog_enabled { 1 } else { 0 });
+                    gl.enable(WebGl2RenderingContext::DEPTH_TEST);
+                    gl.depth_mask(true);
+                    gl.enable(WebGl2RenderingContext::CULL_FACE);
+                    gl.cull_face(WebGl2RenderingContext::FRONT);
+                    gl.front_face(WebGl2RenderingContext::CCW);
+                    gl.disable(WebGl2RenderingContext::BLEND);
+                }
+            }
+        }
 
         // Traverse scene graph and draw model nodes
         if self.member_data.contains_key(&member_key) {
@@ -1921,6 +2020,146 @@ void main() {
 
     // Old render_overlays_static removed — functionality merged into render_overlays_to_fbo
 
+    /// Render camera backdrops into the FBO. Backdrops are positioned 2D images
+    /// drawn BEHIND the 3D scene (Director 11.5 `addBackdrop`): each is a textured
+    /// quad placed by loc/scale/regPoint/rotation, with loc measured from the
+    /// sprite's upper-left corner. This is the backdrop counterpart of
+    /// render_overlays_to_fbo (which draws on top). It must run before the scene's
+    /// geometry: it clears the FBO to the member background colour, fills it with
+    /// the backdrop images, and leaves the colour buffer intact so the subsequent
+    /// `render_scene_with_state_ex(clear_fbo=false)` only clears depth and composites
+    /// the models on top.
+    /// Draw camera backdrops into the CURRENTLY-BOUND, ALREADY-CLEARED FBO, in the
+    /// middle of render_scene_with_state_ex (after the clear, before the models).
+    /// Each backdrop is a positioned 2D quad (loc/scale/regPoint/rotation, loc from
+    /// the sprite's upper-left per the Director dictionary), drawn with depth test
+    /// off so all geometry occludes it. The sky is shown unlit/full-bright: emissive
+    /// is forced to white so the textured-path lighting clamps to 1 and the texture
+    /// shows as-is, which also means u_num_lights is left untouched (the model loop
+    /// keeps its lighting). The caller restores u_view/u_projection + GL state after.
+    fn draw_backdrops_inline(
+        &self,
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        member_key: &(i32, i32),
+        backdrops: &[crate::player::cast_member::CameraOverlay],
+        width: u32,
+        height: u32,
+    ) {
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
+
+        // Bind the default VAO before touching vertex attrib pointers. Otherwise the
+        // vertexAttribPointer calls below would write onto whatever VAO is currently
+        // bound — which is the 2D compositor's sprite-quad VAO (left bound from the
+        // previous sprite). The 3D scene still renders (models bind their own VAOs),
+        // but the compositor would then draw every sprite, including this 3D one, with
+        // a corrupted quad → a degenerate / full-screen white quad ("all white").
+        gl.bind_vertex_array(None);
+
+        // 2D orthographic state — depth off (behind everything), no cull, alpha blend.
+        gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        // CRITICAL: also disable depth WRITES. On ANGLE/D3D (Windows) disabling the
+        // depth test alone does not reliably stop depth writes, so the full-screen
+        // backdrop quad would stamp its depth (~0.5) over the whole buffer and then
+        // every house surface farther than that fails the LEQUAL test and vanishes —
+        // leaving only the sky ("fades to white"). The skybox model path does the
+        // same. The caller restores depth_mask(true) before the model loop.
+        gl.depth_mask(false);
+        gl.disable(WebGl2RenderingContext::CULL_FACE);
+        gl.enable(WebGl2RenderingContext::BLEND);
+        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+
+        let w = width as f32;
+        let h = height as f32;
+        // Ortho: (0,0)=top-left in sprite space. FBO is Y-flipped when composited, so
+        // use positive Y here (matches render_overlays_to_fbo).
+        let ortho: [f32; 16] = [
+            2.0/w,  0.0,    0.0, 0.0,
+            0.0,    2.0/h,  0.0, 0.0,
+            0.0,    0.0,   -1.0, 0.0,
+           -1.0,   -1.0,    0.0, 1.0,
+        ];
+        let identity: [f32; 16] = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+        gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &ortho);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &identity);
+        // Unlit full-bright: emissive=1 → lighting clamps to 1 → final = texture.
+        gl.uniform4f(shader.u_emissive_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+        gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
+        gl.uniform4f(shader.u_ambient_color.as_ref(), 0.0, 0.0, 0.0, 1.0);
+        gl.uniform1i(shader.u_has_lightmap.as_ref(), 0);
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), 0);
+        gl.uniform1i(shader.u_has_specular_map.as_ref(), 0);
+        gl.uniform1i(shader.u_shader_mode.as_ref(), 0);
+        gl.uniform1i(shader.u_has_vertex_color.as_ref(), 0);
+        gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
+        // The 2D backdrop is the scene background — never fogged (the caller
+        // re-enables fog for the models afterward).
+        gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
+        // u_skinning_enabled = -1 → vertex shader skips CLOD UV remap for the quad.
+        gl.uniform1i(shader.u_skinning_enabled.as_ref(), -1);
+        gl.uniform1i(shader.u_uv_proj_mode.as_ref(), 0);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_tex_transform.as_ref(), false, &identity);
+        gl.uniform_matrix4fv_with_f32_array(shader.u_wrap_transform.as_ref(), false, &identity);
+
+        // Bind quad VBOs once
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, self.overlay_quad_vbo.as_ref());
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 3, WebGl2RenderingContext::FLOAT, false, 24, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 3, WebGl2RenderingContext::FLOAT, false, 24, 12);
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, self.overlay_quad_uv.as_ref());
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+
+        for backdrop in backdrops {
+            if backdrop.source_texture.is_empty() || backdrop.blend <= 0.0 { continue; }
+            let tex = match gpu_data.textures.get(&backdrop.source_texture_lower) {
+                Some(t) => t,
+                None => continue,
+            };
+            let (tex_w, tex_h) = gpu_data.texture_sizes
+                .get(&backdrop.source_texture_lower)
+                .map(|&(w, h)| (w as f32, h as f32))
+                .unwrap_or((64.0, 64.0));
+
+            gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+            gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
+            gl.uniform1i(shader.u_has_texture.as_ref(), 1);
+            gl.uniform1f(shader.u_opacity.as_ref(), (backdrop.blend / 100.0) as f32);
+
+            let x = backdrop.loc[0] as f32;
+            let y = backdrop.loc[1] as f32;
+            let sx = (backdrop.scale * backdrop.scale_x) as f32;
+            let sy = (backdrop.scale * backdrop.scale_y) as f32;
+            let rx = backdrop.reg_point[0] as f32;
+            let ry = backdrop.reg_point[1] as f32;
+            let rot_rad = (backdrop.rotation as f32).to_radians();
+            let cos_r = rot_rad.cos();
+            let sin_r = rot_rad.sin();
+
+            let sw = sx * tex_w;
+            let sh = sy * tex_h;
+            let model: [f32; 16] = [
+                cos_r * sw, sin_r * sw, 0.0, 0.0,
+               -sin_r * sh, cos_r * sh, 0.0, 0.0,
+                0.0,        0.0,        1.0, 0.0,
+                x - rx * sx * cos_r + ry * sy * sin_r,
+                y - rx * sx * sin_r - ry * sy * cos_r,
+                0.0, 1.0,
+            ];
+            gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
+            gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+        }
+
+        gl.disable_vertex_attrib_array(0);
+        gl.disable_vertex_attrib_array(1);
+        gl.disable_vertex_attrib_array(2);
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, None);
+    }
+
     /// Fallback: draw all meshes with identity transform when no scene graph
     fn draw_all_meshes_fallback(
         &self,
@@ -2104,6 +2343,8 @@ void main() {
                     if !bound {
                         self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
                     }
+                    // Reflection map last so the per-mesh candidate search can't clobber it.
+                    self.apply_reflection_map(gl, shader, scene, model_node, member_key, runtime_state);
 
                     if mesh_buf.has_bones && has_skeleton_data {
                         gl.uniform1i(shader.u_skinning_enabled.as_ref(), 1);
@@ -2915,6 +3156,15 @@ void main() {
                 None => continue,
             };
 
+            // tex_mode 4 = reflection / environment map (Director `reflectionMap`).
+            // Sampled with sphere-mapped UVs (not the mesh's authored UVs), so it
+            // must be kept out of the diffuse/extra-layer slots here. It is bound
+            // separately as a final step via apply_reflection_map() so the per-mesh
+            // candidate search can't clobber its u_layer2_blend signal.
+            if layer.tex_mode == 4 {
+                continue;
+            }
+
             // tex_mode 6 = specular map
             if layer.tex_mode == 6 {
                 if result.specular.is_none() {
@@ -3051,6 +3301,102 @@ void main() {
         }
 
         tex_bound
+    }
+
+    /// Resolve a model's primary shader name the same way the Lingo `model.shader`
+    /// getter (get_model_prop) does, so reflection binding targets the exact shader
+    /// the movie assigned `reflectionMap` to. Precedence: runtime override →
+    /// model-resource first-mesh binding (prefer non-DefaultShader) → node
+    /// shader_name → model-index→shader-index.
+    fn resolve_model_primary_shader(
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> Option<String> {
+        // 1) Runtime override (model.shader = s1 / shaderList[1] = ref)
+        if let Some(name) = runtime_state
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+        {
+            return Some(name.clone());
+        }
+        // 2) Model-resource first-mesh shader binding (prefer non-DefaultShader)
+        let resource = if !model_node.model_resource_name.is_empty() {
+            &model_node.model_resource_name
+        } else {
+            &model_node.resource_name
+        };
+        if let Some(res) = scene.model_resources.get(resource) {
+            let mut fallback = String::new();
+            for binding in &res.shader_bindings {
+                if !binding.mesh_bindings.is_empty() && !binding.mesh_bindings[0].is_empty() {
+                    let name = &binding.mesh_bindings[0];
+                    if !name.eq_ignore_ascii_case("DefaultShader") {
+                        return Some(name.clone());
+                    } else if fallback.is_empty() {
+                        fallback = name.clone();
+                    }
+                }
+            }
+            if !fallback.is_empty() { return Some(fallback); }
+        }
+        // 3) Node's shader_name
+        if !model_node.shader_name.is_empty() {
+            return Some(model_node.shader_name.clone());
+        }
+        // 4) Model index → shader index
+        let mi = scene.nodes.iter()
+            .filter(|n| n.node_type == W3dNodeType::Model)
+            .position(|n| n.name == model_node.name);
+        if let Some(mi) = mi {
+            if mi < scene.shaders.len() {
+                return Some(scene.shaders[mi].name.clone());
+            }
+        }
+        None
+    }
+
+    /// Bind the model's reflection / environment map as the FINAL material step.
+    /// Director's `reflectionMap` helper puts the texture on the third layer with
+    /// tex_mode 4 (#reflection); we sample it sphere-mapped in the fragment shader
+    /// and signal it via u_layer2_blend = 5. This runs after bind_material[_for_mesh]
+    /// so the per-mesh path's multi-candidate texture search (which calls
+    /// bind_texture_layers repeatedly and resets u_layer2_blend) cannot clobber it.
+    /// Untextured surfaces (e.g. tinted glass) therefore still get their reflection.
+    fn apply_reflection_map(
+        &self,
+        gl: &WebGl2RenderingContext,
+        shader: &Shader3d,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) {
+        // Resolve the model's SINGLE primary shader exactly as `model.shader`
+        // (get_model_prop) does — that is the shader the reflectionMap helper was
+        // assigned to. Scanning every shader the model's resource references is
+        // wrong: house models share one model-resource whose bindings include the
+        // glass's `roofshad`, so a broad scan applied the reflection (and its 50%
+        // sky blend) to every surface and washed the scene white.
+        let shader_name = match Self::resolve_model_primary_shader(scene, model_node, runtime_state) {
+            Some(s) => s,
+            None => return,
+        };
+        let refl = Self::find_shader_ci(&scene.shaders, &shader_name)
+            .and_then(|sh| sh.texture_layers.iter()
+                .find(|l| l.tex_mode == 4 && !l.name.is_empty())
+                .map(|l| (l.name.clone(), l.blend_const)));
+        let (tex_name, blend_const) = match refl { Some(x) => x, None => return };
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
+        let tex = match gpu_data.textures.get(&tex_name.to_lowercase()) {
+            Some(t) => t,
+            None => return,
+        };
+        gl.active_texture(WebGl2RenderingContext::TEXTURE2);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), 5);
+        gl.uniform1f(shader.u_layer2_intensity.as_ref(), blend_const.clamp(0.0, 1.0));
     }
 
     /// Bind material properties for a model node
@@ -3636,11 +3982,12 @@ void main() {
             if f > 100000.0 || f <= 0.0 { f = 10000.0; }
             let mut n = node.near_plane;
             if n <= 0.0 { n = 1.0; }
-            let cam_aspect = if node.screen_width > 0 && node.screen_height > 0 {
-                node.screen_width as f32 / node.screen_height as f32
-            } else {
-                _fbo_aspect
-            };
+            // Director scales the projection plane to fit the SPRITE rect, so the
+            // aspect must come from the sprite/FBO — NOT the camera's stored screen
+            // size. W3dNode.screen_width/height are an unparsed 640x480 default that
+            // never updates, which forced every movie to 4:3 (fine for 4:3 sprites,
+            // but horizontally stretched for square sprites like the estate explore).
+            let cam_aspect = _fbo_aspect;
             // Each camera uses its own FOV/near/far settings
             let (fov, n, f) = (node.fov, n, f);
             (fov.to_radians(), n, f, cam_aspect)
