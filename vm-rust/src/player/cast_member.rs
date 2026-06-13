@@ -992,6 +992,10 @@ pub struct Shockwave3dRuntimeState {
     /// Per-shader persistent textureModeList DatumRefs: shader_name -> DatumRef to list of mode symbols.
     /// Synced into shader.texture_layers[].tex_mode by sync_shader_texture_lists before render.
     pub shader_texture_mode_lists: std::collections::HashMap<String, crate::player::DatumRef>,
+    /// Per-shader persistent blendConstantList DatumRefs: shader_name -> DatumRef to list of 0..100 floats.
+    /// Synced into shader.texture_layers[].blend_const by sync_shader_texture_lists before render.
+    /// Needed so `shader.blendConstantList[i] = N` (e.g. reflectionMap's 30% blend) persists.
+    pub shader_blend_constant_lists: std::collections::HashMap<String, crate::player::DatumRef>,
 
     // ─── MeshDeform state ───
     /// Per-model mesh deform data: model_name -> list of mesh texture layers
@@ -1236,6 +1240,11 @@ impl Shockwave3dRuntimeState {
             animation_scale: 1.0,
             animation_end_time: -1.0,
             directional_preset: 2, // Director default: #topCenter
+            // IFX default fog decay is #exponential (IFXRenderFog: m_eMode = IFX_FOG_EXP),
+            // NOT #linear. Movies that enable fog without setting decayMode (e.g. the
+            // estate explore) rely on this; a linear default left distant geometry
+            // unfogged because linear ignores everything closer than fog.near.
+            fog_mode: 1, // 0=linear, 1=exp, 2=exp2
             ..Default::default()
         };
         // Seed camera transform from 3DPR camera position/rotation.
