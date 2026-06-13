@@ -194,6 +194,37 @@ impl Shockwave3dObjectDatumHandlers {
                     },
                 })
             },
+            // #particle range objects — read .start / .end back from the particle state.
+            // Scripts gate flow on these (e.g. `if resource.blendRange.start > 0`), so the
+            // getter must return what was set, not a placeholder.
+            "colorRange" | "sizeRange" | "blendRange" => {
+                let ps = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.particles.get(&s3d_ref.name))
+                        .cloned()
+                };
+                let is_start = prop_name.eq_ignore_ascii_case("start");
+                match_ci!(s3d_ref.object_type.as_str(), {
+                    "colorRange" => {
+                        let c = ps.as_ref().map(|p| if is_start { p.color_start } else { p.color_end })
+                            .unwrap_or([1.0, 1.0, 1.0]);
+                        let to_u8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                        Ok(player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(
+                            to_u8(c[0]), to_u8(c[1]), to_u8(c[2])))))
+                    },
+                    "sizeRange" => {
+                        let v = ps.as_ref().map(|p| if is_start { p.size_start } else { p.size_end }).unwrap_or(0.0);
+                        Ok(player.alloc_datum(Datum::Float(v as f64)))
+                    },
+                    "blendRange" => {
+                        // Stored as the raw IFX alpha (0..1, default 0.1); report as set.
+                        let v = ps.as_ref().map(|p| if is_start { p.blend_start } else { p.blend_end }).unwrap_or(0.1);
+                        Ok(player.alloc_datum(Datum::Float(v as f64)))
+                    },
+                    _ => Ok(player.alloc_datum(Datum::Void)),
+                })
+            },
             "sds" => {
                 // Subdivision Surface modifier properties
                 let sds = {
@@ -527,6 +558,81 @@ impl Shockwave3dObjectDatumHandlers {
                                     };
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
+            // ── #particle model-resource property sets ──
+            // colorRange/sizeRange/blendRange are range objects (.start/.end); lifeTime,
+            // texture, gravity, wind, drag are direct resource props. All persist into the
+            // ParticleSystemState (created lazily; gravity defaults to vector(0,0,0) per the
+            // Director dictionary, NOT the struct's fire-style default). Handled before the
+            // generic match so the named `texture` (shader) arm doesn't intercept it.
+            {
+                let ot = s3d_ref.object_type.as_str();
+                let is_range = ot.eq_ignore_ascii_case("colorRange")
+                    || ot.eq_ignore_ascii_case("sizeRange")
+                    || ot.eq_ignore_ascii_case("blendRange");
+                let is_res_prop = ot.eq_ignore_ascii_case("modelResource") && (
+                    prop_name.eq_ignore_ascii_case("lifetime")
+                    || prop_name.eq_ignore_ascii_case("texture")
+                    || prop_name.eq_ignore_ascii_case("gravity")
+                    || prop_name.eq_ignore_ascii_case("wind")
+                    || prop_name.eq_ignore_ascii_case("drag"));
+                if is_range || is_res_prop {
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            let ps = w3d.runtime_state.particles
+                                .entry(s3d_ref.name.clone())
+                                .or_insert_with(|| {
+                                    let mut p = crate::player::cast_member::ParticleSystemState::default();
+                                    p.gravity = [0.0, 0.0, 0.0]; // #particle default gravity
+                                    p
+                                });
+                            if is_range {
+                                let is_start = prop_name.eq_ignore_ascii_case("start");
+                                match_ci!(ot, {
+                                    "colorRange" => {
+                                        if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = value {
+                                            let c = [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0];
+                                            if is_start { ps.color_start = c; } else { ps.color_end = c; }
+                                        }
+                                    },
+                                    "sizeRange" => {
+                                        let v = value.float_value().unwrap_or(0.0) as f32;
+                                        if is_start { ps.size_start = v; } else { ps.size_end = v; }
+                                    },
+                                    "blendRange" => {
+                                        // IFX particle blend is the per-particle ALPHA (0..1, default
+                                        // 0.1) — NOT a 0..100 percentage. Store the raw value; values
+                                        // >1 (the faucet's 2-3 / 6-7 at full flow) clamp to fully
+                                        // opaque at render time. See CIFXShaderParticle (vertex RGBA).
+                                        let v = value.float_value().unwrap_or(0.1) as f32;
+                                        if is_start { ps.blend_start = v; } else { ps.blend_end = v; }
+                                    },
+                                    _ => {}
+                                });
+                            } else {
+                                match_ci!(prop_name, {
+                                    // lifetime is in milliseconds (default 10000); store seconds.
+                                    "lifetime" => ps.lifetime = (value.float_value().unwrap_or(10000.0) as f32 / 1000.0).max(0.001),
+                                    "texture" => {
+                                        let tn = match value {
+                                            Datum::Shockwave3dObjectRef(r) if r.object_type == "texture" => r.name.clone(),
+                                            Datum::String(s) => s.clone(),
+                                            _ => String::new(),
+                                        };
+                                        ps.texture_name = tn.to_lowercase();
+                                    },
+                                    "gravity" => if let Datum::Vector(v) = value { ps.gravity = [v[0] as f32, v[1] as f32, v[2] as f32]; },
+                                    "wind" => if let Datum::Vector(v) = value { ps.wind = [v[0] as f32, v[1] as f32, v[2] as f32]; },
+                                    // drag is 0 (none) .. 100 (full); store 0..1.
+                                    "drag" => ps.drag = (value.float_value().unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0),
+                                    _ => {}
+                                });
                             }
                         }
                     }
@@ -1576,6 +1682,23 @@ impl Shockwave3dObjectDatumHandlers {
                     // Handle meshDeformTexLayer.textureCoordinateList = data
                     if s3d_ref.object_type == "emitter" {
                         use crate::player::cast_member::EmitterState;
+                        // emitter.region is assigned as a LIST of positions (Director's API,
+                        // e.g. the car demos' `emitter.region = [exhaust.worldPosition]` to make
+                        // the smoke follow the tailpipe); a bare vector is also accepted. Resolve
+                        // the first position here (needs immutable player access) BEFORE taking the
+                        // mutable member borrow. Without this the list silently failed to match
+                        // `Datum::Vector`, region stayed (0,0,0), and the white exhaust particles
+                        // piled up at the origin — right at the camera — whiting out the scene.
+                        let region_override: Option<[f64; 3]> = if prop_name.eq_ignore_ascii_case("region") {
+                            match value {
+                                Datum::Vector(v) => Some(*v),
+                                Datum::List(_, items, _) => items.front().and_then(|r| match player.get_datum(r) {
+                                    Datum::Vector(v) => Some(*v),
+                                    _ => None,
+                                }),
+                                _ => None,
+                            }
+                        } else { None };
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 let em = w3d.runtime_state.emitters
@@ -1586,7 +1709,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     "mode" => em.mode = value.symbol_value().unwrap_or_else(|_| value.string_value().unwrap_or_default()),
                                     "numParticles" => em.num_particles = value.int_value().unwrap_or(100),
                                     "direction" => if let Datum::Vector(v) = value { em.direction = *v; },
-                                    "region" => if let Datum::Vector(v) = value { em.region = *v; },
+                                    "region" => if let Some(rv) = region_override { em.region = rv; em.has_region = true; },
                                     "distribution" => em.distribution = value.symbol_value().unwrap_or_else(|_| value.string_value().unwrap_or_default()),
                                     "angle" => em.angle = value.float_value().unwrap_or(30.0),
                                     "minSpeed" => em.min_speed = value.float_value().unwrap_or(1.0),
@@ -5051,26 +5174,17 @@ impl Shockwave3dObjectDatumHandlers {
                 })))
             },
             // Particle system resource properties — range objects with #start and #end
-            "colorRange" => {
-                let sk = player.alloc_datum(Datum::Symbol("start".to_string()));
-                let sv = player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(255, 255, 255)));
-                let ek = player.alloc_datum(Datum::Symbol("end".to_string()));
-                let ev = player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(255, 255, 255)));
-                Ok(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(sk, sv), (ek, ev)]), false)))
-            },
-            "sizeRange" => {
-                let sk = player.alloc_datum(Datum::Symbol("start".to_string()));
-                let sv = player.alloc_datum(Datum::Float(1.0));
-                let ek = player.alloc_datum(Datum::Symbol("end".to_string()));
-                let ev = player.alloc_datum(Datum::Float(1.0));
-                Ok(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(sk, sv), (ek, ev)]), false)))
-            },
-            "blendRange" => {
-                let sk = player.alloc_datum(Datum::Symbol("start".to_string()));
-                let sv = player.alloc_datum(Datum::Int(100));
-                let ek = player.alloc_datum(Datum::Symbol("end".to_string()));
-                let ev = player.alloc_datum(Datum::Int(100));
-                Ok(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(sk, sv), (ek, ev)]), false)))
+            // #particle range objects — return a ref so `resource.colorRange.start = X`
+            // routes to set_prop (object_type colorRange/sizeRange/blendRange). The set
+            // persists into the ParticleSystemState; a thrown-away PropList wouldn't.
+            "colorRange" | "sizeRange" | "blendRange" => {
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: prop.to_string(), // "colorRange" | "sizeRange" | "blendRange"
+                    name: resource_name.to_string(),
+                })))
             },
             "lifetime" => Ok(player.alloc_datum(Datum::Int(1000))),
             "gravity" => Ok(player.alloc_datum(Datum::Vector([0.0, -9.8, 0.0]))),

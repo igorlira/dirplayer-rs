@@ -3387,6 +3387,11 @@ async fn run_movie_init_sequence() {
     // while the body animates.
     crate::player::events::tick_w3d_animations().await;
 
+    // Step #particle systems (faucet water, fire, etc.) each frame, independent of
+    // animation_playing — emit/age/move particles using the emitter params + model
+    // position set by Lingo (see tick_w3d_particles).
+    crate::player::events::tick_w3d_particles().await;
+
     // After prepareFrame behaviors have run (which is where simulate()
     // typically lives), drain any pending PhysX collision reports and
     // dispatch the script's registered #collisionCallback. AGEIA's xtra

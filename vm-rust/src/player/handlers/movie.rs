@@ -968,6 +968,7 @@ impl MovieHandlers {
         // I moved the renderer's dt advance onto runtime_state.
         crate::player::events::dispatch_w3d_timer_events().await;
         crate::player::events::tick_w3d_animations().await;
+        crate::player::events::tick_w3d_particles().await;
         crate::player::events::dispatch_physx_collision_callbacks().await;
 
         reserve_player_mut(|player| {

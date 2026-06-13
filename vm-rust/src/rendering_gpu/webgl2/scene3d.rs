@@ -140,8 +140,13 @@ struct ParticleShader {
     u_camera_up: Option<WebGlUniformLocation>,
     u_color_start: Option<WebGlUniformLocation>,
     u_color_end: Option<WebGlUniformLocation>,
-    u_size: Option<WebGlUniformLocation>,
+    u_size_start: Option<WebGlUniformLocation>,
+    u_size_end: Option<WebGlUniformLocation>,
+    u_blend_start: Option<WebGlUniformLocation>,
+    u_blend_end: Option<WebGlUniformLocation>,
     u_lifetime: Option<WebGlUniformLocation>,
+    u_tex: Option<WebGlUniformLocation>,
+    u_has_tex: Option<WebGlUniformLocation>,
 }
 
 /// Simple fullscreen quad shader for post-processing passes
@@ -736,7 +741,8 @@ layout(location = 2) in vec2 a_corner; // (-1,-1) to (1,1)
 uniform mat4 u_view_projection;
 uniform vec3 u_camera_right;
 uniform vec3 u_camera_up;
-uniform float u_size;
+uniform float u_size_start;
+uniform float u_size_end;
 uniform float u_lifetime;
 
 out float v_age_ratio;
@@ -746,14 +752,32 @@ void main() {
     v_age_ratio = clamp(a_age / u_lifetime, 0.0, 1.0);
     v_uv = a_corner * 0.5 + 0.5;
 
-    // Size fades out near end of life
-    float size_factor = u_size * (1.0 - v_age_ratio * 0.5);
+    // sizeRange is the world-unit sprite size (IFX builds a `size`-wide quad per
+    // particle); a_corner spans -1..1 so 0.5 == `size` wide. We use 0.25 (half
+    // that) so the stream is a thin jet matching Shockwave's water output, rather
+    // than a thick column — the visible blob of the particle texture is narrower
+    // than the full quad.
+    float size_factor = mix(u_size_start, u_size_end, v_age_ratio) * 0.25;
 
-    vec3 world_pos = a_center
-        + u_camera_right * a_corner.x * size_factor
-        + u_camera_up * a_corner.y * size_factor;
-
-    gl_Position = u_view_projection * vec4(world_pos, 1.0);
+    // Cull particles that are behind the eye OR so close that the billboard balloons
+    // across the screen. A chase camera following a car repeatedly passes through the
+    // exhaust/wheel-spray it just emitted; as a particle's center nears the eye
+    // (clip.w -> small) its size/w blows the quad up to many times the screen, and a
+    // few such quads white out the entire 3D scene. Measure the billboard's on-screen
+    // half-extent in NDC and discard the quad when it would exceed the screen.
+    vec4 center_clip = u_view_projection * vec4(a_center, 1.0);
+    vec4 edge_clip   = u_view_projection * vec4(a_center + u_camera_right * size_factor, 1.0);
+    bool bad = center_clip.w <= 0.0001 || edge_clip.w <= 0.0001;
+    float ndc_half = bad ? 1e9
+        : length(edge_clip.xy / edge_clip.w - center_clip.xy / center_clip.w);
+    if (bad || ndc_half > 1.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // outside NDC clip volume → discarded
+    } else {
+        vec3 world_pos = a_center
+            + u_camera_right * a_corner.x * size_factor
+            + u_camera_up * a_corner.y * size_factor;
+        gl_Position = u_view_projection * vec4(world_pos, 1.0);
+    }
 }
 "#;
 
@@ -765,20 +789,38 @@ in vec2 v_uv;
 
 uniform vec3 u_color_start;
 uniform vec3 u_color_end;
+uniform float u_blend_start;
+uniform float u_blend_end;
+uniform sampler2D u_tex;
+uniform int u_has_tex;
 
 out vec4 frag_color;
 
 void main() {
-    // Circular soft particle
-    float dist = length(v_uv - 0.5) * 2.0;
-    if (dist > 1.0) discard;
-    float alpha = 1.0 - dist * dist;
-
-    // Fade out with age
-    alpha *= 1.0 - v_age_ratio;
-
+    // colorRange / blendRange interpolate start->end over the particle's life.
     vec3 color = mix(u_color_start, u_color_end, v_age_ratio);
-    frag_color = vec4(color, alpha);
+    // blendRange is the per-particle ALPHA (the script comments call it the
+    // "transparency", scaled by how far the tap is turned). The ParticleTexture is
+    // a solid white square with useAlpha=false, so the texture adds nothing — the
+    // whole look is colorRange (tint) + blendRange (alpha). The faucet drives blend
+    // to 2..3 (cold) / 6..7 (hot) at full flow; clamped that's opaque, but Shockwave
+    // renders the stream translucent (you see the drain through it), so we cap full
+    // flow at ~half. Low flow scales below that toward a faint trickle.
+    float opacity = clamp(mix(u_blend_start, u_blend_end, v_age_ratio), 0.0, 1.0) * 0.5;
+
+    float alpha;
+    if (u_has_tex > 0) {
+        vec4 tex = texture(u_tex, v_uv);
+        alpha = tex.a;
+        color *= tex.rgb;
+    } else {
+        // Soft circular fallback when no particle texture is assigned.
+        float dist = length(v_uv - 0.5) * 2.0;
+        if (dist > 1.0) discard;
+        alpha = 1.0 - dist * dist;
+    }
+
+    frag_color = vec4(color, alpha * opacity);
 }
 "#;
 
@@ -795,8 +837,13 @@ void main() {
             u_camera_up: u("u_camera_up"),
             u_color_start: u("u_color_start"),
             u_color_end: u("u_color_end"),
-            u_size: u("u_size"),
+            u_size_start: u("u_size_start"),
+            u_size_end: u("u_size_end"),
+            u_blend_start: u("u_blend_start"),
+            u_blend_end: u("u_blend_end"),
             u_lifetime: u("u_lifetime"),
+            u_tex: u("u_tex"),
+            u_has_tex: u("u_has_tex"),
             program,
         });
 
@@ -807,6 +854,7 @@ void main() {
     fn render_particles(
         &mut self,
         context: &WebGL2Context,
+        member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
@@ -815,9 +863,9 @@ void main() {
             Some(rs) if !rs.particles.is_empty() => rs,
             _ => return Ok(()),
         };
-
         self.ensure_particle_shader(context)?;
         let gl = context.gl();
+        let gpu_data = self.member_data.get(member_key);
         let shader = self.particle_shader.as_ref().unwrap();
 
         gl.use_program(Some(&shader.program));
@@ -831,18 +879,39 @@ void main() {
         gl.uniform3f(shader.u_camera_right.as_ref(), view_matrix[0], view_matrix[4], view_matrix[8]);
         gl.uniform3f(shader.u_camera_up.as_ref(), view_matrix[1], view_matrix[5], view_matrix[9]);
 
-        // Enable additive blending for particles
-        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE);
+        // Standard alpha blending — Director's default particle blend. Additive
+        // (SRC_ALPHA, ONE) over-saturates dense overlapping particles to white
+        // (e.g. the faucet's translucent pink/red water turned into an opaque white
+        // jet); alpha blending keeps them translucent and colored like Shockwave.
+        gl.enable(WebGl2RenderingContext::BLEND);
+        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.depth_mask(false); // Don't write to depth buffer
 
         for (_name, ps) in &rs.particles {
             if ps.positions.is_empty() { continue; }
 
-            gl.uniform1f(shader.u_size.as_ref(), ps.particle_size);
-            gl.uniform1f(shader.u_lifetime.as_ref(), ps.lifetime);
-            gl.uniform3f(shader.u_color_start.as_ref(), 1.0, 1.0, 0.5); // yellow-ish
-            gl.uniform3f(shader.u_color_end.as_ref(), 1.0, 0.2, 0.0);   // red-ish
+            // colorRange / sizeRange / blendRange — interpolated over each particle's
+            // life in the shader (see vs/fs above).
+            gl.uniform1f(shader.u_size_start.as_ref(), ps.size_start);
+            gl.uniform1f(shader.u_size_end.as_ref(), ps.size_end);
+            gl.uniform1f(shader.u_lifetime.as_ref(), ps.lifetime.max(0.001));
+            gl.uniform3f(shader.u_color_start.as_ref(), ps.color_start[0], ps.color_start[1], ps.color_start[2]);
+            gl.uniform3f(shader.u_color_end.as_ref(), ps.color_end[0], ps.color_end[1], ps.color_end[2]);
+            gl.uniform1f(shader.u_blend_start.as_ref(), ps.blend_start);
+            gl.uniform1f(shader.u_blend_end.as_ref(), ps.blend_end);
+
+            // Bind the particle texture (set via resource.texture) if present.
+            let mut has_tex = false;
+            if !ps.texture_name.is_empty() {
+                if let Some(tex) = gpu_data.and_then(|d| d.textures.get(&ps.texture_name)) {
+                    gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+                    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+                    gl.uniform1i(shader.u_tex.as_ref(), 0);
+                    has_tex = true;
+                }
+            }
+            gl.uniform1i(shader.u_has_tex.as_ref(), if has_tex { 1 } else { 0 });
 
             // Build billboard quad vertex data: 4 verts per particle (center + age + corner)
             let alive_count = ps.alive.iter().filter(|&&a| a).count();
@@ -924,10 +993,14 @@ void main() {
             gl.delete_vertex_array(Some(&vao));
         }
 
-        // Restore state
+        // Restore state. Crucially DISABLE blend: the rest of the camera pass and the
+        // FBO→stage composite run with blend OFF (it's disabled at pass start). Leaving
+        // it enabled here made the 2D composite alpha-blend the whole 3D FBO by its
+        // alpha — fine for the faucet (opaque alpha=1 FBO) but the car/track models
+        // write alpha<1, so the entire scene faded out and read as "3D doesn't render".
         gl.depth_mask(true);
         gl.enable(WebGl2RenderingContext::CULL_FACE);
-        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        gl.disable(WebGl2RenderingContext::BLEND);
 
         Ok(())
     }
@@ -1649,6 +1722,18 @@ void main() {
                     // Skip directly detached nodes
                     if detached_nodes.contains(n.name.as_str()) { return false; }
 
+                    // Skip #particle models — their resource is a billboard placeholder;
+                    // the particle system itself is drawn by render_particles, not as a
+                    // static quad here.
+                    let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
+                    if scene.model_resources.get(res)
+                        .and_then(|r| r.primitive_type.as_deref())
+                        .map(|t| t.eq_ignore_ascii_case("particle"))
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+
                     if let Some(ref root) = root_node_filter {
                         // Camera has rootNode: only render nodes in that subtree
                         self.is_child_of(scene, &n.name, root)
@@ -1840,8 +1925,8 @@ void main() {
             gl.use_program(Some(&shader.program));
         }
 
-        // Render particles (after opaque geometry, with additive blending)
-        let _ = self.render_particles(context, runtime_state, &view_matrix, &projection_matrix);
+        // Render particles (after opaque geometry), alpha-blended.
+        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
 
         // Note: overlays are rendered AFTER all camera passes, not per-camera
 

@@ -1185,6 +1185,7 @@ pub struct EmitterState {
     pub is_loop: bool,
     pub direction: [f64; 3],
     pub region: [f64; 3],
+    pub has_region: bool, // true once a script assigns emitter.region (emit there, not at the model node)
     pub distribution: String, // "linear", "gaussian"
     pub angle: f64,
     pub min_speed: f64,
@@ -1195,11 +1196,12 @@ pub struct EmitterState {
 impl Default for EmitterState {
     fn default() -> Self {
         Self {
-            num_particles: 100,
+            num_particles: 1000, // Director #particle default
             mode: "burst".to_string(),
             is_loop: true,
             direction: [0.0, 1.0, 0.0],
             region: [0.0, 0.0, 0.0],
+            has_region: false,
             distribution: "linear".to_string(),
             angle: 180.0,
             min_speed: 1.0,
@@ -1229,6 +1231,18 @@ pub struct ParticleSystemState {
     pub emitter_size: [f32; 3], // dimensions of emitter shape
     pub angle_range: f32,       // emission cone angle (0 = parallel, PI = hemisphere)
     pub particle_size: f32,
+    pub max_speed: f32,         // upper bound of the emitter speed range
+    pub stream: bool,           // #stream = continuous recycle, #burst = emit once
+    // Per-particle appearance interpolated from birth (start) to death (end), per
+    // the Director #particle colorRange/sizeRange/blendRange properties.
+    pub color_start: [f32; 3],  // RGB 0..1 at birth
+    pub color_end: [f32; 3],    // RGB 0..1 at death
+    pub size_start: f32,
+    pub size_end: f32,
+    pub blend_start: f32,       // opacity 0..1 at birth
+    pub blend_end: f32,         // opacity 0..1 at death
+    pub texture_name: String,   // particle billboard texture (lowercased gpu key)
+    pub seed: u32,              // evolving RNG so respawns aren't a fixed per-index pattern
 }
 
 impl Shockwave3dRuntimeState {
@@ -1322,6 +1336,16 @@ impl Default for ParticleSystemState {
             emitter_size: [1.0; 3],
             angle_range: 0.3,
             particle_size: 1.0,
+            max_speed: 1.0,
+            stream: true,
+            color_start: [1.0, 1.0, 1.0],
+            color_end: [1.0, 1.0, 1.0],
+            size_start: 1.0,
+            size_end: 1.0,
+            blend_start: 1.0,
+            blend_end: 1.0,
+            texture_name: String::new(),
+            seed: 0x9E3779B9,
         }
     }
 }
@@ -1334,9 +1358,13 @@ impl ParticleSystemState {
         self.ages = vec![0.0; count];
         self.alive = vec![false; count];
 
-        // Stagger initial ages
+        // Randomize initial ages across the lifetime so particles are at varied
+        // distances down the stream from the start — a uniform stagger plus the
+        // constant emit speed left them at regular intervals (visible banding).
         for i in 0..count {
-            self.ages[i] = (i as f32 / count as f32) * self.lifetime;
+            self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let r = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
+            self.ages[i] = r * self.lifetime;
             self.alive[i] = false;
         }
     }
@@ -1351,8 +1379,10 @@ impl ParticleSystemState {
                 // Recycle
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;
-                // Emitter shape offset
-                let hash = (i as u32).wrapping_mul(2654435761); // Knuth hash for pseudo-random
+                // Evolve the RNG each respawn so particles don't all return to the
+                // same fixed per-index offset/velocity (that produced regular bands).
+                self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let hash = self.seed;
                 let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
                 let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
                 let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
