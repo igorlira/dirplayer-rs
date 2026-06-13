@@ -2144,9 +2144,15 @@ impl Shockwave3dMemberHandlers {
                         if let Some(w3d) = member.and_then(|m| m.member_type.as_shockwave3d()) {
                             let transforms = w3d.runtime_state.node_transforms.clone();
                             let mut excluded = std::collections::HashSet::new();
-                            for (name, &vis_mode) in &w3d.runtime_state.node_visibility {
-                                if vis_mode == 0 { excluded.insert(name.clone()); } // #none
-                            }
+                            // NOTE: do NOT exclude models by visibility. Per the Director
+                            // 11.5 dictionary, modelsUnderRay filters only by the optional
+                            // #modelList and maxDistance — `visibility = #none` is a
+                            // render-only flag and such models are still hit by the ray.
+                            // Invisible collision geometry (e.g. the estate explore's
+                            // `model("invisible")` boundary, hidden with visibility=#none
+                            // but used by touch() to block the camera) depends on this;
+                            // excluding it let the player walk off the map. Only
+                            // removeFromWorld (detached_nodes) removes a model from raycasts.
                             for name in &w3d.runtime_state.detached_nodes {
                                 excluded.insert(name.clone());
                             }
