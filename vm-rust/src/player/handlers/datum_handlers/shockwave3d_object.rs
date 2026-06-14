@@ -1993,12 +1993,14 @@ impl Shockwave3dObjectDatumHandlers {
                 // ─── Node transform methods ───
                 "translate" => {
                     let (dx, dy, dz) = read_xyz_args(player, args);
-                    apply_translation(player, &member_ref, &s3d_ref.name, dx, dy, dz);
+                    let world = args_relative_to_world(player, args);
+                    apply_translation(player, &member_ref, &s3d_ref.name, dx, dy, dz, world);
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "rotate" => {
                     let (rx, ry, rz) = read_xyz_args(player, args);
-                    apply_rotation(player, &member_ref, &s3d_ref.name, rx, ry, rz);
+                    let world = args_relative_to_world(player, args);
+                    apply_rotation(player, &member_ref, &s3d_ref.name, rx, ry, rz, world);
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "scale" => {
@@ -5500,6 +5502,27 @@ fn read_xyz_args(player: &crate::player::DirPlayer, args: &[crate::player::Datum
     }
 }
 
+/// Read the optional trailing `relativeTo` symbol of translate/rotate.
+/// Per the Director spec a NODE reference defaults to `#self` (the node's own
+/// local axes); `#world`/`#parent` apply the change in the parent/world frame.
+/// Returns true only for an explicit `#world`/`#parent`.
+fn args_relative_to_world(player: &crate::player::DirPlayer, args: &[crate::player::DatumRef]) -> bool {
+    let sym_ref = if args.len() >= 4 {
+        Some(&args[3]) // translate(x, y, z, relativeTo)
+    } else if args.len() == 2 {
+        Some(&args[1]) // translate(vector, relativeTo)
+    } else {
+        None
+    };
+    if let Some(r) = sym_ref {
+        if let Datum::Symbol(s) = player.get_datum(r) {
+            let s = s.to_ascii_lowercase();
+            return s == "world" || s == "parent";
+        }
+    }
+    false
+}
+
 const IDENTITY: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
@@ -5940,6 +5963,7 @@ fn apply_translation(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
     dx: f32, dy: f32, dz: f32,
+    world_relative: bool,
 ) {
     // Flush any pending persistent Transform3d mutations into node_transforms
     // first — otherwise a prior `transform.position = v` on the cached datum is
@@ -5948,9 +5972,21 @@ fn apply_translation(
     // stale position, silently dropping the Lingo write. Mirrors apply_point_at.
     sync_persistent_transforms(player);
     let mut m = get_or_init_node_transform(player, member_ref, node_name);
-    m[12] += dx;
-    m[13] += dy;
-    m[14] += dz;
+    if world_relative {
+        // #world / #parent: increments are in the (parent-space) position frame.
+        m[12] += dx;
+        m[13] += dy;
+        m[14] += dz;
+    } else {
+        // #self (the node-reference default): increments run along the node's own
+        // local axes, i.e. the rotation columns of its transform. Pacman's death
+        // slide relies on this — rz=90 puts local +X along world +Y, so
+        // translate(0.5,0,0) lifts him up (worldPosition.y climbs to the respawn
+        // threshold) instead of sliding sideways.
+        m[12] += m[0] * dx + m[4] * dy + m[8] * dz;
+        m[13] += m[1] * dx + m[5] * dy + m[9] * dz;
+        m[14] += m[2] * dx + m[6] * dy + m[10] * dz;
+    }
     set_node_transform(player, member_ref, node_name, m);
 }
 
@@ -5959,6 +5995,7 @@ fn apply_rotation(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: &str,
     rx_deg: f32, ry_deg: f32, rz_deg: f32,
+    world_relative: bool,
 ) {
     // See apply_translation comment — same flush requirement.
     sync_persistent_transforms(player);
@@ -5966,8 +6003,18 @@ fn apply_rotation(
     // Director uses left-handed coordinates where Y rotation is opposite to OpenGL's
     // right-handed convention, so negate Y.
     let rot = euler_to_matrix_f32(rx_deg, -ry_deg, rz_deg);
-    // Apply rotation in world axes but keep the node positioned in place.
-    let mut result = mat4_mul_f32(&rot, &m);
+    let mut result = if world_relative {
+        // #world / #parent: compose in the world/parent frame (rot · R).
+        mat4_mul_f32(&rot, &m)
+    } else {
+        // #self (the node-reference default): compose in the node's LOCAL frame
+        // (R · rot), so the rotation runs about the node's own axes. Pacman's
+        // death spin uses rotate(5,0,0): about local X (which rz=90 aligns with
+        // world +Y), so local X stays fixed and his upward slide doesn't drift.
+        mat4_mul_f32(&m, &rot)
+    };
+    // Keep the node positioned in place (m * rot already preserves translation,
+    // but restore explicitly for the world-frame branch).
     result[12] = m[12];
     result[13] = m[13];
     result[14] = m[14];
