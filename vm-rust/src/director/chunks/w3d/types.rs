@@ -387,6 +387,21 @@ pub struct ModelResourceInfo {
     pub primitive_length: f32,
     pub primitive_height: f32,
     pub primitive_radius: f32,
+    /// #cylinder taper + tessellation. primitive_radius is the bottom radius;
+    /// primitive_top_radius the top. primitive_resolution is the radial segment
+    /// count (0 = use a sensible default).
+    pub primitive_top_radius: f32,
+    pub primitive_resolution: u32,
+    /// #sphere/#cylinder partial sweep around the Y axis, in degrees. Default
+    /// 0..360 = full. The Pacman mouth uses startAngle 25 / endAngle 335.
+    pub primitive_start_angle: f32,
+    pub primitive_end_angle: f32,
+    /// #cylinder end caps. Per the Director spec the defaults are asymmetric:
+    /// topCap FALSE (open), bottomCap TRUE (sealed). Ghosts set both to 0.
+    /// These are initialised at newModelResource time (derive(Default) gives
+    /// false, which is wrong for bottom_cap, so the creation site sets them).
+    pub primitive_top_cap: bool,
+    pub primitive_bottom_cap: bool,
 }
 
 #[derive(Clone, Debug, Default)]

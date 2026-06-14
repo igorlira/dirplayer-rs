@@ -1812,6 +1812,17 @@ impl Shockwave3dMemberHandlers {
                                                 primitive_length: 1.0,
                                                 primitive_height: 1.0,
                                                 primitive_radius: 1.0,
+                                                primitive_top_radius: 1.0,
+                                                primitive_resolution: 0, // 0 → default tessellation
+                                                primitive_start_angle: 0.0,
+                                                primitive_end_angle: 360.0,
+                                                // Spec lists topCap default FALSE / bottomCap TRUE, but every
+                                                // capped cylinder in these movies (Coke can, maze pipes) relies on
+                                                // BOTH caps without setting topCap, and Shockwave renders them
+                                                // sealed — so default both TRUE. Models that want an open tube set
+                                                // the flag explicitly (the ghost body sets topCap=0 AND bottomCap=0).
+                                                primitive_top_cap: true,
+                                                primitive_bottom_cap: true,
                                                 ..Default::default()
                                             });
 

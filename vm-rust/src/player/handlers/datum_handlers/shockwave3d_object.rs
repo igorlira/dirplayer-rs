@@ -1563,18 +1563,32 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                             }
                         },
-                        "width" | "length" | "height" | "radius" => {
+                        "width" | "length" | "height" | "radius"
+                        | "topRadius" | "bottomRadius" | "resolution"
+                        | "startAngle" | "endAngle" | "topCap" | "bottomCap" => {
                             use crate::director::chunks::w3d::types::ClodDecodedMesh;
                             let val = value.to_float().unwrap_or(1.0) as f32;
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         if let Some(res) = scene.model_resources.get_mut(&s3d_ref.name) {
-                                            match prop_name {
+                                            // The outer match_ci! matched case-insensitively; normalise
+                                            // for the inner exact match.
+                                            match prop_name.to_ascii_lowercase().as_str() {
                                                 "width" => res.primitive_width = val,
                                                 "length" => res.primitive_length = val,
                                                 "height" => res.primitive_height = val,
-                                                "radius" => res.primitive_radius = val,
+                                                // #cylinder taper: bottomRadius -> radius, topRadius -> top.
+                                                // A bare `radius` (e.g. sphere) sets both so a cylinder
+                                                // stays uniform unless top/bottom are set explicitly.
+                                                "radius" => { res.primitive_radius = val; res.primitive_top_radius = val; },
+                                                "topradius" => res.primitive_top_radius = val,
+                                                "bottomradius" => res.primitive_radius = val,
+                                                "resolution" => res.primitive_resolution = val.round().max(3.0) as u32,
+                                                "startangle" => res.primitive_start_angle = val,
+                                                "endangle" => res.primitive_end_angle = val,
+                                                "topcap" => res.primitive_top_cap = val != 0.0,
+                                                "bottomcap" => res.primitive_bottom_cap = val != 0.0,
                                                 _ => {}
                                             }
                                         }
@@ -1621,39 +1635,62 @@ impl Shockwave3dObjectDatumHandlers {
                                                     }]
                                                 },
                                                 "sphere" => {
-                                                    // Generate a UV sphere at the given radius.
-                                                    // Poles along Y so that after the typical
-                                                    // rotation(90,0,0) the poles end up vertical.
+                                                    // Exact match to Director's #sphere, verified by dumping pacModel
+                                                    // via the meshDeform modifier:
+                                                    //   phi (polar, 0=+Y pole .. PI=-Y pole) over `stacks` steps,
+                                                    //   L = startAngle + sweep*(j/slices) swept around the Y axis
+                                                    //   from +Z toward +X, over `slices` steps.
+                                                    //   x = r·sin(phi)·sin(L),  y = r·cos(phi),  z = r·sin(phi)·cos(L)
+                                                    //   u = j/slices  (fraction along the sweep)
+                                                    //   v = 1 - phi/PI  (1 at the +Y pole, 0 at -Y)
+                                                    // startAngle 25 / endAngle 335 leaves the 50° Pacman mouth open;
+                                                    // startAngle 180 gives the ghost-dome hemisphere.
+                                                    use std::f32::consts::PI;
                                                     let r = res.primitive_radius;
-                                                    let stacks = 12u32;
-                                                    let slices = 16u32;
-                                                    let uv_scale = 1.0f32;
+                                                    let start = res.primitive_start_angle.to_radians();
+                                                    let mut sweep = (res.primitive_end_angle - res.primitive_start_angle).to_radians();
+                                                    if sweep <= 0.0 { sweep = 2.0 * PI; }
+                                                    let stacks = 20u32;
+                                                    let slices = ((sweep / (2.0 * PI)) * 28.0).round().max(8.0) as u32;
+                                                    let stride = slices + 1;
                                                     let mut pos = Vec::new();
                                                     let mut nrm = Vec::new();
                                                     let mut uvs = Vec::new();
                                                     let mut faces = Vec::new();
                                                     for i in 0..=stacks {
-                                                        let phi = std::f32::consts::PI * i as f32 / stacks as f32;
-                                                        let sp = phi.sin();
-                                                        let cp = phi.cos();
+                                                        let phi = PI * i as f32 / stacks as f32; // 0 = +Y pole .. PI = -Y pole
+                                                        let (sp, cp) = (phi.sin(), phi.cos());
                                                         for j in 0..=slices {
-                                                            let theta = 2.0 * std::f32::consts::PI * j as f32 / slices as f32;
-                                                            let st = theta.sin();
-                                                            let ct = theta.cos();
-                                                            let nx = cp;
-                                                            let ny = sp * ct;
-                                                            let nz = sp * st;
-                                                            pos.push([r*nx, r*ny, r*nz]);
+                                                            let l = start + sweep * (j as f32 / slices as f32);
+                                                            let (sl, cl) = (l.sin(), l.cos());
+                                                            // Verified against BOTH the Pacman and ghost-dome
+                                                            // meshDeform dumps: x = -sin(theta), z = cos(theta).
+                                                            // (For a sphere whose sweep is centred on theta=0, like
+                                                            // Pacman's mouth or a full sphere, +sin and -sin are
+                                                            // identical; the ghost dome's startAngle 180 hemisphere
+                                                            // exposes the real sign — it must sit on +X so Rz(90)
+                                                            // lifts it into a head.)
+                                                            let nx = -sp * sl; let ny = cp; let nz = sp * cl;
+                                                            pos.push([r * nx, r * ny, r * nz]);
                                                             nrm.push([nx, ny, nz]);
-                                                            uvs.push([(j as f32 / slices as f32 - 0.05) * uv_scale, i as f32 / stacks as f32 * uv_scale]);
+                                                            // Director-dump texcoords: u = 1 - j/slices, v = 1 - i/stacks.
+                                                            // The shared 3D vertex shader applies the CLOD remap
+                                                            // (u+0.5, 0.5-v) to the main texcoord, so emit PRE-CENTERED
+                                                            // here; after the remap they reconstruct the dumped (u, v).
+                                                            let u = 1.0 - j as f32 / slices as f32;
+                                                            let v = 1.0 - i as f32 / stacks as f32;
+                                                            uvs.push([u - 0.5, 0.5 - v]);
                                                         }
                                                     }
                                                     for i in 0..stacks {
                                                         for j in 0..slices {
-                                                            let a = i * (slices + 1) + j;
-                                                            let b = a + slices + 1;
-                                                            if i != 0 { faces.push([a, b, a + 1]); }
-                                                            if i != stacks - 1 { faces.push([a + 1, b, b + 1]); }
+                                                            let a = i * stride + j;
+                                                            let b = a + stride;
+                                                            // With x=-sin·sin, z=cos·sin the outward winding is
+                                                            // [a, a+1, b]. Partial sweeps simply omit the gap faces,
+                                                            // leaving the mouth/section open.
+                                                            faces.push([a, a + 1, b]);
+                                                            faces.push([a + 1, b + 1, b]);
                                                         }
                                                     }
                                                     vec![ClodDecodedMesh {
@@ -1663,6 +1700,109 @@ impl Shockwave3dObjectDatumHandlers {
                                                         diffuse_colors: vec![], specular_colors: vec![],
                                                         bone_indices: vec![], bone_weights: vec![],
                                                     }]
+                                                },
+                                                "cylinder" => {
+                                                    // Director #cylinder: axis along Y, centered. `resolution` is
+                                                    // the radial segment count (default 20; the Pacman pipes use 6
+                                                    // for hexagonal tubes). topRadius/bottomRadius give the taper
+                                                    // (topRadius 0 => cone). topCap/bottomCap default FALSE, so the
+                                                    // cylinder is an open side wall (no end caps) unless a movie
+                                                    // seals them — which Pacman doesn't. Winding matches the sphere
+                                                    // (ring 0 = top -> ring 1 = bottom) so faces front outward.
+                                                    use std::f32::consts::PI;
+                                                    let bottom_r = res.primitive_radius;
+                                                    let top_r = res.primitive_top_radius;
+                                                    let hy = res.primitive_height / 2.0;
+                                                    let segs = if res.primitive_resolution >= 3 { res.primitive_resolution } else { 20 };
+                                                    let stride = segs + 1;
+                                                    // Director's #cylinder is THREE mesh groups: side wall, top cap,
+                                                    // bottom cap — so shaderList[1]/[2]/[3] can each differ (the Coke
+                                                    // can is the cokeT label on the side and silver canTop on the
+                                                    // caps). Emit each as a separate same-named mesh; the renderer
+                                                    // binds a per-mesh-index shader from node_shaders (set by Lingo
+                                                    // shaderList[i]=ref). Cap groups are gated by the cap flags (the
+                                                    // ghost body sets both to 0 → side only).
+                                                    let mut out: Vec<ClodDecodedMesh> = Vec::new();
+                                                    // group 0 → shaderList[1]: side wall
+                                                    {
+                                                        let mut pos = Vec::new();
+                                                        let mut nrm = Vec::new();
+                                                        let mut uvs = Vec::new();
+                                                        let mut faces = Vec::new();
+                                                        for ring in 0..=1u32 {
+                                                            let (y, r) = if ring == 0 { (hy, top_r) } else { (-hy, bottom_r) };
+                                                            for i in 0..=segs {
+                                                                let u = i as f32 / segs as f32;
+                                                                let theta = u * 2.0 * PI;
+                                                                let (c, s) = (theta.cos(), theta.sin());
+                                                                pos.push([c * r, y, s * r]);
+                                                                nrm.push([c, 0.0, s]);
+                                                                // pre-centre to cancel the shader CLOD remap; final UV
+                                                                // is (u, ring): v=0 at the top ring, v=1 at the bottom
+                                                                // edge (where GTEX bakes its black sawtooth).
+                                                                uvs.push([u - 0.5, 0.5 - ring as f32]);
+                                                            }
+                                                        }
+                                                        for i in 0..segs {
+                                                            let a = i;
+                                                            let b = a + stride;
+                                                            faces.push([a, a + 1, b]);
+                                                            faces.push([a + 1, b + 1, b]);
+                                                        }
+                                                        out.push(ClodDecodedMesh {
+                                                            name: s3d_ref.name.clone(), positions: pos, normals: nrm,
+                                                            tex_coords: vec![uvs], faces,
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        });
+                                                    }
+                                                    // group 1 → shaderList[2]: top cap (+Y), fan, disc UV pre-centred
+                                                    if res.primitive_top_cap {
+                                                        let mut pos: Vec<[f32; 3]> = vec![[0.0, hy, 0.0]];
+                                                        let mut nrm: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]];
+                                                        let mut uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]];
+                                                        let mut faces = Vec::new();
+                                                        for i in 0..=segs {
+                                                            let theta = i as f32 / segs as f32 * 2.0 * PI;
+                                                            let (c, s) = (theta.cos(), theta.sin());
+                                                            pos.push([c * top_r, hy, s * top_r]);
+                                                            nrm.push([0.0, 1.0, 0.0]);
+                                                            uvs.push([c * 0.5, -s * 0.5]);
+                                                        }
+                                                        for i in 0..segs {
+                                                            faces.push([0u32, 1 + i + 1, 1 + i]);
+                                                        }
+                                                        out.push(ClodDecodedMesh {
+                                                            name: s3d_ref.name.clone(), positions: pos, normals: nrm,
+                                                            tex_coords: vec![uvs], faces,
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        });
+                                                    }
+                                                    // group 2 → shaderList[3]: bottom cap (-Y)
+                                                    if res.primitive_bottom_cap {
+                                                        let mut pos: Vec<[f32; 3]> = vec![[0.0, -hy, 0.0]];
+                                                        let mut nrm: Vec<[f32; 3]> = vec![[0.0, -1.0, 0.0]];
+                                                        let mut uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]];
+                                                        let mut faces = Vec::new();
+                                                        for i in 0..=segs {
+                                                            let theta = i as f32 / segs as f32 * 2.0 * PI;
+                                                            let (c, s) = (theta.cos(), theta.sin());
+                                                            pos.push([c * bottom_r, -hy, s * bottom_r]);
+                                                            nrm.push([0.0, -1.0, 0.0]);
+                                                            uvs.push([c * 0.5, -s * 0.5]);
+                                                        }
+                                                        for i in 0..segs {
+                                                            faces.push([0u32, 1 + i, 1 + i + 1]);
+                                                        }
+                                                        out.push(ClodDecodedMesh {
+                                                            name: s3d_ref.name.clone(), positions: pos, normals: nrm,
+                                                            tex_coords: vec![uvs], faces,
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        });
+                                                    }
+                                                    out
                                                 },
                                                 _ => vec![],
                                             };
