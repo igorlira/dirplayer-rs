@@ -552,8 +552,11 @@ void main() {
 
         // IFX fixed-function clamps per-vertex lighting to [0,1] before GL_MODULATE
         lighting = clamp(lighting, vec3(0.0), vec3(1.0));
-        // GL_MODULATE: fragment = texture * lighting
-        vec3 final_color = tex_sample.rgb * lighting;
+        // GL_MODULATE: fragment = texture * lighting * vertex color. Vertex colors
+        // are identity-white for normal meshes; extruded 3D text bakes its tunnel
+        // shading here (gray side walls vs white front) so the glyphs read 3D.
+        vec3 vcol_t = (u_has_vertex_color > 0) ? v_vertex_color.rgb : vec3(1.0);
+        vec3 final_color = tex_sample.rgb * lighting * vcol_t;
 
         // Apply second texture layer (shadow/lightmap) if present
         if (u_has_lightmap > 0) {

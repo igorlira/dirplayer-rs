@@ -1487,6 +1487,15 @@ impl Shockwave3dObjectDatumHandlers {
                     // modelResource property set: vertexList, textureCoordinateList, colorList, normalList
                     use crate::player::cast_member::MeshBuildData;
                     match_ci!(prop_name, {
+                        // Text3D geometry params on an extrude3d resource (textres.tunnelDepth
+                        // = 5, .bevelType = #round, ...): update state + re-extrude. A no-op
+                        // for non-text resources, so it never errors.
+                        "tunnelDepth" | "tunneldepth" | "bevelDepth" | "beveldepth"
+                        | "bevelType" | "beveltype" | "smoothness" => {
+                            crate::player::handlers::datum_handlers::cast_member::shockwave3d::Shockwave3dMemberHandlers::set_extruded_text_param(
+                                player, &member_ref, &s3d_ref.name, prop_name, value,
+                            );
+                        },
                         "vertexList" => {
                             let verts: Vec<[f32; 3]> = if let Datum::List(_, items, _) = value {
                                 items.iter().map(|r| {
