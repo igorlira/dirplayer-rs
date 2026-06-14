@@ -4803,7 +4803,12 @@ impl CastMember {
                         name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                         comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
                         member_type: CastMemberType::Shockwave3d(Shockwave3dMember {
-                        source_scene: None,
+                        // Capture the load-time scene (even when it's the empty scene
+                        // for Lingo-built content like Pacman's "BlankScene") so
+                        // resetWorld() can restore it. Without this, resetWorld was a
+                        // no-op for these members and runtime models (the whole maze,
+                        // ghosts, etc.) leaked across a game-over restart.
+                        source_scene: parsed_scene.clone(),
                         parsed_scene,
                         runtime_state,
                         info: info.clone(),

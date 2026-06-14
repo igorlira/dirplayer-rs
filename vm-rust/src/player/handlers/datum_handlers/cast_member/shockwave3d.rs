@@ -1124,12 +1124,26 @@ impl Shockwave3dMemberHandlers {
                     }
 
                     if handler_name == "resetWorld" {
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        // Monotonic generation so each resetWorld stamps a brand-new
+                        // content version — guarantees the renderer's per-member GPU
+                        // mesh cache is rebuilt. Without this, a deterministic restart
+                        // (game over → resetWorld → rebuild the same models) can land
+                        // back on a cached version and leave the PREVIOUS game's models
+                        // on screen (stale models, maze rebuilt over old transforms).
+                        static RESET_GEN: AtomicU64 = AtomicU64::new(1_000_000);
                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            // resetWorld: restore to state when member was first loaded into memory
+                            // resetWorld: restore to the state from when the member was
+                            // first loaded. Deep-clone the retained source so runtime
+                            // edits never leak back into it, and stamp a fresh version.
                             if let Some(ref source) = w3d.source_scene {
-                                w3d.parsed_scene = Some(source.clone());
+                                let mut fresh = (**source).clone();
+                                let reset_gen = RESET_GEN.fetch_add(1, Ordering::Relaxed);
+                                fresh.mesh_content_version = reset_gen;
+                                fresh.texture_content_version = reset_gen;
+                                w3d.parsed_scene = Some(std::rc::Rc::new(fresh));
                             }
                             w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
                         }
