@@ -2282,8 +2282,28 @@ impl Shockwave3dObjectDatumHandlers {
                             Datum::String(s) => s.clone(),
                             _ => String::new(),
                         };
+                        // 2nd arg selects transform handling. Default #preserveParent keeps
+                        // the child's LOCAL transform. #preserveWorld keeps the child's WORLD
+                        // transform, recomputing local = inverse(parentWorld) * childWorld.
+                        // Required by the Pacman maze (pipes parented to pipePink1) and the
+                        // ghosts (top/eyes parented to the body) — without it each child
+                        // inherited the parent's transform on top of its own (misplaced maze,
+                        // ghost parts floating off the body).
+                        let preserve_world = match args.get(1).map(|a| player.get_datum(a)) {
+                            Some(Datum::Symbol(s)) => s.eq_ignore_ascii_case("preserveWorld"),
+                            Some(Datum::String(s)) => s.eq_ignore_ascii_case("preserveWorld"),
+                            _ => false,
+                        };
                         if !child_name.is_empty() {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if preserve_world {
+                                // Compute both world transforms under the OLD hierarchy, then
+                                // rebase the child's local transform onto the new parent.
+                                let child_world = node_world_transform(player, &member_ref, &child_name);
+                                let parent_world = node_world_transform(player, &member_ref, &s3d_ref.name);
+                                let new_local = mat4_mul_f32(&invert_transform_f32(&parent_world), &child_world);
+                                set_node_transform(player, &member_ref, &child_name, new_local);
+                            }
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     w3d.runtime_state.detached_nodes.remove(&child_name);
@@ -5577,6 +5597,34 @@ fn get_node_transform(
     IDENTITY
 }
 
+/// Like get_node_transform, but reads the LIVE persistent transform datum first.
+/// model.transform.position/rotation mutate that datum immediately, while the
+/// node_transforms cache is only flushed once per frame (sync_persistent_transforms).
+/// Mid-script callers (e.g. addChild #preserveWorld, run right after the position is
+/// set) must see the live value, not the stale cache.
+fn get_node_transform_live(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> [f32; 16] {
+    let dr_opt = player.movie.cast_manager.find_member_by_ref(member_ref)
+        .and_then(|m| m.member_type.as_shockwave3d())
+        .and_then(|w3d| {
+            w3d.runtime_state.node_transform_datums.get(node_name).cloned()
+                .or_else(|| w3d.runtime_state.node_transform_datums.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(node_name))
+                    .map(|(_, v)| v.clone()))
+        });
+    if let Some(dr) = dr_opt {
+        if let Datum::Transform3d(m) = player.get_datum(&dr) {
+            let mut out = [0.0f32; 16];
+            for i in 0..16 { out[i] = m[i] as f32; }
+            return out;
+        }
+    }
+    get_node_transform(player, member_ref, node_name)
+}
+
 /// Get the accumulated WORLD position for a node by walking the parent chain.
 /// This matches Director's `model.worldPosition` / `group.worldPosition` behavior.
 fn get_world_position(
@@ -5696,6 +5744,32 @@ pub fn set_node_transform(
             w3d.runtime_state.node_transforms.insert(key, m);
         }
     }
+}
+
+/// World-relative transform of a node, accumulated up its parent chain (same
+/// convention as the getWorldTransform handler). Used by addChild #preserveWorld.
+fn node_world_transform(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> [f32; 16] {
+    let mut result = get_node_transform_live(player, member_ref, node_name);
+    let mut current = node_name.to_string();
+    for _ in 0..20 {
+        let parent_name = {
+            player.movie.cast_manager.find_member_by_ref(member_ref)
+                .and_then(|m| m.member_type.as_shockwave3d())
+                .and_then(|w| w.parsed_scene.as_ref())
+                .and_then(|s| s.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current)))
+                .map(|n| n.parent_name.clone())
+                .unwrap_or_default()
+        };
+        if parent_name.is_empty() || parent_name.eq_ignore_ascii_case("World") { break; }
+        let pt = get_node_transform_live(player, member_ref, &parent_name);
+        result = mat4_mul_f32(&pt, &result);
+        current = parent_name;
+    }
+    result
 }
 
 /// Get or create a persistent Transform3d DatumRef for a node.
