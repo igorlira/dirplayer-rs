@@ -955,6 +955,11 @@ pub struct Shockwave3dRuntimeState {
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
     pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,
+    /// Text3D model resources created by `someTextMember.extrude3d(thisScene)`,
+    /// keyed by the resource name in this member's scene. Retains the source
+    /// glyphs + extrude state so the resource's tunnelDepth/bevelType/bevelDepth/
+    /// smoothness setters can re-extrude the mesh into this scene.
+    pub text3d_resources: std::collections::HashMap<String, (Text3dSource, Text3dState)>,
 
     // ─── World state ───
     pub background_color: Option<(u8, u8, u8)>,

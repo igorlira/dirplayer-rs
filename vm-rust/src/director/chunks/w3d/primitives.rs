@@ -585,6 +585,130 @@ fn flatten_bezier_recursive(
     flatten_bezier_recursive(mx0123,my0123, mx123,my123, mx23,my23, x3,y3, tolerance, depth+1, out);
 }
 
+/// Extrude a rasterised text alpha mask into a SMOOTH 3D glyph mesh via
+/// marching squares. Each grid cell of the alpha image emits the filled
+/// sub-polygon with its boundary placed at the sub-pixel alpha crossing
+/// (smooth, diagonal/curved edges) instead of axis-aligned pixel boxes — so the
+/// silhouette matches Director's vector-outline look rather than stair-stepping.
+/// Letter counters/holes fall out naturally (empty cells emit nothing) and the
+/// mesh is far lighter than the per-pixel voxel version. Flat extrusion:
+/// front (+Z), back (-Z), and straight side walls along the contour (no bevel).
+pub fn extrude_alpha_mask_smooth(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    world_width: f32,
+    world_height: f32,
+    tunnel_depth: f32,
+) -> super::types::ClodDecodedMesh {
+    let mut mesh = super::types::ClodDecodedMesh::default();
+    mesh.name = "Text".to_string();
+    if width < 2 || height < 2 || rgba.len() < (width as usize) * (height as usize) * 4 {
+        return mesh;
+    }
+    let depth = tunnel_depth.max(1.0);
+    let ww = world_width.max(1.0);
+    let wh = world_height.max(1.0);
+    let pw = ww / width as f32;
+    let ph = wh / height as f32;
+    let thr = 24.0f32;
+    let z_front = 0.0f32;
+    let z_back = -depth;
+
+    let alpha = |x: i32, y: i32| -> f32 {
+        rgba[((y as usize) * (width as usize) + x as usize) * 4 + 3] as f32
+    };
+    // grid (gx,gy in pixels) -> (world XY [y flipped to Y-up], uv)
+    let to_world = |gx: f32, gy: f32| -> ([f32; 2], [f32; 2]) {
+        (
+            [gx * pw, wh - gy * ph],
+            [(gx / width as f32).clamp(0.0, 1.0), (gy / height as f32).clamp(0.0, 1.0)],
+        )
+    };
+
+    // Oblique skew: the back face + tunnel are shifted by a uniform up-right
+    // offset (not extruded straight back) so the gray depth reads as one CLEAN
+    // directional edge peeking out of the white front — the way Director's
+    // #topCenter-lit extrusion looks at the gameplay camera — instead of a
+    // straight wall that is edge-on (invisible) head-on.
+    let skew_x = depth * 0.55;
+    let skew_y = depth * 0.85;
+    let g_back = 0.5f32; // back face / shadow gray
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut tex: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut faces: Vec<[u32; 3]> = Vec::new();
+
+    for cy in 0..(height as i32 - 1) {
+        for cx in 0..(width as i32 - 1) {
+            // CCW-in-grid corners: bl, br, tr, tl.
+            let corners = [
+                (cx as f32, cy as f32, alpha(cx, cy)),
+                ((cx + 1) as f32, cy as f32, alpha(cx + 1, cy)),
+                ((cx + 1) as f32, (cy + 1) as f32, alpha(cx + 1, cy + 1)),
+                (cx as f32, (cy + 1) as f32, alpha(cx, cy + 1)),
+            ];
+            // Edge-walk the cell, collecting the filled sub-polygon. Inside corners
+            // are added as-is; inside↔outside transitions add the interpolated
+            // (sub-pixel) crossing point. `is_crossing` flags boundary verts.
+            let mut poly: Vec<(f32, f32, bool)> = Vec::new();
+            for i in 0..4 {
+                let (ax, ay, aa) = corners[i];
+                let (bx, by, ab) = corners[(i + 1) % 4];
+                let a_in = aa >= thr;
+                let b_in = ab >= thr;
+                if a_in {
+                    poly.push((ax, ay, false));
+                }
+                if a_in != b_in {
+                    let t = ((aa - thr) / (aa - ab)).clamp(0.0, 1.0);
+                    poly.push((ax + t * (bx - ax), ay + t * (by - ay), true));
+                }
+            }
+            let n = poly.len();
+            if n < 3 {
+                continue;
+            }
+            // Front + back vertices. The world poly is CW (the y flip reverses the
+            // CCW grid order), so the reverse fan below yields CCW (+Z) front faces.
+            let fbase = positions.len() as u32;
+            for &(gx, gy, _) in &poly {
+                let (p, uv) = to_world(gx, gy);
+                positions.push([p[0], p[1], z_front]);
+                normals.push([0.0, 0.0, 1.0]);
+                tex.push(uv);
+                colors.push([1.0, 1.0, 1.0, 1.0]); // front face: full white
+            }
+            // Back face = a gray copy of the glyph, shifted up-right and pushed
+            // behind (z_back), FACING THE CAMERA (+Z) so it renders as a flat gray
+            // drop-shadow. The white front (z=0, closer) occludes most of it; the
+            // part that peeks out on the upper-right is the clean gray depth edge.
+            // No tunnel walls — those produced the diagonal streaks across the face.
+            let bbase = positions.len() as u32;
+            for &(gx, gy, _) in &poly {
+                let (p, uv) = to_world(gx, gy);
+                positions.push([p[0] + skew_x, p[1] + skew_y, z_back]);
+                normals.push([0.0, 0.0, 1.0]);
+                tex.push(uv);
+                colors.push([g_back, g_back, g_back, 1.0]);
+            }
+            for i in 1..(n as u32 - 1) {
+                faces.push([fbase, fbase + i + 1, fbase + i]);
+                // Back face: same camera-facing winding as the front.
+                faces.push([bbase, bbase + i + 1, bbase + i]);
+            }
+        }
+    }
+    mesh.positions = positions;
+    mesh.normals = normals;
+    mesh.tex_coords = vec![tex];
+    mesh.diffuse_colors = colors;
+    mesh.faces = faces;
+    mesh
+}
+
 /// Extrude text string into a 3D mesh using PFR glyph outlines.
 pub fn extrude_text_to_mesh(
     text: &str,

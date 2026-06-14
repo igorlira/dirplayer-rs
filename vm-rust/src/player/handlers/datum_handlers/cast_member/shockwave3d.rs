@@ -113,7 +113,11 @@ impl Shockwave3dMemberHandlers {
     }
 
     fn native_text_supersample(smoothness: u32) -> i32 {
-        (2 + (smoothness as i32 / 4)).clamp(2, 5)
+        // The native-font path traces the rasterised glyph at this resolution, so
+        // the extruded silhouette is only as smooth as the supersample. Bias it
+        // higher (Director smoothness 0..10 → 3..6) so text like Pacman's score
+        // popups (smoothness 5 → 5) reads far less stair-stepped.
+        (3 + (smoothness as i32 / 2)).clamp(3, 6)
     }
 
     fn render_native_text_bitmap(
@@ -212,6 +216,89 @@ impl Shockwave3dMemberHandlers {
             scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
             scene.mesh_content_version += 1;
         }
+    }
+
+    /// Build an extruded 3D glyph mesh from a Text3D source + state (the same
+    /// native-alpha-mask extrusion used by the #mode3D path). Shared by
+    /// member.extrude3d(scene) and the resulting resource's geometry setters.
+    pub(crate) fn build_text3d_mesh(
+        source: &crate::player::cast_member::Text3dSource,
+        state: &crate::player::cast_member::Text3dState,
+    ) -> Option<crate::director::chunks::w3d::types::ClodDecodedMesh> {
+        let (bw, bh, rgba) = Self::render_native_text_bitmap(source, state.smoothness)?;
+        // Marching-squares extrusion: smooth (sub-pixel) silhouette vs the
+        // per-pixel voxel mesh, matching Director's vector-outline edges.
+        Some(crate::director::chunks::w3d::primitives::extrude_alpha_mask_smooth(
+            bw, bh, &rgba,
+            source.width as f32, source.height as f32,
+            state.tunnel_depth,
+        ))
+    }
+
+    /// Re-extrude an extrude3d resource (keyed by `resname`) into `member`'s
+    /// scene from the retained source + state.
+    pub(crate) fn rebuild_extruded_text(player: &mut DirPlayer, member_ref: &CastMemberRef, resname: &str) {
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some((source, state)) = w3d.runtime_state.text3d_resources.get(resname).cloned() {
+                    if let Some(mut mesh) = Self::build_text3d_mesh(&source, &state) {
+                        mesh.name = resname.to_string();
+                        if let Some(scene) = w3d.scene_mut() {
+                            scene.clod_meshes.insert(resname.to_string(), vec![mesh]);
+                            scene.mesh_content_version += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply a Text3D geometry property (tunnelDepth/bevelDepth/bevelType/
+    /// smoothness) to an extrude3d resource and re-extrude its mesh. Returns
+    /// true if `resname` is an extrude3d resource (so the prop was consumed),
+    /// false otherwise (caller can fall back to other handling).
+    pub(crate) fn set_extruded_text_param(
+        player: &mut DirPlayer,
+        member_ref: &CastMemberRef,
+        resname: &str,
+        prop: &str,
+        value: &Datum,
+    ) -> bool {
+        let mut found = false;
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some((_src, state)) = w3d.runtime_state.text3d_resources.get_mut(resname) {
+                    found = true;
+                    match prop.to_ascii_lowercase().as_str() {
+                        "tunneldepth" => {
+                            state.tunnel_depth = value.float_value()
+                                .or_else(|_| value.int_value().map(|v| v as f64))
+                                .unwrap_or(state.tunnel_depth as f64).max(1.0) as f32;
+                        }
+                        "beveldepth" => {
+                            state.bevel_depth = value.float_value()
+                                .or_else(|_| value.int_value().map(|v| v as f64))
+                                .unwrap_or(state.bevel_depth as f64) as f32;
+                        }
+                        "smoothness" => {
+                            state.smoothness = value.int_value().unwrap_or(state.smoothness as i32) as u32;
+                        }
+                        "beveltype" => {
+                            state.bevel_type = match value.string_value().unwrap_or_default().trim_start_matches('#') {
+                                "miter" => 1,
+                                "round" => 2,
+                                _ => 0,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if found {
+            Self::rebuild_extruded_text(player, member_ref, resname);
+        }
+        found
     }
 
     fn scale_text3d_mesh_depth(
@@ -697,6 +784,17 @@ impl Shockwave3dMemberHandlers {
                 Ok(Datum::Symbol(symbol.to_string()))
             }
 
+            "text" => {
+                // A Text member with displayMode #mode3D is represented here as a
+                // converted Shockwave3D member; Director keeps its .text live. Read
+                // it back from the retained 3D-text spans.
+                let s = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.text3d_source.as_ref())
+                    .map(|src| src.spans.iter().map(|sp| sp.text.as_str()).collect::<String>())
+                    .unwrap_or_default();
+                Ok(Datum::String(s))
+            }
             _ => {
                 Err(ScriptError::new(format!(
                     "Cannot get Shockwave3D property '{}'", prop
@@ -830,6 +928,28 @@ impl Shockwave3dMemberHandlers {
                             }
                             w3d.runtime_state.node_transforms.insert("DefaultDirectional".to_string(), t);
                         }
+                    }
+                }
+                Ok(())
+            }
+            "text" => {
+                // member("x").text = "..." on a Text member that was promoted to a
+                // 3D-text member (displayMode #mode3D). Director keeps the text live
+                // and re-extrudes; replace the retained span content (preserving the
+                // first span's style) and rebuild the mesh. Returning Ok here is what
+                // stops PacMan3D crashing on its score-popup updates.
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        let new_text = value.string_value().unwrap_or_default();
+                        if let Some(source) = w3d.text3d_source.as_mut() {
+                            if let Some(first) = source.spans.first().cloned() {
+                                source.spans = vec![crate::player::handlers::datum_handlers::cast_member::font::StyledSpan {
+                                    text: new_text,
+                                    style: first.style,
+                                }];
+                            }
+                        }
+                        Self::rebuild_native_text_mesh(w3d);
                     }
                 }
                 Ok(())
@@ -1991,10 +2111,69 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
-                    // loadFile, extrude3d, getPref, setPref
-                    if handler_name == "loadFile" || handler_name == "extrude3d"
-                        || handler_name == "getPref" || handler_name == "setPref" {
+                    // loadFile, getPref, setPref — stubs
+                    if handler_name == "loadFile" || handler_name == "getPref" || handler_name == "setPref" {
                         return Ok(player.alloc_datum(Datum::Void));
+                    }
+
+                    // extrude3d(targetScene): extrude THIS text member's glyphs into a
+                    // model resource inside the target 3D scene member (arg 0) and
+                    // return that resource. `member_ref` was promoted to a 3D-text
+                    // member by ensure_text3d at call() entry, so its retained
+                    // text3d_source/state hold the glyphs + extrude params.
+                    if handler_name == "extrude3d" {
+                        let (source, state) = {
+                            let m = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            let w3d = m.and_then(|m| m.member_type.as_shockwave3d());
+                            match (
+                                w3d.and_then(|w| w.text3d_source.clone()),
+                                w3d.and_then(|w| w.text3d_state.clone()),
+                            ) {
+                                (Some(s), Some(st)) => (s, st),
+                                _ => return Ok(player.alloc_datum(Datum::Void)),
+                            }
+                        };
+                        let target_ref = match args.get(0).map(|a| player.get_datum(a)) {
+                            Some(Datum::CastMember(r)) => r.clone(),
+                            _ => return Ok(player.alloc_datum(Datum::Void)),
+                        };
+                        let src_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                            .map(|m| m.name.clone()).unwrap_or_else(|| "text".to_string());
+                        let resname = format!("{}_extrude3d", src_name);
+                        let mut mesh = match Self::build_text3d_mesh(&source, &state) {
+                            Some(m) => m,
+                            None => return Ok(player.alloc_datum(Datum::Void)),
+                        };
+                        mesh.name = resname.clone();
+                        let num_faces = mesh.faces.len() as u32;
+                        if let Some(target) = player.movie.cast_manager.find_mut_member_by_ref(&target_ref) {
+                            if let Some(w3d_t) = target.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d_t.scene_mut() {
+                                    use crate::director::chunks::w3d::types::*;
+                                    scene.clod_meshes.insert(resname.clone(), vec![mesh]);
+                                    let mut mi = ClodMeshInfo::default();
+                                    mi.num_faces = num_faces;
+                                    scene.model_resources.insert(resname.clone(), ModelResourceInfo {
+                                        name: resname.clone(),
+                                        mesh_infos: vec![mi],
+                                        shader_bindings: vec![ModelShaderBinding {
+                                            name: String::new(),
+                                            mesh_bindings: vec![String::new()],
+                                        }],
+                                        ..Default::default()
+                                    });
+                                    scene.mesh_content_version += 1;
+                                }
+                                w3d_t.runtime_state.text3d_resources.insert(resname.clone(), (source, state));
+                            }
+                        }
+                        use crate::director::lingo::datum::Shockwave3dObjectRef;
+                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                            cast_lib: target_ref.cast_lib,
+                            cast_member: target_ref.cast_member,
+                            object_type: "modelResource".to_string(),
+                            name: resname,
+                        })));
                     }
 
                     // If no parsed scene exists, create a minimal empty scene
