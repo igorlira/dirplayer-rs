@@ -583,7 +583,7 @@ impl ScoreFrameData {
         while !reader.eof() {
             match reader.read_u16() {
                 Ok(length) => {
-                    if length == 0 { break; }
+                    if length < 2 { break; } // 0 = terminator, 1 = trailing pad
                     let skip = (length as usize).saturating_sub(2);
                     if reader.pos + skip > reader.length { break; }
                     reader.jmp(reader.pos + skip);
@@ -622,7 +622,15 @@ impl ScoreFrameData {
                 .read_u16()
                 .map_err(|e| format!("Failed to read frame length: {:?}", e))?;
 
-            if length == 0 {
+            // A frame block's `length` includes its own 2-byte length field, so
+            // the minimum valid value is 2 (an empty frame). 0 is the normal
+            // terminator; 1 (or any value < 2) is trailing padding at the end of
+            // the entry — NOT a real frame. Treat it as the terminator. Without
+            // this, `length - 2` underflows the u16 to 65535 and the subsequent
+            // read_bytes(65535) aborts the whole score parse — which silently
+            // emptied many filmloop SCVWs (SpongeBob "JellyFishin'" jelly/health
+            // filmloops, whose entry0 ends with a 2-byte 0x0001 pad).
+            if length < 2 {
                 break;
             }
 
@@ -1802,7 +1810,7 @@ impl ScoreChunk {
     /// Analyze score entries beyond Entry[0] for behavior attachment data
     fn analyze_behavior_attachment_entries(
         entries: &Vec<Vec<u8>>,
-        dir_version: u16,
+        _dir_version: u16,
     ) -> Result<Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>, String> {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
@@ -1835,35 +1843,31 @@ impl ScoreChunk {
                 continue;
             }
 
-            // Primary entries: 40 bytes base (5 x u32 fields + 20-byte
-            // TweenInfo) plus zero or more trailing u32s of authored
-            // keyframe indices. v8.0 movies only ever produce 40/44/48
-            // byte primaries (0-2 trailing keyframes); v8.5+ extends to
-            // 52 (3 trailing keyframes) and beyond — Fugue No.4 / i04.dir
-            // has primary entries of 72, 116, 188, 232, 336+ bytes for
-            // sprites with many authored keyframes along an animated
-            // path. Accepting 52+ unconditionally previously
-            // over-matched non-primary chunks in Junkbot (v8.0), so we
-            // still gate the wider sizes by movie version AND validate
-            // the first 8 bytes look like (start_frame, end_frame) of
-            // a real primary (small, ascending) to avoid false matches.
-            let accept_extended = dir_version >= 850;
-            let size_accepted_basic = matches!(entry_bytes.len(), 40 | 44 | 48)
-                || (accept_extended && entry_bytes.len() == 52);
-            // Allow any 4-byte-aligned entry >= 40 bytes on D8.5+ if the
-            // header looks plausible — that's the path-keyframe-bearing
-            // case that was getting rejected.
-            let size_accepted_extended = accept_extended
-                && entry_bytes.len() > 52
-                && entry_bytes.len() % 4 == 0
-                && entry_bytes.len() >= 8
-                && {
+            // Primary span entries: a 40-byte base (5 x u32 fields + 20-byte
+            // TweenInfo) plus zero or more trailing u32s of authored keyframe
+            // indices, so any size 40 + 4*N (40, 44, 48, 52, 56, ...) is
+            // structurally valid for a tweened sprite.
+            //
+            // 40/44/48 are accepted unconditionally. For 52+ we DON'T gate on
+            // movie version — a previous `dir_version >= 850` gate dropped real
+            // 52/56-byte spans in D6/D7 movies (SpongeBob "JellyFishin'" v600:
+            // the bikini backdrop ch10 36-39 span is 56 bytes; nomiss v700 has
+            // them too), which made whole sprites vanish. The version gate was
+            // also unnecessary for its original purpose: Junkbot (v800), the
+            // movie it was protecting, has NO 52+ entries at all. Instead we
+            // validate the header looks like a real primary — plausible
+            // ascending (start_frame, end_frame) and an in-range channel_index
+            // — which reliably rejects the behavior/initializer chunks (their
+            // first u32s are cast ids or ASCII, far outside these ranges).
+            let n = entry_bytes.len();
+            let size_accepted = matches!(n, 40 | 44 | 48)
+                || (n >= 52 && n % 4 == 0 && {
                     let b = entry_bytes;
                     let sf = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
                     let ef = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
-                    sf >= 1 && sf <= 10000 && ef >= sf && ef <= 100000
-                };
-            let size_accepted = size_accepted_basic || size_accepted_extended;
+                    let ch = u32::from_be_bytes([b[16], b[17], b[18], b[19]]);
+                    sf >= 1 && sf <= 10000 && ef >= sf && ef <= 100000 && ch < 512
+                });
             match entry_bytes.len() {
                 _ if size_accepted => {
                     // Primary entry
@@ -1918,10 +1922,8 @@ impl ScoreChunk {
                             // cast_lib/cast_member.  If the first u32 looks like a valid
                             // start_frame (1–10000) and the second u32 >= first, treat it as a
                             // primary rather than a behavior list.
-                            let primary_size_match = next_size == 40
-                                || next_size == 44
-                                || next_size == 48
-                                || (accept_extended && next_size == 52);
+                            let primary_size_match = matches!(next_size, 40 | 44 | 48)
+                                || (next_size >= 52 && next_size % 4 == 0);
                             let looks_like_primary = if primary_size_match && next_size >= 8 {
                                 let b = &entries[j];
                                 let first_u32 = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);

@@ -216,30 +216,37 @@ pub fn get_channel_number_from_index(index: u32) -> u32 {
 }
 
 /// Convert raw blend byte from score data to a 0-100 percentage.
-/// D8+ uses inverted 0-255 scale: 0 → 100% (opaque), 255 → 0% (transparent
-/// / default not-set, treated as opaque).
-/// D5-D7 uses direct 0-100 percentage: 0 → 100% (opaque/not set).
 ///
-/// Director D8+ stores blend INVERTED in the score byte: raw=0 means fully
-/// opaque (100%), raw=255 means fully transparent (0%), intermediate values
-/// linearly interpolate. raw=0 is also the "no override" sentinel used when
-/// the author hasn't touched blend in the Score, which matches the desired
-/// 100% default — handled by the same linear formula.
+/// D6+ stores blend on an inverted 0-255 scale (raw 0 → 100%, 255 → 0%,
+/// 128 → ~50%), BUT the raw byte is only meaningful when the sprite's
+/// "blend enabled" flag is set — `sprite_flags` (score byte 22) bit 4
+/// (0x10). When the flag is clear the raw byte is an unused default (it
+/// can be 0 OR 255 depending on the sprite) and the sprite is fully opaque.
 ///
-/// Previously we also clamped raw=255 → 100 on the theory that some v850
-/// sprites authored with no explicit blend stored raw=255. That heuristic
-/// masked legitimate `blend=0` authoring: spineworld_dcr's pDropList
-/// sprite 799 is a fullscreen click-catching modal background authored at
-/// `blend=0` (verified in Director Property Inspector) so it stays
-/// invisible. Forcing raw=255 → 100 turned that sprite into a fullscreen
-/// black overlay. The override is removed; if a v850 movie surfaces
-/// unintended raw=255 invisibility, the right fix is to identify the
-/// missing "blend is set" flag in the score chunk, not to clamp the value.
-pub(crate) fn convert_raw_blend(raw: u8, dir_version: u16) -> i32 {
-    if dir_version > 600 {
-        ((255.0 - raw as f32) * 100.0 / 255.0).round() as i32
+/// This flag gate is what reconciles two same-version (D6) movies that the
+/// raw value alone cannot:
+///   - SpongeBob "JellyFishin'" sprite 40: flag SET, raw 127 → 50% overlay.
+///   - load_bug.dcr loader (sprite 2): flag CLEAR, raw 255 → 100% (NOT 0%).
+/// An earlier value-only approach (inverted for all D6+) correctly dimmed
+/// sprite 40 but wrongly made the loader transparent (raw 255 → 0%); the
+/// old direct-0-100 path did the reverse. Only the flag disambiguates.
+/// It also matches spineworld_dcr's pDropList sprite 799 (D8+), authored at
+/// `blend=0`: that has the flag SET, so raw 255 → 0% as intended.
+///
+/// `human_version` maps the late-Director-6 file version 1223 to exactly
+/// 600 (1224+ → 700), so the threshold is `>= 600` to include D6. D5 and
+/// earlier have no authored sprite blend and keep the direct path.
+pub(crate) fn convert_raw_blend(raw: u8, sprite_flags: u8, dir_version: u16) -> i32 {
+    if dir_version >= 600 {
+        // Blend only applies when the "blend enabled" flag (bit 4) is set;
+        // otherwise the raw byte is a junk default → fully opaque.
+        if sprite_flags & 0x10 != 0 {
+            ((255.0 - raw as f32) * 100.0 / 255.0).round() as i32
+        } else {
+            100
+        }
     } else {
-        // D5-D7: direct percentage, 0 = fully opaque (not set)
+        // D5 and earlier: direct percentage, 0 = fully opaque (not set)
         if raw == 0 { 100 } else { (raw as i32).min(100) }
     }
 }
@@ -307,6 +314,19 @@ impl Score {
                 span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame
             })
             .and_then(|span| span.scripts.first().cloned());
+    }
+
+    /// Start frame of the channel-0 (frame-script) span covering `frame`.
+    /// Identifies the span so the cached frame-script instance can be recreated
+    /// when the playhead crosses into a different span (even of the same behavior
+    /// member, which may carry different parameters).
+    pub fn get_frame_script_span_start(&self, frame: u32) -> Option<u32> {
+        self.sprite_spans
+            .iter()
+            .find(|span| {
+                span.channel_number == 0 && frame >= span.start_frame && frame <= span.end_frame
+            })
+            .map(|span| span.start_frame)
     }
 
     /// Create a behavior script instance.
@@ -725,6 +745,11 @@ impl Score {
                 sprite.rotation = data.rotation as f64;
                 sprite.moveable = data.moveable;
                 sprite.trails = data.trails;
+                // Score "stretch" flag (sprite ink byte bit 0x80): authoritative
+                // signal for whether the sprite was resized off its member's
+                // natural size. Drives get_concrete_sprite_rect's sprite-vs-bitmap
+                // dimension choice and `the stretch of sprite`.
+                sprite.stretch = data.stretch as i32;
 
                 // Check if member is a shape to determine ink/blend handling
                 // Use find_member_by_ref which handles relative cast references (65535)
@@ -737,13 +762,13 @@ impl Score {
 
                 if is_shape {
                     // Shape sprites use different ink/blend encoding
-                    sprite.blend = convert_raw_blend(data.blend, dir_version);
+                    sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                     // Shape ink encoding: mask off the high bit and divide by 5
                     sprite.ink = if dir_version > 700 { ((data.ink & 0x7F) / 5) as i32 } else { data.ink as i32 }
                 } else {
                     // Non-shape sprites: mask off the high bit (bit 7 is a flag, not part of ink number)
                     sprite.ink = (data.ink & 0x7F) as i32;
-                    sprite.blend = convert_raw_blend(data.blend, dir_version);
+                    sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                 }
 
                 // Get bitmap's palette for RGB<->index conversion
@@ -968,8 +993,13 @@ impl Score {
                 sprite.rotation = data.rotation as f64;
                 sprite.moveable = data.moveable;
                 sprite.trails = data.trails;
+                // Score "stretch" flag (sprite ink byte bit 0x80): authoritative
+                // signal for whether the sprite was resized off its member's
+                // natural size. Drives get_concrete_sprite_rect's sprite-vs-bitmap
+                // dimension choice and `the stretch of sprite`.
+                sprite.stretch = data.stretch as i32;
                 sprite.ink = (data.ink & 0x7F) as i32;
-                sprite.blend = convert_raw_blend(data.blend, dir_version);
+                sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
 
                 // Attach a sprite-script behavior that appears mid-span. D5
                 // sprites can change member per frame and bring a scriptId with
@@ -1088,8 +1118,9 @@ impl Score {
                     sprite.rotation = data.rotation as f64;
                     sprite.moveable = data.moveable;
                     sprite.trails = data.trails;
+                    sprite.stretch = data.stretch as i32;
                     sprite.ink = (data.ink & 0x7F) as i32;
-                    sprite.blend = convert_raw_blend(data.blend, dir_version);
+                    sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                     // Set base_* values so tweens can work
                     sprite.base_loc_h = sprite.loc_h;
                     sprite.base_loc_v = sprite.loc_v;
@@ -1099,6 +1130,65 @@ impl Score {
                     sprite.base_blend = sprite.blend;
                     sprite.base_skew = sprite.skew;
                     sprite.entered = true;
+                }
+            }
+        }
+
+        // D6-ONLY per-frame MEMBER swap within a span. Some D6 movies
+        // "score-record" a sprite that changes its cast member every frame
+        // inside a single span — e.g. SpongeBob "JellyFishin'"'s instructions/
+        // controls text field (sprite 46) cycling members 36→37→38 across
+        // frames 36-39. In D6 the span system sets the member only at span
+        // entry, so without this the sprite is stuck on the first page. We
+        // update ONLY the member (not pos/size, to avoid disturbing tweens or
+        // Lingo-driven motion) when the current frame's delta names a
+        // different, non-empty member for an already-entered, non-puppet sprite.
+        //
+        // Restricted to D6 (==600): D7+ (e.g. dir_version 700, raw 1406) carry
+        // per-frame member changes inside the keyframe-bearing 52+ byte spans
+        // we now parse, so applying this delta-based swap there double-updates
+        // and fights the span data. Only D6 lacks those member keyframes.
+        if dir_version == 600 {
+            let member_updates: Vec<(i16, CastMemberRef)> = self.channel_initialization_data
+                .iter()
+                .filter_map(|(frame_idx, channel_idx, data)| {
+                    if frame_idx + 1 != frame_num || data.cast_member == 0 {
+                        return None;
+                    }
+                    let channel_number = get_channel_number_from_index(*channel_idx as u32);
+                    if channel_number < 1 {
+                        return None;
+                    }
+                    let sprite_num = channel_number as i16;
+                    let sprite = self.get_sprite(sprite_num)?;
+                    if !sprite.entered || sprite.puppet {
+                        return None;
+                    }
+                    let resolved_cast_lib = if data.cast_lib == 65535 && matches!(score_ref, ScoreRef::Stage) {
+                        1
+                    } else if data.cast_lib == 0 {
+                        1
+                    } else {
+                        data.cast_lib as i32
+                    };
+                    let member = CastMemberRef {
+                        cast_lib: resolved_cast_lib,
+                        cast_member: data.cast_member as i32,
+                    };
+                    if sprite.member.as_ref() == Some(&member) {
+                        return None; // already on the right member
+                    }
+                    Some((sprite_num, member))
+                })
+                .collect();
+            for (sprite_num, member) in member_updates {
+                match &score_ref {
+                    ScoreRef::Stage => {
+                        let _ = sprite_set_prop(sprite_num, "member", Datum::CastMember(member));
+                    }
+                    ScoreRef::FilmLoop(_) => {
+                        self.get_sprite_mut(sprite_num).member = Some(member);
+                    }
                 }
             }
         }
@@ -1928,18 +2018,28 @@ impl Score {
             cast_lib: b.cast_lib as i32,
             cast_member: b.cast_member as i32,
         });
+        // Identity of the channel-0 span at this frame. The same behavior member can
+        // be dropped on several consecutive spans with different parameters (the Game
+        // Loop is `#Nonlooping` on the intro frames and `#CostumeChange`/`#Looping` on
+        // the gameplay frames). Tracking the span start lets us recreate + re-apply
+        // parameters when crossing a span boundary instead of carrying the previous
+        // span's stale `pType` (which made the gameplay `case pType of` fall through →
+        // no `go(the frame)` → the playhead marched through every frame to the end).
+        let new_span_start = self.get_frame_script_span_start(frame_num);
 
-        // Discard the cached instance if the script has changed or no longer applies.
-        // Without this, the previous-span's instance would linger when entering a new
-        // span, and `the frame` inside a different script's beginSprite would see stale state.
+        // Discard the cached instance if the script member OR the span changed (or it
+        // no longer applies). Without this, the previous span's instance lingers when
+        // entering a new span, keeping stale properties/parameters.
         let should_discard = reserve_player_ref(|player| {
             player.movie.frame_script_instance.is_some()
-                && player.movie.frame_script_member != new_script_member
+                && (player.movie.frame_script_member != new_script_member
+                    || player.movie.frame_script_span_start != new_span_start)
         });
         if should_discard {
             reserve_player_mut(|player| {
                 player.movie.frame_script_instance = None;
                 player.movie.frame_script_member = None;
+                player.movie.frame_script_span_start = None;
             });
         }
 
@@ -2041,10 +2141,12 @@ impl Score {
                     });
                 }
 
-                // Cache BOTH the instance and the member ref
+                // Cache the instance, member ref, AND the span it belongs to so we
+                // recreate (and re-apply params) when the playhead enters a new span.
                 reserve_player_mut(|player| {
                     player.movie.frame_script_instance = Some(actual_instance_ref);
                     player.movie.frame_script_member = Some(cast_member_ref);
+                    player.movie.frame_script_span_start = new_span_start;
                 });
 
                 debug!("✓ Frame script instance created and cached");
@@ -2164,6 +2266,7 @@ impl Score {
             sprite.rotation = data.rotation as f64;
             sprite.moveable = data.moveable;
             sprite.trails = data.trails;
+            sprite.stretch = data.stretch as i32;
 
             // Check if member is a shape to determine ink/blend handling
             // Use find_member_by_ref which handles relative cast references (65535)
@@ -2176,13 +2279,13 @@ impl Score {
 
             if is_shape {
                 // Shape sprites use different ink/blend encoding
-                sprite.blend = convert_raw_blend(data.blend, dir_version);
+                sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
                 // Shape ink encoding: mask off the high bit and divide by 5
                 sprite.ink = ((data.ink & 0x7F) / 5) as i32;
             } else {
                 // Non-shape sprites use standard encoding
                 sprite.ink = data.ink as i32;
-                sprite.blend = convert_raw_blend(data.blend, dir_version);
+                sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
             }
 
             // Get bitmap's palette for RGB<->index conversion
@@ -3911,10 +4014,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.width = value?;
                 sprite.has_size_changed = true;
-                // Explicit Lingo size is authoritative — bypass the bbox
-                // heuristic and the bitmap-owned-size override.
-                sprite.explicit_lingo_size = true;
-                sprite.bitmap_size_owned_by_sprite = false;
+                // Director sets `the stretch of sprite` TRUE on any manual
+                // resize; this makes get_concrete_sprite_rect honor the new
+                // size verbatim instead of snapping back to the bitmap's.
+                sprite.stretch = 1;
                 Ok(())
             },
         ),
@@ -3924,8 +4027,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             |sprite, value| {
                 sprite.height = value?;
                 sprite.has_size_changed = true;
-                sprite.explicit_lingo_size = true;
-                sprite.bitmap_size_owned_by_sprite = false;
+                sprite.stretch = 1;
                 Ok(())
             },
         ),
@@ -3966,6 +4068,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 let new_right = new_right?;
                 sprite.width = new_right - left;
                 sprite.has_size_changed = true;
+                sprite.stretch = 1;
                 Ok(())
             },
         ),
@@ -3980,6 +4083,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 let new_bottom = new_bottom?;
                 sprite.height = new_bottom - top;
                 sprite.has_size_changed = true;
+                sprite.stretch = 1;
                 Ok(())
             },
         ),
@@ -4349,6 +4453,11 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             probe.width = new_width;
             probe.height = new_height;
             probe.has_size_changed = true;
+            // Setting `the rect of sprite` is a resize: mark it stretched so
+            // get_concrete_sprite_rect uses these dims verbatim (STRETCH path)
+            // instead of snapping to the bitmap's natural size. Must match the
+            // real sprite below or the reg-offset round-trip breaks.
+            probe.stretch = 1;
             let probe_rect = get_concrete_sprite_rect(player, &probe);
             // probe_rect.left = -effective_reg_x with loc=0, so to make the
             // real getter return `left`, write loc_h = left - probe_rect.left.
@@ -4361,6 +4470,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             s.width = new_width;
             s.height = new_height;
             s.has_size_changed = true;
+            s.stretch = 1;
             Ok(())
         }),
         "scriptInstanceList" => {
@@ -4910,234 +5020,53 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                     (bitmap_member.info.width as i32, bitmap_member.info.height as i32)
                 };
 
-            // Determine the actual dimensions to use for the sprite rectangle.
+            // Choose sprite vs bitmap dimensions from the Score's authoritative
+            // "stretch" flag (sprite ink byte bit 0x80, plumbed to
+            // sprite.stretch). This replaces the old size heuristic that tried
+            // to GUESS whether the score's width/height were an intentional
+            // resize or just an approximate bounding box.
             //
-            // Priority:
-            //  1. has_size_tweened  → tween is authoritative, use sprite dims
-            //  2. bitmap_size_owned_by_sprite → bitmap member changed, sprite dims
-            //     are stale from the previous member, use bitmap dims
-            //  3. has_size_changed  → Score or Lingo explicitly set dimensions,
-            //     trust them (the old simple behaviour that covers the majority)
-            //  4. Neither flag set  → dimensions are inherited/default and may be
-            //     an approximate bounding box. Apply heuristics to decide.
-
-            let (sprite_width, sprite_height, _size_path) = if sprite.explicit_lingo_size
-                && sprite.width > 0 && sprite.height > 0 {
-                // A Lingo script explicitly set `the width/height of sprite`.
-                // This is authoritative: use it verbatim and skip every
-                // bbox/sentinel heuristic below (those exist to disambiguate
-                // SCORE-authored sizes, which can be approximate). hackey's
-                // pseudo-3D `Translate` scales sprites by distance with
-                // integer-rounded proportional dims — the rounding made them
-                // look non-proportional, so the bbox catch-all wrongly snapped
-                // them back to the bitmap's native size and nothing shrank.
-                (sprite.width, sprite.height, "LINGO_EXPLICIT")
-            } else if sprite.width <= 2
-                && sprite.height <= 2 && bitmap_width >= 4 && bitmap_height >= 4 {
-                // Degenerate "use natural size" sentinel: a 1x1 / 2x2 score box
-                // on a real bitmap is never an intentional display size.
-                // Handled before the aspect-based bbox tests, which miss it for
-                // SQUARE bitmaps (a 1x1 box is "proportional" to any square, so
-                // it slips past the non-proportional check and renders 1px
-                // tiny). netjack icons #38/#66/#100/#109 hit this.
-                (bitmap_width, bitmap_height, "NATURAL_SENTINEL")
-            } else if sprite.has_size_tweened {
-                (sprite.width, sprite.height, "TWEENED")
-            } else if sprite.bitmap_size_owned_by_sprite
-                && bitmap_width >= 10 && bitmap_height >= 10 {
-                (bitmap_width, bitmap_height, "BITMAP_OWNED")
-            } else if sprite.has_size_changed {
-                // Score or Lingo explicitly set dimensions — but Score can still
-                // store approximate bounding box values. Detect bbox: sprite dims
-                // differ from bitmap AND are not an exact proportional scale.
-                // An exact proportional scale (e.g. 2× in both axes) is intentional;
-                // any non-proportional difference means the Score approximated.
-
-                // Special case: one dim ≈matches AND the other is significantly
-                // larger in the sprite. This is a thin/narrow bitmap whose sprite
-                // box approximates a larger area — render at native bitmap size
-                // rather than stretching. Handled before the >=10 guard so thin
-                // bitmaps (e.g. 7x182 vertical separators) get bitmap dims.
-                // Guard: the NON-matching bitmap dim must be >= 3px, else it's a
-                // stretchable pattern (e.g. 1px line) and sprite dims should win.
-                let expand_w = bitmap_height >= 3 && (sprite.width - bitmap_width).abs() <= 3
-                    && 10 * sprite.height > 11 * bitmap_height;
-                let expand_h = bitmap_width >= 3 && (sprite.height - bitmap_height).abs() <= 3
-                    && 10 * sprite.width > 11 * bitmap_width;
-
-                // Special case: one dim ≈matches with sprite STRICTLY LARGER
-                // (extends beyond bitmap) AND the other dim is shrunk in sprite.
-                // The bitmap fits inside the sprite bbox — render at native size.
-                // Note: must be STRICTLY greater — when dims match exactly, it's
-                // the existing crop pattern (handled below by crop_w/crop_h).
-                // Tight 1px threshold — being noticeably larger means a real
-                // size difference, not a small bbox approximation.
-                let extend_h_shrink_w = (sprite.height - bitmap_height).abs() <= 1
-                    && sprite.height > bitmap_height && sprite.width < bitmap_width;
-                let extend_w_shrink_h = (sprite.width - bitmap_width).abs() <= 1
-                    && sprite.width > bitmap_width && sprite.height < bitmap_height;
-
-                // True crop pattern: one dim ≈matches AND other shrunk (<90%) AND
-                // sprite mostly fits inside bitmap. Allow up to 3px overshoot in
-                // either dim. The extend rule above (1px tight) takes priority for
-                // "barely extends" cases. wide_h_shrink/tall_w_shrink below fire
-                // BEFORE crop, so moderate shrinks on wide/tall bitmaps go to bbox.
-                let inside_loose = sprite.width <= bitmap_width + 3
-                    && sprite.height <= bitmap_height + 3;
-                let crop_w = inside_loose && (sprite.width - bitmap_width).abs() <= 3
-                    && 10 * sprite.height < 9 * bitmap_height;
-                let crop_h = inside_loose && (sprite.height - bitmap_height).abs() <= 3
-                    && 10 * sprite.width < 9 * bitmap_width;
-
-                // WIDE bitmap (bw>bh) with width matching and height moderately
-                // shrunk (≥50% of bitmap) → BBOX. The sprite is approximating a
-                // smaller bbox of a wide image. Distinguished from tall-bitmap
-                // top-crop pattern by requiring bitmap_width > bitmap_height.
-                let wide_h_shrink = bitmap_width > bitmap_height
-                    && (sprite.width - bitmap_width).abs() <= 3
-                    && sprite.height < bitmap_height
-                    && 2 * sprite.height >= bitmap_height;
-                let tall_w_shrink = bitmap_height > bitmap_width
-                    && (sprite.height - bitmap_height).abs() <= 3
-                    && sprite.width < bitmap_width
-                    && 2 * sprite.width >= bitmap_width;
-                // WIDE bitmap (bw>bh) with HEIGHT matching and WIDTH moderately
-                // shrunk (≥2/3 of bitmap) → BBOX. Stricter threshold than
-                // wide_h_shrink because a horizontal crop of a horizontal bar
-                // is a plausible "real crop"; only treat as bbox when the
-                // sprite is ≥66.7% wide. This separates #80 (134x9 in a 189x9
-                // bitmap, 71%, bbox) from true crops like #779/#782/#772
-                // (sprite ~57% of bitmap width, SPRITE).
-                let wide_w_shrink = bitmap_width > bitmap_height
-                    && (sprite.height - bitmap_height).abs() <= 3
-                    && sprite.width < bitmap_width
-                    && 3 * sprite.width >= 2 * bitmap_width;
-
-                // Bypass the >=10 size guard when sprite is much larger than bitmap
-                // in BOTH dims (small bitmap drawn at native size inside larger bbox).
-                // Guard: bitmap must have real dims (>=2 each) — 1x1 bitmaps are
-                // always stretchable patterns/click targets, not visual elements.
-                // Also require max(bw,bh) >= 8 — very small bitmaps (4x4, 3x3)
-                // are solid color fills / patterns meant to be stretched.
-                let sprite_much_larger = sprite.width > 2 * bitmap_width
-                    && sprite.height > 2 * bitmap_height
-                    && bitmap_width >= 2 && bitmap_height >= 2
-                    && bitmap_width.max(bitmap_height) >= 8;
-                let size_ok = (bitmap_width >= 10 && bitmap_height >= 10) || sprite_much_larger;
-
-                // Strong non-proportional downscale → intentional scaling, not
-                // a bbox approximation. Both sprite dims are <=60% of the
-                // bitmap AND the aspect is clearly skewed (>~15% off
-                // proportional). A bbox approximation stays close to the image
-                // size or is roughly proportional, so it never lands here —
-                // e.g. #5 (24x11 of 42x20) is near-proportional and stays
-                // BBOX. Catches a 373x92 logo squished into a 105x20 score box
-                // (netjack sprite 20, which otherwise rendered at native size
-                // off the top of the stage). Mutually exclusive with the
-                // expand/wide/crop rules above (all require one dim within 3px
-                // of the bitmap), so it is safe to test first.
-                // Guard: the sprite box must be a plausible display size
-                // (>=8px each). Tiny boxes (1x1, 2x2) are "use natural size"
-                // sentinels/defaults — Director stores them when a sprite was
-                // placed without an explicit resize — not an intentional
-                // scale. Those stay BBOX so card/coin bitmaps (netjack #66,
-                // #100, #109) render at native size instead of 1px tiny.
-                let strong_downscale_sprite = sprite.width >= 8
-                    && sprite.height >= 8
-                    && sprite.width < bitmap_width
-                    && sprite.height < bitmap_height
-                    && 5 * sprite.width <= 3 * bitmap_width
-                    && 5 * sprite.height <= 3 * bitmap_height
-                    && {
-                        let a = sprite.width as i64 * bitmap_height as i64;
-                        let b = sprite.height as i64 * bitmap_width as i64;
-                        20 * a.min(b) < 17 * a.max(b)
-                    };
-
-                let is_bbox = if strong_downscale_sprite {
-                    false
-                } else if expand_w || expand_h
-                    || extend_h_shrink_w || extend_w_shrink_h
-                    || wide_h_shrink || tall_w_shrink || wide_w_shrink {
-                    true
-                } else if size_ok
-                    && sprite.width > 0 && sprite.height > 0
-                    && (sprite.width != bitmap_width || sprite.height != bitmap_height)
-                    && !crop_w
-                    && !crop_h
-                    // Skip bbox detection when BOTH dims are scaled up beyond 190%,
-                    // the scale factors are within 2.5× of each other, AND the
-                    // bitmap itself is roughly square (aspect ≤ 2:1). A non-square
-                    // bitmap scaled to a different aspect is still a bbox.
-                    && !(10 * sprite.width >= 19 * bitmap_width
-                         && 10 * sprite.height >= 19 * bitmap_height
-                         && {
-                             let a = sprite.width as i64 * bitmap_height as i64;
-                             let b = sprite.height as i64 * bitmap_width as i64;
-                             5 * a.min(b) >= 2 * a.max(b)
-                         }
-                         && 9 * bitmap_width <= 10 * bitmap_height
-                         && 9 * bitmap_height <= 10 * bitmap_width
-                         && bitmap_width >= 50 && bitmap_height >= 50)
-                {
-                    sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64
-                } else {
-                    false
-                };
-                if is_bbox {
-                    (bitmap_width, bitmap_height, "EXPLICIT_BBOX")
+            // - stretched → the sprite was resized off the member's natural
+            //   size (manual handle drag, Lingo `the width/height of sprite`,
+            //   or a size tween) → use the sprite (score) dimensions verbatim.
+            // - not stretched → the bitmap displays at its natural size; the
+            //   score's width/height are an approximate bounding box and are
+            //   ignored → use the bitmap's real pixel dimensions.
+            //
+            // Verified against Director: a 4x4 fill stretched to 352x282
+            // (nomiss) and a 5x5 fill to 338x253 (SpongeBob) both carry
+            // stretch=1; natural-size sprites whose score box drifts a few px
+            // from the bitmap (PinBall, Junkbot) carry stretch=0.
+            let stretched = sprite.stretch != 0 || sprite.has_size_tweened;
+            // A ≤1px difference from the bitmap's natural size in BOTH axes is
+            // NOT a real resize — it's the rounding Director's score applies to
+            // a center-registered bitmap of odd dimension. The sprite rect is
+            // stored as `2 * regPoint`, i.e. the bitmap size rounded DOWN to
+            // even, and the stretch bit ends up set. e.g. a 760x521 bitmap with
+            // reg (380,260) gets a 760x520 score box with stretch=1; honoring
+            // it verbatim drops the last row. A genuine resize differs by far
+            // more than a pixel, so snapping to the decoded bitmap size here is
+            // safe and only ever corrects this off-by-one.
+            let near_natural = bitmap_width > 0 && bitmap_height > 0
+                && (sprite.width - bitmap_width).abs() <= 1
+                && (sprite.height - bitmap_height).abs() <= 1;
+            let (sprite_width, sprite_height, _size_path) =
+                if stretched && !near_natural && sprite.width > 0 && sprite.height > 0 {
+                    (sprite.width, sprite.height, "STRETCH")
+                } else if bitmap_width > 0 && bitmap_height > 0 {
+                    (bitmap_width, bitmap_height, "NATURAL")
                 } else if sprite.width > 0 && sprite.height > 0 {
-                    (sprite.width, sprite.height, "EXPLICIT_SPRITE")
+                    // Bitmap not loaded yet — fall back to the score box.
+                    (sprite.width, sprite.height, "NATURAL_FALLBACK")
                 } else {
-                    (bitmap_width, bitmap_height, "EXPLICIT_FALLBACK")
-                }
-            } else {
-                // No explicit size set — apply heuristics.
-                let aspect_ratio_matches = if bitmap_width > 0 && bitmap_height > 0
-                    && sprite.width > 0 && sprite.height > 0
-                {
-                    let scale_x = sprite.width as f32 / bitmap_width as f32;
-                    let scale_y = sprite.height as f32 / bitmap_height as f32;
-                    let ratio = if scale_x > scale_y { scale_x / scale_y } else { scale_y / scale_x };
-                    ratio <= 1.1
-                } else {
-                    true
+                    (bitmap_width, bitmap_height, "ZERO")
                 };
-
-                let intentionally_stretched = sprite.width > 0 && sprite.height > 0
-                    && bitmap_width > 0 && bitmap_height > 0
-                    && sprite.width > bitmap_width * 3 / 2
-                    && sprite.height > bitmap_height * 3 / 2
-                    && {
-                        let a = sprite.width as i64 * bitmap_height as i64;
-                        let b = sprite.height as i64 * bitmap_width as i64;
-                        2 * a < 5 * b && 2 * b < 5 * a
-                    };
-
-                if !aspect_ratio_matches && bitmap_width >= 10 && bitmap_height >= 10 {
-                    if intentionally_stretched {
-                        (sprite.width, sprite.height, "H_STRETCHED")
-                    } else {
-                        (bitmap_width, bitmap_height, "H_ASPECT_MISMATCH")
-                    }
-                } else if (bitmap_width + bitmap_height) > (sprite.width + sprite.height)
-                    && bitmap_width >= 10 && bitmap_height >= 10 {
-                    (bitmap_width, bitmap_height, "H_BITMAP_LARGER")
-                } else if (sprite.width != bitmap_width || sprite.height != bitmap_height)
-                    && (sprite.width as i64 * bitmap_height as i64 != sprite.height as i64 * bitmap_width as i64)
-                    && bitmap_width >= 10 && bitmap_height >= 10 {
-                    (bitmap_width, bitmap_height, "H_NON_PROPORTIONAL")
-                } else if sprite.width > 0 && sprite.height > 0 {
-                    (sprite.width, sprite.height, "H_DEFAULT_SPRITE")
-                } else {
-                    (bitmap_width, bitmap_height, "H_DEFAULT_BITMAP")
-                }
-            };
-            debug!("[BITMAP_RECT] sprite#{} path={} result={}x{} loc=({},{}) reg=({},{}) sprite={}x{} bitmap={}x{} flags(tweened={} owned={} changed={})",
-                sprite.number, _size_path, sprite_width, sprite_height,
+            debug!("[BITMAP_RECT] sprite#{} member={:?} path={} result={}x{} loc=({},{}) reg=({},{}) sprite={}x{} bitmap(decoded)={}x{} info={}x{} stretch={} flags(tweened={} owned={} changed={})",
+                sprite.number, sprite.member, _size_path, sprite_width, sprite_height,
                 sprite.loc_h, sprite.loc_v,
                 reg_x, reg_y,
                 sprite.width, sprite.height, bitmap_width, bitmap_height,
+                bitmap_member.info.width, bitmap_member.info.height, sprite.stretch,
                 sprite.has_size_tweened, sprite.bitmap_size_owned_by_sprite, sprite.has_size_changed);
 
             // If centerRegPoint is enabled, set reg point to bitmap center.

@@ -56,6 +56,14 @@ pub struct Movie {
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
     pub frame_script_member: Option<CastMemberRef>,
+    /// Start frame of the channel-0 (frame-script) SPAN the cached instance was
+    /// created for. The same behavior member can appear in several consecutive
+    /// spans with DIFFERENT parameters (e.g. the Game Loop dropped on the intro
+    /// frames as `#Nonlooping` and on the gameplay frames as `#CostumeChange`);
+    /// the instance must be recreated (and its params re-applied) when the span
+    /// changes, not only when the member changes — otherwise the gameplay span
+    /// inherits the intro span's stale `pType`.
+    pub frame_script_span_start: Option<u32>,
     pub sound_device: String,
 }
 
