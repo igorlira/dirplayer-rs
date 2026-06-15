@@ -5038,8 +5038,20 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // stretch=1; natural-size sprites whose score box drifts a few px
             // from the bitmap (PinBall, Junkbot) carry stretch=0.
             let stretched = sprite.stretch != 0 || sprite.has_size_tweened;
+            // A ≤1px difference from the bitmap's natural size in BOTH axes is
+            // NOT a real resize — it's the rounding Director's score applies to
+            // a center-registered bitmap of odd dimension. The sprite rect is
+            // stored as `2 * regPoint`, i.e. the bitmap size rounded DOWN to
+            // even, and the stretch bit ends up set. e.g. a 760x521 bitmap with
+            // reg (380,260) gets a 760x520 score box with stretch=1; honoring
+            // it verbatim drops the last row. A genuine resize differs by far
+            // more than a pixel, so snapping to the decoded bitmap size here is
+            // safe and only ever corrects this off-by-one.
+            let near_natural = bitmap_width > 0 && bitmap_height > 0
+                && (sprite.width - bitmap_width).abs() <= 1
+                && (sprite.height - bitmap_height).abs() <= 1;
             let (sprite_width, sprite_height, _size_path) =
-                if stretched && sprite.width > 0 && sprite.height > 0 {
+                if stretched && !near_natural && sprite.width > 0 && sprite.height > 0 {
                     (sprite.width, sprite.height, "STRETCH")
                 } else if bitmap_width > 0 && bitmap_height > 0 {
                     (bitmap_width, bitmap_height, "NATURAL")
@@ -5049,11 +5061,12 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 } else {
                     (bitmap_width, bitmap_height, "ZERO")
                 };
-            debug!("[BITMAP_RECT] sprite#{} path={} result={}x{} loc=({},{}) reg=({},{}) sprite={}x{} bitmap={}x{} flags(tweened={} owned={} changed={})",
-                sprite.number, _size_path, sprite_width, sprite_height,
+            debug!("[BITMAP_RECT] sprite#{} member={:?} path={} result={}x{} loc=({},{}) reg=({},{}) sprite={}x{} bitmap(decoded)={}x{} info={}x{} stretch={} flags(tweened={} owned={} changed={})",
+                sprite.number, sprite.member, _size_path, sprite_width, sprite_height,
                 sprite.loc_h, sprite.loc_v,
                 reg_x, reg_y,
                 sprite.width, sprite.height, bitmap_width, bitmap_height,
+                bitmap_member.info.width, bitmap_member.info.height, sprite.stretch,
                 sprite.has_size_tweened, sprite.bitmap_size_owned_by_sprite, sprite.has_size_changed);
 
             // If centerRegPoint is enabled, set reg point to bitmap center.
