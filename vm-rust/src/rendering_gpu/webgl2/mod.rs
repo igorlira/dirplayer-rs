@@ -1114,6 +1114,13 @@ impl WebGL2Renderer {
                 font_id: Option<u16>,
                 line_spacing: u16,
                 top_spacing: i16,
+                /// The member's authored top_spacing (leading), BEFORE the
+                /// scroll fold-in that produces `top_spacing` above. Director
+                /// adds top_spacing as inter-line leading, NOT before the first
+                /// line, so the PFR anchor subtracts this to land the first
+                /// baseline at the strike ascent while keeping scroll
+                /// (`top_spacing - member_top_spacing == -scroll_top`).
+                member_top_spacing: i16,
                 bottom_spacing: i16,
                 width: u32,
                 height: u32,
@@ -1560,6 +1567,7 @@ impl WebGL2Renderer {
                         font_id: Some(font_member.font_info.font_id),
                         line_spacing: font_member.fixed_line_space,
                         top_spacing: font_member.top_spacing,
+                        member_top_spacing: font_member.top_spacing,
                         bottom_spacing: 0,
                         width,
                         height,
@@ -2193,6 +2201,7 @@ impl WebGL2Renderer {
                         font_id: None,
                         line_spacing: text_member.fixed_line_space,
                         top_spacing: effective_top_spacing,
+                        member_top_spacing: text_member.top_spacing,
                         bottom_spacing: text_member.bottom_spacing,
                         width,
                         height,
@@ -2555,6 +2564,7 @@ impl WebGL2Renderer {
                         font_id: field_member.font_id,
                         line_spacing: field_member.fixed_line_space,
                         top_spacing: effective_top_spacing,
+                        member_top_spacing: field_member.top_spacing,
                         bottom_spacing: 0,
                         width,
                         height,
@@ -2901,6 +2911,7 @@ impl WebGL2Renderer {
                 font_id,
                 line_spacing,
                 top_spacing,
+                member_top_spacing,
                 bottom_spacing,
                 width,
                 height,
@@ -2962,6 +2973,7 @@ impl WebGL2Renderer {
                         font_id,
                         line_spacing,
                         top_spacing,
+                        member_top_spacing,
                         bottom_spacing,
                         width,
                         height,
@@ -4810,6 +4822,7 @@ impl WebGL2Renderer {
         font_id: Option<u16>,
         line_spacing: u16,
         top_spacing: i16,
+        member_top_spacing: i16,
         bottom_spacing: i16,
         width: u32,
         height: u32,
@@ -4864,6 +4877,7 @@ impl WebGL2Renderer {
         let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
         let line_spacing = ((line_spacing as f64) * scale).round() as u16;
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
+        let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
         let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
         let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
             spans.iter().map(|s| {
@@ -5336,7 +5350,29 @@ impl WebGL2Renderer {
             // equal so behavior is unchanged.
             let max_width = width as i32;
             let wrap_max_width = wrap_width as i32;
-            let mut y = top_spacing as i32;
+            // PFR strikes: anchor the first line so its baseline lands at the
+            // strike's true ascent (Paige: baseline = lineTop + ascent), not at
+            // top_spacing + round(outlineAscender) which sits ~2px low. The atlas
+            // scan gives cap_top (empty rows above caps within a cell); the cell's
+            // baseline_row_px overstates ascent by exactly cap_top. Director also
+            // applies top_spacing as inter-line leading, NOT before the first
+            // line, so subtract member_top_spacing too — while `top_spacing`
+            // (effective = member_top_spacing - scroll) keeps any scroll offset:
+            //   y = top_spacing - member_top_spacing - cap_top = -scroll - cap_top.
+            let (pfr_cap_top, _pfr_desc_bottom) =
+                crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
+            // Anchor the atlas cell top at the line top (keeping the natural
+            // ascender-to-cap gap), matching the `.image` getter's PFR anchor
+            // (`Some(_) => 0`) so on-stage field/text sprites align with baked
+            // member.image text. Previously this subtracted `cap_top` (pulling
+            // the caps onto row 0), which renders ~cap_top px too HIGH — visible
+            // once Volter login fields render from the (gap-bearing) outline atlas
+            // at 18px: the text sat 2px high. `top_spacing - member_top_spacing`
+            // equals `-scroll` (0 when unscrolled), preserving any scroll offset.
+            let mut y = match pfr_cap_top {
+                Some(_) => top_spacing as i32 - member_top_spacing as i32,
+                None => top_spacing as i32,
+            };
             // Track max y of any glyph extent (including descender) across
             // both styled-multi and PFR-simple paths. Used to extend
             // `content_height_actual` so the texture trim doesn't clip
@@ -6775,6 +6811,11 @@ impl WebGL2Renderer {
     /// Get the canvas
     pub fn canvas(&self) -> &HtmlCanvasElement {
         &self.canvas
+    }
+
+    /// Get the preview canvas (used to rebuild the renderer on context restore)
+    pub fn preview_canvas(&self) -> &HtmlCanvasElement {
+        &self.preview_canvas
     }
 
     /// Get the size

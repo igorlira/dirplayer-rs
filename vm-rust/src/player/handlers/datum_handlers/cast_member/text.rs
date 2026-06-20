@@ -45,6 +45,73 @@ pub(crate) fn scroll_line_height(fixed_line_space: u16, font_size: u16) -> i32 {
     }
 }
 
+/// Count the number of VISUAL lines a text member produces, walking the SAME
+/// greedy word-wrap rule the renderer and the `.image` getter use (split on
+/// line breaks, then wrap on spaces at `wrap_width` using per-char advances +
+/// `char_spacing`).
+///
+/// The `.rect`/`.height` getters previously derived the line count as
+/// `measure_text_wrapped().height / (char_height - 1)`. For PFR fonts whose
+/// atlas cell (`char_height` ≈ 26 for Volter-9) dwarfs the authored
+/// `fixedLineSpace` (≈ 10), `measure_text_wrapped` strides by `fixedLineSpace`
+/// while the divisor was `char_height - 1` — so the count came out ~2.3× too
+/// SMALL, making `.rect`/`.height` report ~43% of `.image`'s height. Habbo's
+/// window Text-Wrapper bakes text via
+/// `pimage.copyPixels(member.image, dst = member.image.rect, src = member.rect)`,
+/// so that mismatch stretched the registration ToS (Origins "Habbo Details")
+/// ~2.3× vertically. Sharing this walk keeps `.rect`/`.height` == `.image`.
+pub(crate) fn count_text_lines(
+    text: &str,
+    font: &crate::player::font::BitmapFont,
+    word_wrap: bool,
+    wrap_width: i32,
+    char_spacing: i32,
+) -> usize {
+    if word_wrap && wrap_width > 0 {
+        let cs = char_spacing;
+        let space_w = font.get_char_advance(b' ') as i32 + cs;
+        let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut count: usize = 0;
+        for raw in normalised.split('\n') {
+            if raw.is_empty() {
+                count += 1;
+                continue;
+            }
+            let mut current_w: i32 = 0;
+            let mut had_word = false;
+            for word in raw.split(' ') {
+                if word.is_empty() {
+                    continue;
+                }
+                let word_w: i32 = word
+                    .chars()
+                    .map(|c| font.get_char_advance(c as u8) as i32 + cs)
+                    .sum();
+                let candidate = if !had_word {
+                    word_w
+                } else {
+                    current_w + space_w + word_w
+                };
+                if candidate <= wrap_width || !had_word {
+                    current_w = candidate;
+                    had_word = true;
+                } else {
+                    count += 1;
+                    current_w = word_w;
+                }
+            }
+            count += 1;
+        }
+        count.max(1)
+    } else {
+        text.replace("\r\n", "\n")
+            .chars()
+            .filter(|c| *c == '\r' || *c == '\n')
+            .count()
+            + 1
+    }
+}
+
 /// Read `(fixed_line_space, font_size, height_px)` from a field or text member,
 /// or `None` for any other member type. `height_px` is the member's box height
 /// (used to size a "page" for `scrollByPage`).
@@ -463,12 +530,19 @@ impl TextMemberHandlers {
                 Ok(Datum::String(html))
             }
             "rect" => {
+                // Load the font IDENTICALLY to the `.image` getter
+                // (`get_font_with_cast_and_bitmap`, which rasterizes the PFR atlas
+                // at the requested size). `get_font_with_cast` returned a font with
+                // different (wider) char advances, so `count_text_lines` wrapped to
+                // ~2x more lines here than `.image` did — making `.rect` over-report
+                // and the Text-Wrapper bake squish the terms text. Must match.
                 let font = if !text_data.font.is_empty() {
                     player
                         .font_manager
-                        .get_font_with_cast(
+                        .get_font_with_cast_and_bitmap(
                             &text_data.font,
-                            Some(&player.movie.cast_manager),
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
                             Some(text_data.font_size),
                             None,
                         )
@@ -550,25 +624,16 @@ impl TextMemberHandlers {
                     } else if let Some(ref info) = text_data.info {
                         if info.width > 0 { info.width as u16 } else { 0 }
                     } else { 0 };
-                    let line_count = if text_data.word_wrap && wrap_width > 0 {
-                        let (_, wrapped_h) = measure_text_wrapped(
-                            &text_data.text, &font, wrap_width, true,
-                            text_data.fixed_line_space,
-                            text_data.top_spacing, text_data.bottom_spacing,
-                            text_data.char_spacing,
-                        );
-                        let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
-                        (wrapped_h / raw_line_h.max(1)).max(1) as usize
-                    } else {
-                        // Count CRLF / lone CR / lone LF as one break each.
-                        // Without CRLF normalisation Lingo's `& RETURN` (which
-                        // is `\r\n` on Windows-saved movies) double-counts.
-                        text_data.text
-                            .replace("\r\n", "\n")
-                            .chars()
-                            .filter(|c| *c == '\r' || *c == '\n')
-                            .count() + 1
-                    };
+                    // Count visual lines with the SAME word-wrap walk the
+                    // `.image` getter + renderer use (see `count_text_lines`).
+                    // The old `measure_text_wrapped().height / (char_height-1)`
+                    // shortcut under-counted PFR lines ~2.3x, making `.rect`
+                    // disagree with `.image` and triggering Habbo's window
+                    // Text-Wrapper to copyPixels-stretch the terms text.
+                    let line_count = count_text_lines(
+                        &text_data.text, &font, text_data.word_wrap,
+                        wrap_width as i32, text_data.char_spacing,
+                    );
                     let nominal = if text_data.font_size > 0 {
                         text_data.font_size
                     } else if font.font_size > 0 {
@@ -650,11 +715,41 @@ impl TextMemberHandlers {
                 let text_has_breaks = text_data.text.contains('\n')
                     || text_data.text.contains('\r');
                 let is_multi_par_authored = text_data.par_runs.len() > 1;
-                let box_height = if text_data.height > 0
-                    && (text_data.box_type != "adjust"
-                        || text_has_breaks
-                        || is_multi_par_authored)
-                {
+                // Reserve PFR descender/underline overflow so a content-sized box
+                // matches the `.image` getter (the Origins Text-Wrapper bakes with
+                // `src = member.rect`, so a `.rect` shorter than `.image` would drop
+                // the underline of links like `login_b_login_forgotten`).
+                let measured_height = measured_height + player
+                    .bitmap_manager
+                    .get_bitmap(font.bitmap_ref)
+                    .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
+                        &font, fb, text_data.fixed_line_space, text_data.top_spacing,
+                    ));
+                let box_height = if text_data.box_type == "adjust" {
+                    if text_data.rect_set_at_runtime {
+                        // #adjust + runtime-set rect: auto-grow to content but keep
+                        // the set height when content fits. CS navigator toggles
+                        // boxType=#adjust to capture the FULL room list (content >>
+                        // set box); Origins' Text-Wrapper sizes the box to the
+                        // content (set >= content, so this stays text_data.height).
+                        // EXCEPTION: a NON-WRAPPING #adjust member auto-sizes its
+                        // height to the content (Director), even when its canvas rect
+                        // is much taller. The v7 Habbo Purse reuses one big-text
+                        // writer (rect 60x480) to render "9366" (~22px); checkSaldo
+                        // CENTRES member.image, so a 480-tall image shoved the digits
+                        // off the top. The bake-users that rely on the set height
+                        // (CS roomlist / Origins ToS / Spineworld droplist) all WRAP.
+                        if !text_data.word_wrap {
+                            measured_height
+                        } else {
+                            text_data.height.max(measured_height)
+                        }
+                    } else if text_has_breaks || is_multi_par_authored {
+                        text_data.height
+                    } else {
+                        measured_height
+                    }
+                } else if text_data.height > 0 {
                     text_data.height
                 } else if let Some(ref info) = text_data.info {
                     if info.height > 0 { info.height as u16 } else { measured_height }
@@ -688,19 +783,15 @@ impl TextMemberHandlers {
                 let text_has_breaks = text_data.text.contains('\n')
                     || text_data.text.contains('\r');
                 let is_multi_par_authored = text_data.par_runs.len() > 1;
-                if text_data.height > 0
-                    && (text_data.box_type != "adjust"
-                        || text_has_breaks
-                        || is_multi_par_authored)
-                {
-                    Ok(Datum::Int(text_data.height as i32))
-                } else {
+                let measured: u16 = {
+                    // Match the `.image` getter's font load exactly (see `.rect`).
                     let font = if !text_data.font.is_empty() {
                         player
                             .font_manager
-                            .get_font_with_cast(
+                            .get_font_with_cast_and_bitmap(
                                 &text_data.font,
-                                Some(&player.movie.cast_manager),
+                                &player.movie.cast_manager,
+                                &mut player.bitmap_manager,
                                 Some(text_data.font_size),
                                 None,
                             )
@@ -758,18 +849,16 @@ impl TextMemberHandlers {
                         } else {
                             font.char_height
                         };
-                        // Count lines (respecting word-wrap if enabled).
-                        let line_count = if text_data.word_wrap && wrap_width > 0 {
-                            let (_, wrapped_h) = measure_text_wrapped(
-                                &text_data.text, &font, wrap_width, true,
-                                text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                                text_data.char_spacing,
-                            );
-                            let raw_line_h = font.char_height.saturating_sub(1).max(1) as u16;
-                            (wrapped_h / raw_line_h.max(1)).max(1) as usize
-                        } else {
-                            text_data.text.chars().filter(|c| *c == '\r' || *c == '\n').count() + 1
-                        };
+                        // Count lines with the SAME word-wrap walk `.image` uses
+                        // (see `count_text_lines`). The old `wrapped_h /
+                        // (char_height-1)` shortcut under-counted PFR lines ~2.3x
+                        // (atlas cell ≫ fixedLineSpace), so `.height` disagreed
+                        // with `.image` and Habbo's Text-Wrapper stretched the
+                        // baked terms text vertically.
+                        let line_count = count_text_lines(
+                            &text_data.text, &font, text_data.word_wrap,
+                            wrap_width as i32, text_data.char_spacing,
+                        );
                         // See `.rect` getter for the rationale —
                         // `min(cell_h, nominal × 1.5)` caps pixel-padded
                         // PFR atlases without regressing tight-cell ones.
@@ -803,8 +892,39 @@ impl TextMemberHandlers {
                             + (line_count as i32 - 1) * line_step)
                             .max(0) as u16
                     };
-                    Ok(Datum::Int(height as i32))
-                }
+                    // Reserve PFR descender/underline overflow so `.height` agrees
+                    // with `.image`/`.rect` (the Origins Text-Wrapper bakes with
+                    // src=member.rect, dropping the underline otherwise —
+                    // login_b_login_forgotten).
+                    let overflow = player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
+                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
+                        ));
+                    height + overflow
+                };
+                let box_height = if text_data.box_type == "adjust" {
+                    if text_data.rect_set_at_runtime {
+                        // #adjust + runtime-set rect: auto-grow to content but keep
+                        // the set height when content fits (mirrors `.rect`/`.image`).
+                        // Non-wrapping #adjust auto-sizes to content (see `.rect`).
+                        if !text_data.word_wrap {
+                            measured
+                        } else {
+                            text_data.height.max(measured)
+                        }
+                    } else if text_has_breaks || is_multi_par_authored {
+                        text_data.height
+                    } else {
+                        measured
+                    }
+                } else if text_data.height > 0 {
+                    text_data.height
+                } else {
+                    measured
+                };
+                Ok(Datum::Int(box_height as i32))
             }
             "forecolor" | "color" => {
                 // Get foreground color from cast member
@@ -1324,7 +1444,16 @@ impl TextMemberHandlers {
                             .filter(|c| *c == '\r' || *c == '\n')
                             .count() + 1
                     };
-                    let line_h = (nominal as f32 * 1.4).round() as u16;
+                    // Honor the member's explicit line height (set from the font
+                    // struct's #lineHeight → fixedLineSpace) so the produced bitmap
+                    // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
+                    // matching the baked login_b_title bitmap) rather than the
+                    // font_size×1.4 heuristic (→14). The bitmap is drawn 1:1.
+                    let line_h = if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space
+                    } else {
+                        (nominal as f32 * 1.4).round() as u16
+                    };
                     // See `.rect` getter for rationale on folding
                     // top_spacing + bottom_spacing into line_step.
                     let line_step = (if text_data.fixed_line_space > 0 {
@@ -1339,16 +1468,67 @@ impl TextMemberHandlers {
                         + (line_count as i32 - 1) * line_step)
                         .max(1) as u16;
                 }
-                // For #adjust box type, always use measured height. For #fixed/#scroll, use stored height.
-                if text_data.box_type != "adjust" {
-                    if text_data.height > 0 {
-                        box_height = box_height.max(text_data.height);
-                    }
-                    if let Some(ref info) = text_data.info {
-                        if info.height > 0 {
-                            box_height = box_height.max(info.height as u16);
+                // CRITICAL: member.image.height MUST equal member.rect.height
+                // (Director invariant) — otherwise Habbo's Text-Wrapper bake
+                // `pimage.copyPixels(member.image, dest=image-height, src=member.rect)`
+                // stretches the text vertically (login text 2px tall, registration
+                // paragraph blown up to one giant line). Use the IDENTICAL box_height
+                // selection as the `.rect`/`.height` getters above.
+                {
+                    // `.image` must always render the FULL content (>= measured) so
+                    // movies that capture it to build scroll buffers / dropdowns get
+                    // every line — Director's text `.image` never clips the rendered
+                    // content. This is unlike the `.rect`/`.height` getters, which
+                    // REPORT a logical size (and trust text_data.height for authored
+                    // multi-line members like Junkbot credits). Capturing movies:
+                    // CS navigator roomlist (copyPixels member.image), Spineworld
+                    // GUI_droplist (makeListImage reads txt_droplist.image).
+                    // Reserve the PFR descender overflow for the auto-sized
+                    // (non-wrapping #adjust) case below: the Writer forces
+                    // fixedLineSpace=fontSize, but the glyph descender (and the
+                    // underline drawn on it — `underline_y = y_pos + pfr_desc_bottom`)
+                    // reaches BELOW that. Shrinking the box to the fixedLineSpace-based
+                    // `measured` then clipped the v7 Navigator "Go" link underline.
+                    // Adds 0 when fixedLineSpace already covers the descender.
+                    let pfr_descender_overflow: u16 = player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
+                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
+                        ));
+                    // Fold the descender/underline overflow into `measured` so every
+                    // content-sized branch (and the `.rect`/`.height` getters) agree —
+                    // the Origins Text-Wrapper bakes with src=member.rect, so .image
+                    // and .rect must match or the underline ("login_b_login_forgotten",
+                    // Navigator "Go") is dropped.
+                    let measured = box_height + pfr_descender_overflow;
+                    box_height = if text_data.box_type == "adjust" {
+                        if text_data.rect_set_at_runtime {
+                            // CS / Origins runtime-set rect: grow to content, keep the
+                            // set height when it fits (keeps .image == .rect so the
+                            // Origins Text-Wrapper bake stays 1:1, no stretch).
+                            // Non-wrapping #adjust auto-sizes to content (see `.rect`):
+                            // the v7 Habbo Purse big-text writer's 480-tall canvas
+                            // must shrink to the digits so checkSaldo's centred
+                            // copyPixels keeps them on-screen.
+                            if !text_data.word_wrap {
+                                measured
+                            } else {
+                                text_data.height.max(measured)
+                            }
+                        } else {
+                            measured
                         }
-                    }
+                    } else {
+                        // #fixed/#scroll/#limit: still render the full content so list
+                        // members overflowing a fixed box can be captured whole.
+                        let mut h = measured;
+                        if text_data.height > 0 { h = h.max(text_data.height); }
+                        if let Some(ref info) = text_data.info {
+                            if info.height > 0 { h = h.max(info.height as u16); }
+                        }
+                        h
+                    };
                 }
 
                 // Create 32-bit bitmap with TRANSPARENT background for .image.
@@ -1579,9 +1759,64 @@ impl TextMemberHandlers {
                     let default_underline = text_data.font_style.iter().any(|s| s == "underline");
                     let is_pfr_font = font.char_widths.is_some();
 
+                    // PFR pixel-font vertical anchoring (Paige semantics). Recover
+                    // the strike's cap-top / descender-bottom from the atlas so the
+                    // first line's cell top anchors at lineTop and the underline lands
+                    // in the descent, matching Shockwave. Shared with the on-stage
+                    // `Bitmap::draw_text` path so both render identically.
+                    let (pfr_cap_top, pfr_desc_bottom) =
+                        crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
+
                     let max_width = box_width as i32;
-                    let mut y = text_data.top_spacing as i32;
-                    let line_height = (font.char_height as i32 - 1).max(1);
+                    // Anchor the first line's atlas cell top at box row 0. In Paige
+                    // the line is placed by its baseline = lineTop + ascent, and the
+                    // PFR atlas cell top already corresponds to (baseline - ascent) =
+                    // lineTop, so the cell top maps straight onto box row 0. The
+                    // natural ascent-to-cap gap (cap_top) above the capitals is kept,
+                    // exactly as Shockwave renders it. (Previously this subtracted
+                    // cap_top, pulling the caps onto row 0 and the whole block ~3-4px
+                    // too high.) Non-PFR fonts keep the historical top_spacing.
+                    let mut y = match (pfr_cap_top, pfr_desc_bottom) {
+                        // Director positions baked text using BOTH the authored
+                        // topSpacing (extra space above the line) AND the
+                        // fixedLineSpace leading distributed above the glyph:
+                        //   - The v7 Navigator ROOM ROWS go through Habbo's Writer
+                        //     Class, which FORCES `fixedLineSpace = fontSize` (9) and
+                        //     puts the real line height into `topSpacing`
+                        //     (= fixedLineSpace(18) - fontSize(9) = 9). Their offset
+                        //     therefore lives in topSpacing, not fixedLineSpace.
+                        //   - The TITLE is a non-Writer member that keeps
+                        //     fixedLineSpace=15 over a ~11px glyph, so its offset is
+                        //     fixedLineSpace leading (descender sits at line bottom).
+                        // Volter strikes' taller atlas cell masked both; the scaling
+                        // outline exposed them, baking text ~7px too high (the
+                        // window-element bitmap PLACEMENT is correct). For tight
+                        // lines both terms are ~0, so the registration ToS / headings
+                        // are unchanged. No member has both terms large, so summing
+                        // does not double-count.
+                        //
+                        // The topSpacing term carries a -1: the glyph descender (db)
+                        // already overruns the Writer-forced `fixedLineSpace=fontSize`
+                        // by ~1px, so applying the raw topSpacing dropped the room rows
+                        // 1px below Shockwave. Calibrated against the v7 Navigator room
+                        // list (topSpacing=9 -> 8px effective).
+                        (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
+                            (text_data.fixed_line_space as i32 - 1 - db).max(0)
+                                + (text_data.top_spacing as i32 - 1).max(0)
+                        }
+                        (Some(_), _) => text_data.top_spacing as i32,
+                        (None, _) => text_data.top_spacing as i32,
+                    };
+                    // Underline row sits just below the line's baseline. Use the
+                    // member's explicit line height (fixedLineSpace) when set so
+                    // the underline lands inside the bitmap (Volter login link
+                    // text is 11px tall); the atlas cell height (char_height-1,
+                    // ~25) would place it far below and clip it.
+                    let line_height = if text_data.fixed_line_space > 0 {
+                        (text_data.fixed_line_space as i32).max(1)
+                    } else {
+                        (font.char_height as i32 - 1).max(1)
+                    };
 
                     // Get char_spacing from styled spans (XMED data)
                     let char_spacing: i32 = text_data.html_styled_spans.first()
@@ -1802,7 +2037,14 @@ impl TextMemberHandlers {
                                 // Per-character underline so per-span underline
                                 // is honoured (CS uses underline on some items
                                 // only). Draw one pixel row under this glyph.
-                                let underline_y = y_pos + line_height - 1;
+                                // Paige draws the underline in the descent. For
+                                // PFR strikes put it on the descender's lowest row
+                                // (scanned), so it sits just under the text instead
+                                // of at the oversized atlas cell bottom.
+                                let underline_y = match pfr_desc_bottom {
+                                    Some(db) => y_pos + db,
+                                    None => y_pos + line_height - 1,
+                                };
                                 let run_end = (x + adv + char_spacing).max(x);
                                 for ux in x..run_end {
                                     bitmap.set_pixel(ux, underline_y, per.color, &palettes);
@@ -2374,9 +2616,15 @@ impl TextMemberHandlers {
                     if w > 0 {
                         text_data.width = w;
                     }
-                    // Setting height via rect is a no-op for #adjust box type
-                    if h > 0 && text_data.box_type != "adjust" {
+                    // An explicit `member.rect = …` resizes the member even for
+                    // #adjust (Habbo's Text-Wrapper relies on this). Record that
+                    // the height is runtime-set so the `.rect`/`.height`/`.image`
+                    // getters report this height consistently — keeping
+                    // member.image.height == member.rect.height so the bake
+                    // copyPixels doesn't stretch the text vertically.
+                    if h > 0 {
                         text_data.height = h;
+                        text_data.rect_set_at_runtime = true;
                     }
 
                     Ok(())
@@ -2387,10 +2635,10 @@ impl TextMemberHandlers {
                 |player| value.int_value(),
                 |cast_member, value| {
                     let text_data = cast_member.member_type.as_text_mut().unwrap();
-                    // Setting height is a no-op for #adjust box type
-                    if text_data.box_type != "adjust" {
-                        text_data.height = value? as u16;
-                    }
+                    // Explicit `member.height = …` resizes even #adjust members
+                    // (see the `rect` setter for the bake-stretch rationale).
+                    text_data.height = value? as u16;
+                    text_data.rect_set_at_runtime = true;
                     Ok(())
                 },
             ),

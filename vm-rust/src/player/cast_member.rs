@@ -158,6 +158,14 @@ pub struct TextMember {
     pub bottom_spacing: i16,
     pub width: u16,
     pub height: u16,
+    /// True once Lingo explicitly sets `member.rect`/`member.height` at runtime
+    /// (e.g. Habbo's Text-Wrapper does `member.rect = rect(0,0,w,h)`). Director
+    /// honors such an explicit size even for `#adjust` members, and crucially
+    /// `member.image.height` must then equal `member.rect.height` — otherwise the
+    /// `pimage.copyPixels(member.image, dest=image-height, src=member.rect)` bake
+    /// stretches the text vertically. Distinguishes the runtime-set case from a
+    /// stale single-line authored height (wrap-only #adjust must still measure).
+    pub rect_set_at_runtime: bool,
     pub char_spacing: i32,
     pub tab_stops: Vec<TabStop>,
     pub html_styled_spans: Vec<StyledSpan>,
@@ -446,6 +454,7 @@ impl TextMember {
             anti_alias: false,
             width: 100,
             height: 20,
+            rect_set_at_runtime: false,
             char_spacing: 0,
             tab_stops: Vec::new(),
             html_styled_spans: Vec::new(),
@@ -4240,6 +4249,7 @@ impl CastMember {
             bottom_spacing: styled_text.bottom_spacing as i16,
             width: box_w,
             height: box_h,
+            rect_set_at_runtime: false,
             char_spacing: styled_text.styled_spans.first()
                 .map(|s| s.style.char_spacing as i32)
                 .unwrap_or(0),

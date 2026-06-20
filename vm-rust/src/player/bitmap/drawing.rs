@@ -3233,13 +3233,37 @@ impl Bitmap {
         top_spacing: i16,
     ) {
         let mut x = loc_h;
-        let mut y = loc_v + top_spacing as i32;
-        let line_height = font.char_height;
+        // Paige draws the baseline at lineTop + ascent. For PFR strikes, anchor
+        // the scanned cap-top at the sprite top so the baseline lands at the
+        // strike's real ascent instead of ~2px low (see pfr_strike_vertical_metrics).
+        let (cap_top, _desc_bottom) =
+            crate::player::font::pfr_strike_vertical_metrics(font, font_bitmap);
+        let mut y = match cap_top {
+            Some(t) => loc_v - t,
+            None => loc_v + top_spacing as i32,
+        };
+        // `line_spacing` is the member's fixedLineSpace. Director 11.5 defines
+        // it as the ABSOLUTE height of each line ("height in absolute pixels of
+        // each line"), NOT extra leading added on top of the glyph cell. This
+        // must agree with `measure_text()` — which sizes this very bitmap plus
+        // member.rect / member.height / charPosToLoc and uses `line_spacing` as
+        // the per-line stride when set. Adding `char_height` on top of it (the
+        // old behaviour) spaced lines ~1 glyph-cell too far apart, so text
+        // rasterized via `member.image` (e.g. Habbo's window Text Wrapper, which
+        // authors fixedLineSpace ≈ fontSize+1 and copyPixels the result into a
+        // bitmap) overflowed its measured box and rendered with huge gaps.
+        // Honour it as the absolute stride when set; fall back to the natural
+        // glyph cell only when unset (0).
+        let line_step = if line_spacing > 0 {
+            line_spacing as i32
+        } else {
+            font.char_height as i32
+        };
 
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
                 x = loc_h;
-                y += line_height as i32 + line_spacing as i32;
+                y += line_step;
                 continue;
             }
 
@@ -3274,12 +3298,25 @@ impl Bitmap {
         line_spacing: u16,
         top_spacing: i16,
     ) -> i32 {
-        let line_height = font.char_height as i32 + line_spacing as i32;
+        // fixedLineSpace is the absolute per-line height when set (see the note
+        // in `draw_text`); fall back to the natural glyph cell when unset.
+        let line_height = if line_spacing > 0 {
+            line_spacing as i32
+        } else {
+            font.char_height as i32
+        };
 
         // Break text into wrapped lines
         let lines = Self::wrap_text_lines(text, font, max_width);
 
-        let mut y = loc_v + top_spacing as i32;
+        // Paige baseline = lineTop + ascent; anchor the strike cap-top at the
+        // sprite top (see pfr_strike_vertical_metrics) so PFR text isn't ~2px low.
+        let (cap_top, _desc_bottom) =
+            crate::player::font::pfr_strike_vertical_metrics(font, font_bitmap);
+        let mut y = match cap_top {
+            Some(t) => loc_v - t,
+            None => loc_v + top_spacing as i32,
+        };
         for line in &lines {
             // Calculate x based on alignment
             let line_w: i32 = line.chars()
