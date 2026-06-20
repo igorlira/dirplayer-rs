@@ -623,6 +623,38 @@ impl DirPlayer {
         }
     }
 
+    /// Tear down any Flash (Ruffle) instances whose source member lives in the
+    /// given cast lib, so the renderer re-creates them from the member's CURRENT
+    /// bytes.
+    ///
+    /// Director keeps a member ref stable across an external-cast swap, but the
+    /// bytes behind it change: Storyscramble's `castLib("story").fileName =
+    /// nextStory.castFile` reloads cast lib 2 in place, so member 2:1 (the story
+    /// SWF the tiles render) is replaced while the sprites still point at 2:1.
+    /// The lazy-load gate (`flash_sprite_loaded`) and the captured-frame buffer
+    /// would otherwise keep the STALE Ruffle player on screen forever. Clearing
+    /// both — and destroying the JS-side player (which also stops its capture
+    /// RAF) — makes the next render see `flash_bitmap_ref.is_none()` and
+    /// re-dispatch `createFlashInstance` with the new story's SWF.
+    pub fn invalidate_flash_for_cast_lib(&mut self, cast_lib: i32) {
+        let sprites: Vec<i16> = self
+            .flash_sprite_loaded
+            .iter()
+            .filter(|(_, cl, _)| *cl == cast_lib)
+            .map(|(sn, _, _)| *sn)
+            .collect();
+        if sprites.is_empty() {
+            return;
+        }
+        self.flash_sprite_loaded.retain(|(_, cl, _)| *cl != cast_lib);
+        for sn in sprites {
+            // Destroy the JS-side Ruffle instance first (cancels its capture
+            // RAF so it can't re-insert a frame buffer after we drop it).
+            JsApi::dispatch_flash_member_unloaded(sn as i32);
+            self.flash_frame_buffers.remove(&sn);
+        }
+    }
+
     pub async fn load_movie_from_file(&mut self, path: &str) -> Result<(), String> {
         let task_id = self.net_manager.preload_net_thing(path.to_owned());
         self.net_manager.await_task(task_id).await;

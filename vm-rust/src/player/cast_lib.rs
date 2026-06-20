@@ -638,6 +638,13 @@ pub async fn player_cast_lib_set_prop(
                 &mut player.dir_cache,
             )
             .await;
+        // The external cast was reloaded in place — any Flash member it holds
+        // now has new SWF bytes behind the same member ref. Tear down the stale
+        // Ruffle instances so the renderer re-creates them from the new bytes
+        // (Storyscramble swaps `castLib("story").fileName` to load the next
+        // story; member 2:1's SWF changes but the tile sprites keep pointing at
+        // it). `cast_lib_obj`'s borrow ends here (NLL), freeing `player`.
+        player.invalidate_flash_for_cast_lib(cast_lib as i32);
     }
     // TODO handle preload error
     Ok(())
