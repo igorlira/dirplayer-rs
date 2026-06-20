@@ -2030,7 +2030,15 @@ impl Score {
         // Discard the cached instance if the script member OR the span changed (or it
         // no longer applies). Without this, the previous span's instance lingers when
         // entering a new span, keeping stale properties/parameters.
-        let should_discard = reserve_player_ref(|player| {
+        //
+        // CRITICAL: only the MAIN movie (Stage) drives `player.movie.frame_script_instance`.
+        // Film loops / nested scores have their own frame numbering, and at a film-loop
+        // frame with no channel-0 script `new_script_member` is None — without this gate
+        // the film loop's begin_sprites discards the MAIN movie's channel-0 frame-script
+        // instance every tick, forcing it to be recreated each frame (the "Game Loop"
+        // frame script in Trick-or-Treat-Beat was recreated 329×, resetting its state).
+        let is_stage = matches!(score_ref, ScoreRef::Stage);
+        let should_discard = is_stage && reserve_player_ref(|player| {
             player.movie.frame_script_instance.is_some()
                 && (player.movie.frame_script_member != new_script_member
                     || player.movie.frame_script_span_start != new_span_start)
@@ -2043,7 +2051,9 @@ impl Score {
             });
         }
 
-        if let Some(behavior_ref) = self.get_script_in_frame(frame_num) {
+        if let Some(behavior_ref) = self.get_script_in_frame(frame_num)
+            .filter(|_| is_stage)
+        {
             // Only create when no instance is cached (covers initial entry and post-discard).
             let needs_creation = reserve_player_ref(|player| {
                 player.movie.frame_script_instance.is_none()
