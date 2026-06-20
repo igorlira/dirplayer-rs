@@ -3405,6 +3405,24 @@ thread_local! {
     /// each rAF, so we only need one loop across the whole WASM lifetime —
     /// dropping and recreating the renderer between tests must not respawn it.
     pub static DRAW_LOOP_SPAWNED: Cell<bool> = Cell::new(false);
+    /// True while the stage WebGL2 context is lost (browser reclaimed it, e.g.
+    /// the tab was backgrounded). Drawing is skipped until `webglcontextrestored`
+    /// re-initializes the renderer. See `register_webgl_context_handlers`.
+    pub static WEBGL_CONTEXT_LOST: Cell<bool> = Cell::new(false);
+}
+
+/// True when the document/tab is hidden (backgrounded). Rendering to a hidden
+/// tab's GL context is wasted work and provokes context-loss; skip it.
+fn document_is_hidden() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.hidden())
+        .unwrap_or(false)
+}
+
+/// Skip the stage draw when the context is lost or the tab is hidden.
+fn should_skip_stage_draw() -> bool {
+    WEBGL_CONTEXT_LOST.with(|c| c.get()) || document_is_hidden()
 }
 
 pub fn mark_frame_drawn() {
@@ -3439,6 +3457,9 @@ pub fn draw_frame_immediate() {
         (player.current_frame_tempo as f64, player.stage_dirty)
     });
     if !dirty {
+        return;
+    }
+    if should_skip_stage_draw() {
         return;
     }
     let interval = if tempo > 0.0 {
@@ -3703,6 +3724,12 @@ pub(crate) fn try_create_webgl2_renderer(
     preview_canvas.set_width(1);
     preview_canvas.set_height(1);
 
+    // Mark the stage canvas so the Flash manager's global `getContext`
+    // monkey-patch does NOT force `preserveDrawingBuffer: true` on it (that
+    // patch is only needed for Ruffle's frame-capture readback; on the stage
+    // it just wastes GPU memory and makes background context-loss more likely).
+    let _ = canvas.set_attribute("data-dp-stage", "1");
+
     set_pixelated_canvas_style(&canvas);
     set_pixelated_canvas_style(&preview_canvas);
 
@@ -3710,6 +3737,7 @@ pub(crate) fn try_create_webgl2_renderer(
     match WebGL2Renderer::new(canvas, preview_canvas) {
         Ok(renderer) => {
             debug!("WebGL2 renderer created successfully");
+            register_webgl_context_handlers(renderer.canvas());
             Some(renderer)
         }
         Err(e) => {
@@ -3717,6 +3745,63 @@ pub(crate) fn try_create_webgl2_renderer(
             None
         }
     }
+}
+
+/// Register `webglcontextlost` / `webglcontextrestored` listeners on the stage
+/// canvas. Browsers reclaim a tab's WebGL context when it is backgrounded; the
+/// default is to NOT restore it, so without `preventDefault()` the stage would
+/// stay dead after the tab regains focus. On loss we pause drawing; on restore
+/// we rebuild the renderer on the same canvas (fresh programs/buffers/textures).
+/// The closures are leaked (`forget`) so they live for the canvas's lifetime.
+fn register_webgl_context_handlers(canvas: &web_sys::HtmlCanvasElement) {
+    let lost_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+        // preventDefault tells the browser we will restore -> it will fire
+        // webglcontextrestored once the tab is visible again.
+        e.prevent_default();
+        WEBGL_CONTEXT_LOST.with(|c| c.set(true));
+        warn!("[webgl] stage context lost — pausing draw until restored");
+    });
+    let _ = canvas.add_event_listener_with_callback(
+        "webglcontextlost",
+        lost_cb.as_ref().unchecked_ref(),
+    );
+    lost_cb.forget();
+
+    let restored_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+        on_webgl_context_restored();
+    });
+    let _ = canvas.add_event_listener_with_callback(
+        "webglcontextrestored",
+        restored_cb.as_ref().unchecked_ref(),
+    );
+    restored_cb.forget();
+}
+
+/// Rebuild the WebGL2 renderer on the existing (now-restored) canvas so its GL
+/// objects are recreated, then resume drawing. Caches (textures/text) start
+/// empty and re-populate on the next frame.
+fn on_webgl_context_restored() {
+    use crate::rendering_gpu::webgl2::WebGL2Renderer;
+    with_renderer_mut(|renderer_lock| {
+        if let Some(DynamicRenderer::WebGL2(old)) = renderer_lock.as_ref() {
+            let canvas = old.canvas().clone();
+            let preview = old.preview_canvas().clone();
+            match WebGL2Renderer::new(canvas, preview) {
+                Ok(new_renderer) => {
+                    *renderer_lock = Some(DynamicRenderer::WebGL2(new_renderer));
+                    warn!("[webgl] stage context restored — renderer rebuilt");
+                }
+                Err(e) => {
+                    warn!("[webgl] failed to rebuild renderer after context restore: {:?}", e);
+                }
+            }
+        }
+    });
+    WEBGL_CONTEXT_LOST.with(|c| c.set(false));
+    // Force a full redraw on the next frame.
+    reserve_player_mut(|player| {
+        player.stage_dirty = true;
+    });
 }
 
 fn get_stage_container() -> Result<web_sys::HtmlElement, JsValue> {
@@ -3853,13 +3938,14 @@ async fn run_draw_loop() {
         let frame_interval = 1000 / draw_fps as i64;
         if Local::now().timestamp_millis() - last_frame_ms >= frame_interval {
             last_frame_ms = Local::now().timestamp_millis();
+            let skip_stage = should_skip_stage_draw();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
+                    if !skip_stage && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
                         player.stage_dirty = false;
                     }
-                    if player.preview_dirty {
+                    if !skip_stage && player.preview_dirty {
                         renderer.draw_preview_frame(&mut player);
                         player.preview_dirty = false;
                     }
