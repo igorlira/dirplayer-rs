@@ -187,6 +187,7 @@ impl WebGL2Context {
 
     /// Set blend mode for additive blending (ink 33 — Add Pin)
     pub fn set_blend_additive(&self) {
+        self.gl.enable(WebGl2RenderingContext::BLEND); // see set_blend_alpha
         // Ensure blend equation is FUNC_ADD (additive needs: dst + src)
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
         // Use separate blend for RGB and Alpha:
@@ -214,6 +215,14 @@ impl WebGL2Context {
 
     /// Set blend mode for standard alpha blending (ink 0)
     pub fn set_blend_alpha(&self) {
+        // Re-enable GL_BLEND. The 3D scene renderer (scene3d.rs) toggles
+        // GL_BLEND off per draw and doesn't always restore it, so a blended 2D
+        // sprite drawn AFTER a 3D scene would render OPAQUE — PacMan3D2's mBlue
+        // status bar (a bitmap at blend 40 over the white score text) covered
+        // the text instead of letting it show through. Enabling here makes
+        // every 2D sprite blend regardless of the prior GL state (set_blend_*
+        // means "set up blending", which implies blending must be on).
+        self.gl.enable(WebGl2RenderingContext::BLEND);
         // Always reset blend equation to FUNC_ADD in case a previous sprite
         // used a different equation (Lighten uses MAX, SubPin uses REVERSE_SUBTRACT)
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
@@ -232,6 +241,7 @@ impl WebGL2Context {
 
     /// Set blend mode for multiply (ink 41 - darken)
     pub fn set_blend_multiply(&self) {
+        self.gl.enable(WebGl2RenderingContext::BLEND); // see set_blend_alpha
         // Ensure blend equation is FUNC_ADD for multiply blend
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_ADD);
         // Preserve destination alpha (same fix as other blend modes)
@@ -246,6 +256,7 @@ impl WebGL2Context {
     /// Set blend mode for lighten (ink 40)
     /// Uses MAX blend equation to only show lighter pixels
     pub fn set_blend_lighten(&self) {
+        self.gl.enable(WebGl2RenderingContext::BLEND); // see set_blend_alpha
         self.gl.blend_equation(WebGl2RenderingContext::MAX);
         // Preserve destination alpha (same fix as AddPin)
         self.gl.blend_func_separate(
@@ -259,6 +270,7 @@ impl WebGL2Context {
     /// Set blend mode for Dark ink (ink 39)
     /// Uses MIN blend equation: result = min(src, dst)
     pub fn set_blend_darken(&self) {
+        self.gl.enable(WebGl2RenderingContext::BLEND); // see set_blend_alpha
         self.gl.blend_equation(WebGl2RenderingContext::MIN);
         // Preserve destination alpha (same fix as AddPin)
         self.gl.blend_func_separate(
@@ -272,6 +284,7 @@ impl WebGL2Context {
     /// Set blend mode for subtractive blending (ink 35 - Sub Pin)
     /// Uses FUNC_REVERSE_SUBTRACT equation: result = dst - src
     pub fn set_blend_subtractive(&self) {
+        self.gl.enable(WebGl2RenderingContext::BLEND); // see set_blend_alpha
         self.gl.blend_equation(WebGl2RenderingContext::FUNC_REVERSE_SUBTRACT);
         // Preserve destination alpha (same fix as AddPin)
         self.gl.blend_func_separate(

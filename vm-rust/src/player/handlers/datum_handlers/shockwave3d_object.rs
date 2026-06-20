@@ -2818,26 +2818,35 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
-                "addOverlay" | "addBackdrop" => {
+                "addOverlay" | "addBackdrop" | "insertOverlay" | "insertBackdrop" => {
                     // addOverlay(texture, point, rotation)
-                    let is_overlay = handler_name == "addOverlay";
-                    let tex_name = if !args.is_empty() {
-                        match player.get_datum(&args[0]) {
+                    // insertOverlay(index, texture, point, rotation) — the 1-based
+                    // index shifts texture/loc/rotation one slot right and the new
+                    // overlay is INSERTED at that index instead of appended.
+                    // PacMan3D2's intro builds its 5 ffTitle title images this way.
+                    let is_overlay = handler_name.contains("Overlay");
+                    let is_insert = handler_name.starts_with("insert");
+                    let arg_off = if is_insert { 1 } else { 0 };
+                    let insert_index = if is_insert && !args.is_empty() {
+                        player.get_datum(&args[0]).int_value().unwrap_or(1).max(1) as usize
+                    } else { 0 };
+                    let tex_name = if args.len() > arg_off {
+                        match player.get_datum(&args[arg_off]) {
                             Datum::Shockwave3dObjectRef(r) if r.object_type == "texture" => r.name.clone(),
                             Datum::String(s) => s.clone(),
                             _ => String::new(),
                         }
                     } else { String::new() };
-                    let loc = if args.len() > 1 {
-                        match player.get_datum(&args[1]) {
+                    let loc = if args.len() > arg_off + 1 {
+                        match player.get_datum(&args[arg_off + 1]) {
                             Datum::Point(vals, _flags) => {
                                 [vals[0], vals[1]]
                             }
                             _ => [0.0, 0.0],
                         }
                     } else { [0.0, 0.0] };
-                    let rotation = if args.len() > 2 {
-                        player.get_datum(&args[2]).to_float().unwrap_or(0.0)
+                    let rotation = if args.len() > arg_off + 2 {
+                        player.get_datum(&args[arg_off + 2]).to_float().unwrap_or(0.0)
                     } else { 0.0 };
 
                     let camera_name = s3d_ref.name.clone();
@@ -2877,7 +2886,13 @@ impl Shockwave3dObjectDatumHandlers {
                             } else {
                                 w3d.runtime_state.camera_backdrops.entry(cam_key).or_insert_with(Vec::new)
                             };
-                            list.push(overlay);
+                            if is_insert {
+                                // 1-based index → 0-based, clamped to the list end.
+                                let idx = insert_index.saturating_sub(1).min(list.len());
+                                list.insert(idx, overlay);
+                            } else {
+                                list.push(overlay);
+                            }
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
