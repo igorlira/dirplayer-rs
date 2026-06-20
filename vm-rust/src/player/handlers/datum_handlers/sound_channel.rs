@@ -1820,6 +1820,16 @@ impl SoundChannel {
                 this.sample_rate = sound_member.info.sample_rate;
                 this.sample_count = sound_member.info.sample_count;
                 this.channel_count = sound_member.info.channels;
+                // Mark the channel busy SYNCHRONOUSLY so `soundBusy(channel)`
+                // returns true on the very next frame. The decode/resample runs
+                // in a spawn_local task that only flips status to Loading AFTER
+                // the current Lingo dispatch returns — leaving a 1-frame Idle
+                // window in which Storyscramble's soundQueue.checkPlayList
+                // (`pPlaying and not soundBusy(ch)`) advanced past this sound and
+                // dropped it (the "read it" sequence skipped tile 1's audio, only
+                // playing 2-3). The async task / error paths below take over the
+                // Loading → Playing/Idle transitions from here.
+                this.status = SoundStatus::Loading;
             }
             // Stash sound_member + cue cursor are set further below, inside
             // the async resampling completion block — at the exact moment we
