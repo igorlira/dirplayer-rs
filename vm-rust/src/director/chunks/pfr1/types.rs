@@ -236,6 +236,16 @@ pub struct PhysicalFontRecord {
     pub extra_type5_line_spacing: i16,
     pub extra_type5_word39: i16,
     pub two_byte_char_code: bool,
+    // Bitmap strike (extra item type 1, nBitmapSizes>0). Single strike supported.
+    pub has_bitmap_strike: bool,
+    pub bct_offset: u32,
+    pub bct_size: u32,
+    pub n_bmap_chars: u32,
+    pub bmap_xppm: u16,
+    pub bmap_yppm: u16,
+    pub bct_three_byte_gps_offset: bool,
+    pub bct_two_byte_gps_size: bool,
+    pub bct_two_byte_char_code: bool,
 }
 
 impl PhysicalFontRecord {
@@ -282,6 +292,15 @@ impl PhysicalFontRecord {
             extra_type5_line_spacing: 0,
             extra_type5_word39: 0,
             two_byte_char_code: false,
+            has_bitmap_strike: false,
+            bct_offset: 0,
+            bct_size: 0,
+            n_bmap_chars: 0,
+            bmap_xppm: 0,
+            bmap_yppm: 0,
+            bct_three_byte_gps_offset: false,
+            bct_two_byte_gps_size: false,
+            bct_two_byte_char_code: false,
         }
     }
 }

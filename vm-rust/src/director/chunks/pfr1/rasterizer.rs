@@ -496,6 +496,19 @@ pub fn rasterize_pfr1_font_with_options(
 ) -> RasterizedFont {
     let phys = &parsed_font.physical_font;
 
+    // Bitmap strikes are hand-tuned pixel bitmaps for ONE native size — the
+    // strike pixels-per-em (`bmap_yppm`, e.g. Volter = 9px). They do NOT scale:
+    // using a 9px strike for an 18px request renders the glyph at ~half size
+    // (the Origins login fields rendered Volter at 7px caps instead of 14px).
+    // So use strikes only when the requested render height matches the strike
+    // ppm (±1 for rounding); otherwise render from the OUTLINE, which scales
+    // correctly. Verified against Shockwave + FontinatorFINAL: Volter 'H' at
+    // 18px is 14px caps (outline), the strike gives 7px. At the native 9px the
+    // strike and the outline agree (so 9px text is unchanged / still crisp).
+    // Strikeless fonts (bmap_yppm==0) always use outlines.
+    let use_strikes = phys.bmap_yppm > 0
+        && (target_height as i32 - phys.bmap_yppm as i32).abs() <= 1;
+
     let outline_res = phys.outline_resolution as f32;
     let target_em_px = parsed_font.target_em_px as f32;
     let coords_scaled = target_em_px > 0.0 && outline_res > 0.0;
@@ -752,14 +765,16 @@ pub fn rasterize_pfr1_font_with_options(
             char_widths[idx] = glyph_pixel_width as u16;
         }
 
-        // Skip rasterization if a bitmap glyph exists — bitmap glyphs are pixel-perfect
-        // pre-rendered by the font designer. The bitmap loop will handle rendering.
-        // UNLESS "outline" preference is set, in which case always rasterize from outlines.
+        // Skip rasterization if a bitmap glyph exists — bitmap glyphs are
+        // pixel-perfect pre-rendered by the font designer. The bitmap loop
+        // handles rendering. (Degenerate strikes are dropped at parse time so
+        // they fall through to this outline render.) UNLESS "outline"
+        // preference is set, in which case always rasterize from outlines.
         let prefer_outline = {
             use crate::player::font::{get_glyph_preference, GlyphPreference};
             get_glyph_preference() == GlyphPreference::Outline
         };
-        if !prefer_outline && parsed_font.bitmap_glyphs.contains_key(&char_code) {
+        if !prefer_outline && use_strikes && parsed_font.bitmap_glyphs.contains_key(&char_code) {
             continue;
         }
 
@@ -824,24 +839,26 @@ pub fn rasterize_pfr1_font_with_options(
 
         // Use Canvas2D (Skia-backed) for all font rendering.
         //
-        // For PIXEL fonts (PFR1 cast members that ship pre-rendered bitmap
-        // glyphs alongside outlines — fff_reaction, volter, prima_mono,
-        // v/vb, etc.): threshold the Canvas2D AA output to binary at 128.
-        // The bitmap glyphs are designed for integer-coordinate cells, and
-        // any sub-pixel AA would blur their crisp pixel edges. The earlier
-        // gate `coords_scaled` was too coarse — with our parse-at-
-        // outline_resolution change it became `true` for *all* outline
-        // fonts too, which then killed thin italic stems (lowercase l, i,
-        // uppercase I in fugue_arial_italic) whose AA coverage falls
-        // below 128 at small render sizes. Fontinator's SkiaSharp path
-        // does NOT threshold and renders these correctly at 12px.
+        // For PIXEL fonts (rectilinear bitmap-style designs — fff_reaction,
+        // volter, prima_mono, v/vb, etc.): threshold the Canvas2D AA output
+        // to binary at 128. These glyphs are designed for integer-coordinate
+        // cells, and any sub-pixel AA blurs their crisp pixel edges (Habbo
+        // Origins' Volter login text rendered as a grey halo otherwise).
         //
-        // For OUTLINE fonts (Arial / Verdana / fugue_arial etc.): keep
-        // the Canvas2D AA coverage as-is. Matches Skia's analytic AA and
-        // Font Xtra's 4-bit-per-pixel coverage + SRCPAINT composite.
-        let is_pixel_font = phys.has_bitmap_section
-            && !parsed_font.bitmap_glyphs.is_empty();
-        let alpha_mask = if coords_scaled && is_pixel_font {
+        // Classify by GEOMETRY (`parsed_font.is_pixel_font`: ~0% béziers,
+        // ~100% axis-aligned edges) rather than by the presence of bitmap
+        // strikes. Volter declares a bitmap section but ships ZERO parsed
+        // bitmap glyphs (`has_bitmap_section=true`, `bitmap_glyphs` empty),
+        // so the old `has_bitmap_section && !bitmap_glyphs.is_empty()` test
+        // was false and it fell to the AA path. The earlier `coords_scaled`
+        // gate is also dropped: it became `true` for all outline fonts after
+        // the parse-at-outline_resolution change AND is `false` on the
+        // cast-load (native-size) rasterization, so it gated inconsistently.
+        // Smooth fonts (Arial / Verdana / fugue_arial, incl. thin italic
+        // stems) are curve-heavy → `is_pixel_font=false` → keep AA coverage.
+        let is_pixel_font = parsed_font.is_pixel_font
+            || (phys.has_bitmap_section && !parsed_font.bitmap_glyphs.is_empty());
+        let alpha_mask = if is_pixel_font {
             // Canvas2D with even-odd fill → binary threshold (pixel-font path)
             let canvas_result = {
                 #[cfg(target_arch = "wasm32")]
@@ -960,7 +977,7 @@ pub fn rasterize_pfr1_font_with_options(
         get_glyph_preference() == GlyphPreference::Outline
     };
     for (&char_code, bmp_glyph) in &parsed_font.bitmap_glyphs {
-        if skip_bitmap_glyphs { continue; }
+        if skip_bitmap_glyphs || !use_strikes { continue; }
         let has_outline = parsed_font.glyphs.contains_key(&char_code);
         if has_outline {
             bitmap_overlap_outline += 1;
@@ -1022,9 +1039,11 @@ pub fn rasterize_pfr1_font_with_options(
             char_widths[idx] = bmp_adv;
         }
 
-        // Copy bitmap data to RGBA grid
-        // Convert PFR Y-up y_pos to bitmap Y-down using baseline
-        let py_base = baseline_row_px as i32 - bmp_glyph.y_pos as i32;
+        // Copy bitmap data to RGBA grid.
+        // PFR bitmap y_pos is the Y-up offset of the glyph's BOTTOM from the
+        // baseline; the top row is therefore baseline - y_pos - y_size (matches
+        // the verified Fontinator/Director reference render).
+        let py_base = baseline_row_px as i32 - bmp_glyph.y_pos as i32 - bmp_glyph.y_size as i32;
         let px_base = bmp_glyph.x_pos as i32;
         let glyph_bits_per_row = bmp_glyph.x_size as usize;
         for gy in 0..bmp_glyph.y_size as usize {
@@ -1032,8 +1051,11 @@ pub fn rasterize_pfr1_font_with_options(
             if py_signed < 0 || py_signed as usize >= bitmap_height { continue; }
             let py = py_signed as usize;
             if py >= cell_y + cell_height { continue; }
+            // PFR bitmap rows are stored bottom-to-top (Y-up), so the top
+            // destination row (gy=0) reads the LAST bit-stream row.
+            let src_row = bmp_glyph.y_size as usize - 1 - gy;
             for gx in 0..bmp_glyph.x_size as usize {
-                let bit_index = gy * glyph_bits_per_row + gx;
+                let bit_index = src_row * glyph_bits_per_row + gx;
                 let byte_idx = bit_index / 8;
                 let bit_idx = 7 - (bit_index % 8);
                 if byte_idx < bmp_glyph.image_data.len() {
