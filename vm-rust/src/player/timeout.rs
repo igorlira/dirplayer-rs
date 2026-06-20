@@ -122,6 +122,16 @@ impl Timeout {
     pub fn schedule(&mut self) {
         self.cancel();
 
+        // A timeout whose period is 0 is dormant — it sends no events until its
+        // period is set to a value > 0 (Director Scripting Dictionary,
+        // `timeout.period`). Habbo's DM_CurlDetacher depends on this: it creates
+        // the timeout at period 0, then sets `period = 1` from the cURL
+        // completion callback to start it. Scheduling a 0 ms interval here would
+        // fire it immediately and break that hand-off, so leave it un-scheduled.
+        if self.period == 0 {
+            return;
+        }
+
         let timeout_name = self.name.to_owned();
         JsApi::dispatch_schedule_timeout(&timeout_name, self.period);
         self.is_scheduled = true;
