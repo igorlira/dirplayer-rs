@@ -523,12 +523,22 @@ impl BitmapDatumHandlers {
                 bitmap.original_bit_depth,
             );
 
-            let shape_type = PropListUtils::get_by_concrete_key(
+            // Director 11.5 Scripting Dictionary, draw() image method: the
+            // `#shapeType` property "is a symbol value of #oval, #rect,
+            // #roundRect, or #line. The default is #line." When the param list
+            // omits #shapeType, fall back to #line rather than treating the
+            // VOID lookup result as a literal "VOID" shape name.
+            let shape_type_d = PropListUtils::get_by_concrete_key(
                 &draw_map,
                 &Datum::Symbol("shapeType".to_owned()),
                 &player.allocator,
             )?;
-            let shape_type = player.get_datum(&shape_type).string_value()?;
+            let shape_type_d = player.get_datum(&shape_type_d);
+            let shape_type = if shape_type_d.is_void() {
+                "line".to_string()
+            } else {
+                shape_type_d.string_value()?
+            };
 
             let blend = PropListUtils::get_by_concrete_key(
                 &draw_map,
@@ -590,30 +600,6 @@ impl BitmapDatumHandlers {
                     // For #line, (x1,y1) and (x2,y2) are the line endpoints
                     // (rather than a bounding rect like the other shapes).
                     bitmap.draw_line_thick(x1, y1, x2, y2, color, &palettes, alpha, thickness);
-                }
-                "oval" => {
-                    bitmap.stroke_ellipse(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                        &palettes,
-                        blend as f32 / 100.0,
-                        thickness,
-                    );
-                }
-                "line" => {
-                    bitmap.draw_line_thick(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                        &palettes,
-                        blend as f32 / 100.0,
-                        thickness,
-                    );
                 }
                 _ => {
                     return Err(ScriptError::new(format!(
