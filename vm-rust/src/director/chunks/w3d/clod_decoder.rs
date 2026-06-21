@@ -9,6 +9,63 @@ use super::bitstream::IFXBitStreamCompressed;
 use super::clod_types::*;
 use super::types::*;
 
+/// Recompute per-vertex normals geometrically: area-weighted average of the
+/// normals of all faces using each vertex, then normalize.
+///
+/// The CLOD stream's coded normals decode with a WRONG prediction basis (the
+/// U3D spec predicts from the average of adjacent GEOMETRIC face normals split
+/// by the crease parameter, but this port — like the C# W3DParser reference —
+/// seeds the prediction from a previously-decoded normal). The result has the
+/// correct polar angle (Z) but a garbage azimuth (X/Y). Director recomputes
+/// normals from geometry instead, which is what this does. For non-indexed flat
+/// meshes (each vertex in exactly one face) this yields the flat face normal;
+/// shared-vertex meshes get smoothed — matching the file's flat/smooth intent,
+/// which is encoded by whether vertices are shared. Mirrors the C# reference's
+/// `RecalculateSmoothNormals`. See memory w3d-clod-normal-decode-geometric-prediction.
+pub(crate) fn recompute_smooth_normals(
+    positions: &[[f32; 3]],
+    faces: &[[u32; 3]],
+) -> Vec<[f32; 3]> {
+    let mut accum = vec![[0.0f32; 3]; positions.len()];
+    for f in faces {
+        let (i0, i1, i2) = (f[0] as usize, f[1] as usize, f[2] as usize);
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+            continue;
+        }
+        if i0 == i1 || i1 == i2 || i0 == i2 {
+            continue;
+        }
+        let p0 = positions[i0];
+        let p1 = positions[i1];
+        let p2 = positions[i2];
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        // Cross product magnitude == 2 * triangle area => area-weighted.
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        if nx * nx + ny * ny + nz * nz < 1e-12 {
+            continue;
+        }
+        for &vi in &[i0, i1, i2] {
+            accum[vi][0] += nx;
+            accum[vi][1] += ny;
+            accum[vi][2] += nz;
+        }
+    }
+    accum
+        .into_iter()
+        .map(|[x, y, z]| {
+            let len = (x * x + y * y + z * z).sqrt();
+            if len > 1e-8 {
+                [x / len, y / len, z / len]
+            } else {
+                [0.0, 1.0, 0.0]
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct ClodMeshDecoder {
     meshes: Vec<MeshState>,
@@ -646,10 +703,11 @@ impl ClodMeshDecoder {
             .iter()
             .enumerate()
             .map(|(i, mesh)| {
+                let normals = recompute_smooth_normals(&mesh.positions, &mesh.faces);
                 ClodDecodedMesh {
                     name: format!("mesh_{}", i),
                     positions: mesh.positions.clone(),
-                    normals: mesh.normals.clone(),
+                    normals,
                     tex_coords: mesh.tex_coords.clone(),
                     faces: mesh.faces.clone(),
                     diffuse_colors: Vec::new(),
@@ -672,7 +730,7 @@ impl ClodMeshDecoder {
                     return ClodDecodedMesh {
                         name: format!("mesh_{}", i),
                         positions: mesh.positions.clone(),
-                        normals: mesh.normals.clone(),
+                        normals: recompute_smooth_normals(&mesh.positions, &mesh.faces),
                         tex_coords: mesh.tex_coords.clone(),
                         faces: mesh.faces.clone(),
                         diffuse_colors: Vec::new(),
@@ -729,10 +787,12 @@ impl ClodMeshDecoder {
                     layer[..vert_count.min(layer.len())].to_vec()
                 }).collect();
 
+                let positions = mesh.positions[..vert_count].to_vec();
+                let normals = recompute_smooth_normals(&positions, &faces);
                 ClodDecodedMesh {
                     name: format!("mesh_{}", i),
-                    positions: mesh.positions[..vert_count].to_vec(),
-                    normals: mesh.normals[..vert_count.min(mesh.normals.len())].to_vec(),
+                    positions,
+                    normals,
                     tex_coords: tc,
                     faces,
                     diffuse_colors: Vec::new(),
@@ -760,10 +820,11 @@ impl ClodMeshDecoder {
                     }
                 }
 
+                let normals = recompute_smooth_normals(&mesh.positions, &faces);
                 ClodDecodedMesh {
                     name: format!("mesh_{}", i),
                     positions: mesh.positions.clone(),
-                    normals: mesh.normals.clone(),
+                    normals,
                     tex_coords: mesh.tex_coords.clone(),
                     faces,
                     diffuse_colors: Vec::new(),
