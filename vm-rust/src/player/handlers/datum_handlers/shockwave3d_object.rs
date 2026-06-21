@@ -413,18 +413,48 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     },
                     "face" => {
-                        let face_count = scene.nodes.iter().find(|n| n.name == *model_name)
-                            .and_then(|n| {
-                                let rn = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
-                                scene.model_resources.get(rn.as_str())
-                            })
-                            .and_then(|res| res.mesh_infos.get(mesh_idx))
-                            .map(|m| m.num_faces)
-                            .unwrap_or(0);
-                        // Return a PropList with #count
-                        let count_key = player.alloc_datum(Datum::Symbol("count".to_string()));
-                        let count_val = player.alloc_datum(Datum::Int(face_count as i32));
-                        Ok(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(count_key, count_val)]), false)))
+                        // Return a LIST of faces, each a 3-element list of 1-based vertex
+                        // indices [v1,v2,v3] (Director's meshDeform face[] convention). This
+                        // makes BOTH `face.count` (list length) and `face[j]` (the j-th triple)
+                        // work, matching Director's message-window output [1,2,3],[4,5,6],…
+                        let node = scene.nodes.iter().find(|n| n.name == *model_name);
+                        let model_res = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
+                        let res = node.map(|n| n.resource_name.as_str()).unwrap_or("");
+                        let keys: Vec<&str> = [model_res, res].iter()
+                            .filter(|k| !k.is_empty() && **k != ".")
+                            .copied().collect();
+                        let mut faces: Vec<[u32; 3]> = Vec::new();
+                        for key in &keys {
+                            if let Some(meshes) = scene.clod_meshes.get(*key) {
+                                if let Some(mesh) = meshes.get(mesh_idx) {
+                                    faces = mesh.faces.clone();
+                                }
+                            }
+                            if !faces.is_empty() { break; }
+                        }
+                        if faces.is_empty() {
+                            for key in &keys {
+                                for raw in &scene.raw_meshes {
+                                    if raw.name == *key && raw.chain_index as usize == mesh_idx {
+                                        faces = raw.faces.clone();
+                                        break;
+                                    }
+                                }
+                                if !faces.is_empty() { break; }
+                            }
+                        }
+                        let mut items = VecDeque::new();
+                        for f in &faces {
+                            let tri = VecDeque::from(vec![
+                                player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
+                                player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
+                                player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
+                            ]);
+                            items.push_back(player.alloc_datum(Datum::List(
+                                crate::director::lingo::datum::DatumType::List, tri, false)));
+                        }
+                        Ok(player.alloc_datum(Datum::List(
+                            crate::director::lingo::datum::DatumType::List, items, false)))
                     },
                     "vertexList" => {
                         // Return a list of vertex vectors from clod_meshes or raw_meshes
@@ -455,6 +485,42 @@ impl Shockwave3dObjectDatumHandlers {
                                     if raw.name == *key && raw.chain_index as usize == mesh_idx {
                                         for pos in &raw.positions {
                                             items.push_back(player.alloc_datum(Datum::Vector([pos[0] as f64, pos[1] as f64, pos[2] as f64])));
+                                        }
+                                        break;
+                                    }
+                                }
+                                if !items.is_empty() { break; }
+                            }
+                        }
+                        Ok(player.alloc_datum(Datum::List(
+                            crate::director::lingo::datum::DatumType::List, items, false,
+                        )))
+                    },
+                    "normalList" => {
+                        // Full list of per-vertex normal vectors (parallels vertexList).
+                        let mut items = VecDeque::new();
+                        let node = scene.nodes.iter().find(|n| n.name == *model_name);
+                        let model_res_name = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
+                        let res_name = node.map(|n| n.resource_name.as_str()).unwrap_or("");
+                        let keys_to_try: Vec<&str> = [model_res_name, res_name].iter()
+                            .filter(|k| !k.is_empty() && **k != ".")
+                            .copied().collect();
+                        for key in &keys_to_try {
+                            if let Some(meshes) = scene.clod_meshes.get(*key) {
+                                if let Some(mesh) = meshes.get(mesh_idx) {
+                                    for n in &mesh.normals {
+                                        items.push_back(player.alloc_datum(Datum::Vector([n[0] as f64, n[1] as f64, n[2] as f64])));
+                                    }
+                                }
+                                if !items.is_empty() { break; }
+                            }
+                        }
+                        if items.is_empty() {
+                            for key in &keys_to_try {
+                                for raw in &scene.raw_meshes {
+                                    if raw.name == *key && raw.chain_index as usize == mesh_idx {
+                                        for n in &raw.normals {
+                                            items.push_back(player.alloc_datum(Datum::Vector([n[0] as f64, n[1] as f64, n[2] as f64])));
                                         }
                                         break;
                                     }
@@ -4092,6 +4158,55 @@ impl Shockwave3dObjectDatumHandlers {
                                             if idx < raw.positions.len() {
                                                 let pos = &raw.positions[idx];
                                                 return Ok(player.alloc_datum(Datum::Vector([pos[0] as f64, pos[1] as f64, pos[2] as f64])));
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                Some(player.alloc_datum(Datum::Void))
+                            }
+                            // meshDeformMesh.face[j] — return the j-th face's 1-based vertex
+                            // indices [v1,v2,v3] (Director's meshDeform face[] convention; the
+                            // Director message-window shows e.g. [1,2,3],[4,5,6],…). Lets us diff
+                            // dirplayer's decoded triangulation against Director's.
+                            "face" if s3d_ref.object_type == "meshDeformMesh" => {
+                                let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
+                                let model_name = parts.get(0).unwrap_or(&"").to_string();
+                                let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                let node = scene.nodes.iter().find(|n| n.name == *model_name);
+                                let model_res = node.map(|n| n.model_resource_name.as_str()).unwrap_or("");
+                                let res = node.map(|n| n.resource_name.as_str()).unwrap_or("");
+                                let keys: Vec<&str> = [model_res, res].iter()
+                                    .filter(|k| !k.is_empty() && **k != ".")
+                                    .copied().collect();
+                                for key in &keys {
+                                    if let Some(meshes) = scene.clod_meshes.get(*key) {
+                                        if let Some(mesh) = meshes.get(mesh_idx) {
+                                            if idx < mesh.faces.len() {
+                                                let f = mesh.faces[idx];
+                                                let items = VecDeque::from(vec![
+                                                    player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
+                                                    player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
+                                                    player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
+                                                ]);
+                                                return Ok(player.alloc_datum(Datum::List(
+                                                    crate::director::lingo::datum::DatumType::List, items, false)));
+                                            }
+                                        }
+                                    }
+                                }
+                                for key in &keys {
+                                    for raw in &scene.raw_meshes {
+                                        if raw.name == *key && raw.chain_index as usize == mesh_idx {
+                                            if idx < raw.faces.len() {
+                                                let f = raw.faces[idx];
+                                                let items = VecDeque::from(vec![
+                                                    player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
+                                                    player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
+                                                    player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
+                                                ]);
+                                                return Ok(player.alloc_datum(Datum::List(
+                                                    crate::director::lingo::datum::DatumType::List, items, false)));
                                             }
                                             break;
                                         }
