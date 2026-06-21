@@ -645,10 +645,14 @@ impl WebGL2Renderer {
     /// Get stage background color as normalized floats
     fn get_stage_bg_color(&self, player: &DirPlayer) -> (f32, f32, f32) {
         let palettes = player.movie.cast_manager.palettes();
+        // The stage background is a bare palette index; resolve it through the
+        // movie's active palette for this frame (score palette channel -> movie
+        // default palette -> system), not a hard system palette.
+        let active_palette = player.movie.get_active_palette(player.movie.current_frame);
         let (r, g, b) = resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &active_palette,
             8, // bit depth
         );
         (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
@@ -1426,7 +1430,7 @@ impl WebGL2Renderer {
                     }
 
                     let palettes = player.movie.cast_manager.palettes();
-                    let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                    let frame_palette = player.movie.get_active_palette(player.movie.current_frame);
                     let fg_rgb = resolve_color_ref(
                         &palettes,
                         &fg_color,
