@@ -870,6 +870,10 @@ impl BuiltInHandlerManager {
             "do" => true,
             "updateStage" => true,
             "go" => true,
+            // `play movie X` / `play frame X of movie Y` compile to play(frame, movie)
+            // and must load a movie like `go` (async). The 1-arg Flash form is handled
+            // synchronously inside the async arm.
+            "play" => true,
             "nothing" => true,
             // Old-style Lingo lets `importFileInto member, url, props` be
             // called as a global verb; route it to the same async impl as
@@ -894,6 +898,50 @@ impl BuiltInHandlerManager {
             "do" => Self::do_command(args).await,
             "updateStage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
+            // The global `play` command. `play movie X` / `play frame X of movie Y`
+            // compile to play(frame, movie) — the SAME arg shape as `go`, so route the
+            // 2-arg form to the movie-load path. `play movie the movieName` (the current
+            // movie) reloads it = restart (frog01's game-over "hit enter to restart").
+            // The 1-arg form is the Ruffle/Flash sprite play (sprite.play() global form).
+            "play" => {
+                if args.len() >= 2 {
+                    // `play movie X`. If X is the CURRENT movie → in-place restart
+                    // (the net loader often can't re-fetch the movie by name once
+                    // it's loaded; frog01's "hit enter to restart" does exactly this).
+                    // Otherwise load X like `go frame N of movie X`.
+                    let restart = reserve_player_mut(|player| {
+                        let name = player.get_datum(&args[1]).string_value().unwrap_or_default();
+                        fn base(s: &str) -> String {
+                            s.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(s)
+                                .split('.').next().unwrap_or(s).to_ascii_lowercase()
+                        }
+                        let cur = player.movie.file_name.clone();
+                        let has_bytes = player.movie_reload_data.is_some();
+                        // Restart when the target IS the current movie. `the movieName` /
+                        // file_name are frequently EMPTY here (the loader didn't set a
+                        // usable filename), so treat an empty name or empty current file as
+                        // "the current movie" and restart from the retained bytes. Only a
+                        // clearly-different *named* movie (both names present, not matching)
+                        // falls through to `go`.
+                        let m = has_bytes
+                            && (name.is_empty() || cur.is_empty() || base(&name) == base(&cur));
+                        if m { player.pending_restart = true; }
+                        m
+                    });
+                    if restart {
+                        Ok(DatumRef::Void)
+                    } else {
+                        MovieHandlers::go(args).await
+                    }
+                } else {
+                    if !args.is_empty() {
+                        if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                            ruffle_play(sn);
+                        }
+                    }
+                    Ok(DatumRef::Void)
+                }
+            }
             "nothing" => MovieHandlers::nothing_async(args).await,
             "importFileInto" => Self::import_file_into(args).await,
             _ => {

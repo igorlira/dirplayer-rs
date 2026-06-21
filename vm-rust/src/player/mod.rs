@@ -362,6 +362,14 @@ pub struct DirPlayer {
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+    /// Set by `play movie <the current movie>` (restart). The frame loop, between
+    /// frames, re-parses the retained movie bytes and runs the full load+init
+    /// (rebuilds the cast → fresh W3D scenes), preserving globals + external params
+    /// like Director's `play movie`. (The net loader can't always re-fetch by name
+    /// once loaded, so we keep the original bytes.)
+    pub pending_restart: bool,
+    /// Raw bytes + file_name + base_url of the loaded movie, retained for restart.
+    pub movie_reload_data: Option<(Vec<u8>, String, String)>,
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
@@ -564,6 +572,8 @@ impl DirPlayer {
             eval_scope_index: None,
             delay_until: None,
             pending_goto_net_movie: None,
+            pending_restart: false,
+            movie_reload_data: None,
             is_in_transition: false,
             actor_list_generation: 0,
             behavior_channel_cache_generation: 0,
@@ -679,12 +689,17 @@ impl DirPlayer {
             .and_then(|segments| segments.last())
             .unwrap_or("untitled.dcr");
 
+        let base_url = get_base_url(&task.resolved_url).to_string();
+        let file_name_owned = file_name.to_string();
         let movie_file = read_director_file_bytes(
             &data_bytes,
             &file_name,
-            &get_base_url(&task.resolved_url).to_string(),
+            &base_url,
         )
         .map_err(|e| format!("Failed to parse movie file '{}': {}", path, e))?;
+        // Retain the raw bytes so a `play movie <current>` restart can re-parse and
+        // rebuild the cast (the net loader often can't re-fetch by name once loaded).
+        self.movie_reload_data = Some((data_bytes, file_name_owned, base_url));
         self.load_movie_from_dir(movie_file).await;
         Ok(())
     }
@@ -1138,6 +1153,7 @@ impl DirPlayer {
         self.current_breakpoint = None;
         self.scope_count = 0;
         self.pending_goto_net_movie = None;
+        self.pending_restart = false;
 
         debug!("Resetting allocator");
         // Now it's safe to reset the allocator
@@ -3647,6 +3663,78 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     });
 }
 
+/// Restart the current movie in place (`play movie <the current movie>`). Re-parses
+/// the retained movie bytes and runs the same load+init flow as a movie transition —
+/// rebuilding the cast (fresh W3D scenes, no stale clones) while PRESERVING globals
+/// and external params (which belong to the projector/embedding, not the movie file),
+/// matching Director's `play movie`. Used because the net loader often can't re-fetch
+/// the movie by name once it's been loaded.
+async fn restart_current_movie() {
+    let reload = reserve_player_ref(|player| player.movie_reload_data.clone());
+    let (bytes, file_name, base_url) = match reload {
+        Some(x) => x,
+        None => {
+            // No retained bytes — best-effort soft reset so we don't hang.
+            reserve_player_mut(|player| {
+                player.pending_restart = false;
+                player.reset();
+                player.play();
+            });
+            return;
+        }
+    };
+
+    let dir_file = match read_director_file_bytes(&bytes, &file_name, &base_url) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("restart: failed to re-parse movie bytes: {}", e);
+            reserve_player_mut(|player| player.pending_restart = false);
+            return;
+        }
+    };
+
+    // Shut the current movie down (block the event loop during the transition).
+    reserve_player_mut(|player| {
+        player.pending_restart = false;
+        player.is_playing = false;
+        player.is_in_transition = true;
+    });
+    stop_movie_sequence().await;
+
+    // Rebuild from frame 1, preserving globals + the allocator (like a transition).
+    reserve_player_mut(|player| {
+        player.movie.score.reset();
+        player.clear_script_instance_list_caches();
+        player.movie.frame_script_instance = None;
+        player.movie.frame_script_member = None;
+        player.movie.current_frame = 1;
+        player.last_initialized_frame = None;
+        for scope in player.scopes.iter_mut() {
+            scope.reset();
+        }
+        player.scope_count = 0;
+        player.is_playing = false;
+    });
+
+    reserve_player_mut_async(|player| {
+        Box::pin(async move {
+            player.load_movie_from_dir(dir_file).await;
+        })
+    }).await;
+
+    reserve_player_mut(|player| {
+        player.movie.current_frame = 1;
+        player.pending_restart = false;
+        player.is_playing = true;
+    });
+
+    run_movie_init_sequence().await;
+
+    reserve_player_mut(|player| {
+        player.is_in_transition = false;
+    });
+}
+
 // JS bridge name uses the `dirplayer_` prefix so this fork's globals don't
 // collide with stock Ruffle / other libraries on the same page.
 #[wasm_bindgen]
@@ -4454,6 +4542,18 @@ pub async fn run_frame_loop() {
         // Exit if the player was reset (e.g. between tests)
         if unsafe { PLAYER_GENERATION } != generation {
             return;
+        }
+        // Restart (`play movie <the current movie>`). Done HERE — between frames,
+        // no active bytecode — so it's safe to rebuild the cast. Re-parses the
+        // retained movie bytes and runs the full load+init (fresh W3D scenes etc.),
+        // preserving globals + external params like Director's `play movie`.
+        let do_restart = reserve_player_ref(|player| player.pending_restart);
+        if do_restart {
+            restart_current_movie().await;
+            (is_playing, _) = reserve_player_ref(|player| {
+                (player.is_playing, player.is_script_paused)
+            });
+            continue;
         }
         // Check for pending gotoNetMovie completion
         let goto_transition = reserve_player_ref(|player| {
