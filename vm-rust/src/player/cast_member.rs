@@ -1237,6 +1237,45 @@ pub struct Shockwave3dRuntimeState {
     /// fired (their producers aren't wired up). `unregisterAllEvents`
     /// truncates this Vec.
     pub registered_events: Vec<RegisteredW3dEvent>,
+
+    // ─── Native #collision modifier (addModifier(#collision)) ───
+    /// Per-model collision modifier state, keyed by model node name. Drives
+    /// native W3D collision detection in `events::tick_w3d_collisions`.
+    pub collision_modifiers: std::collections::HashMap<String, W3dCollisionModifier>,
+}
+
+/// Native Shockwave3D #collision modifier state (Director 11.5 collision
+/// modifier). Attached to a model via `model.addModifier(#collision)` and
+/// exposed through the `model.collision` property. Detection runs each frame
+/// in `events::tick_w3d_collisions`; only detection + callback dispatch are
+/// implemented — resolution is a no-op (every consumer so far sets `resolve = 0`).
+#[derive(Clone, Debug)]
+pub struct W3dCollisionModifier {
+    /// `collision.enabled` — whether collisions with this model are detected.
+    pub enabled: bool,
+    /// `collision.resolve` — whether collisions are auto-resolved. Stored, not applied.
+    pub resolve: bool,
+    /// `collision.immovable` — stored only.
+    pub immovable: bool,
+    /// `collision.mode` — #box / #sphere / #mesh. Detection uses an axis-aligned
+    /// bounding box for every mode (sufficient for the gameplay callbacks).
+    pub mode: String,
+    /// Handler registered via `collision.setCollisionCallback(#handler, instance)`.
+    pub callback_handler: Option<String>,
+    pub callback_instance: Option<crate::player::script_ref::ScriptInstanceRef>,
+}
+
+impl Default for W3dCollisionModifier {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            resolve: true,
+            immovable: false,
+            mode: "mesh".to_string(),
+            callback_handler: None,
+            callback_instance: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

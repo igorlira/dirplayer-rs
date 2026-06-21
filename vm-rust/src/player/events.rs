@@ -664,6 +664,270 @@ pub async fn tick_w3d_particles() {
     });
 }
 
+// ─── Native Shockwave3D #collision modifier helpers ───
+const W3D_COL_IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// Column-major 4x4 multiply (m[col*4+row]).
+fn w3d_col_mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            r[col * 4 + row] = a[row] * b[col * 4]
+                + a[4 + row] * b[col * 4 + 1]
+                + a[8 + row] * b[col * 4 + 2]
+                + a[12 + row] * b[col * 4 + 3];
+        }
+    }
+    r
+}
+
+/// Transform a point by a column-major 4x4 (w = 1).
+fn w3d_col_xform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+        m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+        m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ]
+}
+
+/// Per-frame native W3D collision detection (Director #collision modifier).
+///
+/// `addModifier(#collision)` registers a `W3dCollisionModifier` per model; this
+/// sweeps every enabled collision model in each 3D member, builds a world-space
+/// AABB for each (from the model resource's primitive dimensions and the node's
+/// accumulated world transform), tests all pairs for overlap, and fires each
+/// colliding model's `setCollisionCallback` handler with a `collisionData`
+/// property list (`#modelA / #modelB / #pointOfContact / #collisionNormal`).
+/// Only detection + dispatch are implemented; resolution is intentionally a
+/// no-op (every consumer so far sets `collision.resolve = 0`).
+pub async fn tick_w3d_collisions() {
+    use crate::director::lingo::datum::Shockwave3dObjectRef;
+    use crate::player::cast_member::CastMemberType;
+    use std::collections::VecDeque;
+
+    struct ColModel {
+        name: String,
+        min: [f32; 3],
+        max: [f32; 3],
+        handler: Option<String>,
+        instance: Option<ScriptInstanceRef>,
+    }
+    struct Fire {
+        instance: Option<ScriptInstanceRef>,
+        handler: String,
+        data: DatumRef,
+    }
+
+    let fires: Vec<Fire> = reserve_player_mut(|player| {
+        // Flush any live transform datums (model.transform.position = ...) into
+        // the node_transforms cache so collision reads current positions rather
+        // than the previous render's snapshot.
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
+
+        let mut fires: Vec<Fire> = Vec::new();
+        let cast_count = player.movie.cast_manager.casts.len();
+        for cast_idx in 0..cast_count {
+            let member_numbers: Vec<u32> = player
+                .movie
+                .cast_manager
+                .casts
+                .get(cast_idx)
+                .map(|c| c.members.keys().copied().collect())
+                .unwrap_or_default();
+            for member_num in member_numbers {
+                let member_ref = CastMemberRef {
+                    cast_lib: cast_idx as i32,
+                    cast_member: member_num as i32,
+                };
+
+                // Gather world AABBs + callbacks for every enabled collision
+                // model in this member (owned, so the borrow ends before alloc).
+                let models: Vec<ColModel> = {
+                    let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    else { continue };
+                    let CastMemberType::Shockwave3d(w3d) = &member.member_type else { continue };
+                    if w3d.runtime_state.collision_modifiers.is_empty() { continue; }
+                    let Some(scene) = w3d.parsed_scene.as_ref() else { continue };
+                    let rs = &w3d.runtime_state;
+
+                    // Local transform of a node: runtime override (case-insensitive)
+                    // falling back to the parsed scene node.
+                    let local_tf = |nm: &str| -> [f32; 16] {
+                        rs.node_transforms
+                            .get(nm)
+                            .copied()
+                            .or_else(|| {
+                                rs.node_transforms
+                                    .iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(nm))
+                                    .map(|(_, v)| *v)
+                            })
+                            .or_else(|| {
+                                scene
+                                    .nodes
+                                    .iter()
+                                    .find(|n| n.name.eq_ignore_ascii_case(nm))
+                                    .map(|n| n.transform)
+                            })
+                            .unwrap_or(W3D_COL_IDENTITY)
+                    };
+
+                    let mut out: Vec<ColModel> = Vec::new();
+                    for (mname, cmod) in rs.collision_modifiers.iter() {
+                        if !cmod.enabled { continue; }
+                        if rs.detached_nodes.iter().any(|d| d.eq_ignore_ascii_case(mname)) { continue; }
+                        let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(mname))
+                        else { continue };
+
+                        // Local half-extents from the model resource's primitive dims.
+                        let res_key = if !node.model_resource_name.is_empty() {
+                            &node.model_resource_name
+                        } else {
+                            &node.resource_name
+                        };
+                        let he = scene
+                            .model_resources
+                            .get(res_key.as_str())
+                            .map(|r| match r.primitive_type.as_deref().unwrap_or("") {
+                                // box: width=X, height=Y, length=Z (see primitive build).
+                                "box" => [
+                                    r.primitive_width * 0.5,
+                                    r.primitive_height * 0.5,
+                                    r.primitive_length * 0.5,
+                                ],
+                                "sphere" => {
+                                    let s = r.primitive_radius.max(0.01);
+                                    [s, s, s]
+                                }
+                                // cylinder axis is Y; radius spans X/Z.
+                                "cylinder" => {
+                                    let rad = r.primitive_radius.max(r.primitive_top_radius).max(0.01);
+                                    [rad, r.primitive_height * 0.5, rad]
+                                }
+                                "plane" => [r.primitive_width * 0.5, 0.05, r.primitive_length * 0.5],
+                                _ => [
+                                    r.primitive_width.max(0.5) * 0.5,
+                                    r.primitive_height.max(0.5) * 0.5,
+                                    r.primitive_length.max(0.5) * 0.5,
+                                ],
+                            })
+                            .unwrap_or([0.5, 0.5, 0.5]);
+
+                        // Accumulate the world transform up the parent chain.
+                        let mut world = local_tf(&node.name);
+                        let mut cur_parent = node.parent_name.clone();
+                        for _ in 0..32 {
+                            if cur_parent.is_empty() || cur_parent.eq_ignore_ascii_case("World") {
+                                break;
+                            }
+                            let pm = local_tf(&cur_parent);
+                            world = w3d_col_mat_mul(&pm, &world);
+                            cur_parent = scene
+                                .nodes
+                                .iter()
+                                .find(|n| n.name.eq_ignore_ascii_case(&cur_parent))
+                                .map(|n| n.parent_name.clone())
+                                .unwrap_or_default();
+                        }
+
+                        // World AABB from the 8 transformed local-box corners.
+                        let mut min = [f32::MAX; 3];
+                        let mut max = [f32::MIN; 3];
+                        for &sx in &[-he[0], he[0]] {
+                            for &sy in &[-he[1], he[1]] {
+                                for &sz in &[-he[2], he[2]] {
+                                    let wp = w3d_col_xform_point(&world, [sx, sy, sz]);
+                                    for k in 0..3 {
+                                        if wp[k] < min[k] { min[k] = wp[k]; }
+                                        if wp[k] > max[k] { max[k] = wp[k]; }
+                                    }
+                                }
+                            }
+                        }
+
+                        out.push(ColModel {
+                            name: node.name.clone(),
+                            min,
+                            max,
+                            handler: cmod.callback_handler.clone(),
+                            instance: cmod.callback_instance.clone(),
+                        });
+                    }
+                    out
+                };
+
+                // Test all pairs; for each overlapping pair, fire the callback of
+                // every model in the pair that has one, with that model as modelA.
+                for i in 0..models.len() {
+                    for j in (i + 1)..models.len() {
+                        let a = &models[i];
+                        let b = &models[j];
+                        let overlap = a.min[0] <= b.max[0] && a.max[0] >= b.min[0]
+                            && a.min[1] <= b.max[1] && a.max[1] >= b.min[1]
+                            && a.min[2] <= b.max[2] && a.max[2] >= b.min[2];
+                        if !overlap { continue; }
+
+                        let mid = [
+                            ((a.min[0] + a.max[0] + b.min[0] + b.max[0]) * 0.25) as f64,
+                            ((a.min[1] + a.max[1] + b.min[1] + b.max[1]) * 0.25) as f64,
+                            ((a.min[2] + a.max[2] + b.min[2] + b.max[2]) * 0.25) as f64,
+                        ];
+                        for (selfm, otherm) in [(a, b), (b, a)] {
+                            let Some(handler) = selfm.handler.clone() else { continue };
+                            // collisionData property list: modelA is the model whose
+                            // callback is firing; the handlers check both modelA and
+                            // modelB, so this is consistent with Director.
+                            let model_a = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                cast_lib: member_ref.cast_lib,
+                                cast_member: member_ref.cast_member,
+                                object_type: "model".to_string(),
+                                name: selfm.name.clone(),
+                            }));
+                            let model_b = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                cast_lib: member_ref.cast_lib,
+                                cast_member: member_ref.cast_member,
+                                object_type: "model".to_string(),
+                                name: otherm.name.clone(),
+                            }));
+                            let poc = player.alloc_datum(Datum::Vector(mid));
+                            let normal = player.alloc_datum(Datum::Vector([1.0, 0.0, 0.0]));
+                            let k_a = player.alloc_datum(Datum::Symbol("modelA".to_string()));
+                            let k_b = player.alloc_datum(Datum::Symbol("modelB".to_string()));
+                            let k_poc = player.alloc_datum(Datum::Symbol("pointOfContact".to_string()));
+                            let k_n = player.alloc_datum(Datum::Symbol("collisionNormal".to_string()));
+                            let pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::from(vec![
+                                (k_a, model_a),
+                                (k_b, model_b),
+                                (k_poc, poc),
+                                (k_n, normal),
+                            ]);
+                            let data = player.alloc_datum(Datum::PropList(pairs, false));
+                            fires.push(Fire {
+                                instance: selfm.instance.clone(),
+                                handler,
+                                data,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        fires
+    });
+
+    if fires.is_empty() { return; }
+    player_wait_available().await;
+    for fire in fires {
+        if let Some(inst) = fire.instance {
+            let _ = player_invoke_event_to_instances(&fire.handler, &vec![fire.data], &vec![inst]).await;
+        } else {
+            let _ = player_invoke_static_event(&fire.handler, &vec![fire.data]).await;
+        }
+    }
+}
+
 /// Drain queued PhysX collision reports across all PhysX members and
 /// dispatch them to the script's registered `collisionCallback` handler.
 ///

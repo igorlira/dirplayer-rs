@@ -109,6 +109,23 @@ impl Shockwave3dObjectDatumHandlers {
                 })
             },
             "meshDeform" => Self::get_mesh_deform_prop(player, scene, &s3d_ref.name, prop_name, member_ref),
+            "collision" => {
+                // Native #collision modifier object — s3d_ref.name is the model name.
+                let cm = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.collision_modifiers.get(&s3d_ref.name)
+                        .or_else(|| w3d.runtime_state.collision_modifiers.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&s3d_ref.name)).map(|(_, v)| v)))
+                    .cloned()
+                    .unwrap_or_default();
+                match_ci!(prop_name, {
+                    "enabled" => Ok(player.alloc_datum(Datum::Int(if cm.enabled { 1 } else { 0 }))),
+                    "resolve" => Ok(player.alloc_datum(Datum::Int(if cm.resolve { 1 } else { 0 }))),
+                    "immovable" => Ok(player.alloc_datum(Datum::Int(if cm.immovable { 1 } else { 0 }))),
+                    "mode" => Ok(player.alloc_datum(Datum::Symbol(cm.mode.clone()))),
+                    _ => Ok(player.alloc_datum(Datum::Void)),
+                })
+            },
             "overlay" | "backdrop" => {
                 // overlay/backdrop object: name format "cameraName:index".
                 // camera_overlays/camera_backdrops are keyed by lowercased camera
@@ -510,6 +527,35 @@ impl Shockwave3dObjectDatumHandlers {
                 cast_member: s3d_ref.cast_member,
             };
 
+            // Setters on a #collision modifier object ref:
+            // `model.collision.enabled = 1`, `.resolve`, `.immovable`, `.mode`.
+            // Handled before the generic match_ci! (it can't guard prop names by
+            // object_type, and these names overlap with other object types).
+            if s3d_ref.object_type == "collision" {
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        // Resolve the (case-insensitive) modifier entry, creating
+                        // it if a property was set without addModifier first.
+                        let key = w3d.runtime_state.collision_modifiers.keys()
+                            .find(|k| k.eq_ignore_ascii_case(&s3d_ref.name))
+                            .cloned()
+                            .unwrap_or_else(|| s3d_ref.name.clone());
+                        let cm = w3d.runtime_state.collision_modifiers.entry(key).or_default();
+                        match prop_name.to_ascii_lowercase().as_str() {
+                            "enabled" => cm.enabled = !matches!(value, Datum::Int(0)),
+                            "resolve" => cm.resolve = !matches!(value, Datum::Int(0)),
+                            "immovable" => cm.immovable = !matches!(value, Datum::Int(0)),
+                            "mode" => cm.mode = match value {
+                                Datum::Symbol(s) | Datum::String(s) => s.clone(),
+                                _ => cm.mode.clone(),
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
             // Setters on a fog object ref: `cameraFog.near = X`, etc.
             // Handled before the generic match_ci! since the macro doesn't
             // support `if` guards for distinguishing prop names by object_type.
@@ -736,6 +782,46 @@ impl Shockwave3dObjectDatumHandlers {
                                 .entry(s3d_ref.name.clone())
                                 .or_insert_with(std::collections::HashMap::new);
                             shader_map.insert(0, shader_name);
+                        }
+                    }
+                    Ok(())
+                },
+                "shaderList" => {
+                    // Whole-list assignment: `model.shaderList = singleShader` (or
+                    // `[shaderA, shaderB, ...]`). Distinct from `.shader =` (which
+                    // only sets the first shader) and the indexed `shaderList[i] =`
+                    // (setProp). A single shader applies to EVERY mesh via the
+                    // index-0 fallback in node_shader_override; a list maps
+                    // positionally. frog01 uses this form everywhere — e.g.
+                    // `model("ft").shaderList = shader("clearS")` (makes the frog's
+                    // collision box invisible) and `textModel.shaderList =
+                    // shader("redS")` (colors the title text); without this arm the
+                    // assignment was silently dropped, so those models rendered with
+                    // the default opaque checker texture.
+                    let shader_names: Vec<(usize, String)> = match value {
+                        Datum::List(_, items, _) => items.iter().enumerate().filter_map(|(i, item)| {
+                            match player.get_datum(item) {
+                                Datum::Shockwave3dObjectRef(r) if r.object_type == "shader" => Some((i, r.name.clone())),
+                                Datum::String(s) => Some((i, s.clone())),
+                                _ => None,
+                            }
+                        }).collect(),
+                        Datum::Shockwave3dObjectRef(r) if r.object_type == "shader" => vec![(0, r.name.clone())],
+                        Datum::String(s) => vec![(0, s.clone())],
+                        Datum::Symbol(s) => vec![(0, s.clone())],
+                        _ => vec![],
+                    };
+                    if !shader_names.is_empty() {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                let map = w3d.runtime_state.node_shaders
+                                    .entry(s3d_ref.name.clone())
+                                    .or_insert_with(std::collections::HashMap::new);
+                                map.clear();
+                                for (i, name) in shader_names {
+                                    map.insert(i, name);
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -1711,19 +1797,58 @@ impl Shockwave3dObjectDatumHandlers {
                                                     }]
                                                 },
                                                 "cylinder" => {
-                                                    // Director #cylinder: axis along Y, centered. `resolution` is
-                                                    // the radial segment count (default 20; the Pacman pipes use 6
+                                                    // Director #cylinder: axis along Y, centered. The radial segment
+                                                    // count comes from `resolution` (default 20; Pacman pipes use 6
                                                     // for hexagonal tubes). topRadius/bottomRadius give the taper
-                                                    // (topRadius 0 => cone). topCap/bottomCap default FALSE, so the
-                                                    // cylinder is an open side wall (no end caps) unless a movie
-                                                    // seals them — which Pacman doesn't. Winding matches the sphere
-                                                    // (ring 0 = top -> ring 1 = bottom) so faces front outward.
+                                                    // (topRadius 0 => cone). topCap/bottomCap default TRUE (real-
+                                                    // world cans/logs have solid ends; the ghost body sets both 0).
+                                                    //
+                                                    // startAngle/endAngle sweep the side wall around the Y axis
+                                                    // (Director 11.5 dict, startAngle/endAngle: "The surface of a
+                                                    // cylinder is generated by sweeping a 2D line around the Y axis
+                                                    // from startAngle to endAngle ... To draw a section of a cylinder,
+                                                    // set endAngle to a value less than 360"). A section is left OPEN
+                                                    // along the angular cut — only the caps become half-discs; there
+                                                    // is no flat closing face (same as the sphere-section example).
+                                                    // frog01's floating logs are `logRes` cylinders with
+                                                    // startAngle=180 (a 180° half-pipe) rotated vector(dir,0,90): the
+                                                    // +X wall rolls to +Y (rounded side up) and the open −X side to
+                                                    // −Y (down into the water), so it reads as a solid floating log.
+                                                    //
+                                                    // Angular convention MUST match the meshDeform-verified #sphere:
+                                                    // x = -sin(L), z = cos(L) (L=startAngle ⇒ +Z). Using cos/sin
+                                                    // instead is harmless for a full circle but places a partial arc
+                                                    // 90° off, which after the log's roll would gape sideways.
                                                     use std::f32::consts::PI;
                                                     let bottom_r = res.primitive_radius;
                                                     let top_r = res.primitive_top_radius;
                                                     let hy = res.primitive_height / 2.0;
-                                                    let segs = if res.primitive_resolution >= 3 { res.primitive_resolution } else { 20 };
+                                                    let start = res.primitive_start_angle.to_radians();
+                                                    let mut sweep = (res.primitive_end_angle - res.primitive_start_angle).to_radians();
+                                                    if sweep <= 0.0 { sweep = 2.0 * PI; }
+                                                    // Keep the facet density of the default full cylinder: scale the
+                                                    // radial segment count by the swept fraction (half sweep → half
+                                                    // the segments) so a 180° log stays smooth without over-tessellating.
+                                                    let base = if res.primitive_resolution >= 3 { res.primitive_resolution } else { 20 };
+                                                    // Director does NOT thin out a section's facets. meshDeform of
+                                                    // frog01's 180° log (resolution=20 default) shows ~22 radial
+                                                    // segments (≈8°/facet) — it keeps the full facet COUNT for the
+                                                    // swept arc rather than scaling it by the arc fraction. dirplayer
+                                                    // was doing `sweep/2π * base` (180° log → only 10 facets), so the
+                                                    // logs rendered visibly polygonal / "smaller" with flat-panel
+                                                    // edges. Use the full `base` count for the arc. A full circle
+                                                    // (sweep=2π) is unchanged (still `base`), so Coke-can / Pacman-pipe
+                                                    // (resolution 6 → hexagon) cylinders keep their exact facet counts.
+                                                    let segs = base.max(2);
                                                     let stride = segs + 1;
+                                                    // A SECTIONED cylinder (sweep < 360°, e.g. frog01's 180° half-pipe
+                                                    // logs) is an open trough — you can see its INSIDE. dirplayer
+                                                    // back-face-culls, so looking into the open end showed THROUGH the
+                                                    // single-sided wall to the water (the "gap in the caps"). Director
+                                                    // renders the trough two-sided (wood inside). Emit reversed faces
+                                                    // for the wall + caps when sectioned so the interior is solid. A
+                                                    // full cylinder (Coke can / Pacman pipe) stays single-sided.
+                                                    let two_sided = sweep < (2.0 * PI - 1e-3);
                                                     // Director's #cylinder is THREE mesh groups: side wall, top cap,
                                                     // bottom cap — so shaderList[1]/[2]/[3] can each differ (the Coke
                                                     // can is the cokeT label on the side and silver canTop on the
@@ -1742,21 +1867,29 @@ impl Shockwave3dObjectDatumHandlers {
                                                             let (y, r) = if ring == 0 { (hy, top_r) } else { (-hy, bottom_r) };
                                                             for i in 0..=segs {
                                                                 let u = i as f32 / segs as f32;
-                                                                let theta = u * 2.0 * PI;
-                                                                let (c, s) = (theta.cos(), theta.sin());
-                                                                pos.push([c * r, y, s * r]);
-                                                                nrm.push([c, 0.0, s]);
+                                                                let l = start + sweep * u;
+                                                                let (sl, cl) = (l.sin(), l.cos());
+                                                                pos.push([-sl * r, y, cl * r]);
+                                                                nrm.push([-sl, 0.0, cl]);
                                                                 // pre-centre to cancel the shader CLOD remap; final UV
                                                                 // is (u, ring): v=0 at the top ring, v=1 at the bottom
                                                                 // edge (where GTEX bakes its black sawtooth).
                                                                 uvs.push([u - 0.5, 0.5 - ring as f32]);
                                                             }
                                                         }
+                                                        // segs quads connect slice i→i+1; a full sweep's last vertex
+                                                        // coincides with the first so it closes, a partial sweep stops
+                                                        // at endAngle leaving the cut open.
                                                         for i in 0..segs {
                                                             let a = i;
                                                             let b = a + stride;
                                                             faces.push([a, a + 1, b]);
                                                             faces.push([a + 1, b + 1, b]);
+                                                            if two_sided {
+                                                                // reversed winding → inner trough surface
+                                                                faces.push([a, b, a + 1]);
+                                                                faces.push([a + 1, b, b + 1]);
+                                                            }
                                                         }
                                                         out.push(ClodDecodedMesh {
                                                             name: s3d_ref.name.clone(), positions: pos, normals: nrm,
@@ -1765,21 +1898,30 @@ impl Shockwave3dObjectDatumHandlers {
                                                             bone_indices: vec![], bone_weights: vec![],
                                                         });
                                                     }
-                                                    // group 1 → shaderList[2]: top cap (+Y), fan, disc UV pre-centred
+                                                    // group 1 → shaderList[2]: top cap (+Y), disc UV pre-centred.
+                                                    // SEAL with a FULL disc (0..2π), not just the swept arc: a half-disc
+                                                    // cap leaves the trough side of the END open, so a sideways log
+                                                    // (axis along X) showed the open trough at its ends ("caps open").
+                                                    // A full cylinder's cap is already a full circle, so it's unchanged.
+                                                    // Use 2× segments when sectioned so the +arc half stays as smooth as
+                                                    // the wall.
                                                     if res.primitive_top_cap {
+                                                        let cap_segs = if two_sided { segs * 2 } else { segs };
                                                         let mut pos: Vec<[f32; 3]> = vec![[0.0, hy, 0.0]];
                                                         let mut nrm: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]];
                                                         let mut uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]];
                                                         let mut faces = Vec::new();
-                                                        for i in 0..=segs {
-                                                            let theta = i as f32 / segs as f32 * 2.0 * PI;
-                                                            let (c, s) = (theta.cos(), theta.sin());
-                                                            pos.push([c * top_r, hy, s * top_r]);
+                                                        for i in 0..=cap_segs {
+                                                            let l = 2.0 * PI * (i as f32 / cap_segs as f32);
+                                                            let (sl, cl) = (l.sin(), l.cos());
+                                                            pos.push([-sl * top_r, hy, cl * top_r]);
                                                             nrm.push([0.0, 1.0, 0.0]);
-                                                            uvs.push([c * 0.5, -s * 0.5]);
+                                                            uvs.push([-sl * 0.5, cl * 0.5]);
                                                         }
-                                                        for i in 0..segs {
+                                                        // +Y outward winding for x=-sin,z=cos is [center, i+1, i].
+                                                        for i in 0..cap_segs {
                                                             faces.push([0u32, 1 + i + 1, 1 + i]);
+                                                            if two_sided { faces.push([0u32, 1 + i, 1 + i + 1]); }
                                                         }
                                                         out.push(ClodDecodedMesh {
                                                             name: s3d_ref.name.clone(), positions: pos, normals: nrm,
@@ -1788,21 +1930,23 @@ impl Shockwave3dObjectDatumHandlers {
                                                             bone_indices: vec![], bone_weights: vec![],
                                                         });
                                                     }
-                                                    // group 2 → shaderList[3]: bottom cap (-Y)
+                                                    // group 2 → shaderList[3]: bottom cap (-Y) — full disc seal (see top cap)
                                                     if res.primitive_bottom_cap {
+                                                        let cap_segs = if two_sided { segs * 2 } else { segs };
                                                         let mut pos: Vec<[f32; 3]> = vec![[0.0, -hy, 0.0]];
                                                         let mut nrm: Vec<[f32; 3]> = vec![[0.0, -1.0, 0.0]];
                                                         let mut uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]];
                                                         let mut faces = Vec::new();
-                                                        for i in 0..=segs {
-                                                            let theta = i as f32 / segs as f32 * 2.0 * PI;
-                                                            let (c, s) = (theta.cos(), theta.sin());
-                                                            pos.push([c * bottom_r, -hy, s * bottom_r]);
+                                                        for i in 0..=cap_segs {
+                                                            let l = 2.0 * PI * (i as f32 / cap_segs as f32);
+                                                            let (sl, cl) = (l.sin(), l.cos());
+                                                            pos.push([-sl * bottom_r, -hy, cl * bottom_r]);
                                                             nrm.push([0.0, -1.0, 0.0]);
-                                                            uvs.push([c * 0.5, -s * 0.5]);
+                                                            uvs.push([-sl * 0.5, cl * 0.5]);
                                                         }
-                                                        for i in 0..segs {
+                                                        for i in 0..cap_segs {
                                                             faces.push([0u32, 1 + i, 1 + i + 1]);
+                                                            if two_sided { faces.push([0u32, 1 + i + 1, 1 + i]); }
                                                         }
                                                         out.push(ClodDecodedMesh {
                                                             name: s3d_ref.name.clone(), positions: pos, normals: nrm,
@@ -1812,6 +1956,55 @@ impl Shockwave3dObjectDatumHandlers {
                                                         });
                                                     }
                                                     out
+                                                },
+                                                "plane" => {
+                                                    // Director #plane lies in the XY plane: width=X, length=Y,
+                                                    // centred, normal +Z (the default-facing plane is two-sided:
+                                                    // front mesh +Z, back mesh -Z, so shaderList[1]/[2] address the
+                                                    // two faces — the water sets shaderList[2]). The dimension
+                                                    // setter had no plane case, so width/length never rebuilt the
+                                                    // mesh and every large plane (road 42×18, water, banks, sides,
+                                                    // front/back) stayed at the 1×1 default — rendering tiny.
+                                                    let hw = res.primitive_width / 2.0;   // X half (width)
+                                                    let hl = res.primitive_length / 2.0;  // Y half (length)
+                                                    // UVs are PRE-CENTERED to [-0.5, 0.5]. The shared 3D vertex
+                                                    // shader applies the CLOD remap `base_uv = (u+0.5, 0.5-v)` to
+                                                    // every non-overlay mesh, so a plain [0,1] plane gets shifted
+                                                    // half a texture in both axes (the road's pavement bands landed
+                                                    // in the middle: "2 lanes / 2 sidewalks / 2 lanes" instead of
+                                                    // "sidewalk / 2 lanes / 2 lanes / sidewalk"). Storing
+                                                    // (u-0.5, 0.5-v) makes the shader reconstruct the intended [0,1]
+                                                    // — same convention the #sphere/#cylinder primitives use.
+                                                    //
+                                                    // MESH ORDER MUST MATCH DIRECTOR: a meshDeform dump of a real
+                                                    // Director #plane shows mesh[1].normal = (0,0,-1) and
+                                                    // mesh[2].normal = (0,0,+1). So shaderList[1] is the -Z face and
+                                                    // shaderList[2] the +Z face. frog01's walls set one face to
+                                                    // clearS (transparent) and the other to a texture; with the order
+                                                    // reversed, every clearS/texture landed on the wrong face (the
+                                                    // game-over `back` wall showed its opaque side toward the camera
+                                                    // and filled the view; `front`'s banner was on the culled side).
+                                                    // Emit -Z FIRST (shaderList[1]) then +Z (shaderList[2]).
+                                                    vec![
+                                                        ClodDecodedMesh {
+                                                            name: s3d_ref.name.clone(),
+                                                            positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
+                                                            normals: vec![[0.0,0.0,-1.0]; 4],
+                                                            tex_coords: vec![vec![[0.5,-0.5],[-0.5,-0.5],[-0.5,0.5],[0.5,0.5]]],
+                                                            faces: vec![[0,2,1],[0,3,2]],
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        },
+                                                        ClodDecodedMesh {
+                                                            name: s3d_ref.name.clone(),
+                                                            positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
+                                                            normals: vec![[0.0,0.0,1.0]; 4],
+                                                            tex_coords: vec![vec![[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]]],
+                                                            faces: vec![[0,1,2],[0,2,3]],
+                                                            diffuse_colors: vec![], specular_colors: vec![],
+                                                            bone_indices: vec![], bone_weights: vec![],
+                                                        },
+                                                    ]
                                                 },
                                                 _ => vec![],
                                             };
@@ -2019,15 +2212,33 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 "pointAt" => {
                     if !args.is_empty() {
-                        if let Datum::Vector(target) = player.get_datum(&args[0]) {
-                            let target = *target;
+                        // Director's pointAt accepts EITHER a vector OR a node
+                        // (model/group/light/camera) — in the node case it aims at that
+                        // node's worldPosition. frog01's death camera uses
+                        // `camera.pointAt(s.model("frog"))` (a model) while normal play uses
+                        // `camera.pointAt(frog.worldPosition)` (a vector); handling only the
+                        // vector form left the death camera at the right spot but never
+                        // rotated to face the frog ("camera moves, view wrong"). Also fixes
+                        // `light("spot2").pointAt(s.model("frog"))`, same handler.
+                        let target_opt: Option<[f32; 3]> = match player.get_datum(&args[0]) {
+                            Datum::Vector(target) => {
+                                Some([target[0] as f32, target[1] as f32, target[2] as f32])
+                            }
+                            Datum::Shockwave3dObjectRef(r) => {
+                                let name = r.name.clone();
+                                let wp = get_world_position(player, &member_ref, &name);
+                                Some([wp[0] as f32, wp[1] as f32, wp[2] as f32])
+                            }
+                            _ => None,
+                        };
+                        if let Some(target) = target_opt {
                             let (ux, uy, uz) = if args.len() > 1 {
                                 if let Datum::Vector(up) = player.get_datum(&args[1]) {
                                     (up[0] as f32, up[1] as f32, up[2] as f32)
                                 } else { (0.0f32, 1.0, 0.0) }
                             } else { (0.0f32, 1.0, 0.0) };
                             apply_point_at(player, &member_ref, &s3d_ref.name,
-                                target[0] as f32, target[1] as f32, target[2] as f32,
+                                target[0], target[1], target[2],
                                 ux, uy, uz);
                         }
                     }
@@ -2240,30 +2451,209 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 // ─── Scene management ───
                 "clone" | "cloneDeep" => {
-                    // Return a new model ref with the cloned name and add node to scene
+                    // Director 11.5 Scripting Dictionary (clone): "creates a copy of the
+                    // model, group, light, or camera AND ALL OF ITS CHILDREN. The clone
+                    // shares the parent ... and is assigned the same shaderList as the
+                    // original." The previous implementation copied only the single node,
+                    // so `clone.child[n]` was VOID and the cloned subtree lost its shaders
+                    // (frog01 crashed on `s.model(cn).child[1].shaderList[5] = ...`).
+                    // Recursively clone the whole subtree here.
                     let clone_name = if !args.is_empty() {
                         player.get_datum(&args[0]).string_value().unwrap_or_default()
                     } else {
-                        format!("{}_clone", s3d_ref.name)
+                        String::new()
                     };
                     let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if let Some(scene) = w3d.scene_mut() {
-                                let source_node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&s3d_ref.name)).cloned();
-                                if let Some(mut new_node) = source_node {
-                                    // Per Director docs: clone shares the same parent as original
-                                    // If name is empty, clone has no parent (temporary instance)
-                                    if clone_name.is_empty() {
-                                        new_node.parent_name = String::new();
+                    let source_name = s3d_ref.name.clone();
+                    let source_lower = source_name.to_ascii_lowercase();
+
+                    // 1. Snapshot the source node + its descendant subtree (in scene.nodes
+                    //    order, so the clone's child[n] indexing matches the source's — the
+                    //    child accessor filters scene.nodes in iteration order). Also grab
+                    //    every existing node name so auto-generated clone names stay unique.
+                    let (root_snapshot, descendants, mut used_names) = {
+                        let scene_opt = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w3d| w3d.parsed_scene.as_ref());
+                        if let Some(scene) = scene_opt {
+                            let root = scene.nodes.iter()
+                                .find(|n| n.name.eq_ignore_ascii_case(&source_name)).cloned();
+                            // Parent-chain closure: a node is in the subtree if some
+                            // ancestor is the source. (Parents may appear after their
+                            // children in scene.nodes order, so iterate to a fixpoint.)
+                            let pairs: Vec<(String, String)> = scene.nodes.iter()
+                                .map(|n| (n.name.to_ascii_lowercase(), n.parent_name.to_ascii_lowercase()))
+                                .collect();
+                            let mut in_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            in_set.insert(source_lower.clone());
+                            let mut changed = true;
+                            while changed {
+                                changed = false;
+                                for (nm, pn) in &pairs {
+                                    if !in_set.contains(nm) && in_set.contains(pn) {
+                                        in_set.insert(nm.clone());
+                                        changed = true;
                                     }
-                                    // Otherwise keep original parent_name (already copied from source)
-                                    new_node.name = clone_name.clone();
-                                    scene.nodes.push(new_node);
-                                } else {
-                                    use crate::director::chunks::w3d::types::*;
+                                }
+                            }
+                            let descendants: Vec<crate::director::chunks::w3d::types::W3dNode> = scene.nodes.iter()
+                                .filter(|n| {
+                                    let nl = n.name.to_ascii_lowercase();
+                                    nl != source_lower && in_set.contains(&nl)
+                                })
+                                .cloned()
+                                .collect();
+                            let used: std::collections::HashSet<String> = pairs.into_iter().map(|(nm, _)| nm).collect();
+                            (root, descendants, used)
+                        } else {
+                            (None, Vec::new(), std::collections::HashSet::new())
+                        }
+                    };
+
+                    // The clone root takes the explicit name. Director keeps an anonymous
+                    // "" clone in the scene (just uncounted), so synthesize a stable key
+                    // for it rather than leaving it nameless.
+                    let effective_root_name = if clone_name.is_empty() {
+                        format!("{}_clone", source_name)
+                    } else {
+                        clone_name.clone()
+                    };
+
+                    // Director rejects a clone whose name already names a node:
+                    // `frog.clone("evil")` a second time errors "Object with duplicate
+                    // name already exists" rather than appending a phantom subtree.
+                    // `used_names` was seeded from every existing node, so a hit means
+                    // the target name is taken. (In normal play this never fires —
+                    // beginSprite calls resetWorld first, which clears the prior clone.)
+                    if used_names.contains(&effective_root_name.to_ascii_lowercase()) {
+                        return Err(ScriptError::new(
+                            "Object with duplicate name already exists".to_string(),
+                        ));
+                    }
+
+                    if let Some(root_node) = root_snapshot {
+                        // 2. Pass 1 — assign every clone a name. Auto-named children use
+                        //    Director's "<original>-copy<N>" convention (frog01 relies on
+                        //    it, e.g. s.model("axe-copy2")); N is a per-clone counter that
+                        //    skips any name already taken so repeated clones of the same
+                        //    subtree (16 cars × {acar, wheel1..4}) never collide — runtime
+                        //    state here is keyed by node name, so collisions would corrupt
+                        //    sibling clones.
+                        let mut name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                        name_map.insert(source_lower.clone(), effective_root_name.clone());
+                        used_names.insert(effective_root_name.to_ascii_lowercase());
+                        // Director assigns "-copyN" by walking the source descendants in
+                        // creation (scene.nodes) order and, for each not-yet-named node,
+                        // naming it AND THEN its parent (when the parent is also in the
+                        // cloned subtree and still unnamed). Verified against real
+                        // Director's `frog.clone("evil")`: frog01 creates the bones
+                        // connector-first (body, ll, rl, lc, …) with their joints last
+                        // (…, lhip, lk, la, rhip, rk, ra, axe), so the (node, parent)
+                        // pairing yields body=copy1, axe=copy2, ll=copy3, lhip=copy4,
+                        // rl=copy5, rhip=copy6, … — exactly the names the walk-cycle
+                        // hard-codes (s.model("lhip-copy4").rotate(…)). Plain creation-
+                        // order numbering put the joints last (lhip-copy15) so the lookups
+                        // returned VOID. The loop skips names already taken so repeated
+                        // clones of the same subtree (16 cars × {acar,wheel1..4}) never
+                        // collide; those address children by index, not by copyN name.
+                        fn name_one(
+                            orig: &crate::director::chunks::w3d::types::W3dNode,
+                            name_map: &mut std::collections::HashMap<String, String>,
+                            used_names: &mut std::collections::HashSet<String>,
+                            counter: &mut usize,
+                        ) {
+                            let cand = loop {
+                                let c = format!("{}-copy{}", orig.name, *counter);
+                                *counter += 1;
+                                if used_names.insert(c.to_ascii_lowercase()) { break c; }
+                            };
+                            name_map.insert(orig.name.to_ascii_lowercase(), cand);
+                        }
+                        let mut counter = 1usize;
+                        for d in &descendants {
+                            if !name_map.contains_key(&d.name.to_ascii_lowercase()) {
+                                name_one(d, &mut name_map, &mut used_names, &mut counter);
+                            }
+                            let pl = d.parent_name.to_ascii_lowercase();
+                            if pl != source_lower && !name_map.contains_key(&pl) {
+                                if let Some(parent) = descendants.iter()
+                                    .find(|n| n.name.eq_ignore_ascii_case(&pl)) {
+                                    name_one(parent, &mut name_map, &mut used_names, &mut counter);
+                                }
+                            }
+                        }
+
+                        // 3. Pass 2 — build the cloned nodes with re-parented names and
+                        //    collect the per-node runtime state to copy (live transform +
+                        //    shader overrides + visibility). Read under an immutable borrow.
+                        type ClonedNode = (crate::director::chunks::w3d::types::W3dNode, [f32; 16], Option<std::collections::HashMap<usize, String>>, Option<u8>);
+                        let mut planned: Vec<ClonedNode> = Vec::with_capacity(descendants.len() + 1);
+                        // (orig_node, new_name, new_parent): root keeps the source's parent
+                        // ("clone shares the parent"); descendants map their parent through
+                        // the complete name_map built in pass 1.
+                        let mut work: Vec<(&crate::director::chunks::w3d::types::W3dNode, String, String)> =
+                            Vec::with_capacity(descendants.len() + 1);
+                        work.push((&root_node, effective_root_name.clone(), root_node.parent_name.clone()));
+                        for d in &descendants {
+                            let new_name = name_map.get(&d.name.to_ascii_lowercase()).cloned().unwrap();
+                            let new_parent = name_map.get(&d.parent_name.to_ascii_lowercase()).cloned()
+                                .unwrap_or_else(|| d.parent_name.clone());
+                            work.push((d, new_name, new_parent));
+                        }
+                        for (orig, new_name, new_parent) in &work {
+                            let transform = get_node_transform_live(player, &member_ref, &orig.name);
+                            let (shaders, visibility) = {
+                                let w3d = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                                    .and_then(|m| m.member_type.as_shockwave3d());
+                                let shaders = w3d.and_then(|w| {
+                                    w.runtime_state.node_shaders.get(&orig.name)
+                                        .or_else(|| w.runtime_state.node_shaders.iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case(&orig.name)).map(|(_, v)| v))
+                                        .cloned()
+                                });
+                                let visibility = w3d.and_then(|w| {
+                                    w.runtime_state.node_visibility.get(&orig.name)
+                                        .or_else(|| w.runtime_state.node_visibility.iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case(&orig.name)).map(|(_, v)| v))
+                                        .copied()
+                                });
+                                (shaders, visibility)
+                            };
+                            let mut node = (*orig).clone();
+                            node.name = new_name.clone();
+                            node.parent_name = new_parent.clone();
+                            node.transform = transform;
+                            planned.push((node, transform, shaders, visibility));
+                        }
+
+                        // 4. Commit — push cloned nodes and their runtime state.
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                for (node, transform, shaders, visibility) in &planned {
+                                    w3d.runtime_state.node_transforms.insert(node.name.clone(), *transform);
+                                    if let Some(sh) = shaders {
+                                        w3d.runtime_state.node_shaders.insert(node.name.clone(), sh.clone());
+                                    }
+                                    if let Some(v) = visibility {
+                                        w3d.runtime_state.node_visibility.insert(node.name.clone(), *v);
+                                    }
+                                }
+                                if let Some(scene) = w3d.scene_mut() {
+                                    for (node, _, _, _) in planned {
+                                        scene.nodes.push(node);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Source not in the scene graph — keep the returned ref valid by
+                        // creating a bare model node (mirrors the old fallback).
+                        use crate::director::chunks::w3d::types::*;
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
                                     scene.nodes.push(W3dNode {
-                                        name: clone_name.clone(), node_type: W3dNodeType::Model,
+                                        name: effective_root_name.clone(), node_type: W3dNodeType::Model,
                                         parent_name: "World".to_string(),
                                         resource_name: String::new(), model_resource_name: String::new(),
                                         shader_name: String::new(),
@@ -2279,7 +2669,7 @@ impl Shockwave3dObjectDatumHandlers {
                         cast_lib: s3d_ref.cast_lib,
                         cast_member: s3d_ref.cast_member,
                         object_type: s3d_ref.object_type.clone(),
-                        name: clone_name,
+                        name: effective_root_name,
                     })))
                 },
                 "addChild" => {
@@ -2291,17 +2681,24 @@ impl Shockwave3dObjectDatumHandlers {
                             Datum::String(s) => s.clone(),
                             _ => String::new(),
                         };
-                        // 2nd arg selects transform handling. Default #preserveParent keeps
-                        // the child's LOCAL transform. #preserveWorld keeps the child's WORLD
-                        // transform, recomputing local = inverse(parentWorld) * childWorld.
-                        // Required by the Pacman maze (pipes parented to pipePink1) and the
-                        // ghosts (top/eyes parented to the body) — without it each child
-                        // inherited the parent's transform on top of its own (misplaced maze,
-                        // ghost parts floating off the body).
+                        // 2nd arg selects transform handling. Director's DEFAULT (no symbol)
+                        // is #preserveWorld: the child keeps its WORLD transform and its
+                        // parent-relative (local) transform is recomputed
+                        // (local = inverse(parentWorld) * childWorld). Only #preserveParent
+                        // keeps the child's existing LOCAL transform (the child JUMPS in world
+                        // space). Dict line 18344: "#preserveParent ... the parent-relative
+                        // transform of the child remains unchanged"; "#preserveWorld ... the
+                        // world transform of the child remains unchanged. Its parent-relative
+                        // transform is recalculated." Used by the Pacman maze (pipes parented
+                        // to pipePink1) and ghosts (top/eyes parented to the body), AND frog01:
+                        // it sets each wake's transform in WORLD space then `log.addChild(wake)`
+                        // with NO symbol — real Director rebases it under the log (local ≈
+                        // (0.1,0,0)). Defaulting to #preserveParent kept the world transform AS
+                        // the local, double-transforming the wake off-screen edge-on.
                         let preserve_world = match args.get(1).map(|a| player.get_datum(a)) {
-                            Some(Datum::Symbol(s)) => s.eq_ignore_ascii_case("preserveWorld"),
-                            Some(Datum::String(s)) => s.eq_ignore_ascii_case("preserveWorld"),
-                            _ => false,
+                            Some(Datum::Symbol(s)) => !s.eq_ignore_ascii_case("preserveParent"),
+                            Some(Datum::String(s)) => !s.eq_ignore_ascii_case("preserveParent"),
+                            _ => true, // Director default = #preserveWorld
                         };
                         if !child_name.is_empty() {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
@@ -2413,6 +2810,18 @@ impl Shockwave3dObjectDatumHandlers {
                                         .or_insert_with(crate::player::cast_member::LodState::default);
                                 }
                             }
+                        } else if mod_name == "collision" {
+                            // Native #collision modifier: register state so
+                            // `model.collision` resolves to a collision object and
+                            // events::tick_w3d_collisions includes this model.
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.collision_modifiers
+                                        .entry(s3d_ref.name.clone())
+                                        .or_default();
+                                }
+                            }
                         } else if mod_name == "meshDeform" {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                             let (mesh_count, node_found, res_found) = {
@@ -2450,6 +2859,32 @@ impl Shockwave3dObjectDatumHandlers {
                 },
                 "removeModifier" => Ok(player.alloc_datum(Datum::Void)),
                 "registerScript" | "registerForEvent" => Ok(player.alloc_datum(Datum::Void)),
+                "setCollisionCallback" => {
+                    // model.collision.setCollisionCallback(#handler, scriptInstance):
+                    // register the handler that events::tick_w3d_collisions fires
+                    // when this model is involved in a collision.
+                    if s3d_ref.object_type == "collision" && args.len() >= 2 {
+                        let handler = player.get_datum(&args[0]).string_value()
+                            .unwrap_or_default().trim_start_matches('#').to_string();
+                        let instance = match player.get_datum(&args[1]) {
+                            Datum::ScriptInstanceRef(r) => Some(r.clone()),
+                            _ => None,
+                        };
+                        let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                let key = w3d.runtime_state.collision_modifiers.keys()
+                                    .find(|k| k.eq_ignore_ascii_case(&s3d_ref.name))
+                                    .cloned()
+                                    .unwrap_or_else(|| s3d_ref.name.clone());
+                                let cm = w3d.runtime_state.collision_modifiers.entry(key).or_default();
+                                cm.callback_handler = Some(handler);
+                                cm.callback_instance = instance;
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
                 "isInWorld" => Ok(player.alloc_datum(Datum::Int(1))),
                 // ─── Camera methods ───
                 "modelUnderLoc" => {
@@ -3713,7 +4148,14 @@ impl Shockwave3dObjectDatumHandlers {
                                         }
                                     )))
                                 } else {
-                                    Some(player.alloc_datum(Datum::Void))
+                                    // Director quirk: out-of-range child[N] acts as IDENTITY in a
+                                    // chain — it returns the node itself, so e.g. (verified in
+                                    // real Director) evil.child[2].child[1].child[1] resolves to the
+                                    // body even though evil has only one child (child[2] collapses,
+                                    // continuing from evil). frog01's evil-frog black/red shader
+                                    // setup addresses evil.child[2] (evil has 1 child) and relies on
+                                    // this; without it the chain dies to VOID and no shaders apply.
+                                    Some(player.alloc_datum(Datum::Shockwave3dObjectRef(s3d_ref.clone())))
                                 }
                             }
                             _ => None, // Not a known collection, fall through to general get_prop_inner
@@ -4285,6 +4727,25 @@ impl Shockwave3dObjectDatumHandlers {
 
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(model_name.to_string()))),
+            "collision" => {
+                // model.collision — returns the #collision modifier object if one
+                // was added via addModifier(#collision), else VOID (Director).
+                let has = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .map(|w3d| w3d.runtime_state.collision_modifiers.keys()
+                        .any(|k| k.eq_ignore_ascii_case(model_name)))
+                    .unwrap_or(false);
+                if has {
+                    Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
+                        cast_lib: member_ref.cast_lib,
+                        cast_member: member_ref.cast_member,
+                        object_type: "collision".to_string(),
+                        name: model_name.to_string(),
+                    })))
+                } else {
+                    Ok(player.alloc_datum(Datum::Void))
+                }
+            },
             "visible" | "visibility" => Ok(player.alloc_datum(Datum::Int(1))),
             "pointAtOrientation" | "pointatorientation" => {
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref);
@@ -5269,7 +5730,34 @@ impl Shockwave3dObjectDatumHandlers {
 
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(resource_name.to_string()))),
-            "type" => Ok(player.alloc_datum(Datum::Symbol("fromFile".to_string()))),
+            "type" => {
+                // Real primitive type (#plane/#box/#sphere/#cylinder); fall back to
+                // #fromFile for loaded/mesh resources. Was hardcoded to "fromFile".
+                let t = res.and_then(|r| r.primitive_type.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "fromFile".to_string());
+                Ok(player.alloc_datum(Datum::Symbol(t)))
+            },
+            "topCap" => Ok(player.alloc_datum(Datum::Int(
+                res.map(|r| if r.primitive_top_cap { 1 } else { 0 }).unwrap_or(0)))),
+            "bottomCap" => Ok(player.alloc_datum(Datum::Int(
+                res.map(|r| if r.primitive_bottom_cap { 1 } else { 0 }).unwrap_or(0)))),
+            "topRadius" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_top_radius as f64).unwrap_or(0.0)))),
+            "bottomRadius" | "radius" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_radius as f64).unwrap_or(0.0)))),
+            "height" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_height as f64).unwrap_or(0.0)))),
+            "width" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_width as f64).unwrap_or(0.0)))),
+            "length" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_length as f64).unwrap_or(0.0)))),
+            "startAngle" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_start_angle as f64).unwrap_or(0.0)))),
+            "endAngle" => Ok(player.alloc_datum(Datum::Float(
+                res.map(|r| r.primitive_end_angle as f64).unwrap_or(360.0)))),
+            "resolution" => Ok(player.alloc_datum(Datum::Int(
+                res.map(|r| r.primitive_resolution as i32).unwrap_or(0)))),
             "vertexList" => {
                 // For meshes built via newMesh()+build(), the positions live
                 // in scene.clod_meshes keyed by the resource name. Director
@@ -5660,13 +6148,20 @@ fn get_world_position(
         if let Some(w3d) = member.member_type.as_shockwave3d() {
             if let Some(ref scene) = w3d.parsed_scene {
                 if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(node_name)) {
-                    let local = get_node_transform(player, member_ref, &node.name);
+                    // Use the LIVE transform (persistent datum), not the once-per-frame
+                    // node_transforms cache: a script may read `model.worldPosition`
+                    // immediately after `model.transform.position = v` (e.g. frog01 does
+                    // `snakeBox.position = snakedown.worldPosition + offset` right after
+                    // positioning snakedown). Reading the stale cache returns the model's
+                    // load-time (clone source) transform, which then poisons the
+                    // subsequent addChild #preserveWorld math. Mirrors node_world_transform.
+                    let local = get_node_transform_live(player, member_ref, &node.name);
                     let mut result = local;
                     let mut current_parent = node.parent_name.clone();
                     for _ in 0..20 {
                         if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") { break; }
                         if let Some(pn) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current_parent)) {
-                            let pt = get_node_transform(player, member_ref, &pn.name);
+                            let pt = get_node_transform_live(player, member_ref, &pn.name);
                             result = mat4_mul_f32(&pt, &result);
                             current_parent = pn.parent_name.clone();
                         } else { break; }
@@ -6081,9 +6576,22 @@ fn apply_translation(
         // slide relies on this — rz=90 puts local +X along world +Y, so
         // translate(0.5,0,0) lifts him up (worldPosition.y climbs to the respawn
         // threshold) instead of sliding sideways.
-        m[12] += m[0] * dx + m[4] * dy + m[8] * dz;
-        m[13] += m[1] * dx + m[5] * dy + m[9] * dz;
-        m[14] += m[2] * dx + m[6] * dy + m[10] * dz;
+        //
+        // The axes are the UNIT rotation directions, NOT scaled by the node's own
+        // scale: Director 11.5 dict (translate/#self) moves "x, y, z units along the
+        // [local] axes". A scaled node must still move the full distance — frog01's
+        // snake is cloned at scale 0.11 and animated with translate(0,±5,0); using the
+        // scaled columns moved it 0.55 instead of 5 and broke its worldPosition.y
+        // thresholds, and the logs (scale = log length) drifted at the wrong speed.
+        let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
+        let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
+        let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+        let sx = if sx > 1e-8 { sx } else { 1.0 };
+        let sy = if sy > 1e-8 { sy } else { 1.0 };
+        let sz = if sz > 1e-8 { sz } else { 1.0 };
+        m[12] += (m[0]/sx) * dx + (m[4]/sy) * dy + (m[8]/sz) * dz;
+        m[13] += (m[1]/sx) * dx + (m[5]/sy) * dy + (m[9]/sz) * dz;
+        m[14] += (m[2]/sx) * dx + (m[6]/sy) * dy + (m[10]/sz) * dz;
     }
     set_node_transform(player, member_ref, node_name, m);
 }
@@ -6105,11 +6613,51 @@ fn apply_rotation(
         // #world / #parent: compose in the world/parent frame (rot · R).
         mat4_mul_f32(&rot, &m)
     } else {
-        // #self (the node-reference default): compose in the node's LOCAL frame
-        // (R · rot), so the rotation runs about the node's own axes. Pacman's
-        // death spin uses rotate(5,0,0): about local X (which rz=90 aligns with
-        // world +Y), so local X stays fixed and his upward slide doesn't drift.
-        mat4_mul_f32(&m, &rot)
+        // #self (the node-reference default): rotate about the node's own axes.
+        //
+        // Director PRESERVES the per-axis scale when the basis is a clean rotation×scale
+        // (orthogonal columns): it composes the delta into the ROTATION part and re-applies
+        // the scale — M' = (R·R_delta)·S. Rasterwerks' Z-up base map un-rotates m_si_fi_7
+        // with rotate(-origRot.x,0,0); its grille (clean basis, scale (1.196,1.0,1.196))
+        // must keep that scale, but the naive M·R_delta (=R·S·R_delta) put it on the wrong
+        // axes → (1.196,1.196,1.0), too shallow, so it sat in front of its pipe. This mirrors
+        // the existing transform.rotation SETTER (transform3d.rs ~126: R(v)·diag(sx,sy,sz)).
+        //
+        // An already-SHEARED basis (non-orthogonal columns — frog01's skeletal limbs, whose
+        // bones bake scale in a rotated frame) can't be cleanly decomposed; re-orthonormalizing
+        // it every frame compounds error and visibly stretches the limbs. Those fall back to the
+        // post-multiply M·R_delta, which preserves the shear. For a UNIFORM scale both paths give
+        // s·(R·R_delta), so ordinary rotates (Pacman's death spin etc.) are unaffected.
+        let c0 = [m[0], m[1], m[2]];
+        let c1 = [m[4], m[5], m[6]];
+        let c2 = [m[8], m[9], m[10]];
+        let sx = (c0[0]*c0[0] + c0[1]*c0[1] + c0[2]*c0[2]).sqrt();
+        let sy = (c1[0]*c1[0] + c1[1]*c1[1] + c1[2]*c1[2]).sqrt();
+        let sz = (c2[0]*c2[0] + c2[1]*c2[1] + c2[2]*c2[2]).sqrt();
+        let scale_prod = (sx*sy).max(sx*sz).max(sy*sz).max(1e-6);
+        let max_dot = (c0[0]*c1[0] + c0[1]*c1[1] + c0[2]*c1[2]).abs()
+            .max((c0[0]*c2[0] + c0[1]*c2[1] + c0[2]*c2[2]).abs())
+            .max((c1[0]*c2[0] + c1[1]*c2[1] + c1[2]*c2[2]).abs());
+        let orthogonal = (max_dot / scale_prod) < 1e-3;
+        if orthogonal && sx > 1e-8 && sy > 1e-8 && sz > 1e-8 {
+            // Clean basis: rebuild the rotation (R·R_delta) and re-apply the per-axis scale.
+            let rotm = [
+                c0[0]/sx, c0[1]/sx, c0[2]/sx, 0.0,
+                c1[0]/sy, c1[1]/sy, c1[2]/sy, 0.0,
+                c2[0]/sz, c2[1]/sz, c2[2]/sz, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ];
+            let rn = mat4_mul_f32(&rotm, &rot);
+            [
+                rn[0]*sx, rn[1]*sx, rn[2]*sx, 0.0,
+                rn[4]*sy, rn[5]*sy, rn[6]*sy, 0.0,
+                rn[8]*sz, rn[9]*sz, rn[10]*sz, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ]
+        } else {
+            // Sheared (or degenerate) basis: preserve it with a plain post-multiply.
+            mat4_mul_f32(&m, &rot)
+        }
     };
     // Keep the node positioned in place (m * rot already preserves translation,
     // but restore explicitly for the world-frame branch).
@@ -6297,19 +6845,58 @@ fn euler_to_matrix_f32(rx_deg: f32, ry_deg: f32, rz_deg: f32) -> [f32; 16] {
     ]
 }
 
-/// Invert a column-major affine transform
+/// Invert a column-major affine transform (handles rotation, SCALE and
+/// translation). A previous version transposed the upper-3×3 (assuming a pure
+/// rotation, Rᵀ = R⁻¹), which is wrong when the matrix carries scale: for a 3×3
+/// of R·S the transpose is S·Rᵀ, not the true inverse S⁻¹·Rᵀ. That made
+/// `addChild #preserveWorld` (`inverse(parentWorld) × childWorld`) multiply the
+/// parent's scale in instead of dividing it out, so scale compounded down a deep
+/// hierarchy and shrank every limb toward a point (the frog01 frog: `body` at the
+/// frog's 0.08 scale, but `ll` collapsed to ~0.01). Use a full 3×3 inverse via
+/// the adjugate; falls back to the rigid inverse for a (near-)singular matrix.
 fn invert_transform_f32(m: &[f32; 16]) -> [f32; 16] {
-    // Column-major: R[row][col] = m[col*4 + row]
+    // Upper-3×3 A (column-major: A[row][col] = m[col*4 + row]).
+    let (a, b, c) = (m[0], m[4], m[8]);   // row 0
+    let (d, e, f) = (m[1], m[5], m[9]);   // row 1
+    let (g, h, i) = (m[2], m[6], m[10]);  // row 2
     let (tx, ty, tz) = (m[12], m[13], m[14]);
-    // -R^T * t
-    let itx = -(m[0]*tx + m[1]*ty + m[2]*tz);
-    let ity = -(m[4]*tx + m[5]*ty + m[6]*tz);
-    let itz = -(m[8]*tx + m[9]*ty + m[10]*tz);
+
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det.abs() < 1e-12 {
+        // Singular — fall back to the rigid (rotation-only) inverse.
+        let itx = -(a * tx + d * ty + g * tz);
+        let ity = -(b * tx + e * ty + h * tz);
+        let itz = -(c * tx + f * ty + i * tz);
+        return [
+            a, b, c, 0.0,
+            d, e, f, 0.0,
+            g, h, i, 0.0,
+            itx, ity, itz, 1.0,
+        ];
+    }
+    let inv_det = 1.0 / det;
+    // inverse(A)[row][col] = cofactor / det
+    let r00 = (e * i - f * h) * inv_det;
+    let r01 = (c * h - b * i) * inv_det;
+    let r02 = (b * f - c * e) * inv_det;
+    let r10 = (f * g - d * i) * inv_det;
+    let r11 = (a * i - c * g) * inv_det;
+    let r12 = (c * d - a * f) * inv_det;
+    let r20 = (d * h - e * g) * inv_det;
+    let r21 = (b * g - a * h) * inv_det;
+    let r22 = (a * e - b * d) * inv_det;
+
+    // Inverse translation = -inverse(A) · t.
+    let itx = -(r00 * tx + r01 * ty + r02 * tz);
+    let ity = -(r10 * tx + r11 * ty + r12 * tz);
+    let itz = -(r20 * tx + r21 * ty + r22 * tz);
+
+    // Repack column-major: out[col*4 + row] = inverse(A)[row][col].
     [
-        m[0], m[4], m[8],  0.0,  // R^T col 0
-        m[1], m[5], m[9],  0.0,  // R^T col 1
-        m[2], m[6], m[10], 0.0,  // R^T col 2
-        itx,  ity,  itz,   1.0,
+        r00, r10, r20, 0.0, // col 0
+        r01, r11, r21, 0.0, // col 1
+        r02, r12, r22, 0.0, // col 2
+        itx, ity, itz, 1.0, // col 3
     ]
 }
 

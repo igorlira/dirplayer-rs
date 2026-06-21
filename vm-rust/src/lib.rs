@@ -1068,6 +1068,35 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
     unsafe {
         if let Some(player) = PLAYER_OPT.as_mut() {
             let key = sprite_num as i16;
+
+            // Off-screen Flash-as-3D-texture (synthetic negative sprite number):
+            // route the captured frame into the named W3D texture rather than the
+            // on-stage frame buffer. The incremental texture upload skips re-upload
+            // when the byte length is unchanged, so re-pushing a static SWF frame
+            // every RAF is cheap. See player.flash_texture_targets.
+            if let Some((member_ref, tex_name)) = player.flash_texture_targets.get(&key).cloned() {
+                let mut tex_data = Vec::with_capacity(8 + rgba_data.len());
+                tex_data.extend_from_slice(&width.to_le_bytes());
+                tex_data.extend_from_slice(&height.to_le_bytes());
+                tex_data.extend_from_slice(rgba_data);
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        if let Some(scene) = w3d.scene_mut() {
+                            // Only bump the content version when the pixels actually
+                            // change size (cheap static-SWF guard mirroring the
+                            // renderer's length-based incremental check).
+                            let changed = scene.texture_images.get(&tex_name)
+                                .map_or(true, |old| old.len() != tex_data.len());
+                            scene.texture_images.insert(tex_name.clone(), tex_data);
+                            if changed {
+                                scene.texture_content_version += 1;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
             if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
                 // Replace existing bitmap to reuse the BitmapRef.
                 player.bitmap_manager.replace_bitmap(existing_ref, bitmap);

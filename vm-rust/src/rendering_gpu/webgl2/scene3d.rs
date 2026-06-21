@@ -66,6 +66,7 @@ struct Shader3d {
     u_emissive_color: Option<WebGlUniformLocation>,
     u_shininess: Option<WebGlUniformLocation>,
     u_opacity: Option<WebGlUniformLocation>,
+    u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
@@ -397,6 +398,10 @@ uniform vec4 u_specular_color;
 uniform vec4 u_emissive_color;
 uniform float u_shininess;
 uniform float u_opacity;
+// Alpha-test threshold for cutout (opaque-but-alpha-textured) models drawn in the
+// opaque pass: discard texels below this so they write neither colour nor depth.
+// 0 disables the test (default / blended-transparent paths).
+uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
 uniform sampler2D u_lightmap_tex;
@@ -505,10 +510,24 @@ vec3 apply_fog(vec3 color) {
 }
 
 void main() {
+    // A fully-transparent material (frog01's `clearS`, blend 0 → opacity 0) is
+    // invisible, but in the opaque/cutout pass (depth_mask ON) it would still write
+    // DEPTH — an invisible depth wall that culls everything behind it. The game-over
+    // `back` wall's clearS face sits ~2.5u in front of the camera and covers the
+    // upper view, so it was depth-hiding the banner / side walls / far logs behind it
+    // (they showed in play because the camera wasn't behind that face). Discard it so
+    // it writes neither colour nor depth. (Genuine translucency like water2 blend=50 →
+    // opacity 0.5 is untouched.)
+    if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
     vec3 V = normalize(u_camera_pos - v_position);
 
     vec4 tex_sample = texture(u_diffuse_tex, v_texcoord);
+
+    // Alpha-test cutout: opaque models whose texture carries alpha (e.g. frog01's
+    // Flash bark/leaf textures) are drawn in the opaque pass; discard transparent
+    // texels so they don't write depth and aren't sorted as translucent.
+    if (u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
 
     // When textured: GL_MODULATE mode = texture * vertex_lighting
     // IFX default: UseDiffuse=OFF → material diffuse forced to white (1,1,1)
@@ -689,6 +708,7 @@ void main() {
             u_emissive_color: u("u_emissive_color"),
             u_shininess: u("u_shininess"),
             u_opacity: u("u_opacity"),
+            u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
             u_lightmap_tex: u("u_lightmap_tex"),
@@ -1854,8 +1874,15 @@ void main() {
                 // No model nodes — fallback: draw all meshes with identity transform
                 self.draw_all_meshes_fallback(gl, shader, scene, &member_key);
             } else {
-                // Classify nodes into opaque and transparent for proper rendering order
+                // Classify nodes into opaque, cutout, and transparent for proper order.
+                // - opaque (material opacity ≥ 1, no alpha texture): pass 1, depth write.
+                // - cutout (opacity ≥ 1 but the texture carries alpha, e.g. frog01's
+                //   Flash bark/leaf textures): pass 1b, alpha-tested, depth write — so it
+                //   occludes the translucent water planes instead of being sorted behind
+                //   them (the logs were turning blue when they drifted off-centre).
+                // - transparent (opacity < 1, e.g. water2 blend=50): pass 2, back-to-front.
                 let mut transparent_nodes: Vec<(&W3dNode, f32)> = Vec::new(); // (node, distance_to_camera)
+                let mut cutout_nodes: Vec<&W3dNode> = Vec::new();
 
                 // Sort: skybox nodes first so they render before scene geometry
                 let mut sorted_model_nodes: Vec<&W3dNode> = model_nodes.iter().copied().collect();
@@ -1864,6 +1891,7 @@ void main() {
                 });
 
                 // PASS 1: Render opaque geometry (skybox first, then scene)
+                gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
                         if let Some(&vis_mode) = rs.node_visibility.get(&model_node.name) {
@@ -1889,9 +1917,9 @@ void main() {
                             }
                         }
                     }
-                    let has_alpha_tex = self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state);
-                    if opacity < 0.999 || has_alpha_tex {
-                        // Defer to transparent pass — compute distance for sorting
+                    if opacity < 0.999 {
+                        // Genuinely translucent → defer to the transparent pass, sorted
+                        // by camera distance.
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
@@ -1899,8 +1927,26 @@ void main() {
                         transparent_nodes.push((model_node, dx*dx + dy*dy + dz*dz));
                         continue;
                     }
+                    if self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state) {
+                        // Opaque material but alpha-keyed texture → cutout (alpha-tested
+                        // opaque draw); keep depth writes so it occludes translucent water.
+                        cutout_nodes.push(model_node);
+                        continue;
+                    }
 
                     self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
+                }
+
+                // PASS 1b: Cutout geometry — opaque pass with alpha-test discard so
+                // transparent texels write neither colour nor depth (hard edges, but
+                // correct occlusion vs. the translucent water planes).
+                if !cutout_nodes.is_empty() {
+                    gl.depth_mask(true);
+                    gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.5);
+                    for model_node in &cutout_nodes {
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
+                    }
+                    gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 }
 
                 // PASS 2: Render transparent geometry (back-to-front, no depth writes)
@@ -2325,16 +2371,26 @@ void main() {
         };
 
         let mut chain = vec![node_transform];
-        let mut current_parent = &node.parent_name;
+        let mut current_parent = node.parent_name.as_str();
 
-        // Walk up parent chain
-        while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+        // Walk up parent chain. Director node names are case-insensitive, and
+        // get_runtime_transform already looks them up that way — but the parent
+        // NODE lookup must match it. A case-sensitive `==` here fails to find a
+        // parent whose stored name differs in case from the child's parent_name
+        // (cloneModelFromCastmember preserves the SOURCE member's casing for
+        // re-parented sub-nodes), which silently breaks the chain and renders the
+        // node at its raw local transform — e.g. the frog's deep limb hierarchy
+        // (frog→axe→body→lhip→ll→…→lf) collapsing toward the origin.
+        while !current_parent.is_empty()
+            && !current_parent.eq_ignore_ascii_case("world")
+            && current_parent != "<world>"
+        {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
                 let parent_t = runtime_state
                     .and_then(|rs| get_runtime_transform(rs, &parent_node.name))
                     .unwrap_or(parent_node.transform);
                 chain.push(parent_t);
-                current_parent = &parent_node.parent_name;
+                current_parent = parent_node.parent_name.as_str();
             } else {
                 break;
             }
@@ -2491,7 +2547,17 @@ void main() {
 
     /// Get the opacity of a model node's material (for transparency sorting).
     /// Look up a per-model shader override.  Returns the first available:
-    /// mesh-specific index → index 0 fallback → None.
+    /// mesh-specific index → index 0 fallback → lowest set index → None.
+    ///
+    /// The lowest-set-index fallback handles Director's 2-sided #plane idiom:
+    /// a plane has a front (mesh 0) and back (mesh 1) face, and movies texture
+    /// only the face that points at the camera after the model's rotation —
+    /// e.g. frog01's water does `model("water").shaderList[2] = waterS` (1-based
+    /// → index 1) and leaves shaderList[1] unset. Because the water is rotated
+    /// -90° about X, the VISIBLE face is mesh 0, which would otherwise resolve to
+    /// no override and render the default checker. Falling back to any set shader
+    /// puts the intended texture on the visible face. Models that set index 0
+    /// (whole-list assignment) or every index are unaffected.
     fn node_shader_override<'a>(
         rs: &'a crate::player::cast_member::Shockwave3dRuntimeState,
         node_name: &str,
@@ -2500,6 +2566,7 @@ void main() {
         rs.node_shaders.get(node_name).and_then(|m| {
             mesh_idx.and_then(|idx| m.get(&idx))
                 .or_else(|| m.get(&0))
+                .or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v))
         })
     }
 
@@ -3687,6 +3754,24 @@ void main() {
         for binding in &res_info.shader_bindings {
             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
                 candidate_names.push(binding.mesh_bindings[mesh_idx].clone());
+            }
+        }
+
+        // If this mesh slot has no explicit shader, inherit the lowest-indexed
+        // mesh's shader BEFORE falling back to the resource's auto-generated
+        // "<res>_Shader" default. Director's #plane is 2 meshes; a resource that
+        // carries a single shader (e.g. frog01's cloned wheel: shaderList[1]=wheelS)
+        // puts it on mesh 0 only, leaving mesh 1's binding empty. Director shows the
+        // same shader on both faces ([wheelS, wheelS]); without this, dirplayer's
+        // mesh 1 fell back to the default shader (checker/untextured), so the
+        // camera-facing wheel face rendered with no wheel texture → "no wheels".
+        // Mirrors node_shader_override's lowest-index fallback for the resource path.
+        if candidate_names.is_empty() {
+            for binding in &res_info.shader_bindings {
+                if let Some(first) = binding.mesh_bindings.iter().find(|b| !b.is_empty()) {
+                    candidate_names.push(first.clone());
+                    break;
+                }
             }
         }
 

@@ -328,6 +328,19 @@ pub fn datum_equals(
             _ => false
         }),
 
+        // Two W3D scene-object refs (model/group/light/camera/collision/...)
+        // are the same Director object when they point to the same member,
+        // object type and (case-insensitive) name. Without this the catch-all
+        // returns false and `collisionData.modelA = s.model("ft")` — the heart
+        // of every native #collision callback — never matches.
+        (Shockwave3dObjectRef(a), o) | (o, Shockwave3dObjectRef(a)) => Ok(match o {
+            Shockwave3dObjectRef(b) => a.cast_lib == b.cast_lib
+                && a.cast_member == b.cast_member
+                && a.object_type.eq_ignore_ascii_case(&b.object_type)
+                && a.name.eq_ignore_ascii_case(&b.name),
+            _ => false
+        }),
+
         (Media(a), o) | (o, Media(a)) => Ok(match o {
             // TODO: is equality based on value?
             _ => false

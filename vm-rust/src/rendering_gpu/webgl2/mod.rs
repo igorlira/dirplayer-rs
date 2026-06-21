@@ -1087,6 +1087,16 @@ impl WebGL2Renderer {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
             if matches!(member.member_type, CastMemberType::Flash(_)) {
                 blend = 100;
+            } else if matches!(member.member_type, CastMemberType::Shockwave3d(_)) && blend == 0 {
+                // A Shockwave3D member's sprite-level `blend` comes through as 0 when the
+                // score's D6+ "blend enabled" flag (sprite_flags & 0x10) is set over a
+                // junk-default raw byte (255 → convert_raw_blend → 0). blend=0 (fully
+                // transparent) is never intended for the main composited 3D view —
+                // Director renders these opaque (the FinalDrive / HavokCarDemo car movies
+                // came through black). Treat 0 as opaque so the scene shows. Mirrors the
+                // Flash force above (Shockwave's 2D compositor ignores sprite blend on
+                // these special composited members).
+                blend = 100;
             }
         }
 

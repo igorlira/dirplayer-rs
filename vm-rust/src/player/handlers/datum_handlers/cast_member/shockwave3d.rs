@@ -1592,7 +1592,32 @@ impl Shockwave3dMemberHandlers {
                                     if let Some(scene) = w3d.scene_mut() {
                                         match obj_type {
                                             "model" | "group" | "camera" => {
-                                                scene.nodes.retain(|n| !n.name.eq_ignore_ascii_case(&obj_name));
+                                                // Director deleteModel removes the model AND its child
+                                                // subtree. Without that, children added via addChild are
+                                                // orphaned (parent gone) and keep rendering at a fixed
+                                                // local position. frog01 builds an invisible "car1"
+                                                // template with the body (acar) + 4 wheels as children,
+                                                // clones it 16×, then deleteModel("car1") — leaving the
+                                                // original acar behind as a static, misplaced car. The
+                                                // clones (children of car2..car17) are NOT in car1's
+                                                // subtree, so they're unaffected.
+                                                let mut doomed: std::collections::HashSet<String> =
+                                                    std::collections::HashSet::new();
+                                                doomed.insert(obj_name.to_ascii_lowercase());
+                                                let mut changed = true;
+                                                while changed {
+                                                    changed = false;
+                                                    for n in scene.nodes.iter() {
+                                                        let nl = n.name.to_ascii_lowercase();
+                                                        if !doomed.contains(&nl)
+                                                            && doomed.contains(&n.parent_name.to_ascii_lowercase())
+                                                        {
+                                                            doomed.insert(nl);
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                }
+                                                scene.nodes.retain(|n| !doomed.contains(&n.name.to_ascii_lowercase()));
                                             }
                                             "light" => {
                                                 // Lights live in two places: the scene
@@ -1980,6 +2005,56 @@ impl Shockwave3dMemberHandlers {
                                     _ => None,
                                 };
                                 if let Some(src_ref) = source_member_ref {
+                                    // Off-screen Flash → 3D texture (frog01 environment): capture the
+                                    // SWF bytes + native dims so we can kick off a Ruffle render below.
+                                    // The synchronous bitmap path produces None for Flash members.
+                                    let flash_dispatch: Option<(Vec<u8>, u32, u32)> = {
+                                        let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
+                                        match src_member.map(|m| &m.member_type) {
+                                            Some(CastMemberType::Flash(flash)) => {
+                                                let (l, t, r, b) = flash.effective_rect();
+                                                let mut fw = (r - l).max(1) as u32;
+                                                let mut fh = (b - t).max(1) as u32;
+                                                // Director renders a Flash member into the texture at the SWF's OWN
+                                                // stage size, NOT the cast member's display rect. frog01's
+                                                // `front`/`back` banner have a TALL display rect (640×1320) but a
+                                                // WIDE swf stage (≈1320×640); using the rect letterboxed the wide
+                                                // banner into a tall frame → mostly-black. Parse the frame RECT from
+                                                // the (uncompressed FWS) SWF header for the real stage size.
+                                                //
+                                                // Do NOT round to power-of-2: an earlier POT rounding (to match
+                                                // Director's reported 1024×512) DISTORTED other members — the
+                                                // bark/wood log textures came out the wrong size, so the logs looked
+                                                // gappy / "open caps". NPOT textures are fine in WebGL2; keep the raw
+                                                // stage size.
+                                                if flash.data.len() >= 9 && &flash.data[0..3] == b"FWS" {
+                                                    let bits = &flash.data[8..];
+                                                    let mut bitpos = 0usize;
+                                                    let mut read = |n: usize| -> u32 {
+                                                        let mut v = 0u32;
+                                                        for _ in 0..n {
+                                                            let byte = bits.get(bitpos >> 3).copied().unwrap_or(0);
+                                                            v = (v << 1) | ((byte >> (7 - (bitpos & 7))) & 1) as u32;
+                                                            bitpos += 1;
+                                                        }
+                                                        v
+                                                    };
+                                                    let nbits = read(5) as usize;
+                                                    if nbits > 0 && nbits <= 31 {
+                                                        let _xmin = read(nbits);
+                                                        let xmax = read(nbits);
+                                                        let _ymin = read(nbits);
+                                                        let ymax = read(nbits);
+                                                        let w = (xmax / 20).max(1); // twips → px
+                                                        let h = (ymax / 20).max(1);
+                                                        if w > 1 && h > 1 { fw = w; fh = h; }
+                                                    }
+                                                }
+                                                Some((flash.data.clone(), fw, fh))
+                                            }
+                                            _ => None,
+                                        }
+                                    };
                                     let rgba_data = {
                                         let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         src_member.and_then(|m| {
@@ -1990,6 +2065,7 @@ impl Shockwave3dMemberHandlers {
                                                     let h = bmp.height;
                                                     let palettes = player.movie.cast_manager.palettes();
                                                     let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                                    let mut any_opaque = false;
                                                     for y in 0..h as usize {
                                                         for x in 0..w as usize {
                                                             let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
@@ -1998,14 +2074,30 @@ impl Shockwave3dMemberHandlers {
                                                             rgba[idx + 1] = g;
                                                             rgba[idx + 2] = b;
                                                             rgba[idx + 3] = a;
+                                                            if a != 0 { any_opaque = true; }
+                                                        }
+                                                    }
+                                                    // A 32-bit cast bitmap with no real alpha channel (use_alpha
+                                                    // off) or whose alpha bytes are all 0 must render OPAQUE as a
+                                                    // 3D texture — Director ignores texture alpha for #standard
+                                                    // shaders. Without this, frog01's car-colour textures cc2-cc5
+                                                    // (32-bit, alpha 0) made the car bodies fully transparent
+                                                    // (invisible); cc1 happened to have alpha 255 so it showed.
+                                                    if !bmp.use_alpha || !any_opaque {
+                                                        for px in 0..(w as usize) * (h as usize) {
+                                                            rgba[px * 4 + 3] = 255;
                                                         }
                                                     }
                                                     log(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}'",
-                                                        obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name
+                                                        "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}' (forced_opaque={})",
+                                                        obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name,
+                                                        !bmp.use_alpha || !any_opaque
                                                     ));
                                                     Some((w, h, rgba))
                                                 }
+                                                // Flash members are rendered off-screen via Ruffle
+                                                // (flash_dispatch above), not the synchronous bitmap path.
+                                                CastMemberType::Flash(_) => None,
                                                 _ => {
                                                     console_warn!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): member {}:{} '{}' is {} not Bitmap",
@@ -2035,6 +2127,46 @@ impl Shockwave3dMemberHandlers {
                                                 }
                                             }
                                         }
+                                    }
+                                    // Flash source: start an off-screen Ruffle render and route its
+                                    // captured frames into this texture (update_flash_frame consults
+                                    // player.flash_texture_targets). The synthetic sprite number is
+                                    // NEGATIVE so it never collides with an on-stage channel, and
+                                    // deterministic per source member so a movie restart reuses the
+                                    // same Ruffle instance instead of leaking a new one.
+                                    if let Some((swf, fw, fh)) = flash_dispatch {
+                                        let synthetic = {
+                                            let raw = 2000i32
+                                                + src_ref.cast_lib.max(0) * 1000
+                                                + src_ref.cast_member.max(0);
+                                            -(raw.min(30000)) as i16
+                                        };
+                                        player.flash_texture_targets
+                                            .insert(synthetic, (member_ref.clone(), obj_name.clone()));
+                                        // Transparent 1×1 placeholder so the plane isn't the default
+                                        // checker (primitive fallback) until the first Flash frame lands.
+                                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                                if let Some(scene) = w3d.scene_mut() {
+                                                    if !scene.texture_images.contains_key(&obj_name) {
+                                                        let mut ph = Vec::with_capacity(12);
+                                                        ph.extend_from_slice(&1u32.to_le_bytes());
+                                                        ph.extend_from_slice(&1u32.to_le_bytes());
+                                                        ph.extend_from_slice(&[0u8, 0, 0, 0]);
+                                                        scene.texture_images.insert(obj_name.clone(), ph);
+                                                        scene.texture_content_version += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        crate::js_api::JsApi::dispatch_flash_member_loaded(
+                                            synthetic as i32, src_ref.cast_lib, src_ref.cast_member,
+                                            &swf, fw, fh, true,
+                                        );
+                                        log(&format!(
+                                            "[W3D] newTexture(\"{}\"): Flash member {}:{} -> off-screen Ruffle (sprite {}, {}x{})",
+                                            obj_name, src_ref.cast_lib, src_ref.cast_member, synthetic, fw, fh
+                                        ));
                                     }
                                 }
                             } else if tex_type == "fromImageObject" {

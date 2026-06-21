@@ -325,6 +325,13 @@ pub struct DirPlayer {
     /// duplicate `createFlashInstance` calls every frame before the
     /// instance's first pixels arrive.
     pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
+    /// Off-screen Flash members rendered into W3D textures (frog01's environment:
+    /// `newTexture(#fromCastMember, flashMember)`). Keyed by a synthetic NEGATIVE
+    /// sprite number (so it never collides with on-stage positive channels);
+    /// maps to the target W3D cast member + texture name. `update_flash_frame`
+    /// routes captured frames for these synthetic numbers into the named texture
+    /// instead of `flash_frame_buffers`. See `flash_texture_synthetic_id`.
+    pub flash_texture_targets: HashMap<i16, (cast_lib::CastMemberRef, String)>,
     /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
     pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
     pub in_enter_frame: bool,
@@ -532,6 +539,7 @@ impl DirPlayer {
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
+            flash_texture_targets: HashMap::new(),
             w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
             in_prepare_frame: false,
@@ -3489,6 +3497,10 @@ async fn run_movie_init_sequence() {
     // animation_playing — emit/age/move particles using the emitter params + model
     // position set by Lingo (see tick_w3d_particles).
     crate::player::events::tick_w3d_particles().await;
+
+    // Native #collision modifier detection: sweep enabled collision models,
+    // fire each model's setCollisionCallback handler for overlapping pairs.
+    crate::player::events::tick_w3d_collisions().await;
 
     // After prepareFrame behaviors have run (which is where simulate()
     // typically lives), drain any pending PhysX collision reports and

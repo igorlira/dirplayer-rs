@@ -969,6 +969,7 @@ impl MovieHandlers {
         crate::player::events::dispatch_w3d_timer_events().await;
         crate::player::events::tick_w3d_animations().await;
         crate::player::events::tick_w3d_particles().await;
+        crate::player::events::tick_w3d_collisions().await;
         crate::player::events::dispatch_physx_collision_callbacks().await;
 
         reserve_player_mut(|player| {
