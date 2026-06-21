@@ -401,28 +401,23 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
     };
     let doc_version = section1_data.doc_version;
 
-    // Parse text content - can be in Section 2 (possibly multi-chunk) OR Section 3
-    // Each Section 2 chunk represents one line of text. Join them with \r (Director's
-    // Mac-heritage line break character) to restore the original line structure.
-    // Compute chunk boundaries for adjusting character run positions later.
-    // When we join Section 2 chunks with \r, character run positions (which reference
-    // the original concatenated-without-\r text) need to be shifted forward.
-    // Each boundary is the cumulative length of chunks 0..i (without \r separators).
-    let section2_boundaries: Vec<u32> = if section2_texts.len() > 1 {
-        let mut boundaries = Vec::with_capacity(section2_texts.len() - 1);
-        let mut cumulative = 0u32;
-        for chunk_text in &section2_texts[..section2_texts.len() - 1] {
-            cumulative += chunk_text.len() as u32;
-            boundaries.push(cumulative);
-        }
-        boundaries
-    } else {
-        Vec::new()
-    };
+    // Parse text content - can be in Section 2 (possibly multi-chunk) OR Section 3.
+    // Section 0x0002 stores the text as one or more *byte-block* chunks (each block
+    // is `len,<bytes>\x03`, filled up to a size limit) — NOT one-line-per-chunk. The
+    // chunk bodies already contain their embedded \r line breaks (parse_section_3
+    // preserves them), so the full text is the byte-for-byte CONCATENATION of the
+    // chunk bodies. The previous code joined with "\r", which inserted a phantom
+    // line break at every chunk boundary: e.g. Rasterwerks' NAV.dm_acheron_bluffs
+    // nav-net (3 chunks) gained 2 empty lines, shifting every nav node after a
+    // boundary (node[44] read node 43's data, node[97] read node 95's) and breaking
+    // bot pathing. Because we concatenate without inserting separators, the Section 7
+    // character-run positions (which already reference the concatenated-without-\r
+    // text) line up as-is — so there are no boundaries to shift.
+    let section2_boundaries: Vec<u32> = Vec::new();
 
     let text_data = if !section2_texts.is_empty() {
         debug!("Found text in Section 2 ({} chunk(s))", section2_texts.len());
-        Section3Data { text: section2_texts.join("\r") }
+        Section3Data { text: section2_texts.concat() }
     } else if let Some(section3) = sections.get(&0x0003) {
         debug!("Found text in Section 3");
         parse_section_3(section3)?
