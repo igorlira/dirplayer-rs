@@ -3025,7 +3025,7 @@ impl Shockwave3dObjectDatumHandlers {
                             // Fall back to mesh-triangle intersection
                             if let Some(hit) = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, 1,
-                                Some(&runtime_state.node_transforms), None,
+                                Some(&runtime_state.node_transforms), None, None,
                             ).into_iter().next() {
                                 debug!(
                                     "[modelUnderLoc] MESH HIT '{}'", hit.model_name
@@ -3103,7 +3103,7 @@ impl Shockwave3dObjectDatumHandlers {
                             let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_world);
                             let hits = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, max_models,
-                                Some(&node_transforms), Some(&excluded),
+                                Some(&node_transforms), Some(&excluded), None,
                             );
 
                             if !hits.is_empty() {

@@ -2463,10 +2463,55 @@ impl Shockwave3dMemberHandlers {
                     }
                     let origin = player.get_datum(&args[0]).to_vector()?;
                     let direction = player.get_datum(&args[1]).to_vector()?;
-                    let max_models = if args.len() > 2 { player.get_datum(&args[2]).int_value().unwrap_or(100) } else { 100 };
-                    let detailed = if args.len() > 3 {
-                        player.get_datum(&args[3]).string_value().unwrap_or_default() == "detailed"
-                    } else { false };
+
+                    // Director's modelsUnderRay accepts EITHER the positional form
+                    //   (loc, dir, maxNumber, #detailed [, modelList])
+                    // OR the documented options-list form (Director 11.5 dictionary)
+                    //   (loc, dir, optionsList)
+                    // where optionsList is a property list with #maxNumberOfModels,
+                    // #levelOfDetail (#simple default / #detailed), #modelList and
+                    // #maxDistance. Rasterwerks' C_MissilePhysics uses the proplist form;
+                    // parsing it as a positional int silently dropped #modelList/#detailed,
+                    // so missiles hit the firer's own proxy/walls -> bots shot themselves.
+                    use crate::player::handlers::datum_handlers::prop_list::PropListUtils;
+                    let mut max_models: i32 = 100;
+                    let mut detailed = false;
+                    let mut max_dist: f32 = 100000.0;
+                    // #modelList: a list of model REFERENCES to restrict the cast to. An
+                    // empty/absent list means "no restriction" (test all), matching the
+                    // dictionary's "if omitted, all models" wording.
+                    let mut model_whitelist: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                    let is_proplist = args.len() > 2 && matches!(player.get_datum(&args[2]), Datum::PropList(..));
+                    if is_proplist {
+                        let map = player.get_datum(&args[2]).to_map()?.clone();
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxNumberOfModels".to_owned()), &player.allocator)?;
+                        if let Ok(n) = player.get_datum(&v).int_value() { max_models = n; }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("levelOfDetail".to_owned()), &player.allocator)?;
+                        if player.get_datum(&v).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed") { detailed = true; }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxDistance".to_owned()), &player.allocator)?;
+                        match player.get_datum(&v) {
+                            Datum::Int(i) => max_dist = *i as f32,
+                            Datum::Float(f) => max_dist = *f as f32,
+                            _ => {}
+                        }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("modelList".to_owned()), &player.allocator)?;
+                        let items = match player.get_datum(&v) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                        for item in &items {
+                            if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                        }
+                    } else {
+                        if args.len() > 2 { max_models = player.get_datum(&args[2]).int_value().unwrap_or(100); }
+                        if args.len() > 3 { detailed = player.get_datum(&args[3]).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed"); }
+                        // Optional positional #modelList at args[4].
+                        if args.len() > 4 {
+                            let items = match player.get_datum(&args[4]) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                            for item in &items {
+                                if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                            }
+                        }
+                    }
+                    if max_models <= 0 { max_models = 100; }
 
                     let scene = {
                         let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -2534,10 +2579,12 @@ impl Shockwave3dMemberHandlers {
                             direction: norm_dir,
                         };
                         let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
+                        let included_ref = if model_whitelist.is_empty() { None } else { Some(&model_whitelist) };
                         let hits = raycast_scene_multi(
-                            &ray, &scene, 100000.0, max_models as usize,
+                            &ray, &scene, max_dist, max_models as usize,
                             node_transforms.as_ref(),
                             excluded_ref,
+                            included_ref,
                         );
                         for hit in &hits {
                             if detailed {
