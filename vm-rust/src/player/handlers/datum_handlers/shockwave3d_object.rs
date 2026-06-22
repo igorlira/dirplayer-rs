@@ -292,7 +292,7 @@ impl Shockwave3dObjectDatumHandlers {
                             .and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| {
                                 let scene = w3d.parsed_scene.as_ref()?;
-                                let skeleton = scene.skeletons.first()?;
+                                let skeleton = find_skeleton_for_model(scene, model_name)?;
                                 if bone_idx >= skeleton.bones.len() { return None; }
                                 let motion = w3d.runtime_state.current_motion.as_deref()
                                     .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
@@ -329,7 +329,7 @@ impl Shockwave3dObjectDatumHandlers {
                             .and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| {
                                 let scene = w3d.parsed_scene.as_ref()?;
-                                let skeleton = scene.skeletons.first()?;
+                                let skeleton = find_skeleton_for_model(scene, model_name)?;
                                 if bone_idx >= skeleton.bones.len() { return None; }
                                 let motion = w3d.runtime_state.current_motion.as_deref()
                                     .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
@@ -351,7 +351,7 @@ impl Shockwave3dObjectDatumHandlers {
                         let name = player.movie.cast_manager.find_member_by_ref(member_ref)
                             .and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| w3d.parsed_scene.as_ref())
-                            .and_then(|s| s.skeletons.first())
+                            .and_then(|s| find_skeleton_for_model(s, model_name))
                             .and_then(|skel| skel.bones.get(bone_idx))
                             .map(|b| b.name.clone())
                             .unwrap_or_else(|| format!("bone_{}", bone_idx));
@@ -4425,6 +4425,13 @@ impl Shockwave3dObjectDatumHandlers {
                             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count(),
                             "motion" => scene.motions.len(),
                             "modelResource" => scene.model_resources.len(),
+                            "bone" => {
+                                // bonesPlayer.bone.count / resource.bone.count — the
+                                // owning model's (or resource's) skeleton bone count.
+                                find_skeleton_for_model(&scene, &s3d_ref.name)
+                                    .map(|s| s.bones.len())
+                                    .unwrap_or(0)
+                            }
                             "playList" => {
                                 // Director's playList includes the currently playing motion
                                 // as entry [1], then the queued motions.
@@ -4886,6 +4893,36 @@ impl Shockwave3dObjectDatumHandlers {
 
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(model_name.to_string()))),
+            "bone.count" | "boneCount" => {
+                let count = find_skeleton_for_model(scene, model_name)
+                    .map(|s| s.bones.len()).unwrap_or(0);
+                Ok(player.alloc_datum(Datum::Int(count as i32)))
+            },
+            "bone" => {
+                // bonesPlayer.bone — return a LIST of bone refs (one per skeleton bone),
+                // so `bone.count` and `bone[i]` (and `bone[i].worldTransform`) work from
+                // the console/Lingo. Lingo `bone[1]` → items[0] → the root bone, matching
+                // both Director and the compiled indexed path. The skeleton is resolved by
+                // the model's OWN resource (each cloned bot has its own skeleton), fixing
+                // the previous `bonesPlayer.bone` = VOID / `bone.count` = 0 for clones.
+                let count = find_skeleton_for_model(scene, model_name)
+                    .map(|s| s.bones.len())
+                    .unwrap_or(0);
+                let mut items = VecDeque::new();
+                for i in 0..count {
+                    items.push_back(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                        crate::director::lingo::datum::Shockwave3dObjectRef {
+                            cast_lib: member_ref.cast_lib,
+                            cast_member: member_ref.cast_member,
+                            object_type: "bone".to_string(),
+                            name: format!("{}:{}", model_name, i),
+                        },
+                    )));
+                }
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List, items, false,
+                )))
+            },
             "collision" => {
                 // model.collision — returns the #collision modifier object if one
                 // was added via addModifier(#collision), else VOID (Director).
@@ -6257,6 +6294,39 @@ fn get_member_default_rect_size(
         }
     }
     (320.0, 240.0)
+}
+
+/// Resolve the skeleton that belongs to a model node, by its resource name — the same
+/// match `setup_skinning_for_resource` uses for the renderer. Falls back to a skeleton
+/// named after the model itself, then to the first skeleton (single-skeleton scenes).
+///
+/// Fixes `bone[]` / `bone.count` / `resource.bone.count` for CLONED skinned models:
+/// Rasterwerks spawns many bots, each a clone with its OWN cloned skeleton, so the old
+/// `scene.skeletons.first()` returned the wrong (or original) skeleton and bone access
+/// failed (`resource.bone.count = 0`). `model_or_resource_name` may be a model NODE name
+/// (bonesPlayer.bone…) or a resource name (resource.bone…); both resolve here.
+fn find_skeleton_for_model<'a>(
+    scene: &'a crate::director::chunks::w3d::types::W3dScene,
+    model_or_resource_name: &str,
+) -> Option<&'a crate::director::chunks::w3d::types::W3dSkeleton> {
+    // Model node → its resource → skeleton named after that resource.
+    if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(model_or_resource_name)) {
+        let res = if !node.model_resource_name.is_empty() {
+            node.model_resource_name.as_str()
+        } else {
+            node.resource_name.as_str()
+        };
+        if !res.is_empty() {
+            if let Some(sk) = scene.skeletons.iter().find(|s| s.name.eq_ignore_ascii_case(res)) {
+                return Some(sk);
+            }
+        }
+    }
+    // Direct name match (resource.bone… passes the resource name, which IS the skeleton name).
+    if let Some(sk) = scene.skeletons.iter().find(|s| s.name.eq_ignore_ascii_case(model_or_resource_name)) {
+        return Some(sk);
+    }
+    scene.skeletons.first()
 }
 
 fn get_node_transform(
