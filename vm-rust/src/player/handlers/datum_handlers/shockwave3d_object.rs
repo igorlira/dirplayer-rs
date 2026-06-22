@@ -2414,23 +2414,19 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                                 // else: #synchronized — keep current relative position
                             } else {
-                                // No args. Director docs (§Methods, play()):
-                                // resumes a paused motion. But if nothing is current
-                                // and playList[1] is queued, Director's playList
-                                // semantics implicitly treat playList[1] as the
-                                // active motion (queue() into an empty list begins
-                                // playback). ClubMarian + Coke Studios both rely on
-                                //   bonesPlayer.queue(name, ...) ; bonesPlayer.play()
-                                // — without this branch, current_motion stayed None
-                                // and the renderer evaluated no tracks (avatar T-pose).
-                                // We READ queue[0] but do NOT pop — Director's
-                                // playList includes the current motion at index 1,
-                                // and the script's `if playList.count < 1` gate
-                                // assumes that. Popping would make the script
-                                // re-queue every frame.
+                                // No args: Director's play() resumes a paused motion.
+                                // If nothing is current but a motion is queued (the
+                                // ClubMarian / Coke Studios pattern `queue(name); play()`),
+                                // PROMOTE queue[0] to the current motion. dirplayer models
+                                // the playList as `[current_motion] ++ motion_queue`, so we
+                                // POP queue[0] when promoting (otherwise the playList getter,
+                                // which prepends current_motion, would show it twice). The
+                                // script's `if playList.count < 1` gate still sees count 1
+                                // (the now-current motion), so it does not re-queue.
                                 if w3d.runtime_state.current_motion.is_some() {
                                     w3d.runtime_state.animation_playing = true;
-                                } else if let Some(q) = w3d.runtime_state.motion_queue.first().cloned() {
+                                } else if !w3d.runtime_state.motion_queue.is_empty() {
+                                    let q = w3d.runtime_state.motion_queue.remove(0);
                                     w3d.runtime_state.current_motion = Some(q.name);
                                     w3d.runtime_state.animation_playing = true;
                                     w3d.runtime_state.animation_loop = q.looped;
@@ -2447,7 +2443,8 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
-                "playNext" | "queue" => {
+                "queue" => {
+                    // queue(name,...) — add the motion to the END of the playList.
                     if !args.is_empty() {
                         let motion_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
                         let is_loop = args.get(1).map(|a| player.get_datum(a).int_value().unwrap_or(0) != 0).unwrap_or(false);
@@ -2471,20 +2468,62 @@ impl Shockwave3dObjectDatumHandlers {
                         };
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                if handler_name.eq_ignore_ascii_case("playNext") {
-                                    w3d.runtime_state.motion_queue.insert(0, queued);
-                                } else {
-                                    w3d.runtime_state.motion_queue.push(queued);
-                                }
+                                w3d.runtime_state.motion_queue.push(queued);
+                            }
+                        }
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
+                "playNext" => {
+                    // playNext() — Director: interrupt and REMOVE the currently playing
+                    // motion (playList[1]) and begin the next one (playList[2]). dirplayer's
+                    // playList is `[current_motion] ++ motion_queue`, so drop current_motion
+                    // and promote motion_queue[0]. (Was previously a no-op for the no-arg
+                    // form, so scripts that do `queue(x); playNext()` — e.g. Rasterwerks
+                    // C_BonesControl — never drained the queue; it accumulated until
+                    // TrimPlayList()/removeLast() deleted the pile.)
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            let rs = &mut w3d.runtime_state;
+                            // Blend out of the interrupted motion if autoBlend/blendTime set.
+                            if rs.current_motion.is_some() && rs.animation_blend_time > 0.0 {
+                                rs.previous_motion = rs.current_motion.clone();
+                                rs.blend_duration = rs.animation_blend_time / 1000.0;
+                                rs.blend_elapsed = 0.0;
+                                rs.blend_weight = 0.0;
+                            } else {
+                                rs.previous_motion = None;
+                                rs.blend_weight = 1.0;
+                            }
+                            if !rs.motion_queue.is_empty() {
+                                let q = rs.motion_queue.remove(0);
+                                rs.current_motion = Some(q.name);
+                                rs.animation_loop = q.looped;
+                                rs.animation_start_time = q.start_time;
+                                rs.animation_end_time = q.end_time;
+                                rs.animation_scale = q.scale;
+                                rs.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                                rs.animation_playing = true;
+                                rs.motion_ended = false;
+                            } else {
+                                // Nothing left to play.
+                                rs.current_motion = None;
+                                rs.animation_playing = false;
                             }
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "removeLast" => {
+                    // removeLast() — remove the LAST entry of the playList. The playList is
+                    // `[current_motion] ++ motion_queue`, so drop the queue's tail; if the
+                    // queue is empty the last (and only) entry is the current motion itself.
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.motion_queue.pop();
+                            if w3d.runtime_state.motion_queue.pop().is_none() {
+                                w3d.runtime_state.current_motion = None;
+                                w3d.runtime_state.animation_playing = false;
+                            }
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
@@ -4387,9 +4426,14 @@ impl Shockwave3dObjectDatumHandlers {
                             "motion" => scene.motions.len(),
                             "modelResource" => scene.model_resources.len(),
                             "playList" => {
+                                // Director's playList includes the currently playing motion
+                                // as entry [1], then the queued motions.
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 member.and_then(|m| m.member_type.as_shockwave3d())
-                                    .map(|w3d| w3d.runtime_state.motion_queue.len())
+                                    .map(|w3d| {
+                                        (if w3d.runtime_state.current_motion.is_some() { 1 } else { 0 })
+                                            + w3d.runtime_state.motion_queue.len()
+                                    })
                                     .unwrap_or(0)
                             }
                             "overlay" | "backdrop" => {
@@ -5217,10 +5261,29 @@ impl Shockwave3dObjectDatumHandlers {
                 )))
             },
             "playList" => {
-                // bonesPlayer.playList — list of queued motions as property lists
+                // bonesPlayer.playList — list of motions as property lists. Director's
+                // playList includes the CURRENTLY PLAYING motion as entry [1], then the
+                // queued motions. dirplayer stores current_motion separately from
+                // motion_queue, so prepend it here so playList[1] is the active motion
+                // (the C_BonesControl `playList[1].name` / `.count` checks rely on this).
                 let queue = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.motion_queue.clone())
+                    .map(|w3d| {
+                        let rs = &w3d.runtime_state;
+                        let mut list: Vec<crate::player::cast_member::QueuedMotion> = Vec::new();
+                        if let Some(ref name) = rs.current_motion {
+                            list.push(crate::player::cast_member::QueuedMotion {
+                                name: name.clone(),
+                                looped: rs.animation_loop,
+                                start_time: rs.animation_start_time,
+                                end_time: rs.animation_end_time,
+                                scale: rs.animation_scale,
+                                offset: rs.animation_time,
+                            });
+                        }
+                        list.extend(rs.motion_queue.iter().cloned());
+                        list
+                    })
                     .unwrap_or_default();
                 let mut items: VecDeque<DatumRef> = VecDeque::new();
                 for qm in &queue {
