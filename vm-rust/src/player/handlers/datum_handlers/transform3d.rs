@@ -52,9 +52,15 @@ impl Transform3dDatumHandlers {
                 let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
                 Ok(Datum::Vector([sx, sy, sz]))
             }
-            "xAxis" => Ok(Datum::Vector([m[0], m[1], m[2]])),
-            "yAxis" => Ok(Datum::Vector([m[4], m[5], m[6]])),
-            "zAxis" => Ok(Datum::Vector([m[8], m[9], m[10]])),
+            // Director returns the rotation basis as UNIT vectors (scale removed).
+            // A scaled node must still report unit axes — e.g. Rasterwerks' actor-model
+            // group is scaled ~1.06, and the bot's turn convergence does
+            // `targetZaxis.angleBetween(model.transform.zAxis)`; a non-unit zAxis skews
+            // that angle so the body settles facing the wrong way. (The control node is
+            // unit-scaled, which is why movement was correct but the visible model wasn't.)
+            "xAxis" => Ok(Datum::Vector(normalize_vec3([m[0], m[1], m[2]]))),
+            "yAxis" => Ok(Datum::Vector(normalize_vec3([m[4], m[5], m[6]]))),
+            "zAxis" => Ok(Datum::Vector(normalize_vec3([m[8], m[9], m[10]]))),
             "axisAngle" => {
                 // Extract axis-angle from the rotation part of the matrix
                 let (axis, angle) = matrix_to_axis_angle(&m);
@@ -518,6 +524,16 @@ fn translation_matrix(tx: f64, ty: f64, tz: f64) -> [f64; 16] {
         0.0, 0.0, 1.0, 0.0,
         tx,  ty,  tz,  1.0,
     ]
+}
+
+/// Normalize a 3-vector to unit length (returns the input unchanged if ~zero).
+fn normalize_vec3(v: [f64; 3]) -> [f64; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 1e-10 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        v
+    }
 }
 
 /// Euler angles to column-major rotation matrix (R = Rz * Ry * Rx)
