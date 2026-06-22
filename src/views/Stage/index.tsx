@@ -39,6 +39,21 @@ import styles from "./styles.module.css";
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
 
+// setPointerCapture throws InvalidStateError while the Pointer Lock API owns the
+// pointer (FPS aim mode, e.g. Rasterwerks: the first click calls
+// requestPointerLock). Capture is also pointless once locked — pointer events
+// route to the locked element regardless. So skip it when locked, and keep the
+// call best-effort so a capture failure can never abort the rest of the handler
+// (the click that follows is what dispatches mouse_down → shooting to the VM).
+function safeSetPointerCapture(el: HTMLElement, pointerId: number) {
+  if (document.pointerLockElement) return;
+  try {
+    el.setPointerCapture(pointerId);
+  } catch {
+    /* non-essential: pointer capture is best-effort */
+  }
+}
+
 // Snap the CSS scale so that (cssScale × devicePixelRatio) is an integer,
 // guaranteeing one physical-pixel-wide columns/rows per canvas pixel.
 // At 125% Windows DPI (DPR=1.25), scale=1.0 would give 1.25 physical pixels
@@ -549,14 +564,14 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       e.preventDefault();
       const p = pointerOuterPos(e);
       middlePanRef.current = { startPointer: p, startPan: panRef.current };
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      safeSetPointerCapture(e.currentTarget as HTMLElement, e.pointerId);
       setIsMiddlePanning(true);
       return;
     }
 
     const p = pointerOuterPos(e);
     activePointersRef.current.set(e.pointerId, p);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    safeSetPointerCapture(e.currentTarget as HTMLElement, e.pointerId);
 
     if (enableGestures && activePointersRef.current.size >= 2) {
       // Entering a multi-touch gesture. If a single-finger interaction was in
