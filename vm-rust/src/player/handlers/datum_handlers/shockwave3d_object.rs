@@ -6882,16 +6882,11 @@ fn apply_point_at(
             .copied()
     };
 
-    let m = get_or_init_node_transform(player, member_ref, node_name);
+    // Ensure the node has a runtime transform entry (side effect of get_or_init).
+    let _ = get_or_init_node_transform(player, member_ref, node_name);
     // Use WORLD position for direction computation (target is in world coordinates)
     let world_pos = get_world_position(player, member_ref, node_name);
     let pos_w = [world_pos[0] as f32, world_pos[1] as f32, world_pos[2] as f32];
-    // Local position preserved for the output matrix
-    let local_pos = [
-        if m[12].is_finite() { m[12] } else { 0.0 },
-        if m[13].is_finite() { m[13] } else { 0.0 },
-        if m[14].is_finite() { m[14] } else { 0.0 },
-    ];
 
     if !tx.is_finite() || !ty.is_finite() || !tz.is_finite() { return; }
 
@@ -6931,6 +6926,37 @@ fn apply_point_at(
         if l > 1e-6 { [v[0]/l, v[1]/l, v[2]/l] } else { v }
     };
 
+    // pointAt orients the node in WORLD space, but set_node_transform stores the
+    // node's LOCAL transform (re-accumulated up the parent chain by
+    // getWorldTransform / worldPosition). Convert the world-space look-at into the
+    // parent's frame so a node with a non-identity parent — e.g. an aim/muzzle
+    // group parented to a view-rotated weapon model (Rasterwerks PlayerAimUtil) —
+    // aims correctly. For a node at the world root this is a strict no-op.
+    let parent_world = {
+        let parent_name = player.movie.cast_manager.find_member_by_ref(member_ref)
+            .and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w| w.parsed_scene.as_ref())
+            .and_then(|s| s.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(node_name)))
+            .map(|n| n.parent_name.clone())
+            .unwrap_or_default();
+        if parent_name.is_empty() || parent_name.eq_ignore_ascii_case("World") {
+            IDENTITY
+        } else {
+            node_world_transform(player, member_ref, &parent_name)
+        }
+    };
+    let inv_parent = invert_transform_f32(&parent_world);
+    // world_mat carries the look-at rotation + the node's WORLD position; converting
+    // by inverse(parent) yields the LOCAL transform (and restores the local position,
+    // since inverse(parent)·pos_w == local_pos), so pointAt never moves the node.
+    let to_local = |world_mat: [f32; 16]| -> [f32; 16] {
+        if inv_parent.iter().all(|v| v.is_finite()) {
+            mat4_mul_f32(&inv_parent, &world_mat)
+        } else {
+            world_mat
+        }
+    };
+
     if let Some((front_axis, up_axis)) = custom_orientation {
         // Custom pointAtOrientation: map the specified local axes to world directions.
         // front_axis defines which local axis points toward the target.
@@ -6961,18 +6987,18 @@ fn apply_point_at(
             -front_sign * up_sign
         };
 
-        let mut result = [0.0f32; 16];
-        result[front_col * 4 + 0] = fwd[0] * front_sign;
-        result[front_col * 4 + 1] = fwd[1] * front_sign;
-        result[front_col * 4 + 2] = fwd[2] * front_sign;
-        result[up_col * 4 + 0] = up_world[0] * up_sign;
-        result[up_col * 4 + 1] = up_world[1] * up_sign;
-        result[up_col * 4 + 2] = up_world[2] * up_sign;
-        result[right_col * 4 + 0] = right_world[0] * right_sign;
-        result[right_col * 4 + 1] = right_world[1] * right_sign;
-        result[right_col * 4 + 2] = right_world[2] * right_sign;
-        result[12] = local_pos[0]; result[13] = local_pos[1]; result[14] = local_pos[2]; result[15] = 1.0;
-        set_node_transform(player, member_ref, node_name, result);
+        let mut world_mat = [0.0f32; 16];
+        world_mat[front_col * 4 + 0] = fwd[0] * front_sign;
+        world_mat[front_col * 4 + 1] = fwd[1] * front_sign;
+        world_mat[front_col * 4 + 2] = fwd[2] * front_sign;
+        world_mat[up_col * 4 + 0] = up_world[0] * up_sign;
+        world_mat[up_col * 4 + 1] = up_world[1] * up_sign;
+        world_mat[up_col * 4 + 2] = up_world[2] * up_sign;
+        world_mat[right_col * 4 + 0] = right_world[0] * right_sign;
+        world_mat[right_col * 4 + 1] = right_world[1] * right_sign;
+        world_mat[right_col * 4 + 2] = right_world[2] * right_sign;
+        world_mat[12] = pos_w[0]; world_mat[13] = pos_w[1]; world_mat[14] = pos_w[2]; world_mat[15] = 1.0;
+        set_node_transform(player, member_ref, node_name, to_local(world_mat));
     } else {
         // Default orientation: -Z toward target, Y up (standard look-at convention).
         // This matches the working camera behavior where cameras look along -Z.
@@ -6980,13 +7006,13 @@ fn apply_point_at(
         let right = normalize(cross(up_hint, neg_fwd));
         let up2 = normalize(cross(neg_fwd, right));
 
-        let result = [
+        let world_mat = [
             right[0],   right[1],   right[2],   0.0,
             up2[0],     up2[1],     up2[2],     0.0,
             neg_fwd[0], neg_fwd[1], neg_fwd[2], 0.0,
-            local_pos[0], local_pos[1], local_pos[2], 1.0,
+            pos_w[0],   pos_w[1],   pos_w[2],   1.0,
         ];
-        set_node_transform(player, member_ref, node_name, result);
+        set_node_transform(player, member_ref, node_name, to_local(world_mat));
     }
 }
 
