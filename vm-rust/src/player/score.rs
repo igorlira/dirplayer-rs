@@ -65,6 +65,14 @@ extern "C" {
     /// looping animations under each label) use `dirplayer_ruffleGoToFrame`.
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop")]
     fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str);
+    /// Classify what's under a sprite-local point in the SWF, mirroring
+    /// Director's Flash `sprite.hitTest()`: 0 = #background, 1 = #normal,
+    /// 2 = #button, 3 = #editText. The fork injects a synthetic MouseMove at
+    /// the point (the offscreen player gets no real motion) then reads the
+    /// resolved cursor + a stage shape pick. Drives `mouseOverButton`
+    /// (== #button) — no dependency on continuous mouse routing.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
 }
 
 #[derive(Clone, Debug)]
@@ -3514,7 +3522,31 @@ pub fn sprite_get_prop(
         "broadcastProps" => Ok(datum_bool(false)),
         "linked" => Ok(datum_bool(false)),
         "posterFrame" => Ok(Datum::Int(1)),
-        "mouseOverButton" => Ok(datum_bool(false)),
+        "mouseOverButton" => {
+            // Flash sprite property: TRUE when the mouse pointer is over a
+            // button within the SWF, FALSE when outside the sprite or over a
+            // non-button object (e.g. the background). Per the Director
+            // dictionary this is exactly `hitTest(mouseLoc) = #button`, so we
+            // reuse the Flash hit-test classifier (2 == #button). Splat's
+            // titleJump gates `on mouseDown ... go(6)` on
+            // `sprite(3).mouseOverButton = 1`; a constant FALSE left the Flash
+            // start button dead.
+            //
+            // The offscreen Ruffle player never sees real mouse motion (we only
+            // capture its frames and forward clicks), so the classifier itself
+            // injects a synthetic MouseMove at this point before reading the
+            // resolved cursor — no dependency on continuous mouse routing. We
+            // pass sprite-local pixels (mouseLoc minus the sprite's top-left).
+            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+                let rect = get_sprite_rect_in_context(player, sprite_id);
+                let (mx, my) = player.mouse_loc;
+                let lx = (mx - rect.0 as i32) as f64;
+                let ly = (my - rect.1 as i32) as f64;
+                Ok(datum_bool(ruffle_hit_test(sprite_id as i32, lx, ly) == 2))
+            } else {
+                Ok(datum_bool(false))
+            }
+        }
         "viewScale" => Ok(Datum::Float(100.0)),
         "originMode" => Ok(Datum::Int(0)),
         "originH" | "originV" => Ok(Datum::Int(0)),

@@ -10,7 +10,7 @@ use crate::player::{
     reserve_player_mut, reserve_player_ref,
     script::{script_get_prop, script_set_prop},
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
-    score::get_concrete_sprite_rect,
+    score::{get_concrete_sprite_rect, get_sprite_rect_in_context},
 };
 
 use super::script_instance::ScriptInstanceUtils;
@@ -47,8 +47,10 @@ extern "C" {
     fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
     fn ruffle_call_function(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+    /// Classify what's under a sprite-local point: 0 = #background,
+    /// 1 = #normal, 2 = #button, 3 = #editText (Director Flash hitTest values).
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
@@ -724,11 +726,39 @@ impl SpriteDatumHandlers {
             }
             "hittest" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let x = reserve_player_ref(|player| player.get_datum(&args[0]).int_value())?;
-                    let y = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
-                    let result = ruffle_hit_test(sn, x as f64, y as f64);
+                    // Director's `sprite.hitTest(point)` takes a *stage* point
+                    // (e.g. `sprite(5).hitTest(_mouse.mouseLoc)`). Accept a
+                    // Point datum, or a legacy two-int (x, y) form. Rebase to
+                    // sprite-local pixels (the classifier's coordinate space)
+                    // by subtracting the sprite's top-left.
+                    let (sx, sy) = reserve_player_ref(|player| -> Result<(i32, i32), ScriptError> {
+                        match player.get_datum(&args[0]) {
+                            Datum::Point([px, py], _) => Ok((*px as i32, *py as i32)),
+                            other => {
+                                let x = other.int_value()?;
+                                let y = if let Some(a) = args.get(1) {
+                                    player.get_datum(a).int_value()?
+                                } else {
+                                    0
+                                };
+                                Ok((x, y))
+                            }
+                        }
+                    })?;
+                    let rect = reserve_player_ref(|player| {
+                        get_sprite_rect_in_context(player, sn as i16)
+                    });
+                    let lx = (sx - rect.0 as i32) as f64;
+                    let ly = (sy - rect.1 as i32) as f64;
+                    // 0 = #background, 1 = #normal, 2 = #button, 3 = #editText.
+                    let symbol = match ruffle_hit_test(sn, lx, ly) {
+                        2 => "button",
+                        3 => "editText",
+                        1 => "normal",
+                        _ => "background",
+                    };
                     return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+                        Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
                     });
                 }
                 Ok(DatumRef::Void)

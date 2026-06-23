@@ -114,11 +114,18 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
 };
 
 // Monkey-patch HTMLCanvasElement.getContext to force preserveDrawingBuffer: true
-// for all WebGL contexts. This is needed so we can read pixels back from Ruffle's
+// for WebGL contexts. This is needed so we can read pixels back from Ruffle's
 // wgpu-webgl canvas after the frame is presented.
+//
+// EXCEPTION: dirplayer's own stage canvas is marked with `data-dp-stage` (set in
+// Rust before it requests its WebGL2 context). preserveDrawingBuffer keeps a full
+// extra drawing buffer alive — pointless for the stage (we never read it back via
+// this path) and it raises GPU memory, which makes the browser more likely to
+// drop the stage context when the tab is backgrounded. So skip the stage canvas.
 const origGetContext = HTMLCanvasElement.prototype.getContext;
 (HTMLCanvasElement.prototype as any).getContext = function(type: string, attrs?: any) {
-  if (type === 'webgl' || type === 'webgl2') {
+  const isStage = (this as HTMLElement)?.getAttribute?.('data-dp-stage') === '1';
+  if ((type === 'webgl' || type === 'webgl2') && !isStage) {
     attrs = { ...(attrs || {}), preserveDrawingBuffer: true };
   }
   return origGetContext.call(this, type, attrs);
@@ -612,28 +619,56 @@ function startFrameCapture(key: string): void {
   const instance = instances.get(key);
   if (!instance) return;
 
+  // Off-screen Flash members used as 3D textures use a NEGATIVE synthetic
+  // sprite number (dispatched by the Rust newTexture path). These are STATIC
+  // textures, so capturing every frame would run one expensive getImageData
+  // GPU→CPU readback per texture per frame — with ~10 of them (frog01's
+  // environment + wheels) that tanks the frame rate. Instead, capture a few
+  // throttled frames to let the SWF paint, then STOP the readback loop and
+  // pause the player. The last captured frame stays in the GPU texture.
+  const isOffscreenTexture = instance.spriteNum < 0;
+  let rafCount = 0;
+  let textureCaptures = 0;
+  const TEX_CAPTURE_INTERVAL = 10; // every Nth RAF
+  const TEX_CAPTURE_LIMIT = 10;    // ~10 captures (~1.7s) then stop
+
   function captureFrame() {
     const inst = instances.get(key);
     if (!inst || !inst.canvas) return;
 
-    try {
-      const canvas = inst.canvas;
-      const width = canvas.width;
-      const height = canvas.height;
+    rafCount++;
+    // On-stage sprites capture every frame (they animate). Off-screen
+    // textures only capture on the throttled interval.
+    const doCapture = !isOffscreenTexture || (rafCount % TEX_CAPTURE_INTERVAL === 0);
 
-      if (width > 0 && height > 0) {
-        const offscreen = document.createElement('canvas');
-        offscreen.width = width;
-        offscreen.height = height;
-        const offCtx = offscreen.getContext('2d');
-        if (offCtx) {
-          offCtx.drawImage(canvas, 0, 0);
-          const imageData = offCtx.getImageData(0, 0, width, height);
-          update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
+    if (doCapture) {
+      try {
+        const canvas = inst.canvas;
+        const width = canvas.width;
+        const height = canvas.height;
+
+        if (width > 0 && height > 0) {
+          const offscreen = document.createElement('canvas');
+          offscreen.width = width;
+          offscreen.height = height;
+          const offCtx = offscreen.getContext('2d');
+          if (offCtx) {
+            offCtx.drawImage(canvas, 0, 0);
+            const imageData = offCtx.getImageData(0, 0, width, height);
+            update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
+          }
         }
+      } catch (e) {
+        // Silently ignore frame capture errors
       }
-    } catch (e) {
-      // Silently ignore frame capture errors
+
+      if (isOffscreenTexture && ++textureCaptures >= TEX_CAPTURE_LIMIT) {
+        // Static texture fully captured — stop the readback loop and pause
+        // the player so it stops consuming CPU every frame.
+        inst.animFrameId = null;
+        try { inst.rufflePlayer.pause?.(); } catch { /* bridge mode / no pause */ }
+        return;
+      }
     }
 
     inst.animFrameId = requestAnimationFrame(captureFrame);
@@ -678,17 +713,6 @@ export function destroyFlashInstance(spriteNum: number): void {
 function translateLevel0(path: string): string {
   if (path.startsWith('_level0')) {
     return '_root' + path.substring('_level0'.length);
-  }
-  // Director's getVariable/setVariable/callFunction accept bare names
-  // and resolve them as `_root.<name>`. Ruffle's GetVariable is strict
-  // — a bare path returns Void. Rewrite bare names (no path
-  // separator, no leading `_root`/`_level0`/`this`/`super`) into the
-  // `/:<name>` form Ruffle handles, so e.g. JunkbotUndercover's
-  // `getVariable(sprite(15), "sceneNumber")` actually reads the SWF's
-  // `_root.sceneNumber`.
-  const isBareName = !/[\/:.]/.test(path) && !/^_?(root|level\d+|this|super|parent)\b/i.test(path);
-  if (isBareName && path.length > 0) {
-    return '/:' + path;
   }
   return path;
 }
@@ -1188,19 +1212,41 @@ function findLabel(spriteNum: number, _label: string): number {
 }
 
 /**
- * Perform a hit test on a Ruffle instance.
- * Returns true if the point (in Flash coordinates) hits content.
+ * Classify what's under a sprite-local point, mirroring Director's Flash
+ * `sprite.hitTest(point)` return values — and the signal behind
+ * `sprite.mouseOverButton`. Coordinates are sprite-local pixels (origin at the
+ * sprite's top-left), the same space `dispatchMouseEvent` takes; we rebase them
+ * to canvas pixels and hand them to the fork's `dirplayer_hitTest`, which
+ * injects a synthetic MouseMove to refresh hover state then reads the resolved
+ * cursor + a stage shape pick.
+ *
+ * Returns: 0 = #background, 1 = #normal, 2 = #button, 3 = #editText
+ * (0 when no instance / the fork method is unavailable).
  */
-function hitTest(spriteNum: number, x: number, y: number): boolean {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
-  if (!instance) return false;
+function hitTest(spriteNum: number, localX: number, localY: number): number {
+  const inst = instances.get(instanceKey(spriteNum));
+  if (!inst) return 0;
+
+  let canvasX = localX;
+  let canvasY = localY;
+  if (inst.canvas) {
+    const rect = inst.canvas.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      canvasX = (localX / rect.width) * inst.canvas.width;
+      canvasY = (localY / rect.height) * inst.canvas.height;
+    }
+  }
+
+  const player = inst.rufflePlayer as
+    | { dirplayer_hitTest?: (x: number, y: number) => number }
+    | undefined;
+  if (typeof player?.dirplayer_hitTest !== 'function') {
+    return 0;
+  }
   try {
-    // Use CallFunction to invoke _root.hitTest(x, y, true)
-    const result = instance.rufflePlayer.CallFunction("_root.hitTest", [x, y, true]);
-    return result === true || result === "true" || result === 1;
+    return player.dirplayer_hitTest(canvasX, canvasY) | 0;
   } catch (e) {
-    return false;
+    return 0;
   }
 }
 

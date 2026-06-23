@@ -24,7 +24,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::get_concrete_sprite_rect, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::{get_concrete_sprite_rect, get_sprite_rect_in_context}, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -73,8 +73,10 @@ extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
     fn ruffle_call_frame(sprite_num: i32, frame: i32);
 
+    /// Classify what's under a sprite-local point: 0 = #background,
+    /// 1 = #normal, 2 = #button, 3 = #editText (Director Flash hitTest values).
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
@@ -1304,6 +1306,8 @@ impl BuiltInHandlerManager {
             "hittest" => {
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
+                    // Director stage coords; rebase to sprite-local for the
+                    // classifier by subtracting the sprite's top-left.
                     let x = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).int_value()
                     })?;
@@ -1311,9 +1315,20 @@ impl BuiltInHandlerManager {
                         player.get_datum(&args[2]).int_value()
                     })?;
                     if let Some((sn, _cl, _cm)) = member_ref {
-                        let result = ruffle_hit_test(sn, x as f64, y as f64);
+                        let rect = reserve_player_ref(|player| {
+                            get_sprite_rect_in_context(player, sn as i16)
+                        });
+                        let lx = (x - rect.0 as i32) as f64;
+                        let ly = (y - rect.1 as i32) as f64;
+                        // 0 = #background, 1 = #normal, 2 = #button, 3 = #editText.
+                        let symbol = match ruffle_hit_test(sn, lx, ly) {
+                            2 => "button",
+                            3 => "editText",
+                            1 => "normal",
+                            _ => "background",
+                        };
                         return reserve_player_mut(|player| {
-                            Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+                            Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
                         });
                     }
                 }
