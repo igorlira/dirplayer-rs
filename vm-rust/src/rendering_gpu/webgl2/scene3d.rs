@@ -551,10 +551,13 @@ void main() {
                     float dist = length(light_dir);
                     L = light_dir / dist;
                     atten = 1.0 / (u_light_atten[i].x + u_light_atten[i].y * dist + u_light_atten[i].z * dist * dist);
-                    // Spot light cone attenuation
+                    // Spot light cone attenuation. Director's spotAngle is the
+                    // HALF-cone angle (dict: "corresponds to half the angle; for a
+                    // 90° angle pass 45.0"), so the cone edge is cos(spotAngle) — do
+                    // NOT halve it again.
                     if (u_light_spot_angle[i] > 0.0) {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
-                        float cone_cos = cos(u_light_spot_angle[i] * 0.5);
+                        float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
                         else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
                     }
@@ -642,7 +645,14 @@ void main() {
                     vec3 light_dir = u_light_pos[i] - v_position;
                     float dist = length(light_dir);
                     L = light_dir / dist;
-                    atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
+                    atten = 1.0 / (u_light_atten[i].x + u_light_atten[i].y * dist + u_light_atten[i].z * dist * dist);
+                    // Spot cone (spotAngle = half-cone angle, per Director dict).
+                    if (u_light_spot_angle[i] > 0.0) {
+                        float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
+                        float cone_cos = cos(u_light_spot_angle[i]);
+                        if (spot_cos < cone_cos) atten = 0.0;
+                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                    }
                 }
 
                 // Two-sided lighting: use abs(N·L) so back faces also receive light
@@ -4274,20 +4284,16 @@ void main() {
         let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
-        // One-time light diagnostic
-        {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                let light_info: Vec<String> = scene.lights.iter().map(|l| {
-                    format!("{}({:?}, color=[{:.2},{:.2},{:.2}])", l.name, l.light_type, l.color[0], l.color[1], l.color[2])
-                }).collect();
-                log(&format!(
-                    "[W3D-LIGHTS] {} lights: {:?}",
-                    scene.lights.len(), light_info
-                ));
-            }
-        }
+        // dirplayer injects fallback default lights (Default*/UI*) so an unlit scene
+        // is still visible. When the movie supplies its OWN directional/spot lighting
+        // (e.g. frog01's spot/spot2), those synthetic fallbacks flood the scene and
+        // wash out the intended mood — so suppress them in that case. Baked content
+        // lights (e.g. AmbientLightResource from the .w3d) are kept.
+        let is_fallback_light = |name: &str| matches!(name,
+            "DefaultAmbient" | "DefaultDirectional" | "UIAmbient" | "UIDirectional");
+        let has_movie_light = scene.lights.iter().any(|l|
+            l.enabled && !is_fallback_light(&l.name)
+            && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
 
         if scene.lights.is_empty() {
             // Default: one directional light from above-right
@@ -4318,6 +4324,10 @@ void main() {
 
             for light in &sorted_lights {
                 if !light.enabled {
+                    continue;
+                }
+                // Suppress dirplayer's synthetic fallback lights when the movie lights itself.
+                if has_movie_light && is_fallback_light(&light.name) {
                     continue;
                 }
                 // Skip lights that have been removed from world
