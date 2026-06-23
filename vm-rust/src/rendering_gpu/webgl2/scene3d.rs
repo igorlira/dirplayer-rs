@@ -2126,15 +2126,23 @@ void main() {
             let cos_r = rot_rad.cos();
             let sin_r = rot_rad.sin();
 
-            // 2D transform: Scale → Rotate → Translate (with regPoint offset)
+            // 2D transform: Scale → Rotate → Translate (with regPoint offset).
+            // Director's camera.overlay[n].regPoint is in SCALED/destination pixels,
+            // NOT source-texture pixels: e.g. Rasterwerks' rifle scope reticle sets
+            // reg = GetScale(#center) = texCenter × scale (= 256×128 × 3.06 = 783×392)
+            // so the screen rect is `loc - regPoint .. loc - regPoint + texSize×scale`,
+            // centred on loc. The reg term must therefore NOT be multiplied by the
+            // scale again — doing so pushed the scaled reticle far off-screen while
+            // every scale=1 HUD layer (rx*sx == rx) was unaffected, so only the scope
+            // tube vanished. translate = loc − R·regPoint.
             let sw = sx * tex_w;
             let sh = sy * tex_h;
             let model: [f32; 16] = [
                 cos_r * sw, sin_r * sw, 0.0, 0.0,
                -sin_r * sh, cos_r * sh, 0.0, 0.0,
                 0.0,        0.0,        1.0, 0.0,
-                x - rx * sx * cos_r + ry * sy * sin_r,
-                y - rx * sx * sin_r - ry * sy * cos_r,
+                x - rx * cos_r + ry * sin_r,
+                y - rx * sin_r - ry * cos_r,
                 0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
