@@ -304,7 +304,19 @@ impl Shockwave3dObjectDatumHandlers {
                                     None => compute_motion_t(motion, &w3d.runtime_state),
                                 };
                                 let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
-                                matrices.get(bone_idx).copied()
+                                let bone_m = matrices.get(bone_idx).copied()?;
+                                // Relativize by the idle-pose root to MATCH the renderer's
+                                // skin (scene3d setup_skinning), so a weapon attached via
+                                // bone[].worldTransform lines up with the relativized body.
+                                // Only biped actors have an idle-rest motion; others unchanged.
+                                let idle = scene.motions.iter()
+                                    .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
+                                    .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
+                                    .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
+                                match idle {
+                                    Some(im) if !im.is_empty() => Some(mat4_mul_f32(&invert_transform_f32(&im[0]), &bone_m)),
+                                    _ => Some(bone_m),
+                                }
                             });
                         if let Some(m) = bone_matrix {
                             let m64: [f64; 16] = [
@@ -347,7 +359,19 @@ impl Shockwave3dObjectDatumHandlers {
                                     None => compute_motion_t(motion, &w3d.runtime_state),
                                 };
                                 let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
-                                matrices.get(bone_idx).copied()
+                                let bone_m = matrices.get(bone_idx).copied()?;
+                                // Relativize by the idle-pose root to MATCH the renderer's
+                                // skin (scene3d setup_skinning), so a weapon attached via
+                                // bone[].worldTransform lines up with the relativized body.
+                                // Only biped actors have an idle-rest motion; others unchanged.
+                                let idle = scene.motions.iter()
+                                    .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
+                                    .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
+                                    .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
+                                match idle {
+                                    Some(im) if !im.is_empty() => Some(mat4_mul_f32(&invert_transform_f32(&im[0]), &bone_m)),
+                                    _ => Some(bone_m),
+                                }
                             });
                         if let Some(bone_m) = bone_matrix {
                             let model_world = get_node_transform(player, member_ref, model_name);

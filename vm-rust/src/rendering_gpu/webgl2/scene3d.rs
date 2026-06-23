@@ -3999,6 +3999,44 @@ void main() {
             skeleton, motion, t, root_lock,
         );
 
+        // [root-relativize] Director keeps a 3ds-Max biped's ROOT at identity IN THE SKIN
+        // (the root COM drives the model node, not the deformation). dirplayer's posed
+        // skeleton is instead pre-rotated by the root COM — verified against Director:
+        // dirplayer's bone[i] world == Rz(-122°) × Director's, the SAME factor for every
+        // bone (the root's COM). Strip it by relativizing each posed bone to the posed
+        // ROOT: skin[b] = inverse(root) × world[b] × inv_bind[b]. Algebra cancels to
+        // (b-relative-to-root) × inv_bind[b], so the inv_bind (mesh-consistent dir/quat
+        // T-pose) is untouched — no distortion (changing the bind DOES distort). This is
+        // the bot "aims right, faces ~NW" fix; rigid bodies/non-skinned models are
+        // unaffected (only skinned models reach here).
+        let affine_inv = |m: &[f32; 16]| -> [f32; 16] {
+            let (r00, r01, r02) = (m[0], m[4], m[8]);
+            let (r10, r11, r12) = (m[1], m[5], m[9]);
+            let (r20, r21, r22) = (m[2], m[6], m[10]);
+            let (tx, ty, tz) = (m[12], m[13], m[14]);
+            let itx = -(r00 * tx + r10 * ty + r20 * tz);
+            let ity = -(r01 * tx + r11 * ty + r21 * tz);
+            let itz = -(r02 * tx + r12 * ty + r22 * tz);
+            [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0, itx, ity, itz, 1.0]
+        };
+        // Relativize by a FIXED idle-pose root, NOT the per-frame posed root. The idle
+        // root strips the biped COM convention while KEEPING each frame's run deviation
+        // (the per-frame posed root removed the run's small turn too → bots looked
+        // "slightly off while moving"). The bot mesh is authored at "Idle_Rest", so use
+        // that motion's frame-0 root as the fixed reference; models with no idle motion
+        // (dino/frog) fall back to the per-frame posed root (idle-dominant → no residual).
+        let idle_root_mats = scene.motions.iter()
+            .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
+            .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
+            .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
+        // Only models with an idle-rest motion (the biped actors/bots) are relativized;
+        // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
+        // relativization — so this can't regress them.
+        let root_relinv = match &idle_root_mats {
+            Some(m) if !m.is_empty() => affine_inv(&m[0]),
+            _ => IDENTITY_4X4,
+        };
+
         // Check for motion blending (crossfade) — per-model blend state.
         let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);
         let prev_motion_name = bp.and_then(|b| b.previous_motion.as_deref())
@@ -4023,15 +4061,18 @@ void main() {
                 skeleton, prev_motion, t, root_lock,
             );
             for i in 0..bone_count {
-                let cur = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
-                let prev = mat4_multiply_col_major(&prev_matrices[i], &inv_bind[i]);
+                let cur_rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
+                let prev_rel = mat4_multiply_col_major(&root_relinv, &prev_matrices[i]);
+                let cur = mat4_multiply_col_major(&cur_rel, &inv_bind[i]);
+                let prev = mat4_multiply_col_major(&prev_rel, &inv_bind[i]);
                 for j in 0..16 {
                     skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
                 }
             }
         } else {
             for i in 0..bone_count {
-                let final_mat = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
+                let rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
+                let final_mat = mat4_multiply_col_major(&rel, &inv_bind[i]);
                 skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
             }
         }
