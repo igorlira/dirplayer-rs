@@ -1093,6 +1093,59 @@ pub struct QueuedMotion {
     pub offset: f32,       // seconds, -1.0 = #synchronized
 }
 
+/// Per-MODEL bonesPlayer/keyframePlayer animation state.
+///
+/// Director keeps animation state PER MODEL (each model carries its own
+/// #bonesPlayer modifier), but the single fields on `Shockwave3dRuntimeState`
+/// are per-MEMBER. When several skinned models are cloned into one 3D member
+/// (e.g. Rasterwerks clones 5 bots into the single G3D world), they all shared
+/// one motion + one clock — the last `play()` won, so every bot was posed with
+/// the same motion's root rotation (wrong facing, frozen clock). The renderer
+/// skinning and the `bone[]` getters read this per-model map instead; the
+/// member-level single fields remain for the keyframe (motion_transforms) path.
+#[derive(Clone, Debug)]
+pub struct BonesPlayerState {
+    pub animation_time: f32,
+    pub animation_playing: bool,
+    pub current_motion: Option<String>,
+    pub play_rate: f32,
+    pub animation_loop: bool,
+    pub motion_queue: Vec<QueuedMotion>,
+    pub animation_start_time: f32,
+    pub animation_end_time: f32,
+    pub animation_blend_time: f32,
+    pub root_lock: bool,
+    pub animation_scale: f32,
+    pub motion_ended: bool,
+    pub previous_motion: Option<String>,
+    pub blend_weight: f32,
+    pub blend_duration: f32,
+    pub blend_elapsed: f32,
+}
+
+impl Default for BonesPlayerState {
+    fn default() -> Self {
+        Self {
+            animation_time: 0.0,
+            animation_playing: false,
+            current_motion: None,
+            play_rate: 1.0,
+            animation_loop: true,
+            motion_queue: Vec::new(),
+            animation_start_time: 0.0,
+            animation_end_time: -1.0,
+            animation_blend_time: 0.0,
+            root_lock: false,
+            animation_scale: 1.0,
+            motion_ended: false,
+            previous_motion: None,
+            blend_weight: 1.0,
+            blend_duration: 0.0,
+            blend_elapsed: 0.0,
+        }
+    }
+}
+
 /// Mutable runtime state for a Shockwave 3D member (animation, transforms, etc.)
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
@@ -1116,6 +1169,11 @@ pub struct Shockwave3dRuntimeState {
     pub blend_weight: f32,       // 0.0 = all previous, 1.0 = all current
     pub blend_duration: f32,     // total blend time in seconds
     pub blend_elapsed: f32,      // time spent blending
+    /// Per-model animation state, keyed by model node name (lowercase). The
+    /// SOURCE OF TRUTH for skinned models — the single fields above are kept
+    /// for the keyframe (motion_transforms / non-skinned) path. See
+    /// [`BonesPlayerState`]. Access via `bones_player` / `bones_player_mut`.
+    pub bones_players: std::collections::HashMap<String, BonesPlayerState>,
 
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
@@ -1465,6 +1523,45 @@ pub struct ParticleSystemState {
 }
 
 impl Shockwave3dRuntimeState {
+    /// Per-model bonesPlayer state (read), case-insensitive by model node name.
+    pub fn bones_player(&self, model: &str) -> Option<&BonesPlayerState> {
+        self.bones_players.get(&model.to_ascii_lowercase())
+    }
+
+    /// Per-model bonesPlayer state (mutable), creating a default entry on first
+    /// use. Director attaches a #bonesPlayer per model; play()/queue()/setters
+    /// route here so each model animates independently.
+    pub fn bones_player_mut(&mut self, model: &str) -> &mut BonesPlayerState {
+        self.bones_players.entry(model.to_ascii_lowercase()).or_default()
+    }
+
+    /// Mirror a model's per-node animation state into the member-level single
+    /// fields. The renderer skinning + bone getters read per-node, but the
+    /// keyframe (motion_transforms) block, auto-play, and legacy queue-pop
+    /// still read the single fields — so we keep them pointed at the most
+    /// recently-acted model (historical per-member behavior). Harmless for
+    /// skinned models (which never consult the single fields).
+    pub fn sync_legacy_from_bones_player(&mut self, model: &str) {
+        if let Some(bp) = self.bones_players.get(&model.to_ascii_lowercase()).cloned() {
+            self.animation_time = bp.animation_time;
+            self.animation_playing = bp.animation_playing;
+            self.current_motion = bp.current_motion;
+            self.play_rate = bp.play_rate;
+            self.animation_loop = bp.animation_loop;
+            self.motion_queue = bp.motion_queue;
+            self.animation_start_time = bp.animation_start_time;
+            self.animation_end_time = bp.animation_end_time;
+            self.animation_blend_time = bp.animation_blend_time;
+            self.root_lock = bp.root_lock;
+            self.animation_scale = bp.animation_scale;
+            self.motion_ended = bp.motion_ended;
+            self.previous_motion = bp.previous_motion;
+            self.blend_weight = bp.blend_weight;
+            self.blend_duration = bp.blend_duration;
+            self.blend_elapsed = bp.blend_elapsed;
+        }
+    }
+
     /// Create runtime state initialized with camera data from the 3DPR info
     /// and optionally auto-start animation if animationEnabled is set.
     pub fn from_info(info: &Shockwave3dInfo, scene: Option<&crate::director::chunks::w3d::types::W3dScene>) -> Self {

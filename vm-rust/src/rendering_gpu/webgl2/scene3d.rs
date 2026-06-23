@@ -2427,7 +2427,7 @@ void main() {
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
             let has_skeleton_data = self.setup_skinning_for_resource(
-                gl, shader, scene, resource, gpu_data, runtime_state,
+                gl, shader, scene, resource, &model_node.name, gpu_data, runtime_state,
             );
 
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
@@ -3916,12 +3916,15 @@ void main() {
     }
 
     /// Compute and upload bone matrices for skinning. Returns true if skinning data was uploaded.
+    /// `model_name` selects the per-model bonesPlayer state — each skinned model in a member
+    /// animates independently (multiple cloned bots in one G3D scene must not share a clock).
     fn setup_skinning_for_resource(
         &self,
         gl: &WebGl2RenderingContext,
         shader: &Shader3d,
         scene: &W3dScene,
         resource_name: &str,
+        model_name: &str,
         gpu_data: &MemberGpuData,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
@@ -3952,9 +3955,20 @@ void main() {
         };
         let inv_bind = &inv_bind_fresh;
 
-        let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
-        let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
-        let root_lock = runtime_state.map(|rs| rs.root_lock).unwrap_or(false);
+        // Per-MODEL bonesPlayer state is the source of truth ONCE a motion has been
+        // play()'d on that model. A bare entry created only by a setter (rootLock /
+        // playRate, e.g. the dino) has no motion and a frozen clock — treat it as
+        // absent so we fall back ENTIRELY to the legacy member fields (auto-play +
+        // the advancing legacy clock). Otherwise its frozen time=0 shadowed the
+        // legacy clock and the model rendered stuck on frame 0.
+        let bp = runtime_state.and_then(|rs| rs.bones_player(model_name))
+            .filter(|b| b.current_motion.is_some());
+        let current_motion_name = bp.and_then(|b| b.current_motion.as_deref())
+            .or_else(|| runtime_state.and_then(|rs| rs.current_motion.as_deref()));
+        let is_loop = bp.map(|b| b.animation_loop)
+            .or_else(|| runtime_state.map(|rs| rs.animation_loop)).unwrap_or(true);
+        let root_lock = bp.map(|b| b.root_lock)
+            .or_else(|| runtime_state.map(|rs| rs.root_lock)).unwrap_or(false);
         let motion = if let Some(name) = current_motion_name {
             scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name))
         } else {
@@ -3965,10 +3979,12 @@ void main() {
         if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
             return false;
         }
-        let time = self.animation_time;
+        let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
-        let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
-        let start_time = runtime_state.map(|rs| rs.animation_start_time).unwrap_or(0.0);
+        let end_time = bp.map(|b| b.animation_end_time)
+            .or_else(|| runtime_state.map(|rs| rs.animation_end_time)).unwrap_or(-1.0);
+        let start_time = bp.map(|b| b.animation_start_time)
+            .or_else(|| runtime_state.map(|rs| rs.animation_start_time)).unwrap_or(0.0);
         let eff_end = if end_time >= 0.0 { (end_time).min(duration) } else { duration };
         let eff_start = start_time.min(eff_end);
         let range = eff_end - eff_start;
@@ -3983,9 +3999,10 @@ void main() {
             skeleton, motion, t, root_lock,
         );
 
-        // Check for motion blending (crossfade) — use renderer's local blend state
-        let blend_weight = self.blend_weight;
-        let prev_motion_name = runtime_state.and_then(|rs| rs.previous_motion.as_deref());
+        // Check for motion blending (crossfade) — per-model blend state.
+        let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);
+        let prev_motion_name = bp.and_then(|b| b.previous_motion.as_deref())
+            .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.as_deref()));
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
         let bone_count = skeleton.bones.len().min(48);

@@ -1389,23 +1389,46 @@ impl WebGL2Renderer {
         // This triggers when the sprite first appears on stage during playback.
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if w3d.info.animation_enabled
-                    && !w3d.runtime_state.animation_playing
-                    && w3d.runtime_state.current_motion.is_none()
-                {
-                    if let Some(scene) = w3d.parsed_scene.as_ref() {
-                        if let Some(first_motion) = scene.motions.first() {
-                            // Detect animation type: bones (skeleton) vs keyframe (node transforms)
-                            let has_skeleton = !scene.skeletons.is_empty()
-                                && scene.skeletons.iter().any(|s| s.bones.len() > 1);
-                            let anim_type = if has_skeleton { "bones" } else { "keyframe" };
-                            debug!(
-                                "[3D] animationEnabled: auto-starting {} motion '{}' (loop={})",
-                                anim_type, first_motion.name, w3d.info.loops
-                            );
-                            w3d.runtime_state.current_motion = Some(first_motion.name.clone());
+                if w3d.info.animation_enabled {
+                    let first_motion = w3d.parsed_scene.as_ref()
+                        .and_then(|s| s.motions.first()).map(|m| m.name.clone());
+                    let loops = w3d.info.loops;
+                    if let Some(motion_name) = first_motion {
+                        // Per-MODEL auto-play: seed the first motion into EACH skinned
+                        // model's own bonesPlayer entry. The dino animates only via
+                        // auto-play (its behavior never calls play()/rootLock), so its
+                        // pause()/resume() buttons must act on the SAME per-model state
+                        // the renderer reads — otherwise they hit a bare stub whose sync
+                        // clobbered the legacy clock (pause restarted, play froze).
+                        let skinned: Vec<String> = w3d.parsed_scene.as_ref().map(|s| {
+                            s.nodes.iter()
+                                .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Model)
+                                .filter(|n| {
+                                    let key = if !n.model_resource_name.is_empty() {
+                                        n.model_resource_name.as_str()
+                                    } else { n.resource_name.as_str() };
+                                    s.skeletons.iter().any(|sk| sk.name.eq_ignore_ascii_case(key) && sk.bones.len() > 1)
+                                })
+                                .map(|n| n.name.clone())
+                                .collect()
+                        }).unwrap_or_default();
+                        let any_skinned = !skinned.is_empty();
+                        for model in &skinned {
+                            let bp = w3d.runtime_state.bones_player_mut(model);
+                            if bp.current_motion.is_none() && !bp.animation_playing {
+                                bp.current_motion = Some(motion_name.clone());
+                                bp.animation_playing = true;
+                                bp.animation_loop = loops;
+                            }
+                        }
+                        // Legacy member-level auto-play for non-skinned (keyframe) content.
+                        if !any_skinned
+                            && !w3d.runtime_state.animation_playing
+                            && w3d.runtime_state.current_motion.is_none()
+                        {
+                            w3d.runtime_state.current_motion = Some(motion_name);
                             w3d.runtime_state.animation_playing = true;
-                            w3d.runtime_state.animation_loop = w3d.info.loops;
+                            w3d.runtime_state.animation_loop = loops;
                         }
                     }
                 }

@@ -294,9 +294,15 @@ impl Shockwave3dObjectDatumHandlers {
                                 let scene = w3d.parsed_scene.as_ref()?;
                                 let skeleton = find_skeleton_for_model(scene, model_name)?;
                                 if bone_idx >= skeleton.bones.len() { return None; }
-                                let motion = w3d.runtime_state.current_motion.as_deref()
+                                let bp = w3d.runtime_state.bones_player(model_name)
+                                    .filter(|b| b.current_motion.is_some());
+                                let motion = bp.and_then(|bp| bp.current_motion.as_deref())
+                                    .or_else(|| w3d.runtime_state.current_motion.as_deref())
                                     .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
-                                let t = compute_motion_t(motion, &w3d.runtime_state);
+                                let t = match bp {
+                                    Some(bp) => compute_motion_t_bp(motion, bp),
+                                    None => compute_motion_t(motion, &w3d.runtime_state),
+                                };
                                 let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
                                 matrices.get(bone_idx).copied()
                             });
@@ -331,9 +337,15 @@ impl Shockwave3dObjectDatumHandlers {
                                 let scene = w3d.parsed_scene.as_ref()?;
                                 let skeleton = find_skeleton_for_model(scene, model_name)?;
                                 if bone_idx >= skeleton.bones.len() { return None; }
-                                let motion = w3d.runtime_state.current_motion.as_deref()
+                                let bp = w3d.runtime_state.bones_player(model_name)
+                                    .filter(|b| b.current_motion.is_some());
+                                let motion = bp.and_then(|bp| bp.current_motion.as_deref())
+                                    .or_else(|| w3d.runtime_state.current_motion.as_deref())
                                     .and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)));
-                                let t = compute_motion_t(motion, &w3d.runtime_state);
+                                let t = match bp {
+                                    Some(bp) => compute_motion_t_bp(motion, bp),
+                                    None => compute_motion_t(motion, &w3d.runtime_state),
+                                };
                                 let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
                                 matrices.get(bone_idx).copied()
                             });
@@ -911,9 +923,11 @@ impl Shockwave3dObjectDatumHandlers {
                         Datum::Int(i) => *i as f32,
                         _ => 1.0,
                     };
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.play_rate = rate;
+                            w3d.runtime_state.bones_player_mut(&model_name).play_rate = rate;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(())
@@ -924,18 +938,22 @@ impl Shockwave3dObjectDatumHandlers {
                         Datum::Int(i) => *i as f32,
                         _ => 0.0,
                     };
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_blend_time = ms;
+                            w3d.runtime_state.bones_player_mut(&model_name).animation_blend_time = ms;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(())
                 },
                 "rootLock" => {
                     let locked = match value { Datum::Int(i) => *i != 0, _ => false };
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.root_lock = locked;
+                            w3d.runtime_state.bones_player_mut(&model_name).root_lock = locked;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(())
@@ -946,18 +964,22 @@ impl Shockwave3dObjectDatumHandlers {
                         Datum::Float(f) => *f as f32 / 1000.0,
                         _ => 0.0,
                     };
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_time = time;
+                            w3d.runtime_state.bones_player_mut(&model_name).animation_time = time;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(())
                 },
                 "currentLoopState" => {
                     let looping = match value { Datum::Int(i) => *i != 0, _ => false };
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_loop = looping;
+                            w3d.runtime_state.bones_player_mut(&model_name).animation_loop = looping;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(())
@@ -2371,48 +2393,53 @@ impl Shockwave3dObjectDatumHandlers {
                         Some((motion_name, is_loop, start_time_ms, end_time_ms, scale, offset_ms))
                     };
 
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some((motion_name, is_loop, start_time_ms, end_time_ms, scale, offset_ms)) = play_args {
-                                // Save interrupted motion into front of queue so it resumes later
-                                if let Some(ref cur) = w3d.runtime_state.current_motion {
-                                    if w3d.runtime_state.animation_playing {
-                                        let interrupted = crate::player::cast_member::QueuedMotion {
-                                            name: cur.clone(),
-                                            looped: w3d.runtime_state.animation_loop,
-                                            start_time: w3d.runtime_state.animation_start_time,
-                                            end_time: w3d.runtime_state.animation_end_time,
-                                            scale: w3d.runtime_state.animation_scale,
-                                            offset: w3d.runtime_state.animation_time, // resume from current position
-                                        };
-                                        w3d.runtime_state.motion_queue.insert(0, interrupted);
+                                {
+                                    let bp = w3d.runtime_state.bones_player_mut(&model_name);
+                                    // Save interrupted motion into front of queue so it resumes later
+                                    if let Some(ref cur) = bp.current_motion {
+                                        if bp.animation_playing {
+                                            let interrupted = crate::player::cast_member::QueuedMotion {
+                                                name: cur.clone(),
+                                                looped: bp.animation_loop,
+                                                start_time: bp.animation_start_time,
+                                                end_time: bp.animation_end_time,
+                                                scale: bp.animation_scale,
+                                                offset: bp.animation_time, // resume from current position
+                                            };
+                                            bp.motion_queue.insert(0, interrupted);
+                                        }
                                     }
-                                }
-                                // Set up crossfade blending using stored blendTime
-                                let blend_time = w3d.runtime_state.animation_blend_time;
-                                if blend_time > 0.0 && w3d.runtime_state.current_motion.is_some() {
-                                    w3d.runtime_state.previous_motion = w3d.runtime_state.current_motion.clone();
-                                    w3d.runtime_state.blend_duration = blend_time / 1000.0;
-                                    w3d.runtime_state.blend_elapsed = 0.0;
-                                    w3d.runtime_state.blend_weight = 0.0;
-                                } else {
-                                    w3d.runtime_state.previous_motion = None;
-                                    w3d.runtime_state.blend_weight = 1.0;
-                                }
+                                    // Set up crossfade blending using stored blendTime
+                                    let blend_time = bp.animation_blend_time;
+                                    if blend_time > 0.0 && bp.current_motion.is_some() {
+                                        bp.previous_motion = bp.current_motion.clone();
+                                        bp.blend_duration = blend_time / 1000.0;
+                                        bp.blend_elapsed = 0.0;
+                                        bp.blend_weight = 0.0;
+                                    } else {
+                                        bp.previous_motion = None;
+                                        bp.blend_weight = 1.0;
+                                    }
 
-                                w3d.runtime_state.current_motion = Some(motion_name);
-                                w3d.runtime_state.animation_playing = true;
-                                w3d.runtime_state.animation_loop = is_loop;
-                                w3d.runtime_state.animation_start_time = start_time_ms as f32 / 1000.0;
-                                w3d.runtime_state.animation_end_time = end_time_ms as f32 / 1000.0;
-                                w3d.runtime_state.animation_scale = scale as f32;
-                                w3d.runtime_state.motion_ended = false;
+                                    bp.current_motion = Some(motion_name);
+                                    bp.animation_playing = true;
+                                    bp.animation_loop = is_loop;
+                                    bp.animation_start_time = start_time_ms as f32 / 1000.0;
+                                    bp.animation_end_time = end_time_ms as f32 / 1000.0;
+                                    bp.animation_scale = scale as f32;
+                                    bp.motion_ended = false;
 
-                                // Determine initial animation time from offset
-                                if offset_ms >= 0.0 {
-                                    w3d.runtime_state.animation_time = offset_ms as f32 / 1000.0;
+                                    // Determine initial animation time from offset
+                                    if offset_ms >= 0.0 {
+                                        bp.animation_time = offset_ms as f32 / 1000.0;
+                                    }
+                                    // else: #synchronized — keep current relative position
                                 }
-                                // else: #synchronized — keep current relative position
+                                w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                             } else {
                                 // No args: Director's play() resumes a paused motion.
                                 // If nothing is current but a motion is queued (the
@@ -2423,21 +2450,25 @@ impl Shockwave3dObjectDatumHandlers {
                                 // which prepends current_motion, would show it twice). The
                                 // script's `if playList.count < 1` gate still sees count 1
                                 // (the now-current motion), so it does not re-queue.
-                                if w3d.runtime_state.current_motion.is_some() {
-                                    w3d.runtime_state.animation_playing = true;
-                                } else if !w3d.runtime_state.motion_queue.is_empty() {
-                                    let q = w3d.runtime_state.motion_queue.remove(0);
-                                    w3d.runtime_state.current_motion = Some(q.name);
-                                    w3d.runtime_state.animation_playing = true;
-                                    w3d.runtime_state.animation_loop = q.looped;
-                                    w3d.runtime_state.animation_start_time = q.start_time;
-                                    w3d.runtime_state.animation_end_time = q.end_time;
-                                    w3d.runtime_state.animation_scale = q.scale;
-                                    w3d.runtime_state.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
-                                    w3d.runtime_state.motion_ended = false;
-                                    w3d.runtime_state.previous_motion = None;
-                                    w3d.runtime_state.blend_weight = 1.0;
+                                {
+                                    let bp = w3d.runtime_state.bones_player_mut(&model_name);
+                                    if bp.current_motion.is_some() {
+                                        bp.animation_playing = true;
+                                    } else if !bp.motion_queue.is_empty() {
+                                        let q = bp.motion_queue.remove(0);
+                                        bp.current_motion = Some(q.name);
+                                        bp.animation_playing = true;
+                                        bp.animation_loop = q.looped;
+                                        bp.animation_start_time = q.start_time;
+                                        bp.animation_end_time = q.end_time;
+                                        bp.animation_scale = q.scale;
+                                        bp.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                                        bp.motion_ended = false;
+                                        bp.previous_motion = None;
+                                        bp.blend_weight = 1.0;
+                                    }
                                 }
+                                w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                             }
                         }
                     }
@@ -2466,9 +2497,11 @@ impl Shockwave3dObjectDatumHandlers {
                             scale: scale as f32,
                             offset: offset_ms as f32 / 1000.0,
                         };
+                        let model_name = s3d_ref.name.clone();
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                w3d.runtime_state.motion_queue.push(queued);
+                                w3d.runtime_state.bones_player_mut(&model_name).motion_queue.push(queued);
+                                w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                             }
                         }
                     }
@@ -2482,9 +2515,11 @@ impl Shockwave3dObjectDatumHandlers {
                     // form, so scripts that do `queue(x); playNext()` — e.g. Rasterwerks
                     // C_BonesControl — never drained the queue; it accumulated until
                     // TrimPlayList()/removeLast() deleted the pile.)
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            let rs = &mut w3d.runtime_state;
+                            {
+                            let rs = w3d.runtime_state.bones_player_mut(&model_name);
                             // Blend out of the interrupted motion if autoBlend/blendTime set.
                             if rs.current_motion.is_some() && rs.animation_blend_time > 0.0 {
                                 rs.previous_motion = rs.current_motion.clone();
@@ -2510,6 +2545,8 @@ impl Shockwave3dObjectDatumHandlers {
                                 rs.current_motion = None;
                                 rs.animation_playing = false;
                             }
+                            }
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
@@ -2518,38 +2555,52 @@ impl Shockwave3dObjectDatumHandlers {
                     // removeLast() — remove the LAST entry of the playList. The playList is
                     // `[current_motion] ++ motion_queue`, so drop the queue's tail; if the
                     // queue is empty the last (and only) entry is the current motion itself.
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            if w3d.runtime_state.motion_queue.pop().is_none() {
-                                w3d.runtime_state.current_motion = None;
-                                w3d.runtime_state.animation_playing = false;
+                            {
+                                let bp = w3d.runtime_state.bones_player_mut(&model_name);
+                                if bp.motion_queue.pop().is_none() {
+                                    bp.current_motion = None;
+                                    bp.animation_playing = false;
+                                }
                             }
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "pause" => {
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_playing = false;
+                            w3d.runtime_state.bones_player_mut(&model_name).animation_playing = false;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "resume" => {
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_playing = true;
+                            w3d.runtime_state.bones_player_mut(&model_name).animation_playing = true;
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "stop" => {
+                    let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.animation_playing = false;
-                            w3d.runtime_state.animation_time = 0.0;
-                            w3d.runtime_state.current_motion = None;
+                            {
+                                let bp = w3d.runtime_state.bones_player_mut(&model_name);
+                                bp.animation_playing = false;
+                                bp.animation_time = 0.0;
+                                bp.current_motion = None;
+                            }
+                            w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
                     Ok(player.alloc_datum(Datum::Void))
@@ -4437,9 +4488,10 @@ impl Shockwave3dObjectDatumHandlers {
                                 // as entry [1], then the queued motions.
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 member.and_then(|m| m.member_type.as_shockwave3d())
-                                    .map(|w3d| {
-                                        (if w3d.runtime_state.current_motion.is_some() { 1 } else { 0 })
-                                            + w3d.runtime_state.motion_queue.len()
+                                    .map(|w3d| match w3d.runtime_state.bones_player(&s3d_ref.name).filter(|b| b.current_motion.is_some()) {
+                                        Some(bp) => (if bp.current_motion.is_some() { 1 } else { 0 }) + bp.motion_queue.len(),
+                                        None => (if w3d.runtime_state.current_motion.is_some() { 1 } else { 0 })
+                                            + w3d.runtime_state.motion_queue.len(),
                                     })
                                     .unwrap_or(0)
                             }
@@ -5216,14 +5268,14 @@ impl Shockwave3dObjectDatumHandlers {
             "playing" => {
                 let playing = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| if w3d.runtime_state.animation_playing { 1 } else { 0 })
+                    .map(|w3d| if w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.animation_playing).unwrap_or(w3d.runtime_state.animation_playing) { 1 } else { 0 })
                     .unwrap_or(0);
                 Ok(player.alloc_datum(Datum::Int(playing)))
             },
             "currentTime" => {
                 let time = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.animation_time)
+                    .map(|w3d| w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.animation_time).unwrap_or(w3d.runtime_state.animation_time))
                     .unwrap_or(0.0);
                 // Director returns currentTime in milliseconds
                 Ok(player.alloc_datum(Datum::Int((time * 1000.0) as i32)))
@@ -5231,21 +5283,21 @@ impl Shockwave3dObjectDatumHandlers {
             "playRate" => {
                 let rate = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.play_rate)
+                    .map(|w3d| w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.play_rate).unwrap_or(w3d.runtime_state.play_rate))
                     .unwrap_or(1.0);
                 Ok(player.alloc_datum(Datum::Float(rate as f64)))
             },
             "rootLock" => {
                 let locked = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| if w3d.runtime_state.root_lock { 1 } else { 0 })
+                    .map(|w3d| if w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.root_lock).unwrap_or(w3d.runtime_state.root_lock) { 1 } else { 0 })
                     .unwrap_or(0);
                 Ok(player.alloc_datum(Datum::Int(locked)))
             },
             "currentLoopState" => {
                 let looping = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| if w3d.runtime_state.animation_loop { 1 } else { 0 })
+                    .map(|w3d| if w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.animation_loop).unwrap_or(w3d.runtime_state.animation_loop) { 1 } else { 0 })
                     .unwrap_or(0);
                 Ok(player.alloc_datum(Datum::Int(looping)))
             },
@@ -5256,7 +5308,7 @@ impl Shockwave3dObjectDatumHandlers {
                 // blend_weight is 0.0-1.0, Director uses 0.0-100.0
                 let factor = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.blend_weight * 100.0)
+                    .map(|w3d| w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.blend_weight).unwrap_or(w3d.runtime_state.blend_weight) * 100.0)
                     .unwrap_or(0.0);
                 Ok(player.alloc_datum(Datum::Float(factor as f64)))
             },
@@ -5307,18 +5359,25 @@ impl Shockwave3dObjectDatumHandlers {
                     .and_then(|m| m.member_type.as_shockwave3d())
                     .map(|w3d| {
                         let rs = &w3d.runtime_state;
+                        // Prefer the per-model bonesPlayer state; fall back to legacy fields.
+                        let (cur, loop_, start, end, scale, time, queue) = match rs.bones_player(model_name).filter(|b| b.current_motion.is_some()) {
+                            Some(bp) => (bp.current_motion.clone(), bp.animation_loop, bp.animation_start_time,
+                                bp.animation_end_time, bp.animation_scale, bp.animation_time, bp.motion_queue.clone()),
+                            None => (rs.current_motion.clone(), rs.animation_loop, rs.animation_start_time,
+                                rs.animation_end_time, rs.animation_scale, rs.animation_time, rs.motion_queue.clone()),
+                        };
                         let mut list: Vec<crate::player::cast_member::QueuedMotion> = Vec::new();
-                        if let Some(ref name) = rs.current_motion {
+                        if let Some(name) = cur {
                             list.push(crate::player::cast_member::QueuedMotion {
-                                name: name.clone(),
-                                looped: rs.animation_loop,
-                                start_time: rs.animation_start_time,
-                                end_time: rs.animation_end_time,
-                                scale: rs.animation_scale,
-                                offset: rs.animation_time,
+                                name,
+                                looped: loop_,
+                                start_time: start,
+                                end_time: end,
+                                scale,
+                                offset: time,
                             });
                         }
-                        list.extend(rs.motion_queue.iter().cloned());
+                        list.extend(queue.into_iter());
                         list
                     })
                     .unwrap_or_default();
@@ -6215,6 +6274,28 @@ fn compute_motion_t(
     if range <= 0.0 { return 0.0; }
     let time = rs.animation_time;
     if rs.animation_loop {
+        eff_start + ((time - eff_start) % range + range) % range
+    } else {
+        time.clamp(eff_start, eff_end)
+    }
+}
+
+/// Per-model variant of `compute_motion_t` reading a model's own
+/// [`BonesPlayerState`] (each model animates independently).
+fn compute_motion_t_bp(
+    motion: Option<&crate::director::chunks::w3d::types::W3dMotion>,
+    bp: &crate::player::cast_member::BonesPlayerState,
+) -> f32 {
+    let Some(motion) = motion else { return 0.0; };
+    let duration = motion.duration();
+    let end_time = bp.animation_end_time;
+    let start_time = bp.animation_start_time;
+    let eff_end = if end_time >= 0.0 { end_time.min(duration) } else { duration };
+    let eff_start = start_time.min(eff_end);
+    let range = eff_end - eff_start;
+    if range <= 0.0 { return 0.0; }
+    let time = bp.animation_time;
+    if bp.animation_loop {
         eff_start + ((time - eff_start) % range + range) % range
     } else {
         time.clamp(eff_start, eff_end)

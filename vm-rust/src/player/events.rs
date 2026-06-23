@@ -568,14 +568,64 @@ pub async fn tick_w3d_animations() {
         for cast in player.movie.cast_manager.casts.iter_mut() {
             for (_, member) in cast.members.iter_mut() {
                 if let CastMemberType::Shockwave3d(w3d) = &mut member.member_type {
-                    if !w3d.runtime_state.animation_playing { continue; }
-                    let rate = w3d.runtime_state.play_rate;
-                    let scale = w3d.runtime_state.animation_scale;
-                    w3d.runtime_state.animation_time += dt_seconds * rate * scale;
-                    if w3d.runtime_state.blend_weight < 1.0 && w3d.runtime_state.blend_duration > 0.0 {
-                        w3d.runtime_state.blend_elapsed += dt_seconds;
-                        w3d.runtime_state.blend_weight =
-                            (w3d.runtime_state.blend_elapsed / w3d.runtime_state.blend_duration).min(1.0);
+                    // ── Per-MODEL bonesPlayer clocks ──
+                    // Each model animates independently (Rasterwerks clones N bots into
+                    // one member; sharing a single clock froze/cross-posed them). Snapshot
+                    // motion durations first (immutable scene borrow) for end-detection.
+                    let motion_durations: Vec<(String, f32)> = w3d.parsed_scene.as_ref()
+                        .map(|s| s.motions.iter()
+                            .map(|m| (m.name.to_ascii_lowercase(), m.duration()))
+                            .collect())
+                        .unwrap_or_default();
+                    let dur_of = |name: &str| -> f32 {
+                        let nl = name.to_ascii_lowercase();
+                        motion_durations.iter().find(|(n, _)| *n == nl).map(|(_, d)| *d).unwrap_or(0.0)
+                    };
+                    for bp in w3d.runtime_state.bones_players.values_mut() {
+                        if !bp.animation_playing || bp.motion_ended { continue; }
+                        bp.animation_time += dt_seconds * bp.play_rate * bp.animation_scale;
+                        if bp.blend_weight < 1.0 && bp.blend_duration > 0.0 {
+                            bp.blend_elapsed += dt_seconds;
+                            bp.blend_weight = (bp.blend_elapsed / bp.blend_duration).min(1.0);
+                        }
+                        // Non-looping end: advance the per-model queue, else hold last frame.
+                        if !bp.animation_loop {
+                            if let Some(cur) = bp.current_motion.clone() {
+                                let duration = dur_of(&cur);
+                                let eff_end = if bp.animation_end_time >= 0.0 {
+                                    bp.animation_end_time.min(duration)
+                                } else { duration };
+                                if eff_end > 0.0 && bp.animation_time >= eff_end {
+                                    if !bp.motion_queue.is_empty() {
+                                        let q = bp.motion_queue.remove(0);
+                                        bp.current_motion = Some(q.name);
+                                        bp.animation_loop = q.looped;
+                                        bp.animation_start_time = q.start_time;
+                                        bp.animation_end_time = q.end_time;
+                                        bp.animation_scale = q.scale;
+                                        bp.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                                        bp.motion_ended = false;
+                                        bp.previous_motion = None;
+                                        bp.blend_weight = 1.0;
+                                    } else {
+                                        bp.animation_time = eff_end; // hold final frame
+                                        bp.motion_ended = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Legacy member clock (keyframe / motion_transforms path) ──
+                    if w3d.runtime_state.animation_playing {
+                        let rate = w3d.runtime_state.play_rate;
+                        let scale = w3d.runtime_state.animation_scale;
+                        w3d.runtime_state.animation_time += dt_seconds * rate * scale;
+                        if w3d.runtime_state.blend_weight < 1.0 && w3d.runtime_state.blend_duration > 0.0 {
+                            w3d.runtime_state.blend_elapsed += dt_seconds;
+                            w3d.runtime_state.blend_weight =
+                                (w3d.runtime_state.blend_elapsed / w3d.runtime_state.blend_duration).min(1.0);
+                        }
                     }
                 }
             }
