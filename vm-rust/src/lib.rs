@@ -472,12 +472,30 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
     });
 }
 
+/// Resolve a canvas-space mouse event to movie coordinates — EXCEPT during FPS
+/// mouse-look (pointer lock). While the movie wants pointer lock it drives the
+/// camera from `mouse_move_delta` and recenters `mouse_loc` every frame; the
+/// browser also freezes the cursor at the lock-engage point, so a click's absolute
+/// position is meaningless and would slam `mouse_loc` away from that center — a
+/// one-frame delta spike that jolts the camera on EVERY click (left or right).
+/// In that mode keep the existing delta-managed `mouse_loc` so the click only
+/// registers the button, not a phantom move.
+fn mouse_event_loc(x: f64, y: f64) -> (i32, i32) {
+    reserve_player_ref(|p| {
+        if p.wants_pointer_lock {
+            p.mouse_loc
+        } else {
+            // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
+            // matching where sprites live in Lingo-facing state. No-op when scale=1.
+            let (mx, my) = crate::player::stage::canvas_to_movie_coords(p, x, y);
+            (mx.to_i32().unwrap(), my.to_i32().unwrap())
+        }
+    })
+}
+
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
-    // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
-    // matching where sprites live in Lingo-facing state. No-op when scale=1.
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.mouse_down = true;
@@ -487,8 +505,7 @@ pub fn mouse_down(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.mouse_down = false;
@@ -498,6 +515,15 @@ pub fn mouse_up(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
+    // During FPS mouse-look the camera is driven by `mouse_move_delta` and the movie
+    // recenters `mouse_loc` each frame. An absolute move here — e.g. right after
+    // pointer lock exits on Esc, before the movie disables mouse-look, when the cursor
+    // reappears far from center — would inject a large one-frame delta and snap the
+    // view ("camera tilts up on focus loss"). Ignore absolute moves while mouse-look
+    // is active; the delta path owns the camera.
+    if reserve_player_ref(|p| p.wants_pointer_lock) {
+        return;
+    }
     let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
     let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
@@ -511,8 +537,7 @@ pub fn mouse_move(x: f64, y: f64) {
 /// is updated alongside so `the mouseLoc` reflects the click point.
 #[wasm_bindgen]
 pub fn right_mouse_down(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.right_mouse_down = true;
@@ -522,8 +547,7 @@ pub fn right_mouse_down(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn right_mouse_up(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.right_mouse_down = false;
@@ -537,12 +561,16 @@ pub fn wants_pointer_lock() -> bool {
     reserve_player_ref(|player| player.wants_pointer_lock)
 }
 
-/// Mouse move with delta values (for pointer lock mode)
-/// The delta is added to the current mouse_loc (which the game resets to center each frame)
+/// Mouse move with delta values (for pointer lock mode).
+/// The delta is added to the current mouse_loc (which the game resets to center each
+/// frame), so `the mouseH` tracks pointer-lock movementX. X must be ADDED, not
+/// subtracted: `the mouseH` increases to the right (screen coords), so moving the
+/// mouse right (movementX > 0) must increase mouseH → the movie yaws right. The
+/// previous `-= dx` inverted horizontal look (move left → turn right).
 #[wasm_bindgen]
 pub fn mouse_move_delta(dx: f64, dy: f64) {
     reserve_player_mut(|player| {
-        player.mouse_loc.0 -= dx.to_i32().unwrap();
+        player.mouse_loc.0 += dx.to_i32().unwrap();
         player.mouse_loc.1 += dy.to_i32().unwrap();
     });
     let (x, y) = reserve_player_ref(|player| player.mouse_loc);
