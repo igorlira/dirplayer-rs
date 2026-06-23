@@ -225,14 +225,57 @@ impl Shockwave3dMemberHandlers {
         source: &crate::player::cast_member::Text3dSource,
         state: &crate::player::cast_member::Text3dState,
     ) -> Option<crate::director::chunks::w3d::types::ClodDecodedMesh> {
-        let (bw, bh, rgba) = Self::render_native_text_bitmap(source, state.smoothness)?;
-        // Marching-squares extrusion: smooth (sub-pixel) silhouette vs the
-        // per-pixel voxel mesh, matching Director's vector-outline edges.
-        Some(crate::director::chunks::w3d::primitives::extrude_alpha_mask_smooth(
-            bw, bh, &rgba,
-            source.width as f32, source.height as f32,
-            state.tunnel_depth,
-        ))
+        use crate::director::chunks::w3d::text3d;
+
+        // displayFace bitmask: bit0=#front, bit1=#tunnel, bit2=#back; -1 = all.
+        let df = state.display_face;
+        let params = text3d::ExtrudeParams {
+            depth: state.tunnel_depth.max(1.0),
+            bevel_type: state.bevel_type,
+            bevel_depth: state.bevel_depth.max(0.0),
+            smoothness: state.smoothness,
+            front: df == -1 || (df & 1) != 0,
+            tunnel: df == -1 || (df & 2) != 0,
+            back: df == -1 || (df & 4) != 0,
+        };
+
+        // Render at a high supersample for a smooth re-vectorised outline (the
+        // marching-squares trace is only as smooth as the rasterised source).
+        let (bw, bh, rgba) = Self::render_native_text_bitmap(source, state.smoothness.max(8))?;
+        // No-PFR (system/native font) path: there are no embedded glyph outlines,
+        // so re-vectorise the rasterised text into clean contours, then run the
+        // SAME contour pipeline as the PFR path (caps-with-holes + tunnel + bevel).
+        // This replaces the old drop-shadow alpha mesh, so system-font 3D text
+        // extrudes properly (frog01 title). px→model maps like the alpha-mask path
+        // (Y flipped to Y-up).
+        let ww = (source.width.max(1)) as f32;
+        let wh = (source.height.max(1)) as f32;
+        let pw = ww / bw.max(1) as f32;
+        let ph = wh / bh.max(1) as f32;
+        // Simplify tolerance ≈ 1 model unit (supersample = bw/ww pixels per model unit).
+        // supersample px per model unit; blur ~⅓ of that smooths the AA iso-edge.
+        let ss = (bw as f32 / ww).max(1.0);
+        let blur_radius = (ss / 3.0).round().max(1.0) as usize;
+        let eps_px = ss * 0.3;
+        let contours_px = text3d::vectorize_alpha(bw, bh, &rgba, 128, eps_px, 2, blur_radius);
+        let contours: Vec<Vec<[f32; 2]>> = contours_px
+            .iter()
+            .map(|c| c.iter().map(|p| [p[0] * pw, wh - p[1] * ph]).collect())
+            .collect();
+        if contours.is_empty() {
+            return None;
+        }
+        // Raster-vectorised fallback uses the same extrude params built above.
+        let (positions, normals, faces) = text3d::extrude_glyph(&contours, &params);
+        if positions.is_empty() {
+            return None;
+        }
+        let mut mesh = crate::director::chunks::w3d::types::ClodDecodedMesh::default();
+        mesh.name = "Text".to_string();
+        mesh.positions = positions;
+        mesh.normals = normals;
+        mesh.faces = faces;
+        Some(mesh)
     }
 
     /// Re-extrude an extrude3d resource (keyed by `resname`) into `member`'s
@@ -324,30 +367,14 @@ impl Shockwave3dMemberHandlers {
         runtime_state: &mut crate::player::cast_member::Shockwave3dRuntimeState,
         display_face: i32,
     ) {
-        let front = display_face == -1 || (display_face & 1) != 0;
-        let tunnel = display_face == -1 || (display_face & 2) != 0;
-        let back = display_face == -1 || (display_face & 4) != 0;
-
-        let mode = if !front && !back && !tunnel {
-            Some(0u8)
-        } else if tunnel || (front && back) {
-            // Tunnel faces need culling disabled to read as extruded text.
-            Some(3u8)
-        } else if back && !front {
-            Some(2u8)
-        } else {
-            Some(1u8)
-        };
-
-        match mode {
-            Some(1) => {
-                runtime_state.node_visibility.remove("Text");
-            }
-            Some(mode) => {
-                runtime_state.node_visibility.insert("Text".to_string(), mode);
-            }
-            None => {}
-        }
+        // extrude_glyph now generates exactly the requested faces (front cap /
+        // back cap / tunnel) per displayFace, so this only toggles overall
+        // visibility and keeps backface culling OFF (mode 3) so every generated
+        // face — including the inward tunnel and hole walls — renders.
+        let any = display_face == -1 || (display_face & 7) != 0;
+        runtime_state
+            .node_visibility
+            .insert("Text".to_string(), if any { 3u8 } else { 0u8 });
     }
 
     /// Lazily initialize the embedded 3D world for text members.
@@ -499,8 +526,13 @@ impl Shockwave3dMemberHandlers {
 
                 // Add mesh to the scene
                 if let Some((glyphs, outline_res)) = glyph_data {
+                    let bevel_depth = w3d_member.text3d_state.as_ref().map(|s| s.bevel_depth).unwrap_or(1.0);
+                    let bevel_type = w3d_member.text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(1);
+                    let smoothness = w3d_member.text3d_state.as_ref().map(|s| s.smoothness).unwrap_or(10);
+                    let display_face = w3d_member.text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1);
                     let mesh = crate::director::chunks::w3d::primitives::extrude_text_to_mesh(
                         &text_content, &glyphs, outline_res, font_size as f32, depth,
+                        bevel_type, bevel_depth, smoothness, display_face,
                     );
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
@@ -558,7 +590,10 @@ impl Shockwave3dMemberHandlers {
                         tunnel_depth: depth.max(1.0),
                         smoothness: 10,
                         bevel_depth: 1.0,
-                        bevel_type: 0,
+                        // Director's default bevelType is #miter (1), not #none. A flat
+                        // #none slab has no lit edge so letters/hole-rims read poorly;
+                        // the miter chamfer catches light and makes depth + holes pop.
+                        bevel_type: 1,
                         display_face: -1,
                         display_mode: 1,
                         diffuse_color: (0, 0, 0),
@@ -2285,7 +2320,17 @@ impl Shockwave3dMemberHandlers {
                         };
                         let src_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
                             .map(|m| m.name.clone()).unwrap_or_else(|| "text".to_string());
-                        let resname = format!("{}_extrude3d", src_name);
+                        // Each extrude3d call returns a DISTINCT model resource — Director does
+                        // too, even when the SAME text member is reused (set text → extrude →
+                        // newModel → repeat), which frog01's title screen does. Keying the mesh
+                        // by member name alone made every call overwrite the one "<name>_extrude3d"
+                        // mesh, so every model showed the LAST text ("www.jellygames.com"). Make
+                        // the name unique per call via the target scene's current resource count.
+                        let seq = player.movie.cast_manager.find_member_by_ref(&target_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d())
+                            .map(|w| w.runtime_state.text3d_resources.len())
+                            .unwrap_or(0);
+                        let resname = format!("{}_extrude3d_{}", src_name, seq);
                         let mut mesh = match Self::build_text3d_mesh(&source, &state) {
                             Some(m) => m,
                             None => return Ok(player.alloc_datum(Datum::Void)),

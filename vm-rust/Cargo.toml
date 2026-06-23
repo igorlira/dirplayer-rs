@@ -58,6 +58,10 @@ base64 = "0.22"
 toml = "0.8"
 dotenvy = "0.15"
 binary_rw = "4.1.0"
+# Polygon-with-holes triangulation (mapbox earcut port, pure Rust / WASM-safe).
+# Used for 3D-text (extrude3D) front/back cap tessellation so glyph holes
+# (O, A, 8, e ...) are filled correctly instead of the old triangle-fan.
+earcutr = "0.4"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

@@ -716,9 +716,23 @@ pub fn extrude_text_to_mesh(
     outline_resolution: u16,
     font_size: f32,
     tunnel_depth: f32,
+    bevel_type: u32,
+    bevel_depth: f32,
+    smoothness: u32,
+    display_face: i32,
 ) -> super::types::ClodDecodedMesh {
     let scale = font_size / outline_resolution.max(1) as f32;
     let depth = tunnel_depth.max(1.0);
+    // displayFace bitmask: bit0=#front, bit1=#tunnel, bit2=#back; -1 = all.
+    let params = super::text3d::ExtrudeParams {
+        depth,
+        bevel_type,
+        bevel_depth: bevel_depth.max(0.0),
+        smoothness,
+        front: display_face == -1 || (display_face & 1) != 0,
+        tunnel: display_face == -1 || (display_face & 2) != 0,
+        back: display_face == -1 || (display_face & 4) != 0,
+    };
 
     // First pass: compute total width for centering
     let mut total_width = 0.0_f32;
@@ -746,18 +760,17 @@ pub fn extrude_text_to_mesh(
             continue; // space or blank glyph
         }
 
+        // Extrude the WHOLE glyph at once (all contours together) so the caps are
+        // tessellated with holes subtracted — the per-contour triangle-fan used to
+        // fill the counters of O / A / 8 / e solid. (Faithful to the IFX pipeline:
+        // contours -> earcut-with-holes caps + per-edge tunnel walls.)
         let polylines = flatten_glyph(glyph, scale, x_cursor);
-        for poly in &polylines {
-            let base = all_positions.len() as u32;
-            let (pos, nrm, faces) = extrude_contour(
-                &poly.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(),
-                depth,
-            );
-            all_positions.extend_from_slice(&pos);
-            all_normals.extend_from_slice(&nrm);
-            for f in &faces {
-                all_faces.push([f[0] + base, f[1] + base, f[2] + base]);
-            }
+        let base = all_positions.len() as u32;
+        let (pos, nrm, faces) = super::text3d::extrude_glyph(&polylines, &params);
+        all_positions.extend_from_slice(&pos);
+        all_normals.extend_from_slice(&nrm);
+        for f in &faces {
+            all_faces.push([f[0] + base, f[1] + base, f[2] + base]);
         }
         x_cursor += advance;
     }
