@@ -1137,9 +1137,13 @@ impl BuiltInHandlerManager {
                 })
             }
             "rightmousedown" => {
-                // We don't track right mouse state separately yet — return FALSE
+                // Right button IS tracked (right_mouse_down/right_mouse_up JS exports set
+                // movie.right_mouse_down; the `the rightMouseDown` property reads it too).
+                // The function form was stubbed to FALSE, so polling movies (Rasterwerks
+                // C_Input.ReadMouse → KEY_ALTFIRE) never saw right-click → the sniper scope
+                // never engaged. Mirror the `mousedown` function above.
                 reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(datum_bool(false)))
+                    Ok(player.alloc_datum(datum_bool(player.movie.right_mouse_down)))
                 })
             }
             "getrendererservices" => {
