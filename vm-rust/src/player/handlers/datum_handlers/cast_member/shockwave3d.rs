@@ -114,10 +114,13 @@ impl Shockwave3dMemberHandlers {
 
     fn native_text_supersample(smoothness: u32) -> i32 {
         // The native-font path traces the rasterised glyph at this resolution, so
-        // the extruded silhouette is only as smooth as the supersample. Bias it
-        // higher (Director smoothness 0..10 → 3..6) so text like Pacman's score
-        // popups (smoothness 5 → 5) reads far less stair-stepped.
-        (3 + (smoothness as i32 / 2)).clamp(3, 6)
+        // the extruded silhouette (and especially the per-edge tunnel side walls)
+        // is only as smooth as the supersample: too low and curved glyphs get a
+        // coarse contour whose few large side quads don't cover the wall smoothly,
+        // reading as stair-steps / gaps next to the front face. The mesh is rebuilt
+        // only on change (not per frame), so a high supersample is affordable.
+        // Director smoothness 0..10 → 6..10.
+        (6 + (smoothness as i32 / 2)).clamp(6, 10)
     }
 
     fn render_native_text_bitmap(
