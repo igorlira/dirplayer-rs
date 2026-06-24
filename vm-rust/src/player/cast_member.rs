@@ -1307,7 +1307,7 @@ pub struct Shockwave3dRuntimeState {
 /// exposed through the `model.collision` property. Detection runs each frame
 /// in `events::tick_w3d_collisions`; only detection + callback dispatch are
 /// implemented — resolution is a no-op (every consumer so far sets `resolve = 0`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct W3dCollisionModifier {
     /// `collision.enabled` — whether collisions with this model are detected.
     pub enabled: bool,
@@ -1321,6 +1321,27 @@ pub struct W3dCollisionModifier {
     /// Handler registered via `collision.setCollisionCallback(#handler, instance)`.
     pub callback_handler: Option<String>,
     pub callback_instance: Option<crate::player::script_ref::ScriptInstanceRef>,
+    /// The raw 2nd arg of `setCollisionCallback(#handler, target)`. Director
+    /// invokes a non-instance target's handler as `on handler target, collisionData`
+    /// (the object is the handler's FIRST param), so we keep it to pass through.
+    /// For a script-instance target this is unused (that path binds `me`).
+    pub callback_target: Option<crate::director::lingo::datum::Datum>,
+}
+
+// Manual Debug: `Datum` doesn't implement Debug (it uses `format_datum`), so
+// derive can't cover `callback_target`; just report whether one is set.
+impl std::fmt::Debug for W3dCollisionModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("W3dCollisionModifier")
+            .field("enabled", &self.enabled)
+            .field("resolve", &self.resolve)
+            .field("immovable", &self.immovable)
+            .field("mode", &self.mode)
+            .field("callback_handler", &self.callback_handler)
+            .field("callback_instance", &self.callback_instance)
+            .field("callback_target", &self.callback_target.is_some())
+            .finish()
+    }
 }
 
 impl Default for W3dCollisionModifier {
@@ -1332,6 +1353,7 @@ impl Default for W3dCollisionModifier {
             mode: "mesh".to_string(),
             callback_handler: None,
             callback_instance: None,
+            callback_target: None,
         }
     }
 }

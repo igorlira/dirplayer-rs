@@ -763,11 +763,13 @@ pub async fn tick_w3d_collisions() {
         max: [f32; 3],
         handler: Option<String>,
         instance: Option<ScriptInstanceRef>,
+        target: Option<crate::director::lingo::datum::Datum>,
     }
     struct Fire {
         instance: Option<ScriptInstanceRef>,
         handler: String,
         data: DatumRef,
+        target: Option<DatumRef>,
     }
 
     let fires: Vec<Fire> = reserve_player_mut(|player| {
@@ -903,6 +905,7 @@ pub async fn tick_w3d_collisions() {
                             max,
                             handler: cmod.callback_handler.clone(),
                             instance: cmod.callback_instance.clone(),
+                            target: cmod.callback_target.clone(),
                         });
                     }
                     out
@@ -954,10 +957,12 @@ pub async fn tick_w3d_collisions() {
                                 (k_n, normal),
                             ]);
                             let data = player.alloc_datum(Datum::PropList(pairs, false));
+                            let target = selfm.target.clone().map(|t| player.alloc_datum(t));
                             fires.push(Fire {
                                 instance: selfm.instance.clone(),
                                 handler,
                                 data,
+                                target,
                             });
                         }
                     }
@@ -971,9 +976,20 @@ pub async fn tick_w3d_collisions() {
     player_wait_available().await;
     for fire in fires {
         if let Some(inst) = fire.instance {
+            // Script-instance target: `me` is the instance, collisionData is the
+            // single explicit arg (`on handler me, collisionData`).
             let _ = player_invoke_event_to_instances(&fire.handler, &vec![fire.data], &vec![inst]).await;
         } else {
-            let _ = player_invoke_static_event(&fire.handler, &vec![fire.data]).await;
+            // Non-instance target (e.g. `setCollisionCallback(#collision, member("scene"))`):
+            // Director passes the registered object as the handler's FIRST arg and
+            // collisionData as the SECOND (`on collision target, collisionData`).
+            // Without the target, collisionData lands in the first param and the
+            // collisionData param is VOID (Splat's `on collision s, collisionData`).
+            let args = match fire.target {
+                Some(target) => vec![target, fire.data],
+                None => vec![fire.data],
+            };
+            let _ = player_invoke_static_event(&fire.handler, &args).await;
         }
     }
 }
