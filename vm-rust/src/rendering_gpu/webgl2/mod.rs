@@ -430,6 +430,24 @@ impl WebGL2Renderer {
     }
 
     /// Draw the current frame
+    /// True if the sprite in `channel_num` is a Shockwave3D member with
+    /// directToStage enabled. Such sprites are composited directly to the screen
+    /// on top of the 2D layer, so they are deferred past the `(the stage).image`
+    /// overlay in draw_frame to keep the live 3D visible under a HUD blit.
+    fn is_direct_to_stage_3d(&self, player: &DirPlayer, channel_num: i16) -> bool {
+        let sprite = match player.movie.score.get_sprite(channel_num) {
+            Some(s) => s,
+            None => return false,
+        };
+        let member_ref = match &sprite.member {
+            Some(m) => m.clone(),
+            None => return false,
+        };
+        player.movie.cast_manager.find_member_by_ref(&member_ref)
+            .map(|m| matches!(&m.member_type, CastMemberType::Shockwave3d(w3d) if w3d.info.direct_to_stage))
+            .unwrap_or(false)
+    }
+
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
         // Increment sprite debug frame counter
@@ -495,8 +513,24 @@ impl WebGL2Renderer {
             self.draw_trails_texture();
         }
 
-        // Render each sprite
+        // Render each sprite.
+        //
+        // directToStage Shockwave3D sprites are drawn DIRECTLY to the screen, on
+        // top of the 2D layer (Director: directToStage ignores ink/blend and
+        // composites last). When a script has drawn into `(the stage).image`
+        // (`stage_image_dirty`), draw_stage_image_overlay blits that OPAQUE
+        // full-stage bitmap over the sprite output below — which would paste a
+        // frozen snapshot over the live, animating 3D (Splat draws a lives/score
+        // HUD into the stage image, freezing the maze view). Defer such sprites
+        // until after the overlay so the live 3D shows through; the HUD (drawn
+        // into a non-overlapping region) still composites underneath.
+        let overlay_active = player.stage_image_dirty && player.stage_image.is_some();
+        let mut deferred_dts_3d: Vec<i16> = Vec::new();
         for (channel_num, _) in &sorted_channels {
+            if overlay_active && self.is_direct_to_stage_3d(player, *channel_num) {
+                deferred_dts_3d.push(*channel_num);
+                continue;
+            }
             self.render_sprite(player, *channel_num);
         }
 
@@ -553,6 +587,13 @@ impl WebGL2Renderer {
         // for "imaging Lingo" movies that draw into `(the stage).image`
         // (see stage.rs `image` getter). Only once a script has drawn into it.
         self.draw_stage_image_overlay(player);
+
+        // Now draw the deferred directToStage 3D sprites ON TOP of the stage-image
+        // overlay (see the render loop above) so the live, animating 3D is visible
+        // even when a HUD has been blitted into `(the stage).image`.
+        for ch in &deferred_dts_3d {
+            self.render_sprite(player, *ch);
+        }
 
         // Update native CSS cursor (no per-frame draw needed)
         self.update_native_cursor(player);

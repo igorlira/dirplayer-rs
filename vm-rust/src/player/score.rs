@@ -5045,6 +5045,24 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
     }
     let member = member.unwrap();
 
+    // Shockwave3D directToStage members render the 3D world into the sprite's
+    // viewport at the member's `defaultRect` size (Director: defaultRect
+    // "controls the default size used for all new sprites"), positioned by the
+    // member regPoint — NOT the raw score channel width/height. Splat's "scene"
+    // sets `defaultRect = rect(0,0,620,410)` + directToStage; without this it
+    // rendered at the 640×480 stage default, distorting the 3D aspect. Gated on
+    // directToStage + a non-degenerate defaultRect + no explicit score stretch,
+    // so non-directToStage / un-sized 3D members keep their existing behavior.
+    if let CastMemberType::Shockwave3d(w3d) = &member.member_type {
+        let dr = w3d.info.default_rect;
+        let (dw, dh) = (dr.2 - dr.0, dr.3 - dr.1);
+        if w3d.info.direct_to_stage && dw > 0 && dh > 0 && sprite.stretch == 0 {
+            let reg_x = w3d.info.reg_point.0;
+            let reg_y = w3d.info.reg_point.1;
+            return IntRect::from_size(sprite.loc_h - reg_x, sprite.loc_v - reg_y, dw, dh);
+        }
+    }
+
     match &member.member_type {
         CastMemberType::Bitmap(bitmap_member) => {
             // Get registration point from bitmap member
