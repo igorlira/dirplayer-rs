@@ -597,12 +597,23 @@ pub fn multiply_datums(
             Datum::Point(vals, flags)
         }
         (Datum::List(_, list, _), Datum::Float(right)) => {
+            // Collect the element refs up front so the recursive multiply (for
+            // nested lists) can borrow the player mutably without aliasing the
+            // outer list's borrow.
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let right_val = *right;
             let mut ref_list = VecDeque::new();
-            for item in list {
+            for item in &item_refs {
                 let item_datum = player.get_datum(item).clone();
                 let result_datum = match &item_datum {
-                    Datum::Int(n) => Datum::Float((*n as f64) * right),
-                    Datum::Float(n) => Datum::Float(n * right),
+                    Datum::Int(n) => Datum::Float((*n as f64) * right_val),
+                    Datum::Float(n) => Datum::Float(*n * right_val),
+                    // Director recurses into nested lists / points / rects /
+                    // vectors, scaling each sub-element by the scalar
+                    // (e.g. gspeed[1] * 1.5 where gspeed[1] is a list of lists).
+                    Datum::List(..) | Datum::Point(..) | Datum::Rect(..) | Datum::Vector(_) => {
+                        multiply_datums(item.clone(), right_ref.clone(), player)?
+                    }
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Mul operator in list only works with ints and floats. Given: {}",
