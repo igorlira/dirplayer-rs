@@ -386,6 +386,12 @@ void main() {
 
         let fs_source = r#"#version 300 es
 precision mediump float;
+// Fragment shaders default `int` to mediump, but vertex shaders default it to
+// highp. A uniform shared across both stages must match precision or GLSL ES
+// linking fails ("Uniform `u_texcoord2_direct` is not linkable between attached
+// shaders" — Firefox enforces this; Chrome/ANGLE silently tolerates it). Force
+// highp int here so every shared int uniform matches the VS default.
+precision highp int;
 
 in vec3 v_position;
 in vec3 v_normal;
