@@ -3048,12 +3048,20 @@ impl SoundChannel {
 
         // --- STEP 2: Detect actual format ---
         // Check for MP3, but skip when data size matches expected raw PCM size.
+        // The sample count is treated as raw-PCM evidence ONLY when the data is
+        // actually about that size. Some Director sound members carry a
+        // placeholder sampleCount of 1 (`expected` then = a few bytes); without
+        // the upper-bound check that trivially satisfied `data >= expected*4/5`
+        // and suppressed MP3 sniffing, so Splat's MP3 SFX were decoded as raw
+        // bytes (loud noise). find_mp3_start still validates 3 chained frames,
+        // so genuine PCM reaching it is not mis-detected.
         let bytes_per_sample_est = if bits_per_sample > 0 { bits_per_sample as usize / 8 } else { 2 };
         let expected_pcm_size = expected_samples
-            .filter(|&s| s > 0)
+            .filter(|&s| s > 1)
             .map(|s| s as usize * channels as usize * bytes_per_sample_est);
-        let data_likely_pcm = expected_pcm_size
-            .map_or(false, |expected| data.len() >= expected * 4 / 5);
+        let data_likely_pcm = expected_pcm_size.map_or(false, |expected| {
+            data.len() >= expected * 4 / 5 && data.len() <= expected.saturating_mul(2)
+        });
         let is_mp3 = if data_likely_pcm { false } else { Self::find_mp3_start(data).is_some() };
         let is_probably_adpcm = !is_mp3 && codec.contains("ima");
         // Only use byte-distribution heuristic when bits_per_sample is unknown (0).
@@ -3286,13 +3294,20 @@ impl SoundChannel {
         // Check for MP3, but skip when data size matches expected raw PCM.
         // sndH/sndS headers sometimes claim "raw_pcm" when data is actually MP3-compressed.
         // We detect this by comparing data size to what raw PCM would need.
-        // If the data is close to expected PCM size, it IS PCM and MP3 patterns are false positives.
+        // Treat the data as PCM (and skip MP3 sniffing) ONLY when its size is in a
+        // sane neighbourhood of what the sample count implies. Some Director sound
+        // members carry a placeholder sampleCount of 1, making `expected` a few
+        // bytes; without the upper bound that trivially passed `data >= expected*4/5`
+        // and suppressed MP3 detection, so Splat's MP3 SFX (an MP3 stream behind a
+        // ~46-byte Mac sound header) were decoded as raw bytes — loud noise.
+        // find_mp3_start validates 3 chained frames, so genuine PCM isn't mis-detected.
         let bytes_per_sample_est = if bits_per_sample > 0 { bits_per_sample as usize / 8 } else { 2 };
         let expected_pcm_size = expected_samples
-            .filter(|&s| s > 0)
+            .filter(|&s| s > 1)
             .map(|s| s as usize * channels as usize * bytes_per_sample_est);
-        let data_likely_pcm = expected_pcm_size
-            .map_or(false, |expected| sound_bytes.len() >= expected * 4 / 5);
+        let data_likely_pcm = expected_pcm_size.map_or(false, |expected| {
+            sound_bytes.len() >= expected * 4 / 5 && sound_bytes.len() <= expected.saturating_mul(2)
+        });
         let mp3_start = if data_likely_pcm {
             None
         } else {
