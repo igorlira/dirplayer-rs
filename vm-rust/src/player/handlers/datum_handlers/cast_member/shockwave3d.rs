@@ -992,6 +992,23 @@ impl Shockwave3dMemberHandlers {
                 }
                 Ok(())
             }
+            // Cast member property: the default rectangle used to size new
+            // sprites / the rendered 3D image (Director dict: `defaultRect`,
+            // e.g. `member.defaultRect = rect(0, 0, 300, 300)`). Stored as the
+            // member's default_rect, which drives width/height/`.image` size.
+            // `rect` is accepted as an alias since the getter maps it to the
+            // same field. (defaultRectMode→#fixed isn't tracked for 3D members.)
+            "defaultRect" | "defaultrect" | "rect" => {
+                if let Datum::Rect([l, t, r, b], _) = value {
+                    let new_rect = (*l as i32, *t as i32, *r as i32, *b as i32);
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.info.default_rect = new_rect;
+                        }
+                    }
+                }
+                Ok(())
+            }
             _ => {
                 Err(ScriptError::new(format!(
                     "Cannot set Shockwave3D property '{}'", prop
@@ -1532,11 +1549,33 @@ impl Shockwave3dMemberHandlers {
                                 .unwrap_or(source_shader_name)
                         };
 
+                        // Copy the source member's keyframe MOTIONS so the cloned
+                        // model's keyframePlayer.play(name) can find them — clone
+                        // otherwise copies geometry/shaders/meshes but NOT motions.
+                        // (Splat: pac-man feet footA/footB clones play "footA-Key"/
+                        // "footB-Key"; the motion's track is named after the source
+                        // node "footA"/"footB", which matches the same-named clone.)
+                        let src_motions: Vec<crate::director::chunks::w3d::types::W3dMotion> = if obj_type == "model" {
+                            source_member_ref.as_ref()
+                                .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                                .and_then(|sm| sm.member_type.as_shockwave3d())
+                                .and_then(|sw| sw.parsed_scene.as_ref())
+                                .map(|sc| sc.motions.clone())
+                                .unwrap_or_default()
+                        } else { Vec::new() };
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
                                     if obj_type == "model" {
+                                        // Bring over any source motions not already present (by
+                                        // name) so keyframePlayer.play() resolves them.
+                                        for m in &src_motions {
+                                            if !scene.motions.iter().any(|em| em.name.eq_ignore_ascii_case(&m.name)) {
+                                                scene.motions.push(m.clone());
+                                            }
+                                        }
                                         scene.nodes.push(W3dNode {
                                             name: obj_name.clone(), node_type: W3dNodeType::Model,
                                             parent_name: "World".to_string(),

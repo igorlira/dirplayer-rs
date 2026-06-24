@@ -197,6 +197,11 @@ pub struct Scene3dRenderer {
     logged_members: std::collections::HashSet<(i32, i32)>,
     animation_time: f32,
     motion_transforms: HashMap<String, [f32; 16]>,
+    /// Single-track keyframe (object) motions that REPLACE a node's local
+    /// transform — Director keyframePlayer semantics: the keyframe stores the
+    /// node's full local transform, so it overrides the base rather than
+    /// multiplying onto it (motion_transforms). Used by the multi-player path.
+    motion_replace_transforms: HashMap<String, [f32; 16]>,
     pub active_camera: Option<String>,
     /// Set when a non-looping motion reaches its end — caller should advance the queue
     pub motion_ended: bool,
@@ -263,6 +268,7 @@ impl Scene3dRenderer {
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
+            motion_replace_transforms: HashMap::new(),
             active_camera: None,
             motion_ended: false,
             last_motion_name: None,
@@ -1155,7 +1161,7 @@ void main() {
                 continue; // Skip light cone/sphere meshes
             }
             let mut group = Vec::new();
-            for (mi, mesh) in decoded_meshes.iter().enumerate() {
+            for mesh in decoded_meshes.iter() {
                 if mesh.positions.is_empty() || mesh.faces.is_empty() {
                     continue;
                 }
@@ -1804,7 +1810,54 @@ void main() {
 
             // Evaluate motion animations each frame
             self.motion_transforms.clear();
-            if !scene.motions.is_empty() {
+            self.motion_replace_transforms.clear();
+            let multi_player = runtime_state.map(|rs| rs.bones_players.len() > 1).unwrap_or(false);
+            if !scene.motions.is_empty() && multi_player {
+                // Multiple per-model keyframe/bones players animating at once
+                // (Splat pac-man: footA plays "footA-Key", footB plays "footB-Key").
+                // The single member-level current_motion can only carry one, so apply
+                // EACH model's own motion at its own clock. A single-track object
+                // keyframe motion is applied to the model the player is on (so
+                // identically-sourced clones with different names still animate);
+                // a multi-track skeletal motion applies each track to its named bone.
+                if let Some(rs) = runtime_state {
+                    for (model_name, bp) in &rs.bones_players {
+                        if !bp.animation_playing { continue; }
+                        let motion_name = match &bp.current_motion { Some(m) => m, None => continue };
+                        let motion = match scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name)) {
+                            Some(m) => m, None => continue,
+                        };
+                        let duration = motion.duration();
+                        let eff_end = if bp.animation_end_time >= 0.0 { bp.animation_end_time.min(duration) } else { duration };
+                        let eff_start = bp.animation_start_time.min(eff_end);
+                        let range = eff_end - eff_start;
+                        if range <= 0.0 { continue; }
+                        let t = if bp.animation_loop {
+                            eff_start + ((bp.animation_time - eff_start) % range + range) % range
+                        } else {
+                            bp.animation_time.clamp(eff_start, eff_end)
+                        };
+                        let apply_to_model = motion.tracks.len() == 1;
+                        for track in &motion.tracks {
+                            let mut kf = track.evaluate(t);
+                            if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
+                            if kf.scale_y.abs() < 1e-6 { kf.scale_y = 1.0; }
+                            if kf.scale_z.abs() < 1e-6 { kf.scale_z = 1.0; }
+                            let m = keyframe_to_column_major_matrix(&kf);
+                            if apply_to_model {
+                                // Single-track object keyframe → replace the model's local transform.
+                                // Key by lowercase: bones_players keys are lowercased but scene node
+                                // names keep their original case (e.g. "footA"), so the node-draw
+                                // lookup must match case-insensitively or the feet never animate.
+                                self.motion_replace_transforms.insert(model_name.to_ascii_lowercase(), m);
+                            } else {
+                                // Multi-track skeletal → multiply each track onto its bone.
+                                self.motion_transforms.insert(track.bone_name.clone(), m);
+                            }
+                        }
+                    }
+                }
+            } else if !scene.motions.is_empty() {
                 // Determine which motion to play: use runtime current_motion, or fallback to first
                 let is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
                 let play_rate = runtime_state.map(|rs| rs.play_rate).unwrap_or(1.0);
@@ -2374,7 +2427,17 @@ void main() {
 
         // Get this node's transform: motion (combined with base), runtime override, or parsed
         let node_transform = if allow_motion_override {
-            if let Some(motion_t) = self.motion_transforms.get(&node.name) {
+            if let Some(km) = (!self.motion_replace_transforms.is_empty())
+                .then(|| self.motion_replace_transforms.get(&node.name.to_ascii_lowercase()))
+                .flatten()
+            {
+                // Per-model keyframe (Splat pac-man/ghost feet+head): apply the
+                // keyframe ONTO the node's base local transform (motion * base), same
+                // as motion_transforms — the keyframe is relative to the part's rest
+                // pose, so replacing it outright swung the body out of place. Lookup is
+                // case-insensitive (bones_players keys are lowercased; node names aren't).
+                mat4_multiply_col_major(km, &node.transform)
+            } else if let Some(motion_t) = self.motion_transforms.get(&node.name) {
                 // Motion applied to base: motion * base (motion rotates the base orientation)
                 mat4_multiply_col_major(motion_t, &node.transform)
             } else {
