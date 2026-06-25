@@ -2431,30 +2431,38 @@ void main() {
             true
         };
 
+        // A model explicitly placed via Lingo `transform.position` (e.g. a cloned
+        // On the Run bonus, repositioned after cloning) has a runtime transform
+        // override. When such a model ALSO runs a keyframePlayer motion, place it
+        // with the runtime transform and apply the keyframe LOCALLY (runtime *
+        // motion) — otherwise the spin would be applied to the stale parsed base
+        // (the template's position) and the model renders nowhere near where
+        // `worldPosition` reports it. Models WITHOUT a runtime override (Splat's
+        // per-part keyframes) keep `motion * base`, relative to the rest pose.
+        let runtime_override: Option<[f32; 16]> =
+            runtime_state.and_then(|rs| get_runtime_transform(rs, &node.name));
         // Get this node's transform: motion (combined with base), runtime override, or parsed
         let node_transform = if allow_motion_override {
             if let Some(km) = (!self.motion_replace_transforms.is_empty())
                 .then(|| self.motion_replace_transforms.get(&node.name.to_ascii_lowercase()))
                 .flatten()
             {
-                // Per-model keyframe (Splat pac-man/ghost feet+head): apply the
-                // keyframe ONTO the node's base local transform (motion * base), same
-                // as motion_transforms — the keyframe is relative to the part's rest
-                // pose, so replacing it outright swung the body out of place. Lookup is
-                // case-insensitive (bones_players keys are lowercased; node names aren't).
-                mat4_multiply_col_major(km, &node.transform)
+                // Lookup is case-insensitive (bones_players keys are lowercased;
+                // node names aren't).
+                match runtime_override {
+                    Some(rt) => mat4_multiply_col_major(&rt, km),
+                    None => mat4_multiply_col_major(km, &node.transform),
+                }
             } else if let Some(motion_t) = self.motion_transforms.get(&node.name) {
-                // Motion applied to base: motion * base (motion rotates the base orientation)
-                mat4_multiply_col_major(motion_t, &node.transform)
+                match runtime_override {
+                    Some(rt) => mat4_multiply_col_major(&rt, motion_t),
+                    None => mat4_multiply_col_major(motion_t, &node.transform),
+                }
             } else {
-                runtime_state
-                    .and_then(|rs| get_runtime_transform(rs, &node.name))
-                    .unwrap_or(node.transform)
+                runtime_override.unwrap_or(node.transform)
             }
         } else {
-            runtime_state
-                .and_then(|rs| get_runtime_transform(rs, &node.name))
-                .unwrap_or(node.transform)
+            runtime_override.unwrap_or(node.transform)
         };
 
         let mut chain = vec![node_transform];
@@ -4538,7 +4546,35 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
         };
         let w = img.width();
         let h = img.height();
-        (w, h, img.into_raw())
+        let mut rgba = img.into_raw();
+        // Director W3D stores rgba4444 / 4444 textures as an RGB JPEG followed by a
+        // separate alpha continuation block: [width u32][height u32][zlibLen u32]
+        // [zlib-compressed 8-bit grayscale alpha]. image::load_from_memory only
+        // decodes the leading JPEG (alpha defaults to 255), so the icon's
+        // transparent background renders black. Recover the alpha here: locate the
+        // JPEG's EOI, parse the trailing block, inflate it, and write it into the
+        // alpha channel (0 = transparent, 255 = opaque).
+        if data[0] == 0xFF && data[1] == 0xD8 {
+            if let Some(eoi) = data.windows(2).position(|b| b[0] == 0xFF && b[1] == 0xD9) {
+                let tail = &data[eoi + 2..];
+                if tail.len() >= 14 {
+                    let aw = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
+                    let ah = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
+                    let alen = u32::from_le_bytes([tail[8], tail[9], tail[10], tail[11]]) as usize;
+                    if aw == w && ah == h && tail[12] == 0x78 && tail.len() >= 12 + alen {
+                        use std::io::Read;
+                        let mut alpha = Vec::new();
+                        let mut dec = flate2::read::ZlibDecoder::new(&tail[12..12 + alen]);
+                        if dec.read_to_end(&mut alpha).is_ok() && alpha.len() >= (w * h) as usize {
+                            for i in 0..(w * h) as usize {
+                                rgba[i * 4 + 3] = alpha[i];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (w, h, rgba)
     } else if is_dxt_texture(data) {
         // DXT compressed texture — decode to RGBA
         match decode_dxt_to_rgba(data) {
