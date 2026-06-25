@@ -761,9 +761,15 @@ pub async fn tick_w3d_collisions() {
         name: String,
         min: [f32; 3],
         max: [f32; 3],
+        immovable: bool,
         handler: Option<String>,
         instance: Option<ScriptInstanceRef>,
         target: Option<crate::director::lingo::datum::Datum>,
+    }
+    // A member-level #collideAny registration (registerForEvent(#collideAny, …)).
+    struct CollideAnyReg {
+        handler: String,
+        instance: Option<ScriptInstanceRef>,
     }
     struct Fire {
         instance: Option<ScriptInstanceRef>,
@@ -796,7 +802,7 @@ pub async fn tick_w3d_collisions() {
 
                 // Gather world AABBs + callbacks for every enabled collision
                 // model in this member (owned, so the borrow ends before alloc).
-                let models: Vec<ColModel> = {
+                let (models, collide_any_regs): (Vec<ColModel>, Vec<CollideAnyReg>) = {
                     let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref)
                     else { continue };
                     let CastMemberType::Shockwave3d(w3d) = &member.member_type else { continue };
@@ -839,33 +845,62 @@ pub async fn tick_w3d_collisions() {
                         } else {
                             &node.resource_name
                         };
-                        let he = scene
+                        let prim_he = scene
                             .model_resources
                             .get(res_key.as_str())
-                            .map(|r| match r.primitive_type.as_deref().unwrap_or("") {
+                            .and_then(|r| match r.primitive_type.as_deref().unwrap_or("") {
                                 // box: width=X, height=Y, length=Z (see primitive build).
-                                "box" => [
+                                "box" => Some([
                                     r.primitive_width * 0.5,
                                     r.primitive_height * 0.5,
                                     r.primitive_length * 0.5,
-                                ],
+                                ]),
                                 "sphere" => {
                                     let s = r.primitive_radius.max(0.01);
-                                    [s, s, s]
+                                    Some([s, s, s])
                                 }
                                 // cylinder axis is Y; radius spans X/Z.
                                 "cylinder" => {
                                     let rad = r.primitive_radius.max(r.primitive_top_radius).max(0.01);
-                                    [rad, r.primitive_height * 0.5, rad]
+                                    Some([rad, r.primitive_height * 0.5, rad])
                                 }
-                                "plane" => [r.primitive_width * 0.5, 0.05, r.primitive_length * 0.5],
-                                _ => [
-                                    r.primitive_width.max(0.5) * 0.5,
-                                    r.primitive_height.max(0.5) * 0.5,
-                                    r.primitive_length.max(0.5) * 0.5,
-                                ],
-                            })
-                            .unwrap_or([0.5, 0.5, 0.5]);
+                                "plane" => Some([r.primitive_width * 0.5, 0.05, r.primitive_length * 0.5]),
+                                // Mesh model (no primitive dims): fall through to mesh bounds.
+                                _ => None,
+                            });
+                        // For mesh models, size the collision box from the actual
+                        // geometry so #collision matches the visible model. (The old
+                        // 0.5-unit fallback never reached On the Run's bonuses, which
+                        // float ~1.5 above the road.) Half-extents are taken about the
+                        // model origin (max |min|,|max| per axis), matching the
+                        // origin-centred ±he box used below.
+                        let he = prim_he.unwrap_or_else(|| {
+                            let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+                            let mut any = false;
+                            if let Some(meshes) = scene.clod_meshes.get(res_key.as_str()) {
+                                for m in meshes {
+                                    for p in &m.positions {
+                                        any = true;
+                                        for k in 0..3 { if p[k] < mn[k] { mn[k] = p[k]; } if p[k] > mx[k] { mx[k] = p[k]; } }
+                                    }
+                                }
+                            }
+                            for rm in scene.raw_meshes.iter().filter(|m| m.name.eq_ignore_ascii_case(res_key.as_str())) {
+                                for p in &rm.positions {
+                                    any = true;
+                                    for k in 0..3 { if p[k] < mn[k] { mn[k] = p[k]; } if p[k] > mx[k] { mx[k] = p[k]; } }
+                                }
+                            }
+                            if any {
+                                [
+                                    mn[0].abs().max(mx[0].abs()).max(0.05),
+                                    mn[1].abs().max(mx[1].abs()).max(0.05),
+                                    mn[2].abs().max(mx[2].abs()).max(0.05),
+                                ]
+                            } else {
+                                [0.5, 0.5, 0.5]
+                            }
+                        });
 
                         // Accumulate the world transform up the parent chain.
                         let mut world = local_tf(&node.name);
@@ -903,12 +938,23 @@ pub async fn tick_w3d_collisions() {
                             name: node.name.clone(),
                             min,
                             max,
+                            immovable: cmod.immovable,
                             handler: cmod.callback_handler.clone(),
                             instance: cmod.callback_instance.clone(),
                             target: cmod.callback_target.clone(),
                         });
                     }
-                    out
+                    // Member-level #collideAny handlers (registerForEvent(#collideAny,
+                    // handler, scriptInstance)) — fired once per colliding pair below.
+                    let collide_any: Vec<CollideAnyReg> = rs.registered_events.iter()
+                        .filter(|e| e.event_name.eq_ignore_ascii_case("collideAny")
+                            && !e.handler_name.is_empty())
+                        .map(|e| CollideAnyReg {
+                            handler: e.handler_name.clone(),
+                            instance: e.script_instance.clone(),
+                        })
+                        .collect();
+                    (out, collide_any)
                 };
 
                 // Test all pairs; for each overlapping pair, fire the callback of
@@ -964,6 +1010,49 @@ pub async fn tick_w3d_collisions() {
                                 data,
                                 target,
                             });
+                        }
+
+                        // Member-level #collideAny handlers (registerForEvent) fire
+                        // once per colliding pair. Director 11.5 `collisionData`:
+                        // modelA / modelB / pointOfContact / collisionNormal — modelA
+                        // and modelB are "one"/"the other" of the pair. Order the
+                        // immovable model as modelB, the convention On the Run's bonus
+                        // pickup relies on (collisionData.modelB = the bonus hit).
+                        if !collide_any_regs.is_empty() {
+                            let (ma, mb) = if a.immovable && !b.immovable { (b, a) } else { (a, b) };
+                            for reg in &collide_any_regs {
+                                let model_a = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                    cast_lib: member_ref.cast_lib,
+                                    cast_member: member_ref.cast_member,
+                                    object_type: "model".to_string(),
+                                    name: ma.name.clone(),
+                                }));
+                                let model_b = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                    cast_lib: member_ref.cast_lib,
+                                    cast_member: member_ref.cast_member,
+                                    object_type: "model".to_string(),
+                                    name: mb.name.clone(),
+                                }));
+                                let poc = player.alloc_datum(Datum::Vector(mid));
+                                let normal = player.alloc_datum(Datum::Vector([1.0, 0.0, 0.0]));
+                                let k_a = player.alloc_datum(Datum::Symbol("modelA".to_string()));
+                                let k_b = player.alloc_datum(Datum::Symbol("modelB".to_string()));
+                                let k_poc = player.alloc_datum(Datum::Symbol("pointOfContact".to_string()));
+                                let k_n = player.alloc_datum(Datum::Symbol("collisionNormal".to_string()));
+                                let pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::from(vec![
+                                    (k_a, model_a),
+                                    (k_b, model_b),
+                                    (k_poc, poc),
+                                    (k_n, normal),
+                                ]);
+                                let data = player.alloc_datum(Datum::PropList(pairs, false));
+                                fires.push(Fire {
+                                    instance: reg.instance.clone(),
+                                    handler: reg.handler.clone(),
+                                    data,
+                                    target: None,
+                                });
+                            }
                         }
                     }
                 }
