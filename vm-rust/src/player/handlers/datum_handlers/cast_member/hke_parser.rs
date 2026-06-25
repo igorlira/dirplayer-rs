@@ -50,6 +50,8 @@ pub struct HkeBodyProps {
     pub orientation: Option<[f32; 4]>,
     /// Initial linear velocity (Havok metres/s).
     pub linear_velocity: Option<[f32; 3]>,
+    /// Initial angular velocity (radians/s — scale-independent, NOT × worldScale).
+    pub angular_velocity: Option<[f32; 3]>,
     pub active: Option<bool>,
     pub primitives: Vec<HkePrimitive>,
 }
@@ -133,6 +135,7 @@ const ACTIVE_TOKEN: [u8; 4] = [0xA5, 0x8E, 0x58, 0x04];
 const PRIMITIVE_MASS_TOKEN: [u8; 4] = [0x83, 0x16, 0x05, 0x00];
 const ORIENTATION_TOKEN: [u8; 4] = [0x4E, 0x89, 0x86, 0x04]; // [angle, axisX, axisY, axisZ]
 const LINEAR_VELOCITY_TOKEN: [u8; 4] = [0xD9, 0x4A, 0xA5, 0x0C]; // [vx, vy, vz] m/s
+const ANGULAR_VELOCITY_TOKEN: [u8; 4] = [0xF9, 0x58, 0x11, 0x04]; // [wx, wy, wz] rad/s
 const PLANE_NORMAL_TOKEN: [u8; 4] = [0x25, 0x06, 0x55, 0x00]; // [nx, ny, nz, dist]
 const SPHERE_RADIUS_TOKEN: [u8; 4] = [0xA3, 0x8E, 0x65, 0x05]; // [radius]
 
@@ -394,6 +397,7 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
         translation: try_read_vec3_after_token(payload, &TRANSLATION_TOKEN),
         orientation: try_read_vec4_after_token(payload, &ORIENTATION_TOKEN),
         linear_velocity: try_read_vec3_after_token(payload, &LINEAR_VELOCITY_TOKEN),
+        angular_velocity: try_read_vec3_after_token(payload, &ANGULAR_VELOCITY_TOKEN),
         active: try_read_bool_after_token(payload, &ACTIVE_TOKEN),
         primitives: Vec::new(),
     };

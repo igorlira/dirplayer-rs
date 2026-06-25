@@ -672,6 +672,10 @@ impl HavokPhysicsMemberHandlers {
                     if let Some(v) = p.linear_velocity {
                         rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
                     }
+                    // Angular velocity is rad/s — scale-independent, do NOT × inv_scale.
+                    if let Some(w) = p.angular_velocity {
+                        rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
+                    }
                 }
 
                 // Set position + authored model scale from the W3D transform.
@@ -774,6 +778,10 @@ impl HavokPhysicsMemberHandlers {
                 if mass > 0.0 { if let Some(act) = body_def.active { rb.active = act; } }
                 if let Some(v) = body_def.linear_velocity {
                     rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
+                }
+                // Angular velocity is rad/s — scale-independent, do NOT × inv_scale.
+                if let Some(w) = body_def.angular_velocity {
+                    rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
                 }
 
                 // World transform: prefer the W3D node (matches the render),
