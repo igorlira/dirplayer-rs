@@ -1270,10 +1270,27 @@ impl Shockwave3dMemberHandlers {
                                         } else {
                                             (String::new(), identity, String::new(), String::new())
                                         };
-                                        let motion_tracks = scene.motions.iter()
-                                            .max_by_key(|m| m.tracks.len())
-                                            .map(|m| m.tracks.clone())
-                                            .unwrap_or_default();
+                                        // cloneMotionFromCastmember(newName, sourceMotionName, member)
+                                        // must clone the SPECIFIC motion named sourceMotionName
+                                        // (= source_model_name, arg1). The old code grabbed the
+                                        // motion with the most tracks instead, so every cloned
+                                        // motion in a member collapsed onto the last/largest one
+                                        // (ties resolve to the last) — On the Run's bonus got the
+                                        // gate's "SbarraChiusura" swing instead of "BonusRotazione",
+                                        // and all train/jeep motions became "JeepCPU02". For model
+                                        // clones (no specific motion requested) keep the
+                                        // most-tracks heuristic (a skeletal model's main motion).
+                                        let motion_tracks = if obj_type == "motion" {
+                                            scene.motions.iter()
+                                                .find(|m| m.name.eq_ignore_ascii_case(&source_model_name))
+                                                .map(|m| m.tracks.clone())
+                                                .unwrap_or_default()
+                                        } else {
+                                            scene.motions.iter()
+                                                .max_by_key(|m| m.tracks.len())
+                                                .map(|m| m.tracks.clone())
+                                                .unwrap_or_default()
+                                        };
                                         // Collect all descendant nodes of the source model recursively
                                         // Use case-insensitive matching (Director is case-insensitive)
                                         let child_nodes = {
