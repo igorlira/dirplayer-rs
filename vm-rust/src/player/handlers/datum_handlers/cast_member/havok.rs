@@ -676,6 +676,15 @@ impl HavokPhysicsMemberHandlers {
                     if let Some(w) = p.angular_velocity {
                         rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
                     }
+                    // Initial orientation from the HKE body's axis-angle. The renderer
+                    // syncs the W3D model from rb.orientation (build_sync_transform), so
+                    // without this a mesh-derived body kept its identity rotation and
+                    // the car spawned facing the wrong way — the HKE places AutoPlayer
+                    // rotated 90 degrees about Z. Axis-angle is scale-independent.
+                    if let Some(o) = p.orientation {
+                        rb.orientation = super::havok_physics::quat_from_axis_angle(
+                            [o[1] as f64, o[2] as f64, o[3] as f64], o[0] as f64);
+                    }
                 }
 
                 // Set position + authored model scale from the W3D transform.
