@@ -277,10 +277,10 @@ impl HavokObjectDatumHandlers {
                 }
                 // Setting a velocity/momentum is a disturbance: wake the body so it
                 // isn't skipped in step (otherwise the new velocity is ignored).
-                "linearVelocity" | "linearvelocity" => { if let Datum::Vector(v) = &value { rb.linear_velocity = *v; rb.active = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
-                "angularVelocity" | "angularvelocity" => { if let Datum::Vector(v) = &value { rb.angular_velocity = *v; rb.active = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
-                "linearMomentum" | "linearmomentum" => { if let Datum::Vector(v) = &value { rb.linear_momentum = *v; rb.active = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
-                "angularMomentum" | "angularmomentum" => { if let Datum::Vector(v) = &value { rb.angular_momentum = *v; rb.active = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
+                "linearVelocity" | "linearvelocity" => { if let Datum::Vector(v) = &value { rb.linear_velocity = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
+                "angularVelocity" | "angularvelocity" => { if let Datum::Vector(v) = &value { rb.angular_velocity = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
+                "linearMomentum" | "linearmomentum" => { if let Datum::Vector(v) = &value { rb.linear_momentum = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
+                "angularMomentum" | "angularmomentum" => { if let Datum::Vector(v) = &value { rb.angular_momentum = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 _ => return Err(ScriptError::new(format!("Cannot set rigidBody property: {}", prop))),
             }
         }
@@ -327,7 +327,7 @@ impl HavokObjectDatumHandlers {
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
                     rb.force[2] += force[2];
@@ -348,7 +348,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_sub, quat_rotate_v, v3_cross};
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     // Add linear force (world-space)
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
@@ -379,7 +379,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_add, v3_scale};
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     if rb.inverse_mass > 0.0 {
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                     }
@@ -402,7 +402,7 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform};
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     if rb.inverse_mass > 0.0 {
                         // Linear: v += impulse * inverseMass
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
@@ -433,7 +433,7 @@ impl HavokObjectDatumHandlers {
                     // Wake a sleeping body — a Lingo torque is a disturbance, and
                     // an inactive body is skipped in step (the torque would be
                     // silently ignored). Matches applyForce/applyImpulse above.
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     rb.torque[0] += torque[0];
                     rb.torque[1] += torque[1];
                     rb.torque[2] += torque[2];
@@ -453,7 +453,7 @@ impl HavokObjectDatumHandlers {
                 {
                     use super::cast_member::havok_physics::{v3_add, mat3_transform};
                     // Wake a sleeping body (consistent with applyImpulse).
-                    rb.active = true;
+                    rb.active = true; rb.lingo_disturbed = true;
                     // angVel += I_inv * angularImpulse (from C# RigidBody.ApplyAngularImpulse)
                     rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, impulse));
                 }

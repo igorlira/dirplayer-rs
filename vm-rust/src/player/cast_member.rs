@@ -1886,6 +1886,13 @@ pub struct HavokRigidBody {
     /// Set on first collision with a rigid-body-owned mesh. Used each
     /// substep to keep the body on the surface analytically.
     pub resting_normal: Option<RestingContact>,
+    /// Auto-sleep: seconds of continuous stillness left before the body
+    /// deactivates (so resting stacks stop jittering). Reset whenever the body
+    /// moves above threshold or is disturbed by Lingo.
+    pub sleep_countdown: f64,
+    /// Set by the Lingo apply*/velocity setters each step so a per-frame-forced
+    /// body (a driven car) never auto-sleeps. Cleared after the sleep check.
+    pub lingo_disturbed: bool,
 }
 
 impl HavokRigidBody {
@@ -1936,6 +1943,8 @@ impl HavokRigidBody {
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
             resting_normal: None,
+            sleep_countdown: 0.5,
+            lingo_disturbed: false,
         }
     }
 
@@ -1973,6 +1982,8 @@ impl HavokRigidBody {
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
             resting_normal: None,
+            sleep_countdown: 0.5,
+            lingo_disturbed: false,
         }
     }
 }

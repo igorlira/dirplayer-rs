@@ -1360,6 +1360,43 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         update_axis_angle_from_orientation(rb);
     }
 
+    // --- Auto-sleep (deactivation) ---
+    // A non-driven body that stays still — low linear+angular speed AND no Lingo
+    // disturbance this step — for SLEEP_DELAY seconds deactivates, so resting
+    // stacks stop jittering and stop loading the solver. Driven/forced bodies
+    // (the SuperSonic car, On the Run's impulse-driven cars) are disturbed every
+    // frame and never reach the countdown, so they never sleep mid-play. Waking
+    // is unchanged (collision at resolve time; Lingo apply*/setters set
+    // `active=true`). The reference RigidBody.ShouldDeactivate exists but is
+    // unwired; this is a velocity-based equivalent of its settle test.
+    {
+        const SLEEP_DELAY: f64 = 0.5;
+        let inv_s = if state.scale.abs() > 1e-10 { 1.0 / state.scale } else { 1.0 };
+        let lin_thr2 = (0.1 * inv_s) * (0.1 * inv_s); // ~0.1 m/s, in display units
+        let ang_thr2 = 0.05 * 0.05;                   // ~0.05 rad/s
+        for rb in &mut state.rigid_bodies {
+            if !rb.active || rb.pinned || rb.driven || rb.inverse_mass <= 0.0 {
+                rb.lingo_disturbed = false;
+                continue;
+            }
+            let lv = rb.linear_velocity;
+            let av = rb.angular_velocity;
+            let lin2 = lv[0]*lv[0] + lv[1]*lv[1] + lv[2]*lv[2];
+            let ang2 = av[0]*av[0] + av[1]*av[1] + av[2]*av[2];
+            if rb.lingo_disturbed || lin2 > lin_thr2 || ang2 > ang_thr2 {
+                rb.sleep_countdown = SLEEP_DELAY;
+            } else {
+                rb.sleep_countdown -= time_increment;
+                if rb.sleep_countdown <= 0.0 {
+                    rb.active = false;
+                    rb.linear_velocity = [0.0; 3];
+                    rb.angular_velocity = [0.0; 3];
+                }
+            }
+            rb.lingo_disturbed = false;
+        }
+    }
+
     state.sim_time += time_increment;
 }
 
