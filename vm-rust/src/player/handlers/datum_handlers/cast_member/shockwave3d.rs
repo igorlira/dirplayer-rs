@@ -16,6 +16,15 @@ use crate::{
 
 const W3D_HANDLER_LOG: bool = false;
 
+/// Director's W3D motion collection has an implicit default motion at index 1,
+/// so authored motions start at index 2. dirplayer's scene.motions holds only
+/// authored motions, so the accessors below synthesise this default at index 1
+/// to keep `member.motion[i]` / `.count` aligned with Director (mirrors the way
+/// the camera accessor inserts DefaultView as camera[1]). Without it,
+/// e.g. Rasterwerks' `m.motion[3].name` returned the wrong (3rd authored) motion
+/// and every actor cloned a non-skeletal motion → T-pose.
+const DEFAULT_MOTION_NAME: &str = "Default Motion";
+
 fn log(msg: &str) {
     if W3D_HANDLER_LOG {
         debug!("[W3D-HANDLER] {}", msg);
@@ -687,7 +696,12 @@ impl Shockwave3dMemberHandlers {
                             cams
                         }
                         "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
-                        "motion" => scene.motions.iter().map(|m| m.name.clone()).collect(),
+                        "motion" => {
+                            // Default motion at index 1, then authored motions (see DEFAULT_MOTION_NAME).
+                            let mut v = vec![DEFAULT_MOTION_NAME.to_string()];
+                            v.extend(scene.motions.iter().map(|m| m.name.clone()));
+                            v
+                        }
                         _ => vec![],
                     }
                 } else {
@@ -1281,8 +1295,13 @@ impl Shockwave3dMemberHandlers {
                                         // clones (no specific motion requested) keep the
                                         // most-tracks heuristic (a skeletal model's main motion).
                                         let motion_tracks = if obj_type == "motion" {
+                                            // Among motions matching the requested name, take the one
+                                            // with the most tracks (the skeletal animation, vs an
+                                            // empty/stub of the same name) — robust to duplicate names;
+                                            // a no-op when the name is unique (On the Run).
                                             scene.motions.iter()
-                                                .find(|m| m.name.eq_ignore_ascii_case(&source_model_name))
+                                                .filter(|m| m.name.eq_ignore_ascii_case(&source_model_name))
+                                                .max_by_key(|m| m.tracks.len())
                                                 .map(|m| m.tracks.clone())
                                                 .unwrap_or_default()
                                         } else {
@@ -2784,7 +2803,8 @@ impl Shockwave3dMemberHandlers {
             "light" => scene.lights.len() as i32,
             "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).count() as i32,
             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count() as i32,
-            "motion" => scene.motions.len() as i32,
+            // +1 for the implicit default motion at index 1 (see DEFAULT_MOTION_NAME).
+            "motion" => scene.motions.len() as i32 + 1,
             _ => 0,
         }
     }
@@ -2815,7 +2835,14 @@ impl Shockwave3dMemberHandlers {
                 cams.get(idx).map(|s| s.to_string())
             }
             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
-            "motion" => scene.motions.get(idx).map(|m| m.name.clone()),
+            // motion[1] = implicit default; authored motions follow at 2.. (see DEFAULT_MOTION_NAME).
+            "motion" => {
+                if idx == 0 {
+                    Some(DEFAULT_MOTION_NAME.to_string())
+                } else {
+                    scene.motions.get(idx - 1).map(|m| m.name.clone())
+                }
+            }
             _ => None,
         }
     }
