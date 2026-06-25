@@ -1893,6 +1893,13 @@ pub struct HavokRigidBody {
     /// Set by the Lingo apply*/velocity setters each step so a per-frame-forced
     /// body (a driven car) never auto-sleeps. Cleared after the sleep check.
     pub lingo_disturbed: bool,
+    /// Authored initial state, snapshotted when the body is created, so
+    /// `havok.reset()` can revert the scene to the .hke-defined state.
+    pub initial_position: [f64; 3],
+    pub initial_orientation: [f64; 4],
+    pub initial_linear_velocity: [f64; 3],
+    pub initial_angular_velocity: [f64; 3],
+    pub initial_active: bool,
 }
 
 impl HavokRigidBody {
@@ -1945,6 +1952,11 @@ impl HavokRigidBody {
             resting_normal: None,
             sleep_countdown: 0.5,
             lingo_disturbed: false,
+            initial_position: [0.0; 3],
+            initial_orientation: [1.0, 0.0, 0.0, 0.0],
+            initial_linear_velocity: [0.0; 3],
+            initial_angular_velocity: [0.0; 3],
+            initial_active: true,
         }
     }
 
@@ -1984,7 +1996,39 @@ impl HavokRigidBody {
             resting_normal: None,
             sleep_countdown: 0.5,
             lingo_disturbed: false,
+            initial_position: [0.0; 3],
+            initial_orientation: [1.0, 0.0, 0.0, 0.0],
+            initial_linear_velocity: [0.0; 3],
+            initial_angular_velocity: [0.0; 3],
+            initial_active: true,
         }
+    }
+
+    /// Record the current transform/velocity as the authored initial state,
+    /// so `havok.reset()` can revert to it.
+    pub fn snapshot_initial(&mut self) {
+        self.initial_position = self.position;
+        self.initial_orientation = self.orientation;
+        self.initial_linear_velocity = self.linear_velocity;
+        self.initial_angular_velocity = self.angular_velocity;
+        self.initial_active = self.active;
+    }
+
+    /// Revert to the snapshotted initial state and clear all accumulated/derived
+    /// runtime state (forces, momenta, resting + sleep state). `havok.reset()`.
+    pub fn restore_initial(&mut self) {
+        self.position = self.initial_position;
+        self.orientation = self.initial_orientation;
+        self.linear_velocity = self.initial_linear_velocity;
+        self.angular_velocity = self.initial_angular_velocity;
+        self.active = self.initial_active;
+        self.force = [0.0; 3];
+        self.torque = [0.0; 3];
+        self.linear_momentum = [0.0; 3];
+        self.angular_momentum = [0.0; 3];
+        self.resting_normal = None;
+        self.sleep_countdown = 0.5;
+        self.lingo_disturbed = false;
     }
 }
 

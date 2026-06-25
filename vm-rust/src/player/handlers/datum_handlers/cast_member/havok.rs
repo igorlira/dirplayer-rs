@@ -899,6 +899,12 @@ impl HavokPhysicsMemberHandlers {
             }
         }
 
+        // Snapshot every body's authored state so havok.reset() can revert the
+        // scene to the .hke-defined state.
+        for rb in &mut havok.state.rigid_bodies {
+            rb.snapshot_initial();
+        }
+
         let movable_names: Vec<String> = havok.state.rigid_bodies.iter()
             .filter(|rb| !rb.pinned && rb.mass > 0.0)
             .map(|rb| format!("{}({:.1})", rb.name, rb.mass)).collect();
@@ -1051,8 +1057,37 @@ impl HavokPhysicsMemberHandlers {
             CastMemberType::HavokPhysics(h) => h,
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
+        // havok.reset() "reverts the entire scene back to the state defined in
+        // the .hke file": restore every body to its authored initial transform,
+        // velocity and active flag, and clear runtime state.
         havok.state.sim_time = 0.0;
-        // Reset rigid body states to initial positions would go here
+        havok.state.collision_list_cache.clear();
+        for rb in &mut havok.state.rigid_bodies {
+            rb.restore_initial();
+        }
+
+        // Write the restored transforms back to the W3D scene so the models snap
+        // to their start positions (same path step() uses). Sync all non-fixed
+        // bodies regardless of active flag so even authored-asleep bodies reset.
+        let w3d_cast_lib = havok.state.w3d_cast_lib;
+        let w3d_cast_member = havok.state.w3d_cast_member;
+        let sync_data: Vec<(String, [f32; 16])> = havok.state.rigid_bodies.iter()
+            .filter(|rb| !rb.is_fixed)
+            .map(|rb| {
+                let t = super::havok_physics::build_sync_transform(
+                    rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
+                );
+                (rb.name.clone(), t)
+            })
+            .collect();
+        drop(member);
+        let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
+        for (name, t) in &sync_data {
+            if t.iter().any(|v| !v.is_finite()) { continue; }
+            crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                player, &w3d_ref, name, *t,
+            );
+        }
         Ok(DatumRef::Void)
     }
 
@@ -1315,6 +1350,7 @@ impl HavokPhysicsMemberHandlers {
 
         havok.state.rigid_bodies.push(rb);
         let new_rb_index = havok.state.rigid_bodies.len() - 1;
+        havok.state.rigid_bodies[new_rb_index].snapshot_initial();
         // Re-link collision mesh for this body
         for cmesh in &mut havok.state.collision_meshes {
             if cmesh.name.eq_ignore_ascii_case(&model_name) && cmesh.body_index.is_none() {
@@ -1464,6 +1500,7 @@ impl HavokPhysicsMemberHandlers {
         let rb = HavokRigidBody::new_fixed(&model_name, is_convex);
         havok.state.rigid_bodies.push(rb);
         let rb_index = havok.state.rigid_bodies.len() - 1;
+        havok.state.rigid_bodies[rb_index].snapshot_initial();
 
         if let Some(mut cmesh) = collision_mesh {
             cmesh.body_index = Some(rb_index);
