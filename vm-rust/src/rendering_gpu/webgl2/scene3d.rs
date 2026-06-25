@@ -1197,6 +1197,7 @@ void main() {
                 } else {
                     None
                 };
+
                 // Pack bone data (variable-length per-vertex → fixed vec4)
                 let (bone_idx_packed, bone_wgt_packed);
                 let (bi_opt, bw_opt) = if !mesh.bone_indices.is_empty() && !mesh.bone_weights.is_empty()
@@ -1296,8 +1297,14 @@ void main() {
         let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
         let mut alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
-            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data) {
-                let lower = tex_name.to_lowercase();
+            let lower = tex_name.to_lowercase();
+            // The SkyLine* textures in this game are authored vertically inverted in
+            // the W3D (the JPEGs are stored upside-down, while houses/buildings/icons
+            // are stored right-side-up). The skyline mesh UVs use the same convention
+            // as everything else, and the texture declarations carry no orientation
+            // flag, so flip these on upload to render the horizon the right way up.
+            let flip_v = lower.contains("skyline");
+            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
                 texture_sizes.insert(lower.clone(), (w, h));
                 if has_alpha {
                     alpha_textures.insert(lower.clone());
@@ -1332,8 +1339,8 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
-        decode_and_upload_texture_impl(context, data)
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
+        decode_and_upload_texture_impl(context, data, flip_v)
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
@@ -1348,7 +1355,8 @@ void main() {
                 Some(&old_len) => old_len != data_len,
             };
             if needs_upload {
-                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data) {
+                let flip_v = lower.contains("skyline");
+                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
                     gpu_data.texture_sizes.insert(lower.clone(), (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(lower.clone());
@@ -4522,7 +4530,7 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -4608,6 +4616,23 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
         }
     } else {
         return None;
+    };
+
+    // Vertically flip the decoded image when requested (the caller sets this for
+    // the SkyLine* textures, which are authored upside-down in the W3D asset).
+    let rgba_data = if flip_v && height > 0 {
+        let row = (width as usize) * 4;
+        let mut out = vec![0u8; rgba_data.len()];
+        for y in 0..(height as usize) {
+            let src = y * row;
+            let dst = (height as usize - 1 - y) * row;
+            if src + row <= rgba_data.len() && dst + row <= out.len() {
+                out[dst..dst + row].copy_from_slice(&rgba_data[src..src + row]);
+            }
+        }
+        out
+    } else {
+        rgba_data
     };
 
     let gl = context.gl();
