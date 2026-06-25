@@ -75,6 +75,11 @@ pub struct HkeCable {
 pub struct HkeWorld {
     pub world_name: String,
     pub world_scale: f32,
+    /// Collision tolerance authored in the modeler and stored in the HKE subspace
+    /// (`havok.tolerance`). The Xtra uses it as the "objects are touching" distance,
+    /// which also sets how far above a surface a resting body floats. `initialize()`
+    /// uses it when the movie doesn't pass an explicit tolerance argument.
+    pub tolerance: Option<f32>,
     pub gravity: Option<[f32; 3]>,
     pub drag: Option<HkeDragAction>,
     pub meshes: Vec<HkeCollisionMesh>,
@@ -133,6 +138,7 @@ const SPHERE_RADIUS_TOKEN: [u8; 4] = [0xA3, 0x8E, 0x65, 0x05]; // [radius]
 
 // Subspace tokens
 const SUBSPACE_GRAVITY_TOKEN: [u8; 4] = [0xD9, 0xAE, 0x66, 0x0C];
+const SUBSPACE_TOLERANCE_TOKEN: [u8; 4] = [0x35, 0x1B, 0xA6, 0x00];
 
 // Drag action tokens
 const DRAG_LINEAR_TOKEN: [u8; 4] = [0xC7, 0x74, 0x33, 0x06];
@@ -142,6 +148,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
     let mut world = HkeWorld {
         world_name: String::new(),
         world_scale: 0.0254,
+        tolerance: None,
         gravity: None,
         drag: None,
         meshes: Vec::new(),
@@ -273,6 +280,9 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld) {
             let payload = &data[pos..end];
             if world.gravity.is_none() {
                 world.gravity = try_read_vec3_after_token(payload, &SUBSPACE_GRAVITY_TOKEN);
+            }
+            if world.tolerance.is_none() {
+                world.tolerance = try_read_f32_after_token(payload, &SUBSPACE_TOLERANCE_TOKEN);
             }
             pos = end;
             continue;

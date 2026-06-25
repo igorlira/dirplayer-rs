@@ -405,6 +405,7 @@ impl PropListDatumHandlers {
             "deleteOne" => Self::delete_one(datum, args),
             "getOne" => Self::get_one(datum, args),
             "findPos" => Self::find_pos(datum, args),
+            "findPosNear" => Self::find_pos_near(datum, args),
             "getPos" => Self::get_pos(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             "getLast" => Self::get_last(datum, args),
@@ -538,6 +539,47 @@ impl PropListDatumHandlers {
             } else {
                 return Ok(DatumRef::Void);
             }
+        })
+    }
+
+    /// `sortedPropList.findPosNear(property)` — Director 11.5 Scripting
+    /// Dictionary, `findPosNear`. For a *sorted* property list, returns the
+    /// 1-based position of the entry whose property (key) is the nearest
+    /// match to `property`. Unlike `findPos` (which is VOID when the property
+    /// is absent), `findPosNear` always reports the position of the closest
+    /// key. The doc's "most similar alphanumeric name" maps to the list's
+    /// sort order: we locate the key's sorted insertion point (lower bound)
+    /// and clamp it into `[1, count]` so the result is always a valid
+    /// position. On Run's DriveHuman behavior calls this on `sndGearSpeed`
+    /// (integer speed keys -> gear symbols) to pick the gear sound nearest the
+    /// current speed.
+    pub fn find_pos_near(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+            let count = prop_list.len() as i32;
+            if count == 0 {
+                return Ok(player.alloc_datum(Datum::Int(0)));
+            }
+            let result = if is_sorted {
+                let pos = PropListUtils::find_index_to_add(
+                    prop_list,
+                    (&args[0], &args[0]),
+                    &player.allocator,
+                )?;
+                (pos + 1).clamp(1, count)
+            } else {
+                // Unsorted list: fall back to an exact key match (mirrors the
+                // linear-list `findPosNear` path), returning 0 when absent.
+                let find = player.get_datum(&args[0]);
+                prop_list
+                    .iter()
+                    .position(|(k, _)| {
+                        datum_equals(player.get_datum(k), find, &player.allocator).unwrap()
+                    })
+                    .map(|x| x as i32 + 1)
+                    .unwrap_or(0)
+            };
+            Ok(player.alloc_datum(Datum::Int(result)))
         })
     }
 

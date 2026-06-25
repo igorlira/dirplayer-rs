@@ -2089,6 +2089,10 @@ pub struct HavokCollisionInfo {
     pub body_b: String,
     pub point: [f64; 3],
     pub normal: [f64; 3],
+    /// Impact speed (|normal relative velocity|) at the contact. Passed to Lingo
+    /// collision callbacks as the 5th argument and gated against the
+    /// registerInterest threshold.
+    pub normal_rel_vel: f64,
 }
 
 pub struct HavokPhysicsState {

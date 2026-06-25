@@ -265,8 +265,8 @@ impl HavokPhysicsMemberHandlers {
             });
 
             let mut step_cbs: Vec<(String, DatumRef, f64)> = Vec::new();
-            // Raw collision data: (handler, instance, body_a, body_b, point, normal)
-            let mut raw_collisions: Vec<(String, DatumRef, String, String, [f64;3], [f64;3])> = Vec::new();
+            // Raw collision data: (handler, instance, body_a, body_b, point, normal, nrv)
+            let mut raw_collisions: Vec<(String, DatumRef, String, String, [f64;3], [f64;3], f64)> = Vec::new();
 
             if let Some(havok) = havok {
                 // Step callbacks
@@ -300,12 +300,28 @@ impl HavokPhysicsMemberHandlers {
                             (contact.body_a.eq_ignore_ascii_case(&interest.rb_name1) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name2))
                             || (contact.body_a.eq_ignore_ascii_case(&interest.rb_name2) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name1))
                         };
-                        if matches {
+                        // Gate on the registerInterest threshold: the Xtra only
+                        // fires the callback when the impact (normal relative)
+                        // speed reaches the threshold, so a body merely resting on
+                        // or sliding along a surface (nrv≈0) doesn't trigger a
+                        // collision event. (Frequency throttling is not yet
+                        // applied; freq is 0 for the player car so it's a no-op
+                        // there, and the scripts self-throttle via sndCollisionWait.)
+                        if matches && contact.normal_rel_vel >= interest.threshold {
+                            // Report the registered body (rb_name1) first so the
+                            // callback can treat cd[1] as "self" and cd[2] as the
+                            // other object (matches the Havok Xtra ordering).
+                            let (name_self, name_other) =
+                                if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1) {
+                                    (contact.body_b.clone(), contact.body_a.clone())
+                                } else {
+                                    (contact.body_a.clone(), contact.body_b.clone())
+                                };
                             raw_collisions.push((
                                 interest.handler_name.clone().unwrap(),
                                 interest.script_instance.clone().unwrap(),
-                                contact.body_a.clone(), contact.body_b.clone(),
-                                contact.point, contact.normal,
+                                name_self, name_other,
+                                contact.point, contact.normal, contact.normal_rel_vel,
                             ));
                         }
                     }
@@ -315,18 +331,21 @@ impl HavokPhysicsMemberHandlers {
 
             // Now allocate datums (requires mutable player, no longer borrowing havok)
             let mut collision_cbs = Vec::new();
-            for (handler, instance, ba, bb, pt, nm) in raw_collisions {
+            for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
+                // Match the Havok Xtra collision-callback signature
+                // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
+                // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
+                // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
+                // read cd[5] as an impact speed — On the Run's DriveHuman damage
+                // logic — saw a position instead.)
                 let ba_r = player.alloc_datum(Datum::String(ba));
                 let bb_r = player.alloc_datum(Datum::String(bb));
-                let cx = player.alloc_datum(Datum::Float(pt[0]));
-                let cy = player.alloc_datum(Datum::Float(pt[1]));
-                let cz = player.alloc_datum(Datum::Float(pt[2]));
-                let nx = player.alloc_datum(Datum::Float(nm[0]));
-                let ny = player.alloc_datum(Datum::Float(nm[1]));
-                let nz = player.alloc_datum(Datum::Float(nm[2]));
+                let pt_r = player.alloc_datum(Datum::Vector(pt));
+                let nm_r = player.alloc_datum(Datum::Vector(nm));
+                let nrv_r = player.alloc_datum(Datum::Float(nrv));
                 let info = player.alloc_datum(Datum::List(
                     DatumType::List,
-                    VecDeque::from([ba_r, bb_r, cx, cy, cz, nx, ny, nz]),
+                    VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
                     false,
                 ));
                 collision_cbs.push((handler, instance, info));
@@ -562,6 +581,20 @@ impl HavokPhysicsMemberHandlers {
                     g[1] as f64 * inv_s,
                     g[2] as f64 * inv_s,
                 ];
+            }
+
+            // Apply the modeler-authored collision tolerance from the HKE subspace
+            // unless the movie passed an explicit tolerance to initialize(). The
+            // Xtra (and the C# HkeParser) take it from the .hke; our hardcoded 0.1
+            // default is only meant for `initialize(member)` calls whose HKE omits
+            // it. On the Run authors 0.35 — the tolerance sets how far a resting
+            // body floats above a surface, so with 0.1 the car sat ~0.1 above the
+            // road, below the ~0.2 raised (visual-only) sidewalk curbs, and
+            // modelsUnderRay then found no ground (pheight=9999 → couldn't drive).
+            if args.len() <= 1 {
+                if let Some(t) = hke.tolerance {
+                    havok.state.tolerance = t as f64;
+                }
             }
 
             // Apply HKE drag parameters as initial defaults
