@@ -568,6 +568,44 @@ pub fn detect_body_contacts(
                         normal_rel_vel: nrv,
                     });
                 }
+            } else if passive && normal[2].abs() > 0.85 {
+                // Edge/vertex contact on a near-horizontal FLOOR triangle: the body's
+                // footprint still overlaps the triangle near an edge even though its
+                // CENTRE projects outside the face. This is the seam between adjacent
+                // road box colliders — On the Run paves the road with separate boxes,
+                // and a car whose centre sits over the gap/edge between two of them
+                // finds no face underneath and falls through. The face-only
+                // `pt_in_tri_3d` test (a simplification of the C# reference's full
+                // triangle-triangle closest-point) misses it.
+                //
+                // Restricted to up-facing floor triangles (|n.z|>0.85, Havok is
+                // Z-up): applying it to ramp/wall faces turned their base edges into a
+                // back-stop that blocked the car from climbing small 45° ramps and
+                // whipped it out of the world. Sloped/vertical faces keep the
+                // face-only test. Passive-only so SuperSonic's tuned narrow phase is
+                // unchanged.
+                let closest = closest_pt_on_tri(pos, v0, v1, v2);
+                let to_pos = v3_sub(pos, closest);
+                let d = v3_len(to_pos);
+                if d > 1e-6 && d <= eff_radius {
+                    let depth = eff_radius - d;
+                    // Keep the surface normal (oriented toward the body) so a flat
+                    // seam pushes the car straight up, not sideways toward the edge.
+                    let n = if v3_dot(to_pos, normal) >= 0.0 { normal } else { v3_scale(normal, -1.0) };
+                    if depth > -margin && n[2] > 0.85 {
+                        let va = body_point_velocity(&bodies[body_idx], closest);
+                        let nrv = (va[0]*n[0] + va[1]*n[1] + va[2]*n[2]).abs();
+                        contacts.push(CollisionContact {
+                            body_a: body_idx,
+                            body_b: mesh.body_index,
+                            point: closest,
+                            normal: n,
+                            depth,
+                            mesh_index: Some(mesh_idx),
+                            normal_rel_vel: nrv,
+                        });
+                    }
+                }
             }
         }
     }
@@ -682,6 +720,47 @@ fn pt_in_tri_3d(p: V3, v0: V3, v1: V3, v2: V3) -> bool {
     let u = (d11*d02 - d01*d12) / denom;
     let v = (d00*d12 - d01*d02) / denom;
     u >= -0.01 && v >= -0.01 && (u + v) <= 1.01
+}
+
+/// Closest point on triangle (a,b,c) to point p — Ericson, Real-Time Collision
+/// Detection (handles the face, the three edges, and the three vertex regions).
+/// Used by the box-support narrow phase to rest a body on a triangle edge when
+/// its centre projects just outside the face (road box seams in On the Run).
+fn closest_pt_on_tri(p: V3, a: V3, b: V3, c: V3) -> V3 {
+    let ab = v3_sub(b, a);
+    let ac = v3_sub(c, a);
+    let ap = v3_sub(p, a);
+    let d1 = v3_dot(ab, ap);
+    let d2 = v3_dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 { return a; }            // vertex region A
+    let bp = v3_sub(p, b);
+    let d3 = v3_dot(ab, bp);
+    let d4 = v3_dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 { return b; }             // vertex region B
+    let vc = d1*d4 - d3*d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {           // edge region AB
+        let v = d1 / (d1 - d3);
+        return v3_add(a, v3_scale(ab, v));
+    }
+    let cp = v3_sub(p, c);
+    let d5 = v3_dot(ab, cp);
+    let d6 = v3_dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 { return c; }             // vertex region C
+    let vb = d5*d2 - d1*d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {           // edge region AC
+        let w = d2 / (d2 - d6);
+        return v3_add(a, v3_scale(ac, w));
+    }
+    let va = d3*d6 - d5*d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {   // edge region BC
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return v3_add(b, v3_scale(v3_sub(c, b), w));
+    }
+    // Inside face region — barycentric combination.
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    v3_add(a, v3_add(v3_scale(ab, v), v3_scale(ac, w)))
 }
 
 fn interp_z(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> f64 {
