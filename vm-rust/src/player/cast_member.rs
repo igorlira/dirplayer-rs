@@ -1256,6 +1256,12 @@ pub struct Shockwave3dRuntimeState {
     // ─── Detached nodes (parent set to VOID) ───
     pub detached_nodes: std::collections::HashSet<String>,
 
+    /// Manual per-bone LOCAL transform overrides from `bonesPlayer.bone[i].transform = t`.
+    /// Keyed by "modelname:boneindex" (lowercase). The skeleton build substitutes these
+    /// (resolving the bone's rest length for a zero translation), letting procedural
+    /// scripts like updateBoneRotation drive bones — the SweeTarts snake's S-wiggle.
+    pub bone_transform_overrides: std::collections::HashMap<String, [f32; 16]>,
+
     // ─── pointAtOrientation per node ───
     /// Per-node pointAtOrientation: node_name -> (front_axis, up_axis)
     /// Default: ([0,0,1], [0,1,0]) — +Z front, +Y up

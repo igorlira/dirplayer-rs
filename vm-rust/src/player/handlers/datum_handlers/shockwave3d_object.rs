@@ -651,6 +651,26 @@ impl Shockwave3dObjectDatumHandlers {
                 cast_member: s3d_ref.cast_member,
             };
 
+            // `bonesPlayer.bone[i].transform = t` — store a manual per-bone LOCAL
+            // override (ref name is "modelName:boneIndex"). Director 11.5: the bone
+            // is no longer driven by the current motion; updateBoneRotation-style
+            // scripts re-set it every frame for procedural animation (the SweeTarts
+            // snake's S-wiggle). The skeleton build substitutes it, resolving the
+            // bone's rest length for the (typically zero) translation.
+            if s3d_ref.object_type == "bone" && prop_name.eq_ignore_ascii_case("transform") {
+                if let Datum::Transform3d(m) = value {
+                    let mut mat = [0.0f32; 16];
+                    for i in 0..16 { mat[i] = m[i] as f32; }
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.runtime_state.bone_transform_overrides
+                                .insert(s3d_ref.name.to_ascii_lowercase(), mat);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
             // Setters on a #collision modifier object ref:
             // `model.collision.enabled = 1`, `.resolve`, `.immovable`, `.mode`.
             // Handled before the generic match_ci! (it can't guard prop names by
@@ -7035,11 +7055,34 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
 
 /// Sync persistent shader textureList DatumRefs back to shader.texture_layers in the scene.
 /// This ensures the renderer sees textures assigned via Lingo (shader.textureList[n] = tex).
+/// Invert the 2×2 UV-linear (scale/rotation) part of a texture transform and
+/// cast to f32. Director's `textureTransform.scale` is the texture's APPARENT
+/// size (0.125 = the texture tiles 8×), the inverse of the coordinate scale the
+/// shader multiplies onto the UVs. Translation (m12,m13) is preserved so a
+/// scrolling `textureTransform.position` still works.
+fn invert_tex_uv_scale(m: &[f64; 16]) -> [f32; 16] {
+    let (a, b, c, d) = (m[0], m[1], m[4], m[5]); // u' = a*u + c*v, v' = b*u + d*v
+    let det = a * d - c * b;
+    let mut out = [0.0f32; 16];
+    for i in 0..16 {
+        out[i] = m[i] as f32;
+    }
+    if det.abs() >= 1e-8 {
+        let inv = 1.0 / det;
+        out[0] = (d * inv) as f32;
+        out[1] = (-b * inv) as f32;
+        out[4] = (-c * inv) as f32;
+        out[5] = (a * inv) as f32;
+    }
+    out
+}
+
 pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
     // Collect (cast_lib, member_num, shader_name, list_ref) tuples
     let mut entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     let mut mode_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     let mut blend_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
+    let mut transform_entries: Vec<(i32, u32, String, DatumRef)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
@@ -7051,6 +7094,9 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                 }
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_blend_constant_lists {
                     blend_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
+                }
+                for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_transform_lists {
+                    transform_entries.push((cast.number as i32, *member_num, shader_name.clone(), list_ref.clone()));
                 }
             }
         }
@@ -7115,6 +7161,39 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                         }
                         for (i, mode) in modes.iter().enumerate() {
                             shader.texture_layers[i].tex_mode = *mode;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sync textureTransformList → shader.texture_layers[].tex_transform. Runtime
+    // shaders set shader.textureTransform.scale on a Transform3d datum; the
+    // renderer only reads texture_layers[].tex_transform, so without this the
+    // transform is dropped (SweeTarts' skybox cloud tile mapped once around the
+    // cylinder → blurry; runtime edits had no visible effect). Scale is inverted
+    // to a tile factor (see invert_tex_uv_scale).
+    for (cast_lib, cast_member, shader_name, list_ref) in transform_entries {
+        let mats: Vec<[f32; 16]> = if let Datum::List(_, items, _) = player.get_datum(&list_ref) {
+            items.iter().map(|item_ref| match player.get_datum(item_ref) {
+                Datum::Transform3d(m) => invert_tex_uv_scale(m),
+                _ => [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            }).collect()
+        } else {
+            continue;
+        };
+        let member_ref = CastMemberRef { cast_lib, cast_member: cast_member as i32 };
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some(scene) = w3d.scene_mut() {
+                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == shader_name) {
+                        use crate::director::chunks::w3d::types::W3dTextureLayer;
+                        while shader.texture_layers.len() < mats.len() {
+                            shader.texture_layers.push(W3dTextureLayer::default());
+                        }
+                        for (i, m) in mats.iter().enumerate() {
+                            shader.texture_layers[i].tex_transform = *m;
                         }
                     }
                 }

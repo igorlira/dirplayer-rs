@@ -4077,9 +4077,28 @@ void main() {
         } else {
             None // Don't apply a motion until the game explicitly calls play()
         };
-        // Skip skinning if motion has too few tracks for the skeleton
+        // Manual per-bone overrides (bonesPlayer.bone[i].transform = t), keyed by
+        // "modelname:boneindex". updateBoneRotation re-sets these each frame to
+        // animate procedurally (the SweeTarts snake's S-wiggle), so we must skin
+        // even when the played motion is sparse or absent.
+        let bone_overrides: std::collections::HashMap<usize, [f32; 16]> = runtime_state
+            .map(|rs| {
+                let prefix = format!("{}:", model_name.to_ascii_lowercase());
+                rs.bone_transform_overrides.iter()
+                    .filter_map(|(k, v)| {
+                        k.strip_prefix(&prefix)
+                            .and_then(|i| i.parse::<usize>().ok())
+                            .map(|i| (i, *v))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Skip skinning if motion has too few tracks for the skeleton — unless
+        // manual bone overrides are driving the pose.
         let min_tracks = (skeleton.bones.len() / 2).max(2);
-        if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
+        if bone_overrides.is_empty()
+            && motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true)
+        {
             return false;
         }
         let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
@@ -4100,6 +4119,7 @@ void main() {
         } else { 0.0 };
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
             skeleton, motion, t, root_lock,
+            if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
         );
 
         // [root-relativize] Director keeps a 3ds-Max biped's ROOT at identity IN THE SKIN
@@ -4162,6 +4182,7 @@ void main() {
             let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(n)));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
                 skeleton, prev_motion, t, root_lock,
+                if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
             );
             for i in 0..bone_count {
                 let cur_rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
