@@ -2011,7 +2011,7 @@ void main() {
                         continue;
                     }
 
-                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
+                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
                 }
 
                 // PASS 1b: Cutout geometry — opaque pass with alpha-test discard so
@@ -2021,7 +2021,7 @@ void main() {
                     gl.depth_mask(true);
                     gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.5);
                     for model_node in &cutout_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
                     }
                     gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 }
@@ -2034,7 +2034,7 @@ void main() {
                     gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
 
                     for (model_node, _dist) in &transparent_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, true);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, true);
                     }
 
                     gl.depth_mask(true);
@@ -2516,6 +2516,8 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        view_matrix: &[f32; 16],
+        projection_matrix: &[f32; 16],
         force_blend: bool,
     ) {
         let resource = if !model_node.model_resource_name.is_empty() {
@@ -2568,6 +2570,24 @@ void main() {
             vis_mode = if is_skybox {
                 gl.disable(WebGl2RenderingContext::CULL_FACE);
                 gl.depth_mask(false);
+                // Rasterwerks draws its skybox through a dedicated sky camera
+                // (rootNode = detached "NodeSkyBox") so it's parallax-free and never
+                // clipped. Approximate that inline: strip the view translation so the
+                // cube is camera-centered (no parallax), and extend the far plane —
+                // the cube is scaled to 32000 (faces at ±16000), far beyond the main
+                // camera's far plane, so it was being clipped to nothing.
+                let mut sky_view = *view_matrix;
+                sky_view[12] = 0.0;
+                sky_view[13] = 0.0;
+                sky_view[14] = 0.0;
+                gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &sky_view);
+                let near = projection_matrix[14] / (projection_matrix[10] - 1.0);
+                let far = 200000.0f32;
+                let nf = 1.0 / (near - far);
+                let mut sky_proj = *projection_matrix;
+                sky_proj[10] = (far + near) * nf;
+                sky_proj[14] = 2.0 * far * near * nf;
+                gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &sky_proj);
                 3u8
             } else {
                 let mode = runtime_state
@@ -2641,6 +2661,9 @@ void main() {
             gl.enable(WebGl2RenderingContext::CULL_FACE);
             gl.cull_face(WebGl2RenderingContext::FRONT); // restore default
             gl.depth_mask(true);
+            // Restore the world view/projection for subsequent (non-skybox) models.
+            gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, view_matrix);
+            gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, projection_matrix);
         } else if vis_mode >= 2 {
             // Restore default culling after #back or #both
             gl.enable(WebGl2RenderingContext::CULL_FACE);
