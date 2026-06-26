@@ -1994,7 +1994,14 @@ impl Shockwave3dObjectDatumHandlers {
                                                     // renders the trough two-sided (wood inside). Emit reversed faces
                                                     // for the wall + caps when sectioned so the interior is solid. A
                                                     // full cylinder (Coke can / Pacman pipe) stays single-sided.
-                                                    let two_sided = sweep < (2.0 * PI - 1e-3);
+                                                    // A sectioned cylinder (open trough) is two-sided, AND a
+                                                    // resource authored #back/#both (skybox cylinder viewed from
+                                                    // inside) must render its inward surface — otherwise the full
+                                                    // cylinder is single-sided outward and the inside is culled
+                                                    // to black. SweeTarts' skybox is newModelResource(#cylinder,#back).
+                                                    let facing = res.primitive_facing.as_str();
+                                                    let two_sided = sweep < (2.0 * PI - 1e-3)
+                                                        || facing == "back" || facing == "both";
                                                     // Director's #cylinder is THREE mesh groups: side wall, top cap,
                                                     // bottom cap — so shaderList[1]/[2]/[3] can each differ (the Coke
                                                     // can is the cokeT label on the side and silver canTop on the
@@ -2399,7 +2406,21 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "scale" => {
-                    let (sx, sy, sz) = read_xyz_args(player, args);
+                    // Director's model.scale() takes EITHER a single uniform factor
+                    // (`scale(9)` → 9,9,9), a vector, or three components. read_xyz_args
+                    // only handles the vector / 3-arg forms (a lone scalar fell through
+                    // to 0,0,0, collapsing the model — SweeTarts candies/snake vanished).
+                    let (sx, sy, sz) = if args.len() == 1 {
+                        match player.get_datum(&args[0]) {
+                            Datum::Vector(v) => (v[0] as f32, v[1] as f32, v[2] as f32),
+                            other => {
+                                let f = other.float_value().unwrap_or(1.0) as f32;
+                                (f, f, f)
+                            }
+                        }
+                    } else {
+                        read_xyz_args(player, args)
+                    };
                     apply_scale(player, &member_ref, &s3d_ref.name, sx, sy, sz);
                     Ok(player.alloc_datum(Datum::Void))
                 },
@@ -5310,7 +5331,22 @@ impl Shockwave3dObjectDatumHandlers {
             },
             "parent" => {
                 if let Some(n) = node {
-                    Ok(player.alloc_datum(Datum::String(n.parent_name.clone())))
+                    // A model removed from the world (removeFromWorld) keeps its
+                    // scene node + parent_name (so addToWorld can re-link it), but
+                    // Director reports `model.parent` as VOID while it's detached.
+                    // Without this, `voidp(model.parent)` stays false and callers
+                    // that gate on it loop forever — SweeTarts' collectobjects
+                    // re-collects a removeFromWorld'd number candy every frame.
+                    let detached = player.movie.cast_manager.find_member_by_ref(member_ref)
+                        .and_then(|m| m.member_type.as_shockwave3d())
+                        .map(|w3d| w3d.runtime_state.detached_nodes.iter()
+                            .any(|d| d.eq_ignore_ascii_case(&n.name)))
+                        .unwrap_or(false);
+                    if detached {
+                        Ok(player.alloc_datum(Datum::Void))
+                    } else {
+                        Ok(player.alloc_datum(Datum::String(n.parent_name.clone())))
+                    }
                 } else {
                     Ok(player.alloc_datum(Datum::Void))
                 }
@@ -6214,10 +6250,20 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(node_name.to_string()))),
             "parent" => {
-                let parent = scene.nodes.iter().find(|n| n.name == node_name)
-                    .map(|n| n.parent_name.clone())
-                    .unwrap_or_default();
-                Ok(player.alloc_datum(Datum::String(parent)))
+                // VOID while detached (removeFromWorld) — see get_model_prop.
+                let detached = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .map(|w3d| w3d.runtime_state.detached_nodes.iter()
+                        .any(|d| d.eq_ignore_ascii_case(node_name)))
+                    .unwrap_or(false);
+                if detached {
+                    Ok(player.alloc_datum(Datum::Void))
+                } else {
+                    let parent = scene.nodes.iter().find(|n| n.name == node_name)
+                        .map(|n| n.parent_name.clone())
+                        .unwrap_or_default();
+                    Ok(player.alloc_datum(Datum::String(parent)))
+                }
             },
             "transform" => {
                 Ok(get_persistent_node_transform(player, member_ref, node_name))

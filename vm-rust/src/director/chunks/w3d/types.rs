@@ -402,6 +402,11 @@ pub struct ModelResourceInfo {
     /// false, which is wrong for bottom_cap, so the creation site sets them).
     pub primitive_top_cap: bool,
     pub primitive_bottom_cap: bool,
+    /// newModelResource(name, #type, #facing) orientation: "" / "front" (outer
+    /// faces only), "back" (inner faces — e.g. a skybox cylinder you view from
+    /// inside), or "both". A "back"/"both" primitive must render two-sided so the
+    /// inward surface isn't backface-culled.
+    pub primitive_facing: String,
 }
 
 #[derive(Clone, Debug, Default)]

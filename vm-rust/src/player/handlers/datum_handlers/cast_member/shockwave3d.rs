@@ -2095,6 +2095,9 @@ impl Shockwave3dMemberHandlers {
                                                 // the flag explicitly (the ghost body sets topCap=0 AND bottomCap=0).
                                                 primitive_top_cap: true,
                                                 primitive_bottom_cap: true,
+                                                // #back/#both (e.g. skybox cylinder) → render two-sided
+                                                // so the inward-facing surface isn't backface-culled.
+                                                primitive_facing: new_res_facing.clone(),
                                                 ..Default::default()
                                             });
 
@@ -2701,10 +2704,24 @@ impl Shockwave3dMemberHandlers {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
                             direction: norm_dir,
                         };
+                        // Director parameterizes the ray as origin + t*direction with
+                        // t in [0, maxDistance], so maxDistance is measured in units of
+                        // the DIRECTION VECTOR's length, not world units. The world reach
+                        // is therefore maxDistance * |direction|. We cast with a unit
+                        // direction, so scale the world cutoff by |direction| to match.
+                        // SweeTarts' snake ground-snap casts vector(0,-15,0) with
+                        // maxDistance 100 → 1500 units of reach; treating it as 100 world
+                        // units fell ~7 units short of the platform 107 below the spawn
+                        // origin, so the snake never seated ("can't move before it jumps").
+                        let world_max_dist = if dir_len > 1e-10 {
+                            max_dist * dir_len as f32
+                        } else {
+                            max_dist
+                        };
                         let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
                         let included_ref = if model_whitelist.is_empty() { None } else { Some(&model_whitelist) };
                         let hits = raycast_scene_multi(
-                            &ray, &scene, max_dist, max_models as usize,
+                            &ray, &scene, world_max_dist, max_models as usize,
                             node_transforms.as_ref(),
                             excluded_ref,
                             included_ref,
