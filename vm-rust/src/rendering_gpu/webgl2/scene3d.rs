@@ -1238,7 +1238,7 @@ void main() {
                 } else {
                     None
                 };
-                let buffers = Mesh3dBuffers::new_full(
+                let mut buffers = Mesh3dBuffers::new_full(
                     context,
                     &mesh.positions,
                     &mesh.normals,
@@ -1249,6 +1249,13 @@ void main() {
                     bw_opt,
                     vc_opt,
                 )?;
+                // A file-provided 2nd UV set is a lightmap/shadowmap atlas coord in
+                // [0,1], NOT pre-centered like the base set, so it must bypass the CLOD
+                // (u+0.5, 0.5-v) remap. Without this it shifts to ~[0.5,1.5] and the
+                // forced CLAMP smears the lightmap's edge across the whole surface.
+                if tc2.is_some() {
+                    buffers.texcoord2_direct = true;
+                }
                 group.push(buffers);
             }
             mesh_groups.insert(name.clone(), group);
