@@ -124,6 +124,13 @@ pub struct Sprite {
     pub w3d_camera: Option<String>,
     /// Additional cameras for multi-camera rendering (index 2+)
     pub w3d_cameras: Vec<String>,
+    /// Last on-screen rect captured when this sprite left its span. Director
+    /// keeps a score channel's `the rect of sprite` at its last value even
+    /// after the member clears to 0 (empty channel between two spans), so init
+    /// scripts that read `sprite(1).rect` on a transition frame still see the
+    /// real viewport size. Set only on span exit (begin_sprites); reset() clears
+    /// it, so a genuinely cleared channel still reports a zero rect.
+    pub retained_rect: Option<(i32, i32, i32, i32)>,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -210,6 +217,7 @@ impl Sprite {
             base_bg_color: ColorRef::PaletteIndex(0),
             w3d_camera: None,
             w3d_cameras: Vec::new(),
+            retained_rect: None,
         }
     }
 
@@ -271,5 +279,6 @@ impl Sprite {
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;
         self.explicit_lingo_size = false;
+        self.retained_rect = None;
     }
 }

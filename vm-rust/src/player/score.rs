@@ -589,6 +589,23 @@ impl Score {
 
         for sprite_num in sprites_to_finish {
             reserve_player_mut(|player| {
+                // Capture the last on-screen rect BEFORE reset for visible stage
+                // sprites that still have a member. Director keeps a channel's
+                // `the rect of sprite` at its last value after the sprite leaves
+                // its span (member clears to 0); 3D init scripts read
+                // sprite(1).rect on the between-spans transition frame.
+                let retained_rect = if matches!(score_ref, ScoreRef::Stage) {
+                    player.movie.score.get_sprite(sprite_num as i16).and_then(|sprite| {
+                        if sprite.visible && !sprite.puppet && sprite.member.is_some() {
+                            let r = get_concrete_sprite_rect(player, sprite);
+                            Some((r.left, r.top, r.right, r.bottom))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
                 let did_reset = {
                     let score = match &score_ref {
                         ScoreRef::Stage => &mut player.movie.score,
@@ -611,8 +628,10 @@ impl Score {
                         sprite.exited = false;
                         false
                     } else if sprite.visible {
-                        // Visible non-puppet sprite leaving its span → full reset.
+                        // Visible non-puppet sprite leaving its span → full reset,
+                        // but keep the last on-screen rect for empty-channel reads.
                         sprite.reset();
+                        sprite.retained_rect = retained_rect;
                         true
                     } else {
                         // Invisible non-puppet exited sprite: clear ONLY the
@@ -5041,6 +5060,12 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
         .as_ref()
         .and_then(|member_ref| player.movie.cast_manager.find_member_by_ref(member_ref));
     if member.is_none() {
+        // Empty channel: Director keeps `the rect of sprite` at the value it had
+        // before the sprite left its span (member→0). retained_rect carries that
+        // last rect so transition-frame reads of sprite(n).rect stay meaningful.
+        if let Some((l, t, r, b)) = sprite.retained_rect {
+            return IntRect::from(l, t, r, b);
+        }
         return IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height);
     }
     let member = member.unwrap();
