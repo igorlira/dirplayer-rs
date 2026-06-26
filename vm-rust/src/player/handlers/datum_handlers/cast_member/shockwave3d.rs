@@ -1335,6 +1335,14 @@ impl Shockwave3dMemberHandlers {
 
                         // Track shader name remapping for -clone suffix creation
                         let mut shader_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                        // Track texture name remapping for -clone suffix creation. Director
+                        // renames a colliding texture to "<name>-clone<N>": two models can both
+                        // ship a generically-named texture (e.g. the base map AND the Shield item
+                        // both export "Map #19"); the second model's copy becomes "Map #19-clone1"
+                        // and that model's shaders are repointed at the clone, so neither hijacks
+                        // the other. dirplayer previously kept only the first → the map wall showed
+                        // the shield's sunset texture.
+                        let mut texture_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
@@ -1436,6 +1444,30 @@ impl Shockwave3dMemberHandlers {
                                         // (handles cases where shader bindings are empty/unknown)
                                         let filter_shaders = !used_shader_names.is_empty();
 
+                                        // Pre-pass: detect texture-name collisions. A texture whose
+                                        // name already exists in the target scene with DIFFERENT
+                                        // pixels is a real collision (generic exporter names); record
+                                        // a "-clone<N>" rename so the shaders below point at it. Same
+                                        // bytes under the same name are genuinely shared — left as-is.
+                                        for (tex_name, tex_data) in &src_textures {
+                                            if filter_shaders && !used_texture_names.contains(tex_name) { continue; }
+                                            if let Some(existing) = scene.texture_images.get(tex_name) {
+                                                if existing != tex_data {
+                                                    let mut n = 1;
+                                                    loop {
+                                                        let cand = format!("{}-clone{}", tex_name, n);
+                                                        if !scene.texture_images.contains_key(&cand)
+                                                            && !texture_name_map.values().any(|v| v == &cand)
+                                                        {
+                                                            texture_name_map.insert(tex_name.clone(), cand);
+                                                            break;
+                                                        }
+                                                        n += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Shaders: only copy those used by the model.
                                         // If name conflicts, create -clone<N> copy (Director behavior).
                                         // DefaultShader is built-in to every cast member — never copy it.
@@ -1446,6 +1478,16 @@ impl Shockwave3dMemberHandlers {
                                             if filter_shaders && !used_shader_names.contains(&shader.name) {
                                                 continue; // Skip shaders not used by this model
                                             }
+                                            let mut cloned = shader.clone();
+                                            // Repoint any texture layers whose texture was renamed
+                                            // on collision (Director's -clone<N> behavior).
+                                            if !texture_name_map.is_empty() {
+                                                for layer in &mut cloned.texture_layers {
+                                                    if let Some(nt) = texture_name_map.get(&layer.name) {
+                                                        layer.name = nt.clone();
+                                                    }
+                                                }
+                                            }
                                             if scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 // Name conflict — create a -clone<N> copy
                                                 let mut n = 1;
@@ -1453,7 +1495,6 @@ impl Shockwave3dMemberHandlers {
                                                     let clone_name = format!("{}-clone{}", shader.name, n);
                                                     if !scene.shaders.iter().any(|s| s.name == clone_name) {
                                                         shader_name_map.insert(shader.name.clone(), clone_name.clone());
-                                                        let mut cloned = shader.clone();
                                                         cloned.name = clone_name;
                                                         scene.shaders.push(cloned);
                                                         break;
@@ -1461,7 +1502,7 @@ impl Shockwave3dMemberHandlers {
                                                     n += 1;
                                                 }
                                             } else {
-                                                scene.shaders.push(shader.clone());
+                                                scene.shaders.push(cloned);
                                             }
                                         }
                                         // Copy materials referenced by copied shaders.
@@ -1515,13 +1556,16 @@ impl Shockwave3dMemberHandlers {
                                                 scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
                                         }
-                                        // Textures: only copy those used by copied shaders
+                                        // Textures: only copy those used by copied shaders.
+                                        // A collided texture lands under its "-clone<N>" name.
                                         for (tex_name, tex_data) in &src_textures {
                                             if filter_shaders && !used_texture_names.contains(tex_name) {
                                                 continue;
                                             }
-                                            if !scene.texture_images.contains_key(tex_name) {
-                                                scene.texture_images.insert(tex_name.clone(), tex_data.clone());
+                                            let target = texture_name_map.get(tex_name).cloned()
+                                                .unwrap_or_else(|| tex_name.clone());
+                                            if !scene.texture_images.contains_key(&target) {
+                                                scene.texture_images.insert(target, tex_data.clone());
                                                 scene.texture_content_version += 1;
                                             }
                                         }
