@@ -561,6 +561,19 @@ impl BuiltInHandlerManager {
         })
     }
 
+    /// `randomVector()` (Director 11.5 dictionary): top-level function returning a
+    /// unit vector — a uniformly random point on the surface of the unit sphere,
+    /// guaranteed length 1. No parameters. Uses the cylinder/Archimedes method
+    /// (z uniform in [-1,1], azimuth uniform in [0, 2pi)) which is exactly uniform.
+    fn random_vector(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let z: f64 = player.rng.random_range(-1.0..1.0);
+            let phi: f64 = player.rng.random_range(0.0..std::f64::consts::TAU);
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            Ok(player.alloc_datum(Datum::Vector([r * phi.cos(), r * phi.sin(), z])))
+        })
+    }
+
     fn bit_and(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let a = player.get_datum(&args[0]).int_value()?;
@@ -999,6 +1012,7 @@ impl BuiltInHandlerManager {
             "put" => Self::put(args),
             "inspect" => Self::inspect(args),
             "random" => Self::random(args),
+            "randomvector" => Self::random_vector(args),
             "bitand" => Self::bit_and(args),
             "bitor" => Self::bit_or(args),
             "bitnot" => Self::bit_not(args),
