@@ -402,11 +402,9 @@ impl Transform3dDatumHandlers {
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0; // percent → 0-1
-
-            let mut result = [0.0f64; 16];
-            for i in 0..16 {
-                result[i] = m[i] + (target[i] - m[i]) * t;
-            }
+            // Lerp position/scale, SLERP rotation (Director 11.5 interpolate():
+            // "position and rotation"). Element-wise matrix lerp shears rotation.
+            let result = interpolate_transform(&m, &target, t);
             Ok(player.alloc_datum(Datum::Transform3d(result)))
         })
     }
@@ -423,11 +421,8 @@ impl Transform3dDatumHandlers {
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0;
-
-            let mut result = [0.0f64; 16];
-            for i in 0..16 {
-                result[i] = m[i] + (target[i] - m[i]) * t;
-            }
+            // interpolateTo modifies transform1 in place (Director 11.5).
+            let result = interpolate_transform(&m, &target, t);
             *player.get_datum_mut(datum) = Datum::Transform3d(result);
             Ok(DatumRef::Void)
         })
@@ -537,6 +532,100 @@ fn normalize_vec3(v: [f64; 3]) -> [f64; 3] {
 }
 
 /// Euler angles to column-major rotation matrix (R = Rz * Ry * Rx)
+/// Interpolate two Director (column-major) transforms by `t` (0..1): lerp the
+/// position and per-axis scale, SLERP the rotation. Matches the 11.5 dictionary
+/// for interpolate()/interpolateTo() ("position and rotation"). An element-wise
+/// 16-cell matrix lerp shears the rotation basis — a follow camera would track
+/// position but never actually rotate to face its target.
+fn interpolate_transform(m: &[f64; 16], target: &[f64; 16], t: f64) -> [f64; 16] {
+    let t = t.clamp(0.0, 1.0);
+    let (p1, s1, q1) = decompose_transform(m);
+    let (p2, s2, q2) = decompose_transform(target);
+    let pos = [p1[0] + (p2[0]-p1[0])*t, p1[1] + (p2[1]-p1[1])*t, p1[2] + (p2[2]-p1[2])*t];
+    let scale = [s1[0] + (s2[0]-s1[0])*t, s1[1] + (s2[1]-s1[1])*t, s1[2] + (s2[2]-s1[2])*t];
+    let q = quat_slerp(q1, q2, t);
+    recompose_transform(pos, scale, q)
+}
+
+/// Decompose a column-major transform into (position, per-axis scale, rotation
+/// quaternion [x,y,z,w]). Scale = column lengths; rotation = normalized columns.
+fn decompose_transform(m: &[f64; 16]) -> ([f64; 3], [f64; 3], [f64; 4]) {
+    let pos = [m[12], m[13], m[14]];
+    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
+    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
+    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+    let (i0, i1, i2) = (s0.max(1e-10), s1.max(1e-10), s2.max(1e-10));
+    // r_{row,col} from normalized columns
+    let (r00, r10, r20) = (m[0]/i0, m[1]/i0, m[2]/i0);
+    let (r01, r11, r21) = (m[4]/i1, m[5]/i1, m[6]/i1);
+    let (r02, r12, r22) = (m[8]/i2, m[9]/i2, m[10]/i2);
+    let q = mat3_to_quat(r00, r10, r20, r01, r11, r21, r02, r12, r22);
+    (pos, [s0, s1, s2], q)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mat3_to_quat(
+    r00: f64, r10: f64, r20: f64,
+    r01: f64, r11: f64, r21: f64,
+    r02: f64, r12: f64, r22: f64,
+) -> [f64; 4] {
+    let trace = r00 + r11 + r22;
+    if trace > 0.0 {
+        let s = 0.5 / (trace + 1.0).sqrt();
+        normalize_quat([(r21 - r12) * s, (r02 - r20) * s, (r10 - r01) * s, 0.25 / s])
+    } else if r00 > r11 && r00 > r22 {
+        let s = (2.0 * (1.0 + r00 - r11 - r22).sqrt()).max(1e-10);
+        normalize_quat([0.25 * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s])
+    } else if r11 > r22 {
+        let s = (2.0 * (1.0 + r11 - r00 - r22).sqrt()).max(1e-10);
+        normalize_quat([(r01 + r10) / s, 0.25 * s, (r12 + r21) / s, (r02 - r20) / s])
+    } else {
+        let s = (2.0 * (1.0 + r22 - r00 - r11).sqrt()).max(1e-10);
+        normalize_quat([(r02 + r20) / s, (r12 + r21) / s, 0.25 * s, (r10 - r01) / s])
+    }
+}
+
+fn recompose_transform(pos: [f64; 3], scale: [f64; 3], q: [f64; 4]) -> [f64; 16] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let (r00, r10, r20) = (1.0 - 2.0*(y*y + z*z), 2.0*(x*y + z*w), 2.0*(x*z - y*w));
+    let (r01, r11, r21) = (2.0*(x*y - z*w), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z + x*w));
+    let (r02, r12, r22) = (2.0*(x*z + y*w), 2.0*(y*z - x*w), 1.0 - 2.0*(x*x + y*y));
+    [
+        r00*scale[0], r10*scale[0], r20*scale[0], 0.0,
+        r01*scale[1], r11*scale[1], r21*scale[1], 0.0,
+        r02*scale[2], r12*scale[2], r22*scale[2], 0.0,
+        pos[0], pos[1], pos[2], 1.0,
+    ]
+}
+
+fn quat_slerp(q1: [f64; 4], mut q2: [f64; 4], t: f64) -> [f64; 4] {
+    let mut dot = q1[0]*q2[0] + q1[1]*q2[1] + q1[2]*q2[2] + q1[3]*q2[3];
+    if dot < 0.0 {
+        for i in 0..4 { q2[i] = -q2[i]; }
+        dot = -dot;
+    }
+    if dot > 0.9995 {
+        // nearly parallel → lerp + normalize (avoids sin(0) blow-up)
+        return normalize_quat([
+            q1[0] + (q2[0]-q1[0])*t, q1[1] + (q2[1]-q1[1])*t,
+            q1[2] + (q2[2]-q1[2])*t, q1[3] + (q2[3]-q1[3])*t,
+        ]);
+    }
+    let theta = dot.clamp(-1.0, 1.0).acos();
+    let s = theta.sin();
+    let a = ((1.0 - t) * theta).sin() / s;
+    let b = (t * theta).sin() / s;
+    normalize_quat([
+        q1[0]*a + q2[0]*b, q1[1]*a + q2[1]*b,
+        q1[2]*a + q2[2]*b, q1[3]*a + q2[3]*b,
+    ])
+}
+
+fn normalize_quat(q: [f64; 4]) -> [f64; 4] {
+    let len = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt();
+    if len > 1e-10 { [q[0]/len, q[1]/len, q[2]/len, q[3]/len] } else { [0.0, 0.0, 0.0, 1.0] }
+}
+
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
     // Guard against NaN/infinity — use 0 for any invalid input
     let rx = if rx_deg.is_finite() { rx_deg } else { 0.0 }.to_radians();
