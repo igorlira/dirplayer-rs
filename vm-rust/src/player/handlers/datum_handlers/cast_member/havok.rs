@@ -685,6 +685,15 @@ impl HavokPhysicsMemberHandlers {
                         rb.orientation = super::havok_physics::quat_from_axis_angle(
                             [o[1] as f64, o[2] as f64, o[3] as f64], o[0] as f64);
                     }
+                    // COLLISIONS_DISABLED: keep the body out of the collision detector.
+                    if let Some(cd) = p.collisions_disabled { rb.collisions_disabled = cd; }
+                    // CASTS_SHADOWS: render metadata (no physics effect).
+                    if let Some(cs) = p.casts_shadows { rb.casts_shadows = cs; }
+                    // DISPLACEMENT is the authored centre of mass (Havok metres); Import
+                    // writes it over the geometric COM. Scale metres → display units.
+                    if let Some(d) = p.displacement {
+                        rb.center_of_mass = [d[0] as f64*inv_scale, d[1] as f64*inv_scale, d[2] as f64*inv_scale];
+                    }
                 }
 
                 // Set position + authored model scale from the W3D transform.
@@ -729,7 +738,16 @@ impl HavokPhysicsMemberHandlers {
                     // COM = local box centre = body-frame offset from the node
                     // origin (model base) to the collision-box centre.
                     let com = [0.5*(lmn[0]+lmx[0]), 0.5*(lmn[1]+lmx[1]), 0.5*(lmn[2]+lmx[2])];
-                    let unit_i = super::havok_physics::box_unit_inertia(he);
+                    // Unit inertia from the actual mesh polyhedron (the engine derives
+                    // mass properties from geometry). A box-AABB inertia is wrong about
+                    // the pitch axis for a long flat chassis. Box fallback for
+                    // degenerate/open meshes.
+                    let local_verts: Vec<[f64; 3]> = mesh.vertices.iter()
+                        .map(|v| [v[0] as f64 * inv_scale, v[1] as f64 * inv_scale, v[2] as f64 * inv_scale])
+                        .collect();
+                    let unit_i = super::havok_physics::compute_polyhedron_unit_inertia(&local_verts, &mesh.triangles)
+                        .map(|(ui, _com, _vol)| ui)
+                        .unwrap_or_else(|| super::havok_physics::box_unit_inertia(he));
                     let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
                     super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
                     let rb = &mut havok.state.rigid_bodies[rb_index];
@@ -791,6 +809,12 @@ impl HavokPhysicsMemberHandlers {
                 // Angular velocity is rad/s — scale-independent, do NOT × inv_scale.
                 if let Some(w) = body_def.angular_velocity {
                     rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
+                }
+                if let Some(cd) = body_def.collisions_disabled { rb.collisions_disabled = cd; }
+                if let Some(cs) = body_def.casts_shadows { rb.casts_shadows = cs; }
+                // DISPLACEMENT = authored centre of mass (Havok metres), overrides geometric.
+                if let Some(d) = body_def.displacement {
+                    rb.center_of_mass = [d[0] as f64*inv_scale, d[1] as f64*inv_scale, d[2] as f64*inv_scale];
                 }
 
                 // World transform: prefer the W3D node (matches the render),
@@ -1192,7 +1216,7 @@ impl HavokPhysicsMemberHandlers {
         };
 
         // Read model's initial transform + mesh bounding box + vertices/faces from W3D scene
-        let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces) = {
+        let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces, prim_type) = {
             let member = player
                 .movie
                 .cast_manager
@@ -1268,12 +1292,20 @@ impl HavokPhysicsMemberHandlers {
                         })
                         .unwrap_or(([10.0, 10.0, 10.0], Vec::new(), Vec::new()));
 
-                    (pos, half_ext, verts, faces)
+                    // Primitive kind of the model resource (#box / #sphere / …), so
+                    // physics can treat a box differently from a rolling sphere.
+                    let prim_type = res_name
+                        .and_then(|rn| w3d.parsed_scene.as_ref()
+                            .and_then(|s| s.model_resources.get(rn.as_str())))
+                        .and_then(|mr| mr.primitive_type.clone())
+                        .unwrap_or_default();
+
+                    (pos, half_ext, verts, faces, prim_type)
                 } else {
-                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
+                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new(), String::new())
                 }
             } else {
-                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
+                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new(), String::new())
             }
         };
 
@@ -1341,14 +1373,22 @@ impl HavokPhysicsMemberHandlers {
 
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
-        // A body created by Lingo (makeMovableRigidBody) is a script-driven
-        // vehicle (e.g. the SuperSonic car) — keep it on the original collision
-        // path (hover-driven, no box-stacking). HKE-authored bodies (warehouse
-        // crates, the car-demo chassis) stay on the passive path.
+        // Default a Lingo-created movable body to the script-driven vehicle path
+        // (the raycast cars are held up by hover forces and stay off the
+        // box-stacking path). A body that is only ever positioned kinematically
+        // (interpolatingMoveTo) without ever receiving an applied force is
+        // reclassified there to a passive stacking body, so the add-cubes demo
+        // still box-stacks. HKE-authored bodies load as driven=false already.
         rb.driven = true;
+        // Box primitives must not be given sphere "rolling" on resting surfaces —
+        // a cube slides/tumbles, it doesn't roll. Flag it from the shape-type arg
+        // (#box) or the model resource's primitive type. Spheres, cylinders/coins,
+        // cars and meshes are left to roll exactly as before.
+        rb.is_box = shape_type.eq_ignore_ascii_case("box")
+            || prim_type.eq_ignore_ascii_case("box");
         rb.inertia_half_extents = mesh_half_extents;
         rb.unit_inertia_tensor = unit_inertia;
-        // Apply mass → finalise inertia / inverseInertia (PPC setMass 0x4c930)
+        // Apply mass → finalise inertia / inverseInertia.
         crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
             mass,
             rb.unit_inertia_tensor,

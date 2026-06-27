@@ -12,6 +12,33 @@ pub type Quat = [f64; 4];
 /// 3x3 matrix, row-major: [M00,M01,M02, M10,M11,M12, M20,M21,M22]
 pub type Mat3 = [f64; 9];
 
+/// Compatibility stub: `HavokPhysicsState` (cast_member.rs) stores per-pair persistent
+/// contact manifolds keyed by body indices. This older physics base does not use them
+/// (the maps stay empty), but the field type must still resolve.
+#[derive(Clone, Default)]
+pub struct Manifold;
+
+/// True if body `body_idx`, placed at (`pos`, `orient`), overlaps any static mesh or other
+/// body beyond `tolerance`. Used by `attemptMoveTo` to reject a blocked move. Temporarily
+/// moves the body to test the pose, then restores it.
+pub fn body_blocked_at(state: &mut HavokPhysicsState, body_idx: usize, pos: V3, orient: Quat) -> bool {
+    if body_idx >= state.rigid_bodies.len() { return false; }
+    let saved_pos = state.rigid_bodies[body_idx].position;
+    let saved_orient = state.rigid_bodies[body_idx].orientation;
+    state.rigid_bodies[body_idx].position = pos;
+    state.rigid_bodies[body_idx].orientation = orient;
+    let tol = state.tolerance;
+    let involves = |c: &CollisionContact| c.body_a == body_idx || c.body_b == Some(body_idx);
+    let blocked = {
+        let s: &HavokPhysicsState = state;
+        detect_all_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
+            || detect_body_body_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
+    };
+    state.rigid_bodies[body_idx].position = saved_pos;
+    state.rigid_bodies[body_idx].orientation = saved_orient;
+    blocked
+}
+
 pub const QUAT_IDENTITY: Quat = [1.0, 0.0, 0.0, 0.0];
 pub const MAT3_IDENTITY: Mat3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 pub const MAT3_ZERO: Mat3 = [0.0; 9];

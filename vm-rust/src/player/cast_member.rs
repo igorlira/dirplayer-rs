@@ -1851,6 +1851,11 @@ pub struct HavokRigidBody {
     pub friction: f64,
     pub active: bool,
     pub pinned: bool,
+    /// HKE `COLLISIONS_DISABLED`: body integrates but is never registered for
+    /// collision detection (skipped by the narrow phase).
+    pub collisions_disabled: bool,
+    /// HKE `CASTS_SHADOWS`: render metadata (display-body shadow); physics no-op.
+    pub casts_shadows: bool,
     pub linear_velocity: [f64; 3],
     pub angular_velocity: [f64; 3],
     pub linear_momentum: [f64; 3],
@@ -1863,10 +1868,23 @@ pub struct HavokRigidBody {
     pub is_convex: bool,
     /// Half-extents of the mesh bounding box, for box inertia computation.
     pub inertia_half_extents: [f64; 3],
-    /// True once the body has received a hover/drive force (applyForce /
-    /// applyForceAtPoint). Such bodies (e.g. the SuperSonic car) keep the
-    /// original collision path; force-free objects use the box-stacking path.
+    /// A Lingo-created movable body defaults to the script-driven vehicle path
+    /// (raycast cars: held up by hover forces, off the box-stacking path). HKE
+    /// bodies load as `false` (passive). A force-free body that is positioned
+    /// kinematically (interpolatingMoveTo) is reclassified to `false` so the
+    /// add-cubes demo box-stacks — see `received_force`.
     pub driven: bool,
+    /// Set once any applied force/torque (applyForce/applyForceAtPoint/
+    /// applyTorque) hits this body. A raycast car hovers every frame, so this is
+    /// true before its recovery interpolatingMoveTo runs — which is how we tell a
+    /// hover vehicle (keep `driven`) from a kinematically-placed stacking block
+    /// (clear `driven`). Never set for the falling cubes.
+    pub received_force: bool,
+    /// True for #box-primitive bodies. A box must not be given the sphere
+    /// "rolling" (ω = v/r) the resting-surface constraint applies to round
+    /// bodies — it slides/tumbles instead. Spheres, cylinders/coins, cars and
+    /// meshes leave this false and keep rolling.
+    pub is_box: bool,
     /// Authored per-axis model scale from the W3D transform, preserved so the
     /// rendered model keeps its size when physics writes back its transform
     /// (the finaldrive car is authored at 0.296×; losing it makes the RaycastCar
@@ -1933,6 +1951,8 @@ impl HavokRigidBody {
             friction: 0.5,
             active: true,
             pinned: false,
+            collisions_disabled: false,
+            casts_shadows: false,
             linear_velocity: [0.0; 3],
             angular_velocity: [0.0; 3],
             linear_momentum: [0.0; 3],
@@ -1945,6 +1965,8 @@ impl HavokRigidBody {
             is_convex,
             inertia_half_extents: [10.0; 3],
             driven: false,
+            received_force: false,
+            is_box: false,
             sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
@@ -1977,6 +1999,8 @@ impl HavokRigidBody {
             friction: 0.5,
             active: false,
             pinned: true,
+            collisions_disabled: false,
+            casts_shadows: false,
             linear_velocity: [0.0; 3],
             angular_velocity: [0.0; 3],
             linear_momentum: [0.0; 3],
@@ -1989,6 +2013,8 @@ impl HavokRigidBody {
             is_convex,
             inertia_half_extents: [10.0; 3],
             driven: false,
+            received_force: false,
+            is_box: false,
             sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: 0.0,
@@ -2192,6 +2218,10 @@ pub struct HavokPhysicsState {
     /// Disabled for HKE scene games where bodies are auto-created from W3D nodes,
     /// because those scenes need proper GJK collision instead of a simple ground clamp.
     pub use_ground_constraint: bool,
+    /// Persistent body-pair contact manifolds for the GJK narrow phase, warm-started
+    /// across substeps/frames. Key is `(min_index, max_index)`. Rebuilt by refresh
+    /// each step; not cloned (transient).
+    pub manifolds: std::collections::HashMap<(usize, usize), crate::player::handlers::datum_handlers::cast_member::havok_physics::Manifold>,
 }
 
 impl Clone for HavokPhysicsState {
@@ -2222,6 +2252,7 @@ impl Clone for HavokPhysicsState {
             collision_meshes: Vec::new(), // Not cloned — rebuilt on initialize
             collision_list_cache: Vec::new(),
             use_ground_constraint: self.use_ground_constraint,
+            manifolds: std::collections::HashMap::new(), // transient — rebuilt by refresh
         }
     }
 }
@@ -2263,6 +2294,7 @@ impl Default for HavokPhysicsState {
             collision_meshes: Vec::new(),
             collision_list_cache: Vec::new(),
             use_ground_constraint: true,
+            manifolds: std::collections::HashMap::new(),
         }
     }
 }

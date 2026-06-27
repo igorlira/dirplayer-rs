@@ -249,7 +249,7 @@ impl HavokObjectDatumHandlers {
                 "mass" => {
                     let new_mass = value.to_float()?;
                     rb.mass = new_mass;
-                    // PPC setMass (0x4c930): I = unit_inertia * mass; then invert.
+                    // On a mass change, rescale inertia: I = unit_inertia * mass; then invert.
                     // unit_inertia_tensor was populated from the mesh at body creation time.
                     crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
                         new_mass,
@@ -328,6 +328,10 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
                     rb.active = true; rb.lingo_disturbed = true;
+                    // Record that this body is force-driven so a later kinematic
+                    // interpolatingMoveTo won't reclassify a hover vehicle as a
+                    // passive stacking block. See HavokRigidBody::received_force.
+                    rb.received_force = true;
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
                     rb.force[2] += force[2];
@@ -349,6 +353,10 @@ impl HavokObjectDatumHandlers {
                 {
                     use super::cast_member::havok_physics::{v3_sub, quat_rotate_v, v3_cross};
                     rb.active = true; rb.lingo_disturbed = true;
+                    // Hover force — record force-driven so a later kinematic
+                    // interpolatingMoveTo can't reclassify this vehicle as a
+                    // passive stacking block. See HavokRigidBody::received_force.
+                    rb.received_force = true;
                     // Add linear force (world-space)
                     rb.force[0] += force[0];
                     rb.force[1] += force[1];
@@ -401,7 +409,7 @@ impl HavokObjectDatumHandlers {
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform};
+                    use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform, mat3_mul, mat3_transpose, quat_to_mat3};
                     rb.active = true; rb.lingo_disturbed = true;
                     if rb.inverse_mass > 0.0 {
                         // Linear: v += impulse * inverseMass
@@ -411,9 +419,14 @@ impl HavokObjectDatumHandlers {
                         let rel = v3_sub(point, rb.center_of_mass);
                         let r = quat_rotate_v(rb.orientation, rel);
 
-                        // Angular: omega += I_inv * cross(lever, impulse)
+                        // Angular: omega += I_world^-1 * cross(lever, impulse). The lever and
+                        // impulse are world-frame, so the body-frame inverse inertia must be
+                        // rotated into the current orientation (R·Iinv·R^T) — matching
+                        // integrate_body / applyAngularImpulse / the engine's impulse resolver.
                         let torque_impulse = v3_cross(r, impulse);
-                        let ang = mat3_transform(rb.inverse_inertia_tensor, torque_impulse);
+                        let rmat = quat_to_mat3(rb.orientation);
+                        let i_world_inv = mat3_mul(mat3_mul(rmat, rb.inverse_inertia_tensor), mat3_transpose(rmat));
+                        let ang = mat3_transform(i_world_inv, torque_impulse);
                         rb.angular_velocity = v3_add(rb.angular_velocity, ang);
                     }
                 }
@@ -434,6 +447,9 @@ impl HavokObjectDatumHandlers {
                     // an inactive body is skipped in step (the torque would be
                     // silently ignored). Matches applyForce/applyImpulse above.
                     rb.active = true; rb.lingo_disturbed = true;
+                    // Record force-driven (see applyForce) so a later kinematic
+                    // interpolatingMoveTo can't reclassify this body as passive.
+                    rb.received_force = true;
                     rb.torque[0] += torque[0];
                     rb.torque[1] += torque[1];
                     rb.torque[2] += torque[2];
@@ -448,14 +464,27 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
+                // The chassis inertia is stored in DISPLAY (scene) units, but Havok
+                // applies a Lingo angular impulse to the METER-scale inertia. A force-
+                // based torque (applyForceAtPoint) carries r×F which already supplies
+                // the worldScale² that cancels — a bare angular impulse does not, so it
+                // must be scaled by (1/worldScale)² here to match real Havok's response.
+                let world_scale = havok.state.scale;
+                let inv_scale_sq = if world_scale.abs() > 1e-10 { (1.0 / world_scale) * (1.0 / world_scale) } else { 1.0 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    use super::cast_member::havok_physics::{v3_add, mat3_transform};
+                    use super::cast_member::havok_physics::{v3_add, v3_scale, mat3_transform, mat3_mul, mat3_transpose, quat_to_mat3};
                     // Wake a sleeping body (consistent with applyImpulse).
                     rb.active = true; rb.lingo_disturbed = true;
-                    // angVel += I_inv * angularImpulse (from C# RigidBody.ApplyAngularImpulse)
-                    rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, impulse));
+                    // angVel += I_world^-1 * angularImpulse. The impulse is world-frame
+                    // (e.g. the raycast car steers about world-up), so the body-frame
+                    // inverse inertia must be rotated into the current orientation,
+                    // matching integrate_body's angular update.
+                    let r = quat_to_mat3(rb.orientation);
+                    let i_world_inv = mat3_mul(mat3_mul(r, rb.inverse_inertia_tensor), mat3_transpose(r));
+                    let dw = v3_scale(mat3_transform(i_world_inv, impulse), inv_scale_sq);
+                    rb.angular_velocity = v3_add(rb.angular_velocity, dw);
                 }
                 Ok(DatumRef::Void)
             }
@@ -499,10 +528,77 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
-                if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
-                {
-                    rb.position = pos;
+                // A body positioned purely kinematically and never force-driven is a
+                // passive stacking object (the add-cubes demo), not a hover vehicle.
+                // A raycast car has already hovered (received_force) before its
+                // recovery interpolatingMoveTo, so it stays a vehicle and just moves
+                // to the exact target.
+                let idx = havok.state.rigid_bodies.iter()
+                    .position(|r| r.name.eq_ignore_ascii_case(rb_name));
+                if let Some(idx) = idx {
+                    let (received_force, half) = {
+                        let rb = &havok.state.rigid_bodies[idx];
+                        (rb.received_force, rb.inertia_half_extents)
+                    };
+                    if received_force {
+                        havok.state.rigid_bodies[idx].position = pos;
+                    } else {
+                        // Stacking spawn: real Havok interpolatingMoveTo moves the body
+                        // toward the target but collisions STOP it, so a new cube lands
+                        // ON TOP of the pile. Teleporting straight to the target z would
+                        // bury it under the stack (it would be "added from the bottom").
+                        // So drop it just above whatever already occupies the target
+                        // column — the existing cubes AND the static floor — and land
+                        // it over the TOP cube's x,y, not the target x,y. Re-centring
+                        // every cube over the target fights the lean and makes the
+                        // tower far too stable; landing on the leaning top (where the
+                        // pile actually blocks it) lets the lean carry up so it topples
+                        // like Director's does.
+                        let mut baseline = pos[2];
+                        let mut top_xy = [pos[0], pos[1]];
+                        for (j, other) in havok.state.rigid_bodies.iter().enumerate() {
+                            if j == idx || other.collisions_disabled || other.pinned { continue; }
+                            let dx = (other.position[0] - pos[0]).abs();
+                            let dy = (other.position[1] - pos[1]).abs();
+                            if dx < half[0] + other.inertia_half_extents[0]
+                                && dy < half[1] + other.inertia_half_extents[1] {
+                                let top = other.position[2] + other.inertia_half_extents[2];
+                                if top > baseline {
+                                    baseline = top;
+                                    top_xy = [other.position[0], other.position[1]];
+                                }
+                            }
+                        }
+                        for mesh in &havok.state.collision_meshes {
+                            // Only FIXED-owned / static meshes form the floor.
+                            if let Some(owner) = mesh.body_index {
+                                if !havok.state.rigid_bodies[owner].pinned { continue; }
+                            }
+                            if pos[0] >= mesh.aabb_min[0] - half[0] && pos[0] <= mesh.aabb_max[0] + half[0]
+                                && pos[1] >= mesh.aabb_min[1] - half[1] && pos[1] <= mesh.aabb_max[1] + half[1] {
+                                baseline = baseline.max(mesh.aabb_max[2]);
+                            }
+                        }
+                        // Nudge the landing a touch further out along the existing
+                        // lean so the tower leans a bit faster and topples around the
+                        // same height Director's does (~11) instead of standing far
+                        // too long. Pure follow-the-top only grows the lean from
+                        // drift, which holds ~16. Tune LEAN_NUDGE to move the topple
+                        // height (bigger = topples sooner).
+                        const LEAN_NUDGE: f64 = 0.05;
+                        let lean = [top_xy[0] - pos[0], top_xy[1] - pos[1]];
+                        let lean_len = (lean[0]*lean[0] + lean[1]*lean[1]).sqrt();
+                        let place_xy = if lean_len > 1e-3 {
+                            let k = LEAN_NUDGE / lean_len;
+                            [top_xy[0] + lean[0]*k, top_xy[1] + lean[1]*k]
+                        } else {
+                            top_xy
+                        };
+                        let rb = &mut havok.state.rigid_bodies[idx];
+                        rb.position = [place_xy[0], place_xy[1], baseline + half[2] + 1.0];
+                        rb.driven = false;
+                        rb.active = true;
+                    }
                 }
                 // Return 1.0 (fully moved)
                 Ok(player.alloc_datum(Datum::Float(1.0)))
