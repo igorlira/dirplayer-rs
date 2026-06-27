@@ -234,6 +234,18 @@ export interface IFontMemberSnapshot {
   type: 'font'
 }
 
+export interface ISoundMemberSnapshot {
+  type: 'sound'
+  sampleRate: number
+  channels: number
+  bitsPerSample: number
+  sampleCount: number
+  duration: number
+  loop: boolean
+  codec: string
+  dataSize: number
+}
+
 export interface IUnknownMemberSnapshot {
   type: 'unknown'
 }
@@ -289,4 +301,4 @@ export interface ScoreSnapshot {
   channelInitData?: IScoreChannelInitData[]
 }
 
-export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | IFlashMemberSnapshot | IShockwave3dMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
+export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | ISoundMemberSnapshot | IFlashMemberSnapshot | IShockwave3dMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)

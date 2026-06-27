@@ -331,6 +331,84 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     }));
 }
 
+/// Dev UI sound preview: dump a sound member's decoded header fields plus the
+/// first 256 raw bytes (hex + ASCII) to the browser console. Lets a sound that
+/// "doesn't play" be identified by its real format magic (RIFF/WAV, FORM/AIFF,
+/// ID3 or 0xFF Ex = MP3, otherwise raw PCM) versus what the member metadata
+/// claims. Read-only, so it resolves the member synchronously.
+#[wasm_bindgen]
+pub fn player_print_member_sound_hex(cast_lib: i32, cast_member: i32) {
+    use crate::player::{cast_member::CastMemberType, reserve_player_ref};
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            web_sys::console::warn_1(
+                &format!("[sound-preview] member {}:{} not found", cast_lib, cast_member).into(),
+            );
+            return;
+        };
+        let CastMemberType::Sound(snd) = &member.member_type else {
+            web_sys::console::warn_1(
+                &format!(
+                    "[sound-preview] member {}:{} '{}' is not a sound member",
+                    cast_lib, cast_member, member.name
+                )
+                .into(),
+            );
+            return;
+        };
+        let data = snd.sound.data();
+        let info = &snd.info;
+        let codec = snd.sound.codec();
+        let big_endian = snd.sound.big_endian_data();
+        let magic = if data.len() >= 4 && &data[0..4] == b"RIFF" {
+            "RIFF/WAV"
+        } else if data.len() >= 4 && &data[0..4] == b"FORM" {
+            "AIFF (FORM)"
+        } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+            "MP3 (ID3 tag)"
+        } else if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
+            "MP3 frame (FF Ex)"
+        } else {
+            "raw / PCM?"
+        };
+        web_sys::console::log_1(
+            &format!(
+                "🎧 SOUND {}:{} '{}' — {} Hz, {} ch, {}-bit, samples={}, dur={}ms, loop={}, codec='{}', big_endian={} — data={} bytes — magic={}",
+                cast_lib, cast_member, member.name,
+                info.sample_rate, info.channels, info.sample_size, info.sample_count,
+                info.duration, info.loop_enabled, codec, big_endian,
+                data.len(), magic
+            )
+            .into(),
+        );
+        let n = data.len().min(256);
+        let mut hex = String::with_capacity(n * 3 + n / 16);
+        let mut ascii = String::with_capacity(n + n / 16);
+        for (i, &b) in data[..n].iter().enumerate() {
+            hex.push_str(&format!("{:02X} ", b));
+            ascii.push(if (0x20..0x7F).contains(&b) { b as char } else { '.' });
+            if (i + 1) % 16 == 0 {
+                hex.push('\n');
+                ascii.push('\n');
+            }
+        }
+        web_sys::console::log_1(&format!("🎧 first {} bytes (hex):\n{}", n, hex).into());
+        web_sys::console::log_1(&format!("🎧 first {} bytes (ascii):\n{}", n, ascii).into());
+    });
+}
+
+/// Dev UI sound preview: play a sound member on channel 1 via the real
+/// puppetSound path. Routed through the command queue so playback starts at a
+/// safe point; the triggering button click satisfies the audio-gesture gate.
+#[wasm_bindgen]
+pub fn player_play_member_sound(cast_lib: i32, cast_member: i32) {
+    player_dispatch(PlayerVMCommand::PlayMemberSound(CastMemberRef {
+        cast_lib,
+        cast_member,
+    }));
+}
+
 /// Dump every authored child sprite inside a filmloop member to the browser
 /// console. Lingo can't reach a filmloop's child sprites directly (the
 /// member.media is opaque), so this exposes the parsed score state

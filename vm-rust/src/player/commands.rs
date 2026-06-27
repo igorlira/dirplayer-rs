@@ -45,6 +45,10 @@ pub enum PlayerVMCommand {
     SetStageSize(u32, u32),
     TimeoutTriggered(TimeoutRef),
     PrintMemberBitmapHex(CastMemberRef),
+    /// Dev UI sound preview: play a sound member through channel 1 (the real
+    /// puppetSound path) so it exercises the same decode/playback code a movie
+    /// would. Triggered by a user gesture so the AudioContext can resume.
+    PlayMemberSound(CastMemberRef),
     MouseDown((i32, i32)),
     MouseUp((i32, i32)),
     MouseMove((i32, i32)),
@@ -100,6 +104,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
             format!("TimeoutTriggered({})", timeout_ref)
         }
         PlayerVMCommand::PrintMemberBitmapHex(..) => "PrintMemberBitmapHex(..)".to_string(),
+        PlayerVMCommand::PlayMemberSound(..) => "PlayMemberSound(..)".to_string(),
         PlayerVMCommand::MouseDown((x, y)) => format!("MouseDown({}, {})", x, y),
         PlayerVMCommand::MouseUp((x, y)) => format!("MouseUp({}, {})", x, y),
         PlayerVMCommand::MouseMove((x, y)) => format!("MouseMove({}, {})", x, y),
@@ -329,6 +334,38 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
                 let bitmap = &bitmap.data;
                 warn!("Bitmap hex: {}", bitmap.to_hex_string());
+            });
+        }
+        PlayerVMCommand::PlayMemberSound(member_ref) => {
+            use crate::player::handlers::datum_handlers::sound_channel::SoundChannelDatumHandlers;
+            let (cl, cm) = (member_ref.cast_lib, member_ref.cast_member);
+            reserve_player_mut(|player| {
+                let is_sound = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .map(|m| matches!(m.member_type, CastMemberType::Sound(_)))
+                    .unwrap_or(false);
+                if !is_sound {
+                    console_warn!("[sound-preview] member {}:{} is not a sound member", cl, cm);
+                    return;
+                }
+                let member_datum = player.alloc_datum(Datum::CastMember(member_ref));
+                // Preview on channel 1 (Director's default puppetSound channel).
+                // Always play ONCE here, ignoring the member's loop flag, so a
+                // looping member doesn't run forever from the dev-UI preview.
+                let channel = match player.get_sound_channel(1) {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        console_warn!("[sound-preview] no channel for {}:{}: {}", cl, cm, e.message);
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    SoundChannelDatumHandlers::handle_play_file(player, &channel, &member_datum, 1)
+                {
+                    console_warn!("[sound-preview] play failed for {}:{}: {}", cl, cm, e.message);
+                }
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {

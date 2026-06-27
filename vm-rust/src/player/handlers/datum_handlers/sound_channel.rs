@@ -1207,6 +1207,51 @@ impl SoundChannel {
         None
     }
 
+    /// True when MP3 frames chain cleanly from offset 0 across (almost) the whole
+    /// buffer with a constant MPEG version / layer / sample-rate. Tells a real MP3
+    /// stream apart from raw PCM that merely contains a stray frame sync — genuine
+    /// PCM won't chain frame-to-frame all the way to the end. This recovers an MP3
+    /// that was mislabeled `raw_pcm` with a sampleCount set to dataSize/2 (so the
+    /// size heuristic alone wrongly concludes "PCM").
+    fn mp3_chain_spans_buffer(data: &[u8]) -> bool {
+        let mut offset = 0usize;
+        let mut frames = 0usize;
+        let mut vlr: Option<(u32, u32, u32)> = None;
+        while offset + 4 <= data.len() {
+            if data[offset] != 0xFF || (data[offset + 1] & 0xE0) != 0xE0 {
+                break;
+            }
+            let header = u32::from_be_bytes([
+                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            ]);
+            let version = (header >> 19) & 0x3;
+            let layer = (header >> 17) & 0x3;
+            let bitrate_index = (header >> 12) & 0xF;
+            let sample_rate_index = (header >> 10) & 0x3;
+            if version == 1 || layer == 0 || bitrate_index == 0xF
+                || bitrate_index == 0 || sample_rate_index == 3
+            {
+                break;
+            }
+            // A real stream keeps version/layer/sample-rate constant (only the
+            // bitrate may vary for VBR).
+            match vlr {
+                None => vlr = Some((version, layer, sample_rate_index)),
+                Some(prev) if prev != (version, layer, sample_rate_index) => break,
+                _ => {}
+            }
+            let frame_size = Self::calculate_mp3_frame_size(header);
+            if frame_size == 0 || frame_size > 4096 {
+                break;
+            }
+            offset += frame_size;
+            frames += 1;
+        }
+        // Require several chained frames AND that they consumed nearly the whole
+        // buffer (Director may truncate the final frame in storage).
+        frames >= 3 && offset >= data.len().saturating_mul(9) / 10
+    }
+
     /// Validate multiple consecutive MP3 frames
     fn validate_mp3_sequence(data: &[u8], min_frames: usize) -> Option<bool> {
         let mut offset = 0;
@@ -1308,11 +1353,21 @@ impl SoundChannel {
         }
         
         let frame_size = if layer == 3 {
+            // Layer I: 384 samples/frame.
             ((12 * bitrate * 1000 / sample_rate) + padding) * 4
+        } else if layer == 1 && version != 3 {
+            // Layer III on MPEG-2 / MPEG-2.5: 576 samples/frame, NOT 1152. Using
+            // 144 here computes double the real frame length, so frame chaining
+            // overshoots the next sync and the detector re-locks further in —
+            // feeding the decoder a stream that starts mid-first-frame, so a
+            // 22 kHz / 16 kHz MP3 SFX drops its opening frame and sounds wrong.
+            // (version: 0 = MPEG-2.5, 2 = MPEG-2, 3 = MPEG-1.)
+            (72 * bitrate * 1000 / sample_rate) + padding
         } else {
+            // Layer II (all versions), or Layer III on MPEG-1: 1152 samples/frame.
             (144 * bitrate * 1000 / sample_rate) + padding
         };
-        
+
         frame_size as usize
     }
 
@@ -2422,8 +2477,54 @@ impl SoundChannel {
             ch.loop_count
         };
 
+        // Shockwave Audio (SWA) sounds are MP3 internally, but the Director snd
+        // header declares the true decoded length. Such sounds get mislabeled
+        // `raw_pcm` here (their MP3 stream starts a few bytes in, so the
+        // at-offset-0 sniff misses it), which leaves a NON-zero `sample_count`
+        // equal to that authoritative length. The MP3 always decodes to a
+        // frame-aligned length >= the real one, so playing it in full runs long
+        // with a garbage tail (the 'doteat' SFX: 88 ms declared, ~0.34 s
+        // decoded). Trim playback to the declared length to match Director.
+        // Genuine MP3 files are detected as MP3 with `sample_count == 0`, so this
+        // never truncates real music.
+        let declared_dur = {
+            let sc = sound_member.info.sample_count;
+            let sr = sound_member.info.sample_rate;
+            // A sample_count of 0 or 1 is Director's PLACEHOLDER for a compressed
+            // sound whose true decoded length it never recorded (e.g. Rasterwerks
+            // SFX carry sample_count=1). That is NOT a real length — deriving a
+            // duration from it would clamp a full sound to ~0s of silence. Only a
+            // genuine declared count (> 1, from a real snd header like 'doteat's
+            // 1936) yields a trim length.
+            if sc > 1 && sr > 0 { sc as f64 / sr as f64 } else { 0.0 }
+        };
+        let buffer_dur = if final_buffer.sample_rate() > 0.0 {
+            final_buffer.length() as f64 / final_buffer.sample_rate() as f64
+        } else {
+            0.0
+        };
+        // Require a plausible real duration (>= 10 ms) AND that the decode is
+        // meaningfully longer than declared. Never extends, never truncates a
+        // correctly-sized sound, and never fires on placeholder-length sounds.
+        let trim_dur = if declared_dur >= 0.010 && declared_dur + 0.005 < buffer_dur {
+            console::log_1(
+                &format!(
+                    "✂️ Trimming SWA/MP3 to declared {:.3}s (decoded {:.3}s)",
+                    declared_dur, buffer_dur
+                )
+                .into(),
+            );
+            Some(declared_dur)
+        } else {
+            None
+        };
+
         if loop_count == 0 {
             source.set_loop(true);
+            // Loop the trimmed region, not the padded tail.
+            if let Some(d) = trim_dur {
+                source.set_loop_end(d);
+            }
             debug!("🔁 Enabled native WebAudio looping (loop_count=0)");
         } else {
             source.set_loop(false);
@@ -2466,8 +2567,17 @@ impl SoundChannel {
         let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
         closure.forget();
 
-        // Start playback
-        source.start()?;
+        // Start playback. For a one-shot SWA/MP3 with a declared length, play
+        // only that grain duration so the padded MP3 tail is never heard; for a
+        // looping one the loopEnd above already bounds it, so start normally.
+        match trim_dur {
+            Some(d) if loop_count != 0 => {
+                source.start_with_when_and_grain_offset_and_grain_duration(0.0, 0.0, d)?;
+            }
+            _ => {
+                source.start()?;
+            }
+        }
         debug!("▶️ MP3 source.start() called");
 
         // Store nodes in channel state AFTER starting (only once!)
@@ -3062,7 +3172,10 @@ impl SoundChannel {
         let data_likely_pcm = expected_pcm_size.map_or(false, |expected| {
             data.len() >= expected * 4 / 5 && data.len() <= expected.saturating_mul(2)
         });
-        let is_mp3 = if data_likely_pcm { false } else { Self::find_mp3_start(data).is_some() };
+        let is_mp3 = match Self::find_mp3_start(data) {
+            Some(start) => !data_likely_pcm || Self::mp3_chain_spans_buffer(&data[start..]),
+            None => false,
+        };
         let is_probably_adpcm = !is_mp3 && codec.contains("ima");
         // Only use byte-distribution heuristic when bits_per_sample is unknown (0).
         // When metadata explicitly says 16-bit, trust it — the heuristic can false-positive
@@ -3308,10 +3421,19 @@ impl SoundChannel {
         let data_likely_pcm = expected_pcm_size.map_or(false, |expected| {
             sound_bytes.len() >= expected * 4 / 5 && sound_bytes.len() <= expected.saturating_mul(2)
         });
-        let mp3_start = if data_likely_pcm {
-            None
-        } else {
-            Self::find_mp3_start(sound_bytes)
+        // A real MP3 can be mislabeled `raw_pcm` with sampleCount == dataSize/2,
+        // so the size heuristic alone says "PCM" (e.g. the 'doteat' SFX: 4324
+        // bytes == 2162 16-bit samples, yet the bytes are a 48 kbps / 16 kHz
+        // MPEG-2 Layer III stream starting 4 bytes in). Only trust the PCM size
+        // match when the bytes do NOT chain as MP3 frames across the whole buffer.
+        let mp3_start = match Self::find_mp3_start(sound_bytes) {
+            Some(start)
+                if !data_likely_pcm
+                    || Self::mp3_chain_spans_buffer(&sound_bytes[start..]) =>
+            {
+                Some(start)
+            }
+            _ => None,
         };
 
         if let Some(mp3_start) = mp3_start {

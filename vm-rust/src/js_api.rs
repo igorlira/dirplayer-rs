@@ -1167,6 +1167,16 @@ impl JsApi {
                 member_map.str_set("regX", &JsValue::from(bitmap_data.reg_point.0));
                 member_map.str_set("regY", &JsValue::from(bitmap_data.reg_point.1));
             }
+            CastMemberType::Sound(sound_member) => {
+                member_map.str_set("sampleRate", &JsValue::from(sound_member.info.sample_rate));
+                member_map.str_set("channels", &JsValue::from(sound_member.info.channels));
+                member_map.str_set("bitsPerSample", &JsValue::from(sound_member.info.sample_size));
+                member_map.str_set("sampleCount", &JsValue::from(sound_member.info.sample_count));
+                member_map.str_set("duration", &JsValue::from(sound_member.info.duration));
+                member_map.str_set("loop", &JsValue::from_bool(sound_member.info.loop_enabled));
+                member_map.str_set("codec", &safe_js_string(&sound_member.sound.codec()));
+                member_map.str_set("dataSize", &JsValue::from(sound_member.sound.data().len() as u32));
+            }
             CastMemberType::FilmLoop(film_loop_data) => {
                 member_map.str_set("width", &JsValue::from(film_loop_data.info.width));
                 member_map.str_set("height", &JsValue::from(film_loop_data.info.height));
