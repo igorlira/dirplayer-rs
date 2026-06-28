@@ -507,18 +507,30 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
-                if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
-                {
+                use crate::player::handlers::datum_handlers::cast_member::havok_physics as hv;
+                let idx = havok.state.rigid_bodies.iter()
+                    .position(|r| r.name.eq_ignore_ascii_case(rb_name));
+                if let Some(idx) = idx {
+                    let new_orient = match rotation {
+                        Some((axis, angle)) => hv::quat_from_axis_angle_degrees(axis, angle),
+                        None => havok.state.rigid_bodies[idx].orientation,
+                    };
+                    // Engine attemptMoveTo: only commit when the target is clear;
+                    // otherwise leave the body in place and report failure.
+                    if hv::body_blocked_at(&mut havok.state, idx, pos, new_orient) {
+                        return Ok(player.alloc_datum(Datum::Int(0)));
+                    }
+                    let rb = &mut havok.state.rigid_bodies[idx];
                     rb.position = pos;
                     if let Some((axis, angle)) = rotation {
                         rb.rotation_axis = axis;
                         rb.rotation_angle = angle;
-                        rb.orientation = crate::player::handlers::datum_handlers::cast_member::havok_physics::quat_from_axis_angle_degrees(axis, angle);
+                        rb.orientation = new_orient;
                     }
+                    return Ok(player.alloc_datum(Datum::Int(1)));
                 }
-                // Always return TRUE (move succeeded)
-                Ok(player.alloc_datum(Datum::Int(1)))
+                // No such body — move did not happen.
+                Ok(player.alloc_datum(Datum::Int(0)))
             }
             "interpolatingMoveTo" | "interpolatingmoveto" => {
                 let pos = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
