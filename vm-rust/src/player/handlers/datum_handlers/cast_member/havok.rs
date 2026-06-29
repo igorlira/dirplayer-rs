@@ -1322,17 +1322,21 @@ impl HavokPhysicsMemberHandlers {
         // first inner integrate step" behaviour. With the divider handling
         // angular attenuation, the inertia reverts to the mathematically
         // correct polyhedron values here.
-        let unit_inertia = if shape_type.eq_ignore_ascii_case("sphere") {
-            // Sphere inertia: I = (2/5) * r² on all axes (isotropic)
+        // Compute the unit inertia AND the local centre of mass. The COM is the lever
+        // origin for applyForceAtPoint/applyImpulse — leaving it [0,0,0] when the mesh's
+        // true COM is offset (e.g. the SuperSonic car box spans z∈[0,10] → COM z=+5) makes
+        // every off-centre force torque about the wrong point (lever 15 vs 10 → 1.5× error).
+        let (unit_inertia, com) = if shape_type.eq_ignore_ascii_case("sphere") {
+            // Sphere inertia: I = (2/5) * r² on all axes (isotropic); centred.
             let r = mesh_half_extents[0].max(mesh_half_extents[1]).max(mesh_half_extents[2]);
             let i_diag = 0.4 * r * r;
-            [i_diag, 0.0, 0.0, 0.0, i_diag, 0.0, 0.0, 0.0, i_diag]
+            ([i_diag, 0.0, 0.0, 0.0, i_diag, 0.0, 0.0, 0.0, i_diag], [0.0_f64; 3])
         } else {
             crate::player::handlers::datum_handlers::cast_member::havok_physics
                 ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
-                .map(|(ui, _com, _vol)| ui)
-                .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
-                    ::box_unit_inertia(mesh_half_extents))
+                .map(|(ui, com, _vol)| (ui, com))
+                .unwrap_or_else(|| (crate::player::handlers::datum_handlers::cast_member::havok_physics
+                    ::box_unit_inertia(mesh_half_extents), [0.0_f64; 3]))
         };
 
         // Diagnostic: log mesh + computed unit inertia so we can verify it matches
@@ -1388,6 +1392,9 @@ impl HavokPhysicsMemberHandlers {
             || prim_type.eq_ignore_ascii_case("box");
         rb.inertia_half_extents = mesh_half_extents;
         rb.unit_inertia_tensor = unit_inertia;
+        // The mesh-derived local COM is the lever origin for force/impulse-at-point. The
+        // car box's COM is (0,0,+5); without this, off-centre forces torque about the origin.
+        rb.center_of_mass = com;
         // Apply mass → finalise inertia / inverseInertia.
         crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
             mass,

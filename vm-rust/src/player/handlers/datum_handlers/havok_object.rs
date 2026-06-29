@@ -137,7 +137,19 @@ impl HavokObjectDatumHandlers {
             "linearVelocity" | "linearvelocity" => Datum::Vector(rb.linear_velocity),
             "angularVelocity" | "angularvelocity" => Datum::Vector(rb.angular_velocity),
             "linearMomentum" | "linearmomentum" => Datum::Vector(rb.linear_momentum),
-            "angularMomentum" | "angularmomentum" => Datum::Vector(rb.angular_momentum),
+            "angularMomentum" | "angularmomentum" => {
+                use crate::player::handlers::datum_handlers::cast_member::havok_physics::{quat_to_mat3, mat3_mul, mat3_transpose, mat3_transform, v3_scale};
+                // L = I_world * omega (the engine derives angular momentum from the body's
+                // angular velocity, not a stored field). I_world = R * I_body * R^T.
+                // Expressed in Havok METER-scale units (× worldScale²): Lingo reads and
+                // CLAMPS angular momentum in meter-scale, so a bare I·ω in display units is
+                // ~1/worldScale² too large — that inflated value trips the car's spin clamp
+                // (angularMomentum.length > 4) at a near-zero yaw, killing the steering.
+                let rmat = quat_to_mat3(rb.orientation);
+                let i_world = mat3_mul(mat3_mul(rmat, rb.inertia_tensor), mat3_transpose(rmat));
+                let ws = havok.state.scale;
+                Datum::Vector(v3_scale(mat3_transform(i_world, rb.angular_velocity), ws * ws))
+            }
             "force" => Datum::Vector(rb.force),
             "torque" => Datum::Vector(rb.torque),
             "corrector" => {
@@ -232,6 +244,9 @@ impl HavokObjectDatumHandlers {
 
         // Update the HavokRigidBody fields
         {
+            // Captured before the &mut borrow below so the angularMomentum setter can convert
+            // the meter-scale L back to display-unit angular velocity (÷ worldScale²).
+            let world_scale = havok.state.scale;
             let rb = havok.state.rigid_bodies.iter_mut()
                 .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
@@ -280,7 +295,19 @@ impl HavokObjectDatumHandlers {
                 "linearVelocity" | "linearvelocity" => { if let Datum::Vector(v) = &value { rb.linear_velocity = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 "angularVelocity" | "angularvelocity" => { if let Datum::Vector(v) = &value { rb.angular_velocity = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 "linearMomentum" | "linearmomentum" => { if let Datum::Vector(v) = &value { rb.linear_momentum = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
-                "angularMomentum" | "angularmomentum" => { if let Datum::Vector(v) = &value { rb.angular_momentum = *v; rb.active = true; rb.lingo_disturbed = true; } else { return Err(ScriptError::new("Expected vector".to_string())); } }
+                "angularMomentum" | "angularmomentum" => { if let Datum::Vector(v) = &value {
+                    use crate::player::handlers::datum_handlers::cast_member::havok_physics::{quat_to_mat3, mat3_mul, mat3_transpose, mat3_transform, v3_scale};
+                    // omega = I_world^-1 * L (the engine's setAngularMomentum drives the body's
+                    // angular velocity from the given momentum). L arrives in meter-scale units,
+                    // so divide by worldScale² (the inverse of the getter's × worldScale²) to get
+                    // display-unit angular velocity. Without this, the car's spin clamp
+                    // (angularMomentum = normalized*4) set a near-zero yaw and killed the steering.
+                    let rmat = quat_to_mat3(rb.orientation);
+                    let i_world_inv = mat3_mul(mat3_mul(rmat, rb.inverse_inertia_tensor), mat3_transpose(rmat));
+                    let inv_scale_sq = if world_scale.abs() > 1e-10 { (1.0 / world_scale) * (1.0 / world_scale) } else { 1.0 };
+                    rb.angular_velocity = v3_scale(mat3_transform(i_world_inv, *v), inv_scale_sq);
+                    rb.angular_momentum = *v; rb.active = true; rb.lingo_disturbed = true;
+                } else { return Err(ScriptError::new("Expected vector".to_string())); } }
                 _ => return Err(ScriptError::new(format!("Cannot set rigidBody property: {}", prop))),
             }
         }
@@ -440,6 +467,14 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
+                // A bare Lingo torque needs the (1/worldScale)² factor, exactly like
+                // applyAngularImpulse below: the chassis inertia is in DISPLAY units, and a
+                // force-based torque (applyForceAtPoint) carries the r×F that already supplies
+                // the worldScale² which cancels — a bare torque does not, so it must be scaled
+                // here to match real Havok (measured: Director's applyTorque response is
+                // ~1/worldScale² stronger than the unscaled value).
+                let world_scale = havok.state.scale;
+                let inv_scale_sq = if world_scale.abs() > 1e-10 { (1.0 / world_scale) * (1.0 / world_scale) } else { 1.0 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
@@ -450,9 +485,9 @@ impl HavokObjectDatumHandlers {
                     // Record force-driven (see applyForce) so a later kinematic
                     // interpolatingMoveTo can't reclassify this body as passive.
                     rb.received_force = true;
-                    rb.torque[0] += torque[0];
-                    rb.torque[1] += torque[1];
-                    rb.torque[2] += torque[2];
+                    rb.torque[0] += torque[0] * inv_scale_sq;
+                    rb.torque[1] += torque[1] * inv_scale_sq;
+                    rb.torque[2] += torque[2] * inv_scale_sq;
                 }
                 Ok(DatumRef::Void)
             }
