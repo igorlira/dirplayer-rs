@@ -742,8 +742,27 @@ impl HavokPhysicsMemberHandlers {
                     // mass properties from geometry). A box-AABB inertia is wrong about
                     // the pitch axis for a long flat chassis. Box fallback for
                     // degenerate/open meshes.
+                    // Inertia must be built in the SAME spawn-rotated frame as the collision
+                    // mesh `vertices` above (both apply the node transform's rotation), else the
+                    // body tensor stays in the un-rotated mesh frame while rb.orientation (the
+                    // HKE spawn rotation) rotates it AGAIN when the integrator forms the world
+                    // inverse-inertia, double-counting the placement rotation. For an anisotropic
+                    // chassis with a spawn rotation that aliased the pitch axis onto the small
+                    // roll inertia, so the car leaned/pitched far too easily. Rotation only (the
+                    // polyhedron inertia is taken about the centroid; translation must not enter).
                     let local_verts: Vec<[f64; 3]> = mesh.vertices.iter()
-                        .map(|v| [v[0] as f64 * inv_scale, v[1] as f64 * inv_scale, v[2] as f64 * inv_scale])
+                        .map(|v| {
+                            let lx = v[0] as f64 * inv_scale;
+                            let ly = v[1] as f64 * inv_scale;
+                            let lz = v[2] as f64 * inv_scale;
+                            if let Some(r) = &xform_rt {
+                                [r[0]*lx + r[3]*ly + r[6]*lz,
+                                 r[1]*lx + r[4]*ly + r[7]*lz,
+                                 r[2]*lx + r[5]*ly + r[8]*lz]
+                            } else {
+                                [lx, ly, lz]
+                            }
+                        })
                         .collect();
                     let unit_i = super::havok_physics::compute_polyhedron_unit_inertia(&local_verts, &mesh.triangles)
                         .map(|(ui, _com, _vol)| ui)
@@ -752,7 +771,14 @@ impl HavokPhysicsMemberHandlers {
                     super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
                     let rb = &mut havok.state.rigid_bodies[rb_index];
                     rb.inertia_half_extents = he;
-                    rb.center_of_mass = com;
+                    // Keep the authored DISPLACEMENT (the HKE's real COM, already assigned
+                    // from p.displacement above) — only fall back to the geometric box-centre
+                    // when no COM was authored. The unconditional overwrite discarded it: the
+                    // FinalDrive chassis got the mesh-AABB centre (0.37,2.72,-3.65) instead of
+                    // its real COM (0.49,4.20,-4.95), shifting wheel ray origins + mis-kicking.
+                    if props.and_then(|p| p.displacement).is_none() {
+                        rb.center_of_mass = com;
+                    }
                     rb.unit_inertia_tensor = unit_i;
                     rb.inertia_tensor = it;
                     rb.inverse_inertia_tensor = inv_it;
@@ -844,7 +870,11 @@ impl HavokPhysicsMemberHandlers {
                     let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
                     super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
                     rb.inertia_half_extents = he;
-                    rb.center_of_mass = com;
+                    // Keep the authored DISPLACEMENT COM (tail-only body path) — same fix as
+                    // the mesh-body path above; only use the geometric centre if none authored.
+                    if body_def.displacement.is_none() {
+                        rb.center_of_mass = com;
+                    }
                     rb.unit_inertia_tensor = unit_i;
                     rb.inertia_tensor = it;
                     rb.inverse_inertia_tensor = inv_it;
