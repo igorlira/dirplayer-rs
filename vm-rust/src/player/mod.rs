@@ -3899,6 +3899,14 @@ pub async fn run_single_frame() -> (bool, bool) {
         if has_frame_changed_in_go && go_direction == 1 { // backwards
             dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
         } else {
+            // Forward advance/go: the arriving (or looping-in-place) frame's sprite
+            // BEHAVIORS were never sent exitFrame here — only the frame+movie scripts ran —
+            // so a sprite's FIRST exitFrame on the frame it lands on was lost (Director fires
+            // beginSprite -> enterFrame -> exitFrame in one frame visit; e.g. a RaycastCar's
+            // updateWheelModels ran a frame late, leaving its wheels in the hover-ray path).
+            // Dispatch the behaviors' exitFrame first (matching the backwards-go branch and
+            // the stayed-on-frame else branch below), then the frame+movie script exitFrames.
+            dispatch_event_to_all_behaviors(&"exitFrame".to_string(), &vec![]).await;
             if let Err(err) = player_invoke_frame_and_movie_scripts(&"exitFrame".to_string(), &vec![]).await {
                 if err.code != ScriptErrorCode::Abort {
                     reserve_player_mut(|player| player.on_script_error(&err));
