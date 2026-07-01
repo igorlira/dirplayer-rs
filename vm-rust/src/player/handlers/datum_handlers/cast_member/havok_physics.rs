@@ -12,12 +12,6 @@ pub type Quat = [f64; 4];
 /// 3x3 matrix, row-major: [M00,M01,M02, M10,M11,M12, M20,M21,M22]
 pub type Mat3 = [f64; 9];
 
-/// Compatibility stub: `HavokPhysicsState` (cast_member.rs) stores per-pair persistent
-/// contact manifolds keyed by body indices. This older physics base does not use them
-/// (the maps stay empty), but the field type must still resolve.
-#[derive(Clone, Default)]
-pub struct Manifold;
-
 /// True if body `body_idx`, placed at (`pos`, `orient`), overlaps any static mesh or other
 /// body beyond `tolerance`. Used by `attemptMoveTo` to reject a blocked move. Temporarily
 /// moves the body to test the pose, then restores it.

@@ -2218,10 +2218,6 @@ pub struct HavokPhysicsState {
     /// Disabled for HKE scene games where bodies are auto-created from W3D nodes,
     /// because those scenes need proper GJK collision instead of a simple ground clamp.
     pub use_ground_constraint: bool,
-    /// Persistent body-pair contact manifolds for the GJK narrow phase, warm-started
-    /// across substeps/frames. Key is `(min_index, max_index)`. Rebuilt by refresh
-    /// each step; not cloned (transient).
-    pub manifolds: std::collections::HashMap<(usize, usize), crate::player::handlers::datum_handlers::cast_member::havok_physics::Manifold>,
 }
 
 impl Clone for HavokPhysicsState {
@@ -2252,7 +2248,6 @@ impl Clone for HavokPhysicsState {
             collision_meshes: Vec::new(), // Not cloned — rebuilt on initialize
             collision_list_cache: Vec::new(),
             use_ground_constraint: self.use_ground_constraint,
-            manifolds: std::collections::HashMap::new(), // transient — rebuilt by refresh
         }
     }
 }
@@ -2294,7 +2289,6 @@ impl Default for HavokPhysicsState {
             collision_meshes: Vec::new(),
             collision_list_cache: Vec::new(),
             use_ground_constraint: true,
-            manifolds: std::collections::HashMap::new(),
         }
     }
 }
