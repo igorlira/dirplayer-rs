@@ -505,25 +505,30 @@ impl MovieHandlers {
             let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
 
             if !is_puppet {
-                // Director: unpuppeting resets the sprite's properties to those
-                // in the Score for the current frame. If the channel has no score
-                // data at this frame, the sprite reverts to empty (no member).
+                // Director defers reverting an unpuppeted sprite to the Score:
+                // the sprite keeps its current member/position/appearance until
+                // the NEXT frame update (begin_sprites / per-frame delta) reloads
+                // the channel from the score. Clearing the visual state here is
+                // wrong — it destroys a sprite the script is still reading in the
+                // same handler.
+                //
+                // BrickOut's newLevel does, per brick channel:
+                //     makeStage()                  -- set the memberNum (scene)
+                //     puppetSprite(i, 0)           -- unpuppet
+                //     puppetSprite(i, 1)           -- re-puppet
+                //     add(vListRect, the rect of sprite i)
+                // With the old clear, puppetSprite(i,0) wiped the member/loc the
+                // score+makeStage had established, so `the rect` read (0,0,0,0)
+                // and brick collision never fired. Preserving the visual state
+                // (and letting the score re-drive it on the next frame if it is
+                // NOT re-puppeted) matches Director's deferred reversion.
+                //
+                // Only the puppet flag and behavior lifecycle are cleared:
+                // `entered = false` lets the next begin_sprites re-enter the span
+                // and reload from the score (the deferred revert) when the sprite
+                // stays unpuppeted; if it is re-puppeted first, it keeps its data.
                 let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
                 sprite.puppet = false;
-                sprite.member = None;
-                sprite.visible = true;
-                sprite.blend = 100;
-                sprite.ink = 0;
-                sprite.loc_h = 0;
-                sprite.loc_v = 0;
-                sprite.width = 0;
-                sprite.height = 0;
-                sprite.has_fore_color = false;
-                sprite.has_back_color = false;
-                sprite.has_visible_mod = false;
-                sprite.has_blend_mod = false;
-                sprite.has_size_changed = false;
-                sprite.moveable = false;
                 sprite.entered = false;
                 sprite.exited = false;
                 sprite.script_instance_list.clear();
@@ -1103,8 +1108,21 @@ impl MovieHandlers {
             let (channel_num, member_ref) = if args.len() == 1 {
                 (1, args[0].clone())
             } else {
-                let channel = player.get_datum(&args[0]).int_value()?;
-                (channel, args[1].clone())
+                // Director's puppetSound disambiguates its two arguments by type
+                // rather than by strict position: the sound cast member may be
+                // named by a string, and the channel is always an integer. The
+                // documented order is `puppetSound whichChannel, whichCastMember`,
+                // but many movies (e.g. BrickOut) write the member-first idiom
+                // `puppetSound "Intro", 2`. When the first argument is a string
+                // it is the member name and the second is the channel; otherwise
+                // fall back to the documented channel-first order.
+                if matches!(player.get_datum(&args[0]), Datum::String(_)) {
+                    let channel = player.get_datum(&args[1]).int_value()?;
+                    (channel, args[0].clone())
+                } else {
+                    let channel = player.get_datum(&args[0]).int_value()?;
+                    (channel, args[1].clone())
+                }
             };
 
             // `puppetSound channel, 0` (and the single-arg `puppetSound 0`)
