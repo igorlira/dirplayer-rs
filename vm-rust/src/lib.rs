@@ -1425,6 +1425,42 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
     true
 }
 
+/// Execute a `getURL("lingo: …")` navigation body from a Flash SWF as a
+/// Lingo command, matching Director's Flash Asset Xtra convention.
+///
+/// Director's Flash sprite interprets a `getURL` whose URL begins with the
+/// `lingo:` scheme by evaluating the remainder as a Lingo command in the
+/// movie's global handler context — exactly like `do "…"`. Pengapop's
+/// titleScreen SWF uses this for every button: the Play button navigates to
+/// `lingo:startGameTimed`, the hover/click sounds to
+/// `lingo:bdPlaySound(#generalSound,"tink")`, etc.
+///
+/// The body is everything after the `lingo:` scheme; we run it through the
+/// same `eval_lingo_command` path the debugger console and `do` use, so it
+/// supports bare handler calls (`startGameTimed`) and calls with args
+/// (`bdPlaySound(#generalSound,"tink")`). Returns true so the JS caller can
+/// swallow the navigation (nothing should actually open a URL).
+#[wasm_bindgen]
+pub fn dispatch_flash_lingo(body: String) -> bool {
+    let trimmed = body.trim().to_string();
+    if trimmed.is_empty() {
+        warn!("[dispatch_flash_lingo] empty lingo body");
+        return false;
+    }
+    // Run asynchronously (like eval_command): the caller is inside a
+    // synchronous Flash mouse-event forward, so we must let the current
+    // command unwind before reserving the player to run the handler.
+    spawn_local(async move {
+        let result = eval_lingo_command(trimmed).await;
+        if let Err(err) = result {
+            reserve_player_ref(|player| {
+                JsApi::dispatch_script_error(player, &err);
+            });
+        }
+    });
+    true
+}
+
 #[wasm_bindgen]
 pub fn set_lingo_script_property(cast_lib: i32, cast_member: i32, prop_name: String, value: JsValue) -> bool {
     use director::lingo::datum::Datum;

@@ -518,10 +518,59 @@ impl Score {
                 }
 
                 Ok::<(), ScriptError>(())
-            })
-        } else {
-            Ok(())
+            })?;
         }
+
+        // Director instantiates a score BEHAVIOR as a child object and calls
+        // its `on new me` handler (if defined) at sprite-entry, BEFORE
+        // beginSprite (and after property defaults are seeded above, so the
+        // handler sees its authored/default props). Many older behaviors do
+        // ALL their setup in `on new` — pengapop's Sparkle01 parks its sprite
+        // offscreen (`the locV of sprite mysprite = -500`) there and defines
+        // no beginSprite; without this the sparkle sprite stays at its
+        // authored (visible) position and a stale `tiny_sparkle0001` frame
+        // lingers on screen at game start.
+        //
+        // ONLY for ScriptType::Score (score behaviors). Parent scripts
+        // (ScriptType::Parent) already had `on new` run when they were
+        // explicitly `new()`'d — a parent-script instance sitting in a
+        // sprite's script_instance_list (e.g. via scriptInstanceList.add or
+        // parent-script-as-field-member) must NOT be re-`new`'d here, or it
+        // gets double-initialized. Dispatched only to instances that actually
+        // define `on new`, so beginSprite-only behaviors no-op; it never falls
+        // through to movie-script `on new`.
+        let should_call_new = reserve_player_ref(|player| {
+            let Some(inst) = player.allocator.get_script_instance_opt(&script_instance_ref) else {
+                return false;
+            };
+            let Some(script) = player.movie.cast_manager.get_script_by_ref(&inst.script) else {
+                return false;
+            };
+            // Behaviors only (see above). Parent scripts already had `on new` run.
+            if script.script_type != crate::director::enums::ScriptType::Score {
+                return false;
+            }
+            // Only auto-call a NO-ARG `on new me`. A handler that declares extra
+            // parameters (`on new me, aSprite, ...`) is meant to be called
+            // explicitly with those args; auto-dispatching with none would run
+            // it with VOID arguments and misbehave. `argument_name_ids` includes
+            // the implicit `me`, so length <= 1 means "me only".
+            match script.get_own_handler("new") {
+                Some(h) => h.argument_name_ids.len() <= 1,
+                None => false,
+            }
+        });
+        if should_call_new {
+            let receivers = vec![script_instance_ref.clone()];
+            let _ = crate::player::events::player_invoke_event_to_instances(
+                &"new".to_string(),
+                &vec![],
+                &receivers,
+            )
+            .await;
+        }
+
+        Ok(())
     }
 
     pub fn begin_sprites(&mut self, score_ref: ScoreRef, frame_num: u32) {

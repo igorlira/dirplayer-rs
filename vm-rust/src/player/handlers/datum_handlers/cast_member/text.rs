@@ -390,6 +390,18 @@ impl TextMemberHandlers {
                     "setContentsBefore" => format!("{}{}", new_str, text_member.text),
                     _ => unreachable!(),
                 };
+                // Clear stale styled spans — same as the `.text` property setter
+                // above. `put X into member` lowers to setContents; without this
+                // the parse-time `html_styled_spans` keep their ORIGINAL text
+                // (and the native renderer draws them, not the updated `.text`),
+                // so a score/round display frozen at its authored value
+                // (pengapop gameScore/gameRound: `put newScore into member`
+                // updated `.text` to "8600" but the span still said "0", so the
+                // HUD never changed). Clearing lets the next render synthesise a
+                // clean default span from the member-level font/size/color and
+                // the new text — matching Director resetting styling on a text
+                // rewrite.
+                text_member.html_styled_spans.clear();
                 Ok(DatumRef::Void)
             }
             _ => Err(ScriptError::new(format!(

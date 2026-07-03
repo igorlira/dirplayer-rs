@@ -527,6 +527,24 @@ impl CastMemberRefHandlers {
             };
             new_member.number = dest_ref.cast_member as u32;
 
+            // Deep-copy the backing bitmap so the duplicate is independent.
+            // `BitmapMember.image_ref` is only a SLOT ID into bitmap_manager, so
+            // a plain member clone leaves the duplicate ALIASING the source's
+            // pixels. Director's `member.duplicate()` clones the image — without
+            // this, `member("3dBallTemplate").duplicate(N)` made every generated
+            // ball share one bitmap, and create3DBallOne's copyPixels writes all
+            // landed in that single slot (last color wins → every ball rendered
+            // yellow, the last colour generated).
+            if let CastMemberType::Bitmap(bm) = &new_member.member_type {
+                let cloned = player.bitmap_manager.get_bitmap(bm.image_ref).cloned();
+                if let Some(cloned) = cloned {
+                    let new_ref = player.bitmap_manager.add_bitmap(cloned);
+                    if let CastMemberType::Bitmap(bm) = &mut new_member.member_type {
+                        bm.image_ref = new_ref;
+                    }
+                }
+            }
+
             let dest_cast = player
                 .movie
                 .cast_manager

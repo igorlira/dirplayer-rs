@@ -1900,6 +1900,47 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::DateRef(date_id)))
             },
             "stage" => Ok(self.alloc_datum(Datum::Stage)),
+            "globals" => {
+                // Director 11.5 Scripting Dictionary — `the globals`:
+                // a special property list of every current global variable
+                // whose value is not VOID, each keyed by its name (symbol)
+                // paired with the value. Supports count/getPropAt/getProp/
+                // getAProp via the normal PropList handlers. The list always
+                // contains #version (Director's running version), so it is
+                // never empty even before any global is declared.
+                //
+                // dirplayer stores the Lingo language constants (PI, EMPTY,
+                // QUOTE, TAB, TRUE, FALSE, …) as globals internally for
+                // convenience, but Director does NOT expose those as global
+                // variables, so they're excluded here to match the spec.
+                // actorList is a genuine global and is kept.
+                const CONST_GLOBALS: &[&str] = &[
+                    "PI", "VOID", "EMPTY", "RETURN", "ENTER", "QUOTE", "TAB",
+                    "BACKSPACE", "TRUE", "FALSE",
+                ];
+                let entries: Vec<(String, DatumRef)> = self
+                    .globals
+                    .iter()
+                    .filter(|(name, r)| {
+                        if CONST_GLOBALS.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+                            return false;
+                        }
+                        // Skip globals whose value is VOID (spec).
+                        !matches!(self.get_datum(r), Datum::Void)
+                    })
+                    .map(|(name, r)| (name.clone(), r.clone()))
+                    .collect();
+                let mut props: VecDeque<(DatumRef, DatumRef)> = entries
+                    .into_iter()
+                    .map(|(name, value_ref)| {
+                        (self.alloc_datum(Datum::Symbol(name)), value_ref)
+                    })
+                    .collect();
+                let version_key = self.alloc_datum(Datum::Symbol("version".to_string()));
+                let version_val = self.alloc_datum(Datum::String("11.0".to_string()));
+                props.push_back((version_key, version_val));
+                Ok(self.alloc_datum(Datum::PropList(props, false)))
+            },
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
             ))),

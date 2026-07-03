@@ -1211,14 +1211,50 @@ impl BuiltInHandlerManager {
                 })
             }
             "getvariable" => {
-                // Flash (SWF) member interop — getVariable(sprite, path)
+                // Flash (SWF) member interop — getVariable(sprite, path [, asObjectFlag]).
+                //
+                // The optional 3rd arg == 0 is Director's "return the value as a
+                // Flash object handle" flag (e.g. getVariable(sprite N, "_level0", 0)
+                // grabs the SWF's _level0 timeline object). Otherwise a scalar
+                // string is returned.
+                //
+                // Resolve the sprite NUMBER directly (not via resolve_flash_member,
+                // which returns None when sprite.member isn't committed to the
+                // channel yet — a beginSprite can run before the Flash member is
+                // assigned). For the object form we then ALWAYS return a
+                // sprite-bound FlashObjectRef, never VOID: a VOID handle stored in
+                // a global (gDemoFlash) crashes the later gDemoFlash.play(). The
+                // binding also makes that deferred call dispatch to the right
+                // sprite even though the member wasn't resolvable at capture time.
                 if args.len() >= 2 {
-                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let sn_opt: Option<i16> = reserve_player_ref(|player| {
+                        Ok(match player.get_datum(&args[0]) {
+                            Datum::SpriteRef(n) => Some(*n),
+                            Datum::Int(n) => Some(*n as i16),
+                            _ => None,
+                        })
+                    })?;
                     let path = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Some((sn, _cl, _cm)) = member_ref {
-                        match ruffle_get_variable(sn, &path) {
+                    let return_as_object: bool = if args.len() >= 3 {
+                        reserve_player_ref(|player| {
+                            Ok(player.get_datum(&args[2]).int_value().unwrap_or(1) == 0)
+                        })?
+                    } else {
+                        false
+                    };
+                    if let Some(sn) = sn_opt {
+                        let (cl, cm): (i32, i32) = reserve_player_ref(|player| {
+                            Ok(player
+                                .movie
+                                .score
+                                .get_sprite(sn)
+                                .and_then(|s| s.member.as_ref())
+                                .map(|m| (m.cast_lib as i32, m.cast_member as i32))
+                                .unwrap_or((0, 0)))
+                        })?;
+                        match ruffle_get_variable(sn as i32, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
                                     return reserve_player_mut(|player| {
@@ -1227,6 +1263,14 @@ impl BuiltInHandlerManager {
                                 }
                             }
                             Err(e) => warn!("getVariable error: {:?}", e),
+                        }
+                        if return_as_object {
+                            return reserve_player_mut(|player| {
+                                use crate::director::lingo::datum::FlashObjectRef;
+                                Ok(player.alloc_datum(Datum::FlashObjectRef(
+                                    FlashObjectRef::from_path_with_sprite(&path, cl, cm, sn as i32),
+                                )))
+                            });
                         }
                     }
                 }

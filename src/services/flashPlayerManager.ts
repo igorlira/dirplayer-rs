@@ -6,7 +6,7 @@
  * can be composited with Director sprites (Director sprites can layer on top).
  */ 
 
-import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event } from 'vm-rust';
+import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event, dispatch_flash_lingo } from 'vm-rust';
 import {
   isBridgeRequired,
   waitForBridge,
@@ -230,6 +230,25 @@ export function dispatchFlashEvent(castLib: number, castMember: number, body: st
 }
 
 /**
+ * Run a Flash `getURL("lingo: …")` navigation body as a Lingo command.
+ *
+ * Director's Flash Asset Xtra interprets a `getURL` whose URL uses the
+ * `lingo:` scheme by evaluating the remainder as a Lingo command in the
+ * movie's global handler context (like `do "…"`). Pengapop's titleScreen
+ * SWF drives every button this way: Play → `lingo:startGameTimed`, hover
+ * SFX → `lingo:bdPlaySound(#generalSound,"s_mouseOver")`, etc. The body is
+ * everything after the `lingo:` prefix.
+ */
+export function dispatchFlashLingo(body: string): boolean {
+  try {
+    return dispatch_flash_lingo(body);
+  } catch (e) {
+    console.warn('[Flash] dispatchFlashLingo error:', e);
+    return false;
+  }
+}
+
+/**
  * Register an open-URL handler on a Ruffle player so `getURL("event: …")`
  * is routed into Director instead of being denied. Requires the dirplayer
  * Ruffle fork's `dirplayer_addOpenUrlHandler` patch; until it lands the
@@ -245,7 +264,24 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
     return;
   }
   player.dirplayer_addOpenUrlHandler((url: string, _target: string): boolean => {
-    if (typeof url !== 'string' || !url.startsWith('event:')) {
+    if (typeof url !== 'string') {
+      return false;
+    }
+    // Director's Flash Asset `lingo:` scheme — run the URL body as a Lingo
+    // command (`do "…"` semantics). Pengapop's titleScreen buttons use this
+    // for everything (Play → `lingo:startGameTimed`, hover SFX →
+    // `lingo:bdPlaySound(...)`). Swallow the navigation either way.
+    if (url.startsWith('lingo:')) {
+      const body = url.slice('lingo:'.length).trim();
+      const handled = dispatchFlashLingo(body);
+      if (!handled) {
+        console.warn(
+          `[Flash] ${castLib}:${castMember}: empty/failed lingo URL body: ${JSON.stringify(body)}`
+        );
+      }
+      return true;
+    }
+    if (!url.startsWith('event:')) {
       return false; // not ours — let Ruffle's openUrlMode decide
     }
     const body = url.slice('event:'.length).trim();
@@ -730,7 +766,16 @@ function getVariable(spriteNum: number, path: string): string | null {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) {
-    console.warn(`ruffleGetVariable: no instance for sprite#${spriteNum}`);
+    // Expected during lazy load: the SWF instance hasn't been created yet.
+    // We can't hand a value back to an already-returned synchronous Lingo
+    // call, but this isn't lost data for the common case — the Rust
+    // getVariable(sprite, path, 0) handler falls back to a lazy
+    // FlashObjectRef that re-resolves the sprite when the handle is actually
+    // used (by which point the instance is ready). Setting
+    // flashAccessBeforeReady makes the frame loop wait for the pending
+    // instance before running more scripts. Log at debug to avoid spamming
+    // the console for a benign, self-healing condition.
+    console.debug(`ruffleGetVariable: no instance yet for sprite#${spriteNum} (path=${path}); deferring via lazy handle`);
     flashAccessBeforeReady = true;
     return null;
   }
@@ -790,7 +835,8 @@ type PendingOp =
   | { kind: 'play' }
   | { kind: 'stop' }
   | { kind: 'rewind' }
-  | { kind: 'setVariable'; path: string; value: string };
+  | { kind: 'setVariable'; path: string; value: string }
+  | { kind: 'callFunction'; path: string; argsXml: string };
 const pendingOps = new Map<number, PendingOp[]>();
 
 /**
@@ -971,6 +1017,21 @@ function flushPendingGoto(spriteNum: number): void {
         case 'setVariable':
           instance.rufflePlayer.SetVariable(translateLevel0(op.path), op.value);
           break;
+        case 'callFunction': {
+          // Replay a pre-ready callFunction. Decode args exactly like the
+          // live callFunction path (null → undefined, `__ruffle_path:` →
+          // AS object handle) so the replayed call matches what Lingo asked
+          // for. The return value is discarded — the original Lingo call
+          // already returned VOID; only the side effect is reproduced.
+          const rawArgs: any[] = op.argsXml ? JSON.parse(op.argsXml) : [];
+          const args: any[] = rawArgs.map(arg => {
+            if (arg === null) return undefined;
+            if (typeof arg === 'string' && arg.startsWith('__ruffle_path:')) return { __ruffle_path: arg.substring('__ruffle_path:'.length) };
+            return arg;
+          });
+          instance.rufflePlayer.CallFunction(translateLevel0(op.path), args);
+          break;
+        }
       }
     } catch (e) {
       console.warn(`[Flash flush] sprite#${spriteNum} op ${op.kind} error:`, e);
@@ -1047,8 +1108,17 @@ function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
 function callFunction(spriteNum: number, path: string, argsXml: string): string | null {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) {
-    console.warn(`ruffleCallFunction: no instance for sprite#${spriteNum}`);
+  // Instance not created / AS-init not finished yet: a beginSprite (or a
+  // puppet/mid-frame) script can call into the SWF before the renderer has
+  // lazily created the Ruffle player. A synchronous Lingo call can't be made
+  // to block for the ~3s AS-init, and it can't be handed a return value after
+  // it has already returned — but the *side effect* of the call can still be
+  // replayed. Queue it (in frame order with goto/play/setVariable) and fire it
+  // once the instance is ready; return null now, matching Director's own
+  // "flash not ready → VOID" result for the immediate call. See setVariable
+  // for the same pre-instance pattern.
+  if (!instance || !instance.ready) {
+    queueOp(spriteNum, { kind: 'callFunction', path, argsXml });
     flashAccessBeforeReady = true;
     return null;
   }

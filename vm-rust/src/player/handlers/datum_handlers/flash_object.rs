@@ -52,6 +52,19 @@ extern "C" {
 /// Most movies have at most one sprite per Flash member; storyscramble's
 /// 3-tile case shares a member but those tiles don't use FlashObjectRef
 /// (they only set frame), so this lookup is fine for the existing surface.
+/// Resolve the Director sprite that backs a Flash object handle. A handle
+/// taken from `getVariable(sprite(N), path, 0)` carries its origin sprite (see
+/// FlashObjectRef::instance_id) and dispatches straight to it; older handles
+/// only know their cast member and fall back to scanning the score. Preferring
+/// the bound sprite keeps `gDemoFlash.play()` working even when the member
+/// wasn't resolvable at the time the handle was captured.
+pub fn resolve_flash_sprite(flash_ref: &FlashObjectRef) -> Option<i32> {
+    if let Some(sn) = flash_ref.bound_sprite() {
+        return Some(sn);
+    }
+    find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member)
+}
+
 pub fn find_sprite_for_flash_member(cast_lib: i32, cast_member: i32) -> Option<i32> {
     crate::player::reserve_player_ref(|player| {
         for channel in &player.movie.score.channels {
@@ -79,7 +92,7 @@ impl FlashObjectDatumHandlers {
 
             if let Datum::FlashObjectRef(flash_ref) = obj_datum {
                 let full_path = format!("{}.{}", flash_ref.path, prop_name);
-                let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+                let sprite_num = match resolve_flash_sprite(flash_ref) {
                     Some(n) => n,
                     None => return Ok(player.alloc_datum(Datum::Void)),
                 };
@@ -99,7 +112,10 @@ impl FlashObjectDatumHandlers {
                         } else if let Some(b) = result.as_bool() {
                             Ok(player.alloc_datum(Datum::Int(if b { 1 } else { 0 })))
                         } else {
-                            let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, flash_ref.cast_lib, flash_ref.cast_member);
+                            // Carry the sprite binding onto the derived handle so
+                            // chained access (gDemoFlash.foo.bar) stays bound to
+                            // the same sprite.
+                            let new_flash_ref = FlashObjectRef::from_path_with_sprite(&full_path, flash_ref.cast_lib, flash_ref.cast_member, flash_ref.instance_id as i32);
                             Ok(player.alloc_datum(Datum::FlashObjectRef(new_flash_ref)))
                         }
                     }
@@ -139,7 +155,7 @@ impl FlashObjectDatumHandlers {
             }
             let args_str = format!("[{}]", js_args_parts.join(","));
 
-            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+            let sprite_num = match resolve_flash_sprite(&flash_ref) {
                 Some(n) => n,
                 None => return Ok(player.alloc_datum(Datum::Void)),
             };
@@ -187,7 +203,7 @@ impl FlashObjectDatumHandlers {
                 _ => "null".to_string(),
             };
 
-            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+            let sprite_num = match resolve_flash_sprite(&flash_ref) {
                 Some(n) => n,
                 None => return Err(ScriptError::new(format!("No sprite for Flash member {}:{}", flash_ref.cast_lib, flash_ref.cast_member))),
             };

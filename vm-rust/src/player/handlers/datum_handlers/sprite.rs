@@ -646,56 +646,74 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "getvariable" => {
-                if let Some((sn, cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let (path, return_as_object) = reserve_player_ref(|player| {
-                        if args.is_empty() { return Ok((String::new(), false)); }
-                        let p = player.get_datum(&args[0]).string_value()?;
-                        // Second arg: 0 = return as Flash object reference, otherwise string
-                        let as_obj = if args.len() >= 2 {
-                            player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
-                        } else {
-                            false
-                        };
-                        Ok((p, as_obj))
-                    })?;
+                // Resolve the target sprite number FIRST, even if its cast
+                // member isn't resolvable at this instant. Director's
+                // getVariable(sprite(N), path, 0) yields a Flash object handle
+                // BOUND TO THAT SPRITE; it must not degrade to VOID just because
+                // the member/Ruffle instance isn't ready yet — a beginSprite can
+                // run before the Flash member is committed to the channel, and a
+                // VOID handle stored in a global (e.g. gDemoFlash) crashes the
+                // deferred `gDemoFlash.play()`. We capture the sprite's cast
+                // member when available (so cast-based lookups still work) but
+                // always bind the handle to the sprite number as the primary key.
+                let sn = reserve_player_ref(|player| player.get_datum(datum).to_sprite_ref())?;
+                let (cl, cm) = reserve_player_ref(|player| {
+                    player
+                        .movie
+                        .score
+                        .get_sprite(sn)
+                        .and_then(|s| s.member.as_ref())
+                        .map(|m| (m.cast_lib, m.cast_member))
+                        .unwrap_or((0, 0))
+                });
+                let (path, return_as_object) = reserve_player_ref(|player| {
+                    if args.is_empty() { return Ok((String::new(), false)); }
+                    let p = player.get_datum(&args[0]).string_value()?;
+                    // Second arg: 0 = return as Flash object reference, otherwise string
+                    let as_obj = if args.len() >= 2 {
+                        player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
+                    } else {
+                        false
+                    };
+                    Ok((p, as_obj))
+                })?;
 
-                    if return_as_object {
-                        // In Director, getVariable(path, 0) returns an object reference.
-                        // But if the Flash variable is a simple string/number, Director
-                        // returns the value directly. We check via GetVariable first:
-                        // if it returns a JS string, return as Datum::String so that
-                        // stringp() works. If it returns an object or undefined, return
-                        // a FlashObjectRef for setCallback/call usage.
-                        match ruffle_get_variable(sn, &path) {
-                            Ok(val) => {
-                                if val.is_string() {
-                                    // Simple string variable - return as string
-                                    let s = val.as_string().unwrap();
-                                    return reserve_player_mut(|player| {
-                                        Ok(player.alloc_datum(Datum::String(s)))
-                                    });
-                                }
-                                // Object or other type - fall through to FlashObjectRef
-                            }
-                            Err(_) => {} // Fall through to FlashObjectRef
+                if return_as_object {
+                    // In Director, getVariable(path, 0) returns an object reference.
+                    // But if the Flash variable is a simple string/number, Director
+                    // returns the value directly. We check via GetVariable first:
+                    // if it returns a JS string, return as Datum::String so that
+                    // stringp() works. If it returns an object or undefined, return
+                    // a FlashObjectRef for setCallback/call usage.
+                    if let Ok(val) = ruffle_get_variable(sn as i32, &path) {
+                        if val.is_string() {
+                            // Simple string variable - return as string
+                            let s = val.as_string().unwrap();
+                            return reserve_player_mut(|player| {
+                                Ok(player.alloc_datum(Datum::String(s)))
+                            });
                         }
-                        // Return a FlashObjectRef for use with setCallback etc.
-                        return reserve_player_mut(|player| {
-                            use crate::director::lingo::datum::FlashObjectRef;
-                            Ok(player.alloc_datum(Datum::FlashObjectRef(FlashObjectRef::from_path_with_member(&path, cl, cm))))
-                        });
+                        // Object or other type - fall through to FlashObjectRef
                     }
+                    // Return a sprite-bound FlashObjectRef for use with
+                    // setCallback / call / play etc. Never VOID for the object form.
+                    return reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::FlashObjectRef;
+                        Ok(player.alloc_datum(Datum::FlashObjectRef(
+                            FlashObjectRef::from_path_with_sprite(&path, cl, cm, sn as i32),
+                        )))
+                    });
+                }
 
-                    match ruffle_get_variable(sn, &path) {
-                        Ok(val) => {
-                            if let Some(s) = val.as_string() {
-                                return reserve_player_mut(|player| {
-                                    Ok(player.alloc_datum(Datum::String(s)))
-                                });
-                            }
+                match ruffle_get_variable(sn as i32, &path) {
+                    Ok(val) => {
+                        if let Some(s) = val.as_string() {
+                            return reserve_player_mut(|player| {
+                                Ok(player.alloc_datum(Datum::String(s)))
+                            });
                         }
-                        Err(e) => warn!("sprite.getVariable error: {:?}", e),
                     }
+                    Err(e) => warn!("sprite.getVariable error: {:?}", e),
                 }
                 Ok(DatumRef::Void)
             }
