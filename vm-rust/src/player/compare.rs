@@ -432,6 +432,21 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             Ok(left_x > right_x && left_y > right_y)
         }
 
+        // Point vs scalar: Director compares the point against the scalar
+        // component-wise; the result is true when ANY component satisfies the
+        // comparison. Summer Resort's room-scroll clamp relies on this — it
+        // tests an axis-aligned delta `point(0,16) > 0` / `point(0,-16) < 0`
+        // (one component is 0, the other ±16) to decide the scroll direction
+        // and clamp the player to the room edge. Without this the clamp never
+        // fired, the player over-scrolled past the screen bottom, and the next
+        // move bounced straight back into the previous room.
+        (Datum::Point(vals, _), Datum::Int(n)) => {
+            Ok((vals[0] as i32) > *n || (vals[1] as i32) > *n)
+        }
+        (Datum::Int(n), Datum::Point(vals, _)) => {
+            Ok(*n > (vals[0] as i32) || *n > (vals[1] as i32))
+        }
+
         // Catch-all
         _ => {
             warn!(
@@ -474,6 +489,15 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             let right_x = right_vals[0] as i32;
             let right_y = right_vals[1] as i32;
             Ok(left_x < right_x && left_y < right_y)
+        }
+
+        // Point vs scalar — see the note in `datum_greater_than`. Any component
+        // satisfying the comparison makes it true (axis-aligned scroll deltas).
+        (Datum::Point(vals, _), Datum::Int(n)) => {
+            Ok((vals[0] as i32) < *n || (vals[1] as i32) < *n)
+        }
+        (Datum::Int(n), Datum::Point(vals, _)) => {
+            Ok(*n < (vals[0] as i32) || *n < (vals[1] as i32))
         }
 
         // String vs number: Director coerces strings to numbers (empty string = 0)
