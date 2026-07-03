@@ -444,6 +444,19 @@ impl TypeHandlers {
                     normalise_lingo_expr_for_value,
                 };
                 let cleaned = normalise_lingo_expr_for_value(&s);
+                // Director's `value()` evaluates the FIRST complete expression
+                // and ignores any trailing tokens. When the input is a list /
+                // property list, trim to the matching close bracket so trailing
+                // garbage doesn't fail the whole parse. Summer Resort's room
+                // members are Paige #text stored in over-allocated text blocks:
+                // the buffer holds the real room list followed by stale bytes
+                // left from a prior edit (Paige tracks the logical length but
+                // XMED serializes the whole buffer). Parsing the whole thing
+                // returned VOID, which blanked the room (and broke map
+                // navigation, since the `= #empty` boundary check then let the
+                // player scroll into an unparsed/black room). Trimming to the
+                // first balanced list matches Director and recovers the room.
+                let cleaned = truncate_to_first_balanced_list(&cleaned);
                 // TEMP diagnostic: log EVERY value() call that looks like a
                 // Lingo prop-list/list so we can confirm whether the Coke
                 // Studios ElementManager retry (concatenating the two halves
@@ -2094,6 +2107,42 @@ impl TypeHandlers {
             Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
         })
     }
+}
+
+/// Director's `value()` evaluates only the FIRST complete expression in the
+/// string. When that expression is a list or property list, trailing tokens
+/// after the matching close bracket are ignored. If `s` (ignoring leading
+/// whitespace) starts with `[`, return the slice up to and including the
+/// bracket that balances it; otherwise return `s` unchanged.
+///
+/// Bracket scanning is string-aware: `[`/`]` inside a Lingo string literal
+/// (`"..."`) don't count. Lingo string literals cannot contain a literal
+/// double quote (the `QUOTE` constant is used instead), so a simple in-string
+/// toggle is sufficient. If the brackets never balance, `s` is returned as-is
+/// so the normal parser still reports the error.
+fn truncate_to_first_balanced_list(s: &str) -> String {
+    let trimmed_start = s.len() - s.trim_start().len();
+    let bytes = s.as_bytes();
+    if bytes.get(trimmed_start) != Some(&b'[') {
+        return s.to_string();
+    }
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    for (i, &b) in bytes.iter().enumerate().skip(trimmed_start) {
+        match b {
+            b'"' => in_string = !in_string,
+            b'[' if !in_string => depth += 1,
+            b']' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    // Include this closing bracket; drop everything after.
+                    return s[..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    s.to_string()
 }
 
 /// Returns true if the given input/cleaned strings look like a Lingo
