@@ -639,12 +639,28 @@ impl SpriteDatumHandlers {
                 }
                 Ok(DatumRef::Void)
             }
-            "rewind" | "hold" => {
+            "rewind" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     ruffle_rewind(sn);
                 }
                 Ok(DatumRef::Void)
             }
+            // Director 11.5 `hold()` — Flash sprite command. In Director the
+            // playhead advances a Flash sprite one SWF frame per Director frame;
+            // `hold` suppresses THAT Director-driven advance for the current
+            // frame while the SWF's own timeline and audio keep running. Movies
+            // call it every `exitFrame` (alongside `go the frame`) to stop the
+            // SWF being double-advanced.
+            //
+            // dirplayer doesn't drive the SWF frame-by-frame — the Ruffle
+            // instance free-runs its own timeline in real time — so there is no
+            // extra advance to suppress. Mapping `hold` to Ruffle `pause()`
+            // wrongly freezes an already-correctly-playing SWF (bogey_nights'
+            // characters stopped animating). The faithful behaviour here is a
+            // no-op: let Ruffle keep playing. Still recognised (not an error) so
+            // `hold(sprite N)` in a hot `exitFrame` loop doesn't abort the
+            // handler.
+            "hold" => Ok(DatumRef::Void),
             "getvariable" => {
                 // Resolve the target sprite number FIRST, even if its cast
                 // member isn't resolvable at this instant. Director's

@@ -544,11 +544,34 @@ impl BuiltInHandlerManager {
 
     fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            // The Director 11.5 Scripting Dictionary documents only the
+            // single-arg form random(n) → a random integer in 1..n. Many
+            // shipped Shockwave games also rely on an undocumented two-arg
+            // form random(min, max) → a random integer in [min, max] inclusive
+            // (bogey_nights uses e.g. `random(-6, -3)` for a splash's launch
+            // velocity and `random(40, 120)` for spawn ranges — with no custom
+            // `on random` handler). The spec is silent on the two-arg form
+            // rather than forbidding it, so we support both. Inferred from the
+            // calling movie, not the 11.5 dictionary.
+            if args.len() >= 2 {
+                let a = player.get_datum(&args[0]).int_value()?;
+                let b = player.get_datum(&args[1]).int_value()?;
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let span = hi - lo + 1; // inclusive range size, always >= 1
+                // next_random_int(n) returns 1..n from the seeded sequence;
+                // rebase it into [lo, hi] so deterministic replay still holds.
+                let value = match player.movie.next_random_int(span) {
+                    Some(v) => lo + (v - 1),
+                    None => player.rng.random_range(lo..=hi),
+                };
+                return Ok(player.alloc_datum(Datum::Int(value)));
+            }
+
             let max = player.get_datum(&args[0]).int_value()?;
             if max <= 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
-            
+
             // Director's random(n) returns a value from 1 to n (inclusive)
             let random_int = match player.movie.next_random_int(max) {
                 Some(value) => value,
@@ -556,7 +579,7 @@ impl BuiltInHandlerManager {
                     player.rng.random_range(1..=max)
                 }
             };
-            
+
             Ok(player.alloc_datum(Datum::Int(random_int)))
         })
     }
@@ -1089,6 +1112,15 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
+            // Director 11.5 `hold()` — global form `hold(sprite N)`. In Director
+            // this suppresses the playhead's per-frame advance of a Flash sprite
+            // while the SWF's own timeline/audio keep running (movies call it
+            // every `exitFrame`). dirplayer doesn't drive the SWF frame-by-frame
+            // — Ruffle free-runs it in real time — so there is nothing to
+            // suppress; pausing would wrongly freeze an already-correct SWF.
+            // Faithful behaviour is a no-op. See the sprite-method `hold` arm in
+            // datum_handlers/sprite.rs for the full rationale.
+            "hold" => Ok(DatumRef::Void),
             "pause"  => Ok(DatumRef::Void),
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),

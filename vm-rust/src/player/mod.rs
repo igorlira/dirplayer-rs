@@ -639,6 +639,33 @@ impl DirPlayer {
                 }
             }
         }
+
+        // Reconcile: tear down any Ruffle instance whose channel no longer
+        // holds that exact Flash member. Instances are otherwise only destroyed
+        // on an external-cast swap (invalidate_flash_for_cast_lib), so a channel
+        // that showed a Flash member once would keep its WebGL-backed Ruffle
+        // player forever. bogey_nights churns Flash sprites hard — every splash
+        // that reaches #superstar swaps its bitmap member for the boogyflash /
+        // spitflash SWF, and `killer` empties the channel a moment later. Across
+        // hundreds of channels this leaks Ruffle instances until the browser
+        // hits its WebGL context cap ("Too many active WebGL contexts"). Freeing
+        // the instance as soon as its Flash member leaves keeps only the
+        // genuinely-active Flash sprites alive.
+        let loaded: Vec<(i16, i32, i32)> = self.flash_sprite_loaded.iter().cloned().collect();
+        for (ch, cl, cm) in loaded {
+            let still_present = self
+                .movie
+                .score
+                .get_sprite(ch)
+                .and_then(|s| s.member.as_ref())
+                .map(|m| m.cast_lib == cl && m.cast_member == cm)
+                .unwrap_or(false);
+            if !still_present {
+                JsApi::dispatch_flash_member_unloaded(ch as i32);
+                self.flash_sprite_loaded.remove(&(ch, cl, cm));
+                self.flash_frame_buffers.remove(&ch);
+            }
+        }
     }
 
     /// Tear down any Flash (Ruffle) instances whose source member lives in the

@@ -3414,6 +3414,24 @@ pub fn sprite_get_prop(
                 .map(|x| x.clone())
                 .unwrap_or(NULL_CAST_MEMBER_REF),
         )),
+        // `the type of sprite` (Director 11.5): "can be tested and set". An
+        // occupied channel reports its member's type symbol (#bitmap, #flash,
+        // …); an empty channel reports 0 (matching `sprite(ch).type = 0`
+        // clearing a channel). bogeyman tests `if sprite(pBogey).type = #flash`.
+        "type" => {
+            let member_ref = sprite.and_then(|s| s.member.clone());
+            match member_ref {
+                Some(m) if m.is_valid() => {
+                    match player.movie.cast_manager.find_member_by_ref(&m) {
+                        Some(member) => {
+                            Ok(Datum::Symbol(member.member_type.type_string().to_string()))
+                        }
+                        None => Ok(Datum::Int(0)),
+                    }
+                }
+                _ => Ok(Datum::Int(0)),
+            }
+        }
         "camera" => {
             // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
             let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
@@ -3568,10 +3586,32 @@ pub fn sprite_get_prop(
             }
         }
         "currentFrame" | "frame" => {
-            if sprite.and_then(|s| s.member.as_ref()).is_some() {
-                Ok(Datum::Int(ruffle_get_current_frame(sprite_id as i32)))
-            } else {
-                Ok(Datum::Int(0))
+            // A behavior's own `property frame` / `property currentFrame` takes
+            // precedence over the Flash playhead reading. Many behaviors track
+            // an animation frame in a property literally named `frame`
+            // (bogey_nights' bogeyman behavior does). Without checking the
+            // behaviors first, `sprite(N).frame` was unconditionally hijacked
+            // into the Ruffle currentFrame for ANY sprite with a member — the
+            // behavior's real value was unreachable and the paired setter
+            // blanked the SWF (see the setter arm). Only when no behavior owns
+            // the property do we read the Flash playhead (storyscramble tiles).
+            let behavior_val = sprite.and_then(|sprite| {
+                reserve_player_mut(|player| {
+                    sprite.script_instance_list.iter().find_map(|behavior| {
+                        script_get_prop_opt(player, behavior, &prop_name.to_string())
+                    })
+                })
+            });
+            match behavior_val {
+                Some(ref_) => {
+                    let datum_clone = player.get_datum(&ref_).clone();
+                    player.last_sprite_prop_ref = Some(ref_);
+                    Ok(datum_clone)
+                }
+                None if sprite.and_then(|s| s.member.as_ref()).is_some() => {
+                    Ok(Datum::Int(ruffle_get_current_frame(sprite_id as i32)))
+                }
+                None => Ok(Datum::Int(0)),
             }
         }
         "actionsEnabled" | "buttonsEnabled" | "imageEnabled" | "sound" | "static" => {
@@ -4055,6 +4095,45 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         // different frames (storyscramble's 3 story tiles use cast 2:1 but
         // display poster frames 2/4/6 simultaneously).
         "frame" | "currentFrame" => {
+            // Mirror the getter: a behavior that declares its own `property
+            // frame`/`currentFrame` OWNS this assignment — store it there and
+            // do NOT touch the Flash playhead. Only sprites with no such
+            // behavior property route to Ruffle gotoAndStop (poster-frame Flash
+            // tiles like storyscramble's). This stops a behavior's animation
+            // counter being misrouted into the Flash bridge — bogey_nights sets
+            // `sprite(16).frame = VOID` every frame, which was calling
+            // gotoAndStop("VOID") (a nonexistent label) and blanking the SWF.
+            let declared = borrow_sprite_mut(
+                sprite_id,
+                |_| {},
+                |sprite, _| {
+                    sprite.script_instance_list.iter().find_map(|behavior| {
+                        reserve_player_mut(|player| {
+                            let value_ref = player.alloc_datum(value.clone());
+                            match script_set_prop(
+                                player,
+                                behavior,
+                                &prop_name.to_string(),
+                                &value_ref,
+                                true, // only if the behavior already declares it
+                            ) {
+                                Ok(_) => Some(()),
+                                Err(_) => None,
+                            }
+                        })
+                    })
+                },
+            );
+            if declared.is_some() {
+                return Ok(());
+            }
+            // No behavior owns `frame`: this is a Flash playhead navigation.
+            // Director ignores a VOID frame value (no valid target), so guard
+            // it — otherwise value.string_value() yields "VOID", which the
+            // bridge treats as a (nonexistent) label and blanks the sprite.
+            if matches!(value, Datum::Void) {
+                return Ok(());
+            }
             let frame_or_label = value.string_value()?;
             let has_member = reserve_player_ref(|player| {
                 player
@@ -4666,6 +4745,44 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),
+        // `the type of sprite` setter. Director games activate a
+        // script-created sprite in an otherwise-empty channel by assigning
+        // e.g. `sprite(ch).type = #bitmap`. bogey_nights' Eustice `#sneeze`
+        // spawns its boogy/spit splashes exactly this way — `newchannel`
+        // finds a free channel, then `sprite(ch).type = #bitmap` before
+        // setting ink/member. dirplayer renders a channel only if it has a
+        // score span OR is a puppet (see get_sorted_channels), so without a
+        // `type` setter the spawned sprites got a member but never became
+        // renderable ("many on the score but not visible"). A non-empty type
+        // activates the channel via the puppet flag; #none/0/VOID clears it.
+        "type" => {
+            let activate = match &value {
+                Datum::Void => false,
+                Datum::Int(n) => *n != 0,
+                Datum::Symbol(s) => {
+                    !s.eq_ignore_ascii_case("none") && !s.eq_ignore_ascii_case("empty")
+                }
+                _ => true,
+            };
+            borrow_sprite_mut(
+                sprite_id,
+                |_| {},
+                |sprite, _| {
+                    if activate {
+                        // Activate the channel so a script-created sprite
+                        // renders even without a score span. The caller sets
+                        // .member/.ink/.loc separately (bogey_nights' Eustice).
+                        sprite.puppet = true;
+                    } else {
+                        // Per the Director 11.5 reference, `sprite(ch).type = 0`
+                        // CLEARS the channel — empty it and stop it rendering.
+                        sprite.member = None;
+                        sprite.puppet = false;
+                    }
+                    Ok(())
+                },
+            )
+        }
         "puppet" => borrow_sprite_mut(
             sprite_id,
             |_| {},
@@ -4759,13 +4876,16 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
             || prop_name.eq_ignore_ascii_case("member")
             || prop_name.eq_ignore_ascii_case("memberNum")
             || prop_name.eq_ignore_ascii_case("castNum")
-            || prop_name.eq_ignore_ascii_case("puppet");
+            || prop_name.eq_ignore_ascii_case("puppet")
+            // `type` activates/clears a channel via the puppet flag, so it
+            // changes which channels render (bogey_nights' spawned splashes).
+            || prop_name.eq_ignore_ascii_case("type");
         if affects_render_order {
             reserve_player_mut(|player| {
                 player.movie.score.invalidate_render_channel_cache();
             });
         }
-        if prop_name.eq_ignore_ascii_case("puppet") {
+        if prop_name.eq_ignore_ascii_case("puppet") || prop_name.eq_ignore_ascii_case("type") {
             reserve_player_mut(|player| {
                 player.refresh_stage_behavior_channel_cache_entry(sprite_id);
             });

@@ -40,6 +40,14 @@ interface FlashInstance {
   /// actually start the SWF. When false, autoplay covers it and the
   /// queued `play` op is a redundant restart we skip.
   pausedAtStart: boolean;
+  /// Director-intent "is this sprite's Flash movie stopped?" flag. We stop a
+  /// Flash sprite by halting its root TIMELINE (not by suspending the whole
+  /// Ruffle player — that would kill the render loop and strand later
+  /// GotoFrame calls on a stale canvas). Because the player keeps running,
+  /// its own `isPlaying` no longer reflects the movie's stopped state, so we
+  /// track it here for `sprite.playing`. Set true by stop/rewind/frame-setter,
+  /// false by play/gotoFrame.
+  stopped?: boolean;
 }
 
 // Per-sprite Flash instance map. Each Flash sprite gets its own Ruffle
@@ -543,7 +551,16 @@ export async function createFlashInstance(
     // takes over those responsibilities on the dirplayer side; this
     // wmode just makes the Ruffle canvas itself transparent-where-empty.
     wmode: 'transparent',
-    renderer: 'canvas',  // Force Canvas2D so we can read pixels back
+    // Force the Canvas2D backend. Ruffle's config key is `preferredRenderer`
+    // (see load-options.ts RenderBackend); the old `renderer: 'canvas'` was an
+    // UNKNOWN key that Ruffle silently ignored, so every instance defaulted to
+    // the wgpu-webgl backend and allocated its own WebGL context. Games with
+    // many simultaneous Flash sprites (bogey_nights' boogyflash/spitflash
+    // "superstar" splashes) then blew past the browser's ~16 WebGL-context cap
+    // ("Too many active WebGL contexts"). Canvas2D uses no WebGL context and
+    // makes the getImageData frame-capture readback cheaper — which is the
+    // whole reason we wanted the canvas backend in the first place.
+    preferredRenderer: 'canvas',
     socketProxy: getSocketProxyConfig(),
   };
   if (bridgeId) {
@@ -937,6 +954,10 @@ function applyGotoLabelAndPin(instance: FlashInstance, label: string): void {
   queueMicrotask(() => {
     try {
       player.CallFunction!('_root.stop', []);
+      // Resume the player so the seeked label frame paints — see schedulePin
+      // for the full rationale (a movie pinning the sprite via per-frame
+      // stop()/hold keeps the player suspended, so the goto never repaints).
+      (instance.rufflePlayer as { play?: () => void }).play?.();
     } catch (e) {
       console.warn(`[Flash gotoLabel] pin-step error:`, e);
     }
@@ -966,6 +987,22 @@ function schedulePin(instance: FlashInstance, frame: number): void {
     pinTarget.delete(instance.spriteNum);
     try {
       instance.rufflePlayer.GotoFrame(frame, true);
+      // Resume the PLAYER (not the clip) so the seeked frame actually paints
+      // to the canvas. Ruffle's `goto_frame` only rebuilds the display list;
+      // the paint happens on a player tick, which is skipped while the player
+      // is SUSPENDED. A movie that pins a Flash sprite by calling
+      // `stop(sprite N)` / `hold` every frame keeps the player suspended, so
+      // without this the model advances to `frame` but dirplayer keeps
+      // capturing the STALE previous frame (bogey_nights' intro: clicking
+      // Instructions sets `sprite(1).frame = 113` but the menu stayed on
+      // screen). The clip itself is stopped by the gotoAndStop above, so
+      // resuming the player renders `frame` once and it stays put; the
+      // movie's next per-frame stop() re-suspends. For sprites that were
+      // never paused (poster-frame tiles) the player is already playing and
+      // this is a harmless no-op. Runs in the microtask (after the current
+      // synchronous Lingo dispatch) so a same-frame stop() can't re-suspend
+      // before the paint lands.
+      instance.rufflePlayer.play?.();
     } catch (e) {
       console.warn(`[Flash goto] pin-step error:`, e);
     }
@@ -1007,11 +1044,28 @@ function flushPendingGoto(spriteNum: number): void {
           pinTarget.delete(spriteNum);
           break;
         case 'stop':
+          // Mirror the live stopFlash: halt the root TIMELINE, don't suspend
+          // the whole player. A queued `stop` replaying `pause()` here was the
+          // bug behind bogey_nights' end screen — "flash bhv" beginSprite runs
+          // `sprite(3).frame = 116` then `sprite(3).stop()`; when sprite 3's
+          // instance was (re)loading, both ops queued, and the queued stop
+          // paused the player so the frame-116 seek never painted (stale frame
+          // on screen even though `sprite(3).frame` read 116). Keeping the
+          // player alive lets the seeked frame render.
           pinTarget.delete(spriteNum);
-          instance.rufflePlayer.pause();
+          instance.stopped = true;
+          {
+            const p = instance.rufflePlayer as {
+              CallFunction?: (path: string, args: unknown[]) => unknown;
+              pause?: () => void;
+            };
+            if (typeof p.CallFunction === 'function') p.CallFunction('_root.stop', []);
+            else p.pause?.();
+          }
           break;
         case 'rewind':
           pinTarget.delete(spriteNum);
+          instance.stopped = true;
           instance.rufflePlayer.GotoFrame(1, true);
           break;
         case 'setVariable':
@@ -1066,6 +1120,7 @@ function goToFrame(spriteNum: number, frameOrLabel: string): void {
     }
     return;
   }
+  instance.stopped = false; // gotoFrame is gotoAndPlay-semantic → keep playing
   if (isNumeric) {
     applyGotoPlay(instance, parseInt(trimmed, 10));
   } else {
@@ -1094,6 +1149,7 @@ function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
     }
     return;
   }
+  instance.stopped = true; // frame setter is gotoAndStop-semantic → stopped
   if (isNumeric) {
     applyGotoAndPin(instance, parseInt(trimmed, 10));
   } else {
@@ -1149,8 +1205,28 @@ function stopFlash(spriteNum: number): void {
     return;
   }
   pinTarget.delete(spriteNum);
+  instance.stopped = true;
   try {
-    instance.rufflePlayer.pause();
+    // Stop the root TIMELINE, not the whole player. `player.pause()` suspends
+    // the entire Ruffle player, which halts its render loop — so any later
+    // GotoFrame updates the SWF model but never repaints, and dirplayer
+    // captures a stale canvas. bogey_nights' intro calls `stop(sprite 1)`
+    // every frame; with pause() the menu stayed frozen on screen even after
+    // `sprite(1).frame = 113` moved the model to the Instructions frame
+    // (confirmed: overriding ruffleStop to a no-op made Instructions appear).
+    // Halting only the root MovieClip freezes the timeline in place while
+    // leaving the player alive to paint frame changes. `sprite.playing` reads
+    // `instance.stopped` since the player itself keeps running.
+    const player = instance.rufflePlayer as {
+      CallFunction?: (path: string, args: unknown[]) => unknown;
+      pause?: () => void;
+    };
+    if (typeof player.CallFunction === 'function') {
+      player.CallFunction('_root.stop', []);
+    } else {
+      // Bridge mode / no CallFunction: fall back to the old full-player pause.
+      player.pause?.();
+    }
   } catch (e) {
     console.warn(`ruffleStop error:`, e);
   }
@@ -1178,6 +1254,7 @@ function playFlash(spriteNum: number): void {
   // in this same Lingo dispatch — otherwise the scheduled RAF stop
   // would undo our play() a frame later (BS69 shrink animation).
   pinTarget.delete(spriteNum);
+  instance.stopped = false;
   try {
     instance.rufflePlayer.play();
     const cur = parseInt(
@@ -1200,6 +1277,7 @@ function rewindFlash(spriteNum: number): void {
     return;
   }
   pinTarget.delete(spriteNum);
+  instance.stopped = true;
   try {
     instance.rufflePlayer.GotoFrame(1, true);
   } catch (e) {
@@ -1214,6 +1292,11 @@ function isPlaying(spriteNum: number): boolean {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return false;
+  // The player's render loop stays alive even when a sprite is "stopped" (we
+  // halt the root timeline, not the player — see stopFlash), so the
+  // player-level isPlaying is no longer a reliable proxy for the movie's
+  // stopped state. Honour the tracked intent first.
+  if (instance.stopped) return false;
   try {
     return instance.rufflePlayer.isPlaying ?? false;
   } catch (e) {
@@ -1504,10 +1587,20 @@ export function initFlashBridge(): void {
     }
   };
 
-  // Expose flash loading state for WASM frame loop to check.
-  // Also returns true if scripts tried to access a Flash instance that doesn't exist yet
-  // (the rendering loop will dispatch it shortly).
-  win.dirplayer_isFlashLoading = () => flashLoadingCount > 0 || flashAccessBeforeReady;
+  // Expose flash loading state for the WASM frame loop to check. The loop
+  // BLOCKS (up to 15s) while this is true, so it must only be true when the
+  // game genuinely can't proceed without a Flash instance — i.e. when a script
+  // actually tried to read a not-yet-ready Flash sprite (getVariable /
+  // callFunction / setVariable set `flashAccessBeforeReady`).
+  //
+  // It must NOT block merely because some instance is still loading
+  // (`flashLoadingCount > 0`). Games that spawn many transient, display-only
+  // Flash sprites (bogey_nights turns every "superstar" splash into a
+  // boogyflash/spitflash SWF) would otherwise stall the ENTIRE game — including
+  // player input — for ~3s per spawn, perpetually, since there's always a load
+  // in flight. Those sprites are never scripted, so blocking for them is pure
+  // lost time; they just pop in when their background load finishes.
+  win.dirplayer_isFlashLoading = () => flashAccessBeforeReady;
 
   // Hand-fired test entry for Flash `event: …` dispatch — lets you prove
   // the WASM dispatch chain end-to-end from DevTools without waiting for
