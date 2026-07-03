@@ -1231,8 +1231,26 @@ impl DirPlayer {
                 .map(|sprite| sprite.script_instance_list.clone())
                 .unwrap_or_default();
             let synced_ids = self.get_sprite_script_instance_ids(sprite_id, &existing_ids);
-            let sprite = self.movie.score.get_sprite_mut(sprite_id);
-            sprite.script_instance_list = synced_ids;
+            {
+                let sprite = self.movie.score.get_sprite_mut(sprite_id);
+                sprite.script_instance_list = synced_ids.clone();
+            }
+            // Stamp `spriteNum` on every instance so `the currentSpriteNum`
+            // resolves for behaviors attached at RUNTIME via
+            // `add(the scriptInstanceList of sprite X, new(script(...)))`. That
+            // add-to-cache path bypasses the scriptInstanceList *setter* (which
+            // stamps spriteNum) and the score begin-sprite path, so without this
+            // the instance's spriteNum stayed Void and `the currentSpriteNum`
+            // returned 0. Summer Resort's inventory icons attach
+            // inventory.select.item this way and read `the currentSpriteNum` in
+            // their mouseUp to identify the clicked item — a 0 there made
+            // `getPos(page, "")` return 0 and crashed showDescription.
+            let sprite_num_ref = self.alloc_datum(Datum::Int(sprite_id as i32));
+            for inst in &synced_ids {
+                let _ = crate::player::script::script_set_prop(
+                    self, inst, "spriteNum", &sprite_num_ref, false,
+                );
+            }
         }
     }
 
