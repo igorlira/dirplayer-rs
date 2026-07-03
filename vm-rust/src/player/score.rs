@@ -5338,6 +5338,27 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (m.max(sprite.height.max(1)), "adjust+measured")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
                 ((field_member.text_height as i32 + extras).max(sprite.height), "wrap+adjust+text_height")
+            } else if field_member.word_wrap
+                && measured_plus_extras.is_some()
+                && sprite.height > 0
+                && {
+                    // #scroll/#fixed/#limit fields normally clip to the authored
+                    // height (handled by the `sprite.height>0` arm below), but a
+                    // short dialogue that overflows by only a few lines would then
+                    // lose text. This happens in Summer Resort: "sign.text" is an
+                    // authored 16px (one-line) #scroll field, but its messages wrap
+                    // to two lines because we substitute a wider font for the
+                    // authored "Osaka" — the second line ("…resort!") was clipped.
+                    // Grow to the measured content height, but only when the
+                    // overflow is small so genuinely large scrolling documents
+                    // (help panels wrapping to thousands of px) still clip + scroll
+                    // as authored. MAX_GROW caps the *extra* height (~10 lines).
+                    const MAX_GROW: i32 = 160;
+                    let m = measured_plus_extras.unwrap();
+                    m > sprite.height && (m - sprite.height) <= MAX_GROW
+                }
+            {
+                (measured_plus_extras.unwrap(), "wrap+scroll+grow-dialogue")
             } else if sprite.height > 0 {
                 (sprite.height, "sprite.height>0")
             } else if field_member.text_height > 0 {
