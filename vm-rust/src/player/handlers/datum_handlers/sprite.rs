@@ -432,12 +432,25 @@ impl SpriteDatumHandlers {
                             let result = player.last_sprite_prop_ref.take()
                                 .unwrap_or_else(|| player.alloc_datum(prop_datum));
 
-                            // If there's a second argument, it's an index into the property
+                            // If there's a second argument, it's an index into
+                            // the property value. A property list is indexed by
+                            // KEY (symbol/string), not a positional int — e.g.
+                            // Summer Resort's `sprite(i).pData[#item]`, where
+                            // pData is a #-keyed prop list. The old code coerced
+                            // the key via int_value() (a symbol → 0) and only
+                            // handled positional Lists, so it errored "cannot
+                            // index into prop_list with 0". Mirror the PropList
+                            // handler's key lookup here.
                             if args.len() > 1 {
-                                let index = player.get_datum(&args[1]).int_value()?;
                                 let list_datum = player.get_datum(&result).clone();
                                 match list_datum {
+                                    Datum::PropList(pairs, _) => {
+                                        return crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_by_key(
+                                            &pairs, &args[1], &player.allocator,
+                                        );
+                                    }
                                     Datum::List(_, item_refs, _) => {
+                                        let index = player.get_datum(&args[1]).int_value()?;
                                         if index < 1 || index as usize > item_refs.len() {
                                             return Err(ScriptError::new(format!(
                                                 "getPropRef: index {} out of range for list of length {}",
@@ -447,6 +460,7 @@ impl SpriteDatumHandlers {
                                         return Ok(item_refs[(index - 1) as usize].clone());
                                     }
                                     _ => {
+                                        let index = player.get_datum(&args[1]).int_value().unwrap_or(0);
                                         return Err(ScriptError::new(format!(
                                             "getPropRef: cannot index into {} with {}",
                                             player.get_datum(&result).type_str(), index
