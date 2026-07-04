@@ -2576,6 +2576,17 @@ impl DirPlayer {
                 self.float_precision = value.int_value()? as u8;
                 Ok(())
             },
+            "timer" => {
+                // `set the timer = N` resets Director's timer to N ticks (1/60 s);
+                // `set the timer = 0` is equivalent to `startTimer`. `the timer`
+                // reads elapsed ticks since `start_time`, so back-date start_time
+                // by N ticks so it reads N going forward. eds_kart_attack's Kart
+                // behavior does `set the timer = 0` in `on wobble`.
+                let ticks = value.int_value()?;
+                let ms = (ticks as i64) * 1000 / 60;
+                self.start_time = chrono::Local::now() - chrono::Duration::milliseconds(ms);
+                Ok(())
+            },
             "centerStage" => {
                 self.center_stage = value.int_value()? != 0;
                 crate::player::stage::apply_stage_draw_rect(self);
