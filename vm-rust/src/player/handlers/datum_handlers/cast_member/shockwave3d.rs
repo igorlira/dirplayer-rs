@@ -2321,7 +2321,7 @@ impl Shockwave3dMemberHandlers {
                                         }
                                         crate::js_api::JsApi::dispatch_flash_member_loaded(
                                             synthetic as i32, src_ref.cast_lib, src_ref.cast_member,
-                                            &swf, fw, fh, true,
+                                            &swf, fw, fh, true, -1,
                                         );
                                         log(&format!(
                                             "[W3D] newTexture(\"{}\"): Flash member {}:{} -> off-screen Ruffle (sprite {}, {}x{})",

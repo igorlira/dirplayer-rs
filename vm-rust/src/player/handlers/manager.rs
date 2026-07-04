@@ -974,6 +974,21 @@ impl BuiltInHandlerManager {
                 } else {
                     if !args.is_empty() {
                         if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                            // play(sprite) overrides a prior `sprite.frame = N`
+                            // hold — clear the asserted frame so a freshly
+                            // (re)created instance PLAYS from the current frame
+                            // instead of pinning+stopping at the held one. This
+                            // mirrors the `sprite(x).play()` method arm
+                            // (datum_handlers/sprite.rs). bogey_nights' #pickit
+                            // does `frame = 1; member = "straw"; play(sprite)`,
+                            // and the member swap recreates the instance on the
+                            // next frame — without clearing here, straw loads
+                            // pinned+stopped at frame 1 (assertedFrame=1) and
+                            // never animates or advances (the grab machine then
+                            // reads a frozen frame and stalls into #retreat).
+                            reserve_player_mut(|player| {
+                                player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                            });
                             ruffle_play(sn);
                         }
                     }
@@ -1099,6 +1114,14 @@ impl BuiltInHandlerManager {
             "play" => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        // play() is resume-semantic: it OVERRIDES a prior
+                        // `sprite.frame = N` hold, so clear the sprite's asserted
+                        // frame — otherwise a fresh instance would be pinned
+                        // (stopped) at N instead of playing (StoryScramble's
+                        // grow-bubble does `frame = N; play()` and must animate).
+                        reserve_player_mut(|player| {
+                            player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                        });
                         ruffle_play(sn);
                     }
                 }
@@ -1112,15 +1135,18 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            // Director 11.5 `hold()` — global form `hold(sprite N)`. In Director
-            // this suppresses the playhead's per-frame advance of a Flash sprite
-            // while the SWF's own timeline/audio keep running (movies call it
-            // every `exitFrame`). dirplayer doesn't drive the SWF frame-by-frame
-            // — Ruffle free-runs it in real time — so there is nothing to
-            // suppress; pausing would wrongly freeze an already-correct SWF.
-            // Faithful behaviour is a no-op. See the sprite-method `hold` arm in
-            // datum_handlers/sprite.rs for the full rationale.
-            "hold" => Ok(DatumRef::Void),
+            // Director 11.5 `hold()` — global form `hold(sprite N)`. Maps to the
+            // same root-timeline stop as `stop()` (spec: stops the Flash sprite,
+            // audio would continue — we don't split audio). See the sprite-method
+            // `hold` arm in datum_handlers/sprite.rs.
+            "hold" => {
+                if args.len() >= 1 {
+                    if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        ruffle_stop(sn);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
             "pause"  => Ok(DatumRef::Void),
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),

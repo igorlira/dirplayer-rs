@@ -181,11 +181,11 @@ export function initVmCallbacks() {
     onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => {
       store.dispatch(channelDisplayNameChanged({ channelNumber, displayName }));
     },
-    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean) => {
+    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => {
       // Copy immediately - swfData is a view into WASM memory that may be invalidated
       const swfDataCopy = new Uint8Array(swfData);
-      console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart})`);
-      createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart)
+      console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
+      createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
         .catch(e => console.error('Failed to create Flash instance:', e));
     },
     onFlashMemberUnloaded: (spriteNum: number) => {

@@ -601,11 +601,71 @@ impl DirPlayer {
     /// before Lingo scripts try to access them. Per-sprite: each sprite that
     /// references a Flash member gets its own dedicated Ruffle instance.
     pub fn pre_dispatch_flash_members(&mut self) {
+        // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
+        // longer holds that exact Flash member — BEFORE the load pass below, so
+        // a member swap is deterministically unload(old) → load(new). If the
+        // load ran first, `createFlashInstance(new)` sets the new instance at
+        // the sprite's key, and the subsequent unload(old) — same key —
+        // destroys the freshly-created instance, so the swapped-in member
+        // (bogey_nights' bogeyman straw/longarm) never renders (frame stays 0,
+        // "stale straw"). Also frees instances when a channel empties
+        // (splash `killer`) so we don't leak players.
+        let loaded: Vec<(i16, i32, i32)> = self.flash_sprite_loaded.iter().cloned().collect();
+        for (ch, cl, cm) in loaded {
+            let cur = self
+                .movie
+                .score
+                .get_sprite(ch)
+                .and_then(|s| s.member.as_ref())
+                .map(|m| (m.cast_lib, m.cast_member));
+            let still_present = cur == Some((cl, cm));
+            if still_present {
+                continue;
+            }
+            // The channel no longer holds THIS member. But the JS Ruffle instance
+            // map is keyed by CHANNEL NUMBER only, while `flash_sprite_loaded` is
+            // keyed by (channel, cast_lib, cast_member) — so a flash→flash swap
+            // leaves BOTH the old and new member entries in the set for the same
+            // channel for a frame. If we blindly `destroyFlashInstance(ch)` for
+            // the stale OLD entry, we destroy the NEW member's instance (same JS
+            // key) that `createFlashInstance` just put there — bogey_nights'
+            // bogeyman swaps longarm↔straw and the straw instance was being
+            // killed the instant it registered (permanent "NO INSTANCE",
+            // frame reads 0, grab stalls into #retreat).
+            //
+            // On a flash→flash swap `createFlashInstance` already replaced the
+            // single per-channel instance itself (its own leading
+            // destroyFlashInstance). So only tear down the JS instance when the
+            // channel no longer shows ANY live Flash member; otherwise just drop
+            // the stale bookkeeping entry and leave the new instance alone.
+            if !self.channel_holds_live_flash(ch) {
+                JsApi::dispatch_flash_member_unloaded(ch as i32);
+                self.flash_frame_buffers.remove(&ch);
+            }
+            self.flash_sprite_loaded.remove(&(ch, cl, cm));
+        }
+
+        // LOAD pass: dispatch newly-present Flash members.
         for channel in &self.movie.score.channels {
             let channel_num = channel.number as i16;
             if let Some(member_ref) = &channel.sprite.member {
                 let dispatch_key = (channel_num, member_ref.cast_lib, member_ref.cast_member);
                 if self.flash_sprite_loaded.contains(&dispatch_key) {
+                    // Already loaded: keep the Ruffle render resolution matched
+                    // to the sprite's current on-stage size so a Flash sprite
+                    // scaled up on stage (bogey_nights' boogyflash/spitflash
+                    // splashes GROW; the bogeyman arm swaps member dims) stays
+                    // sharp — Ruffle re-renders the vector at the new size
+                    // instead of dirplayer upscaling a stale small capture.
+                    // setFlashSize no-ops on sub-2px changes so static sprites
+                    // (StoryScramble posters) never reflow. Only for on-stage
+                    // sprites (positive channel); 3D-texture instances excluded
+                    // in the JS twin.
+                    ruffle_set_size(
+                        channel_num as i32,
+                        channel.sprite.width.max(1) as i32,
+                        channel.sprite.height.max(1) as i32,
+                    );
                     continue;
                 }
                 if let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) {
@@ -619,10 +679,14 @@ impl DirPlayer {
                                 .as_ref()
                                 .map(|fi| fi.paused_at_start)
                                 .unwrap_or(false);
+                            // Re-project the sprite's asserted frame onto the new
+                            // instance so shared-member siblings show unique
+                            // posters and swaps keep their frame.
+                            let asserted_frame = channel.sprite.flash_asserted_frame.unwrap_or(-1);
                             debug!(
-                                "[Flash] Pre-dispatching sprite#{} {}:{} ({}x{}, {} bytes, pausedAtStart={})",
+                                "[Flash] Pre-dispatching sprite#{} {}:{} ({}x{}, {} bytes, pausedAtStart={}, assertedFrame={})",
                                 channel_num, member_ref.cast_lib, member_ref.cast_member,
-                                w, h, data.len(), paused_at_start,
+                                w, h, data.len(), paused_at_start, asserted_frame,
                             );
                             JsApi::dispatch_flash_member_loaded(
                                 channel_num as i32,
@@ -632,6 +696,7 @@ impl DirPlayer {
                                 w,
                                 h,
                                 paused_at_start,
+                                asserted_frame,
                             );
                             self.flash_sprite_loaded.insert(dispatch_key);
                         }
@@ -640,32 +705,24 @@ impl DirPlayer {
             }
         }
 
-        // Reconcile: tear down any Ruffle instance whose channel no longer
-        // holds that exact Flash member. Instances are otherwise only destroyed
-        // on an external-cast swap (invalidate_flash_for_cast_lib), so a channel
-        // that showed a Flash member once would keep its WebGL-backed Ruffle
-        // player forever. bogey_nights churns Flash sprites hard — every splash
-        // that reaches #superstar swaps its bitmap member for the boogyflash /
-        // spitflash SWF, and `killer` empties the channel a moment later. Across
-        // hundreds of channels this leaks Ruffle instances until the browser
-        // hits its WebGL context cap ("Too many active WebGL contexts"). Freeing
-        // the instance as soon as its Flash member leaves keeps only the
-        // genuinely-active Flash sprites alive.
-        let loaded: Vec<(i16, i32, i32)> = self.flash_sprite_loaded.iter().cloned().collect();
-        for (ch, cl, cm) in loaded {
-            let still_present = self
-                .movie
-                .score
-                .get_sprite(ch)
-                .and_then(|s| s.member.as_ref())
-                .map(|m| m.cast_lib == cl && m.cast_member == cm)
-                .unwrap_or(false);
-            if !still_present {
-                JsApi::dispatch_flash_member_unloaded(ch as i32);
-                self.flash_sprite_loaded.remove(&(ch, cl, cm));
-                self.flash_frame_buffers.remove(&ch);
-            }
-        }
+    }
+
+    /// True if the given score channel currently holds a Flash (SWF) cast
+    /// member — i.e. there should be exactly one live Ruffle instance keyed by
+    /// this channel number. Used by the reconcile to distinguish a flash→flash
+    /// member swap (keep the instance `createFlashInstance` just made) from a
+    /// flash→non-flash/empty change (genuinely tear the instance down).
+    fn channel_holds_live_flash(&self, ch: i16) -> bool {
+        self.movie
+            .score
+            .get_sprite(ch)
+            .and_then(|s| s.member.as_ref())
+            .and_then(|mref| self.movie.cast_manager.find_member_by_ref(mref))
+            .map(|member| match &member.member_type {
+                CastMemberType::Flash(f) => crate::rendering::has_swf_signature(&f.data),
+                _ => false,
+            })
+            .unwrap_or(false)
     }
 
     /// Tear down any Flash (Ruffle) instances whose source member lives in the
@@ -3827,6 +3884,11 @@ async fn restart_current_movie() {
 extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_isFlashLoading", catch)]
     fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
+
+    /// Resize a live Ruffle instance so it re-renders the vector sharp at the
+    /// sprite's current on-stage size (splashes grow, arm swaps dims).
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetSize")]
+    fn ruffle_set_size(sprite_num: i32, w: i32, h: i32);
 }
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.

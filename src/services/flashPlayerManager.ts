@@ -24,8 +24,10 @@ interface FlashInstance {
   bridgeId: string | null; // Set when this instance is driven by the main-world bridge
   container: HTMLDivElement;
   canvas: HTMLCanvasElement | null;
-  width: number;
+  width: number;   // current render (canvas) width in px; tracked by setFlashSize
   height: number;
+  nativeW: number; // SWF native stage size (detail floor for resizes); 0 if unknown
+  nativeH: number;
   animFrameId: number | null;
   /// Becomes true only after the SWF has loaded AND the 3s AS init wait
   /// has elapsed AND the inheritance/queue replay has finished. Lingo
@@ -353,6 +355,73 @@ function isFlashDisabled(): boolean {
 }
 
 /**
+ * Parse the SWF header's stage size (width, height) in pixels from the movie
+ * bytes. Only uncompressed FWS is handled (returns null for CWS/ZWS). Used to
+ * pick a high-resolution render canvas so a Flash sprite that is scaled UP on
+ * stage (bogey_nights' boogyflash/spitflash splashes GROW as they absorb
+ * others; the bogeyman arm swaps member dims) stays sharp: Ruffle renders the
+ * vector at high res and dirplayer DOWNSCALES to the sprite rect, instead of
+ * upscaling a tiny creation-time capture (which pixelates).
+ */
+function parseSwfStageSize(data: Uint8Array): { w: number; h: number } | null {
+  if (data.length < 9 || data[0] !== 0x46 || data[1] !== 0x57 || data[2] !== 0x53) {
+    return null; // not "FWS"
+  }
+  const nbits = data[8] >> 3;
+  const readBits = (bitPos: number, n: number): number => {
+    let v = 0;
+    for (let i = 0; i < n; i++) {
+      const byteIdx = (bitPos + i) >> 3;
+      const bitIdx = 7 - ((bitPos + i) & 7);
+      if ((data[byteIdx] >> bitIdx) & 1) v |= 1 << (n - 1 - i);
+    }
+    return v;
+  };
+  let p = 8 * 8 + 5; // byte 8, past the 5-bit nbits field
+  const xMin = readBits(p, nbits); p += nbits;
+  const xMax = readBits(p, nbits); p += nbits;
+  const yMin = readBits(p, nbits); p += nbits;
+  const yMax = readBits(p, nbits);
+  const w = Math.round((xMax - xMin) / 20);
+  const h = Math.round((yMax - yMin) / 20);
+  if (w <= 0 || h <= 0) return null;
+  return { w, h };
+}
+
+/**
+ * Resize a live Ruffle instance to match the sprite's current on-stage size so
+ * the vector re-renders sharp at the new scale (bogey_nights' splashes grow,
+ * the bogeyman arm swaps member dims). Keeps the render ~1:1 with what dirplayer
+ * draws — no blur from up-render + downscale, and no pixelation from upscaling a
+ * stale small capture. Never shrinks below the SWF's native size (detail floor)
+ * and no-ops for tiny changes / off-screen 3D-texture instances.
+ */
+function setFlashSize(spriteNum: number, w: number, h: number): void {
+  if (spriteNum < 0) return; // off-screen 3D texture: fixed size
+  const inst = instances.get(instanceKey(spriteNum));
+  if (!inst) return;
+  let tw = Math.max(1, Math.round(w));
+  let th = Math.max(1, Math.round(h));
+  if (inst.nativeW && inst.nativeH) {
+    tw = Math.max(tw, inst.nativeW);
+    th = Math.max(th, inst.nativeH);
+  }
+  // Skip sub-2px churn so a slowly-growing splash doesn't reflow Ruffle every
+  // single frame.
+  if (Math.abs(tw - inst.width) < 2 && Math.abs(th - inst.height) < 2) return;
+  inst.width = tw;
+  inst.height = th;
+  try {
+    inst.container.style.width = `${tw}px`;
+    inst.container.style.height = `${th}px`;
+    inst.rufflePlayer.style.width = `${tw}px`;
+    inst.rufflePlayer.style.height = `${th}px`;
+  } catch (e) {
+    /* bridge mode / detached element */
+  }
+}
+
+/**
  * Create a Ruffle player instance for a specific Flash sprite.
  * Each sprite gets its own player so multiple sprites that share a single
  * Flash cast member can display different frames simultaneously.
@@ -365,6 +434,7 @@ export async function createFlashInstance(
   width: number,
   height: number,
   pausedAtStart: boolean = false,
+  assertedFrame: number = -1,
 ): Promise<void> {
   const key = instanceKey(spriteNum);
 
@@ -379,57 +449,15 @@ export async function createFlashInstance(
     return;
   }
 
-  // Capture the about-to-die instance's current frame BEFORE destroy so
-  // we can carry it across a member change. storyscramble does
-  // `gotoFrame(sprite 2, 31)` in BS38 while sprite 2 holds member 1:31;
-  // when the scene change swaps sprite 2 to member 1:45 (bubble) we
-  // destroy the old instance and have no record of frame 31. Stash it
-  // here keyed by sprite number, then check below after sibling
-  // inheritance. Mimics Director's per-sprite frame property which
-  // survives member swaps.
-  const priorIntendedFrame: number | null = (() => {
-    const prior = instances.get(key);
-    if (!prior) return null;
-    try {
-      const f = parseInt(prior.rufflePlayer.GetVariable?.('/:_currentframe') || '0', 10);
-      return f >= 1 ? f : null;
-    } catch { return null; }
-  })();
-
   // Destroy existing instance for this sprite if any.
   destroyFlashInstance(spriteNum);
 
-  // Playhead inheritance — preserve Director's "Flash member state is
-  // shared across sprites using that member" semantic the old cast-keyed
-  // architecture used to give us for free. With per-sprite instances,
-  // sprite 2 in storyscramble's main scene would spin up a fresh Ruffle
-  // player and autoplay the bubble SWF (1:45) from frame 1→11, hiding
-  // the frame-21 state sprite 17 already advanced it to. Scan live
-  // siblings here for the same member and capture their current frame;
-  // we'll seed the new instance to that frame in the finally block
-  // below, after the SWF has loaded and AS initialisation finishes.
-  let inheritedFrame: number | null = null;
-  const siblings = Array.from(instances.values());
-  for (const sibling of siblings) {
-    if (sibling.castLib === castLib && sibling.castMember === castMember) {
-      try {
-        const cur = parseInt(
-          sibling.rufflePlayer.GetVariable?.('/:_currentframe') || '0', 10
-        );
-        if (cur >= 1) {
-          inheritedFrame = cur;
-          break;
-        }
-      } catch { /* getVariable failed (bridge mode etc.) — fall through to autoplay */ }
-    }
-  }
-
-  // Per-sprite intent wins over sibling inheritance: if BS38 set this
-  // sprite to frame N before the member changed, the new member should
-  // also land at frame N (Director's per-sprite frame attribute).
-  if (priorIntendedFrame !== null) {
-    inheritedFrame = priorIntendedFrame;
-  }
+  // Per-sprite frame intent is now owned by the Rust sprite
+  // (`flash_asserted_frame`) and threaded in as `assertedFrame`, which we pin
+  // below. The old cross-sprite "sibling frame inheritance" is gone: it seeded
+  // a new instance from ANOTHER sprite sharing the member, which for
+  // shared-member sets (StoryScramble's 3 story tiles) gave them all the SAME
+  // frame — clobbering each tile's unique poster.
 
   flashLoadingCount++;
   console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
@@ -446,13 +474,30 @@ export async function createFlashInstance(
   let player: any;
   let bridgeId: string | null = null;
 
+  // Render resolution = the sprite's current on-stage size, so the captured
+  // frame is ~1:1 with what dirplayer draws (crisp; no bilinear softening from
+  // an up-render + downscale roundtrip). As the sprite is scaled on stage
+  // (bogey_nights' splashes GROW, the arm swaps dims), `setFlashSize` resizes
+  // the player so Ruffle re-renders the vector sharp at the new size — matching
+  // Director's vector rendering at any scale. Never render below the SWF's
+  // native size, so a sprite briefly created tiny (splash at ~10px) still has
+  // detail until the first resize. Off-screen 3D-texture members (negative
+  // sprite number) keep their exact requested size.
+  let renderW = Math.max(1, Math.round(width));
+  let renderH = Math.max(1, Math.round(height));
+  const native = spriteNum >= 0 ? parseSwfStageSize(swfData) : null;
+  if (native) {
+    renderW = Math.max(renderW, native.w);
+    renderH = Math.max(renderH, native.h);
+  }
+
   // Hidden container for Ruffle - pixels are read back and composited into dirplayer's canvas
   const container = document.createElement('div');
   container.style.position = 'absolute';
   container.style.left = '-9999px';
   container.style.top = '-9999px';
-  container.style.width = `${width}px`;
-  container.style.height = `${height}px`;
+  container.style.width = `${renderW}px`;
+  container.style.height = `${renderH}px`;
   container.style.overflow = 'hidden';
   document.body.appendChild(container);
 
@@ -464,15 +509,15 @@ export async function createFlashInstance(
     const elem = bridgeFindElement(bridgeId);
     if (!elem) throw new Error('bridge created player but DOM element not found: ' + bridgeId);
     player = elem;
-    player.style.width = `${width}px`;
-    player.style.height = `${height}px`;
+    player.style.width = `${renderW}px`;
+    player.style.height = `${renderH}px`;
     container.appendChild(player);
   } else {
     // Direct mode (page-loaded polyfill, same world as Ruffle).
     const ruffle = await loadRuffle();
     player = ruffle.createPlayer();
-    player.style.width = `${width}px`;
-    player.style.height = `${height}px`;
+    player.style.width = `${renderW}px`;
+    player.style.height = `${renderH}px`;
     container.appendChild(player);
   }
 
@@ -484,8 +529,10 @@ export async function createFlashInstance(
     bridgeId,
     container,
     canvas: null,
-    width,
-    height,
+    width: renderW,
+    height: renderH,
+    nativeW: native ? native.w : 0,
+    nativeH: native ? native.h : 0,
     animFrameId: null,
     ready: false,
     pausedAtStart,
@@ -579,17 +626,25 @@ export async function createFlashInstance(
   // MovieClip at frame 1 (rendered + stopped) so it doesn't visibly
   // cycle during the 3-second AS-init wait below. Subsequent Lingo
   // `mySprite.play()` (via playFlash) unsticks it normally.
-  if (pausedAtStart) {
+  // Pin the initial frame BEFORE autoplay runs and before frame-capture starts,
+  // so the very first captured frame is already correct. A Lingo-asserted frame
+  // (`sprite.frame = N`, threaded from Rust as `assertedFrame` — it lives on the
+  // SPRITE so it's correct even though this JS instance was just (re)created and
+  // never saw the `frame =` op) takes PRECEDENCE over `pausedAtStart`'s frame-1:
+  // StoryScramble's 3 story tiles share cast 2:1 but each must show its own
+  // poster; pinning them all to frame 1 (pausedAtStart) shows the SAME picture.
+  const initialPin = assertedFrame >= 0 ? assertedFrame : (pausedAtStart ? 1 : -1);
+  if (initialPin >= 0) {
     try {
-      // Two-step pin: gotoAndPlay so Ruffle paints frame 1, wait one
-      // browser RAF so the paint lands on the canvas, then gotoAndStop
-      // to halt the MovieClip. Mirrors applyGotoAndPin's strategy
-      // (Ruffle skips paint for already-stopped MovieClips).
-      player.GotoFrame(1, false);
+      // Two-step: gotoAndPlay so Ruffle paints the frame (it skips paint for an
+      // already-stopped MovieClip), wait one RAF so the paint lands, then
+      // gotoAndStop to halt there.
+      player.GotoFrame(initialPin, false);
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-      player.GotoFrame(1, true);
+      player.GotoFrame(initialPin, true);
+      instance.stopped = true;
     } catch (e) {
-      console.warn(`[Flash] Instance ${key} pausedAtStart pin failed:`, e);
+      console.warn(`[Flash] Instance ${key} initial-frame pin (${initialPin}) failed:`, e);
     }
   }
 
@@ -629,39 +684,32 @@ export async function createFlashInstance(
     flashAccessBeforeReady = false;
     console.log(`[Flash] Instance ${key} fully ready (pending: ${flashLoadingCount})`);
 
-    // Seed the new instance with the frame captured from a sibling
-    // sprite using the same member (see scan above). Bubbles in
-    // storyscramble's main scene rely on this — sprite 2 picks up
-    // sprite 17's frame-21 state instead of autoplaying back to 11.
-    //
-    // By the time this runs (3s after instance creation), the SWF has
-    // already autoplayed 1→11 and AS `stop()` has parked the MovieClip.
-    // A bare `GotoFrame(N, false)` against an AS-stopped MovieClip
-    // doesn't reliably seek — we have to mirror the playFlash
-    // workaround: call `play()` first to flip the player-level paused
-    // flag, THEN `GotoFrame(N, false)` to hit MovieClip's goto_frame
-    // (which seeks AND clears the stopped flag). Frame N's own AS
-    // `stop()` then re-parks the playhead at N.
     const live = instances.get(key);
-    // Mark ready BEFORE the seed and queue replay so the internal
+    // Mark ready BEFORE the queue replay so the internal
     // `live.rufflePlayer.GotoFrame(...)` calls aren't seen as targeting
-    // a not-yet-ready instance (they're the seed itself). After this
-    // point any Lingo goTo/play/stop calls bypass the queue.
+    // a not-yet-ready instance. After this point any Lingo goTo/play/stop
+    // calls bypass the queue.
     if (live) live.ready = true;
-    if (inheritedFrame !== null && live) {
-      try {
-        live.rufflePlayer.play();
-        live.rufflePlayer.GotoFrame(inheritedFrame, false);
-      } catch (e) {
-        console.warn(`[Flash] inherit seed failed for ${key}:`, e);
-      }
-    }
 
     // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
-    // `stop(sprite)` Lingo calls that arrived before this instance was
-    // created. Runs AFTER the inheritance seed so an explicit
-    // `gotoFrame(31)` from BS38 wins over an inherited frame 21.
+    // `stop(sprite)` Lingo calls that arrived before this instance was created.
     flushPendingGoto(spriteNum);
+
+    // Finally, re-assert the sprite's authoritative frame (from Rust). The
+    // early pin above set it before autoplay, but the 3s AS-init window +
+    // flushPendingGoto may have moved the playhead; re-pinning here guarantees
+    // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
+    // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
+    // reflects that).
+    if (assertedFrame >= 0 && live && live.stopped) {
+      try {
+        live.rufflePlayer.GotoFrame(assertedFrame, false);
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        live.rufflePlayer.GotoFrame(assertedFrame, true);
+      } catch (e) {
+        console.warn(`[Flash] asserted-frame re-pin failed for ${key}:`, e);
+      }
+    }
   }
 }
 
@@ -1031,17 +1079,26 @@ function flushPendingGoto(spriteNum: number): void {
           applyGotoLabelAndPin(instance, op.label);
           break;
         case 'play':
-          // Queued `play` ops fire only on instances we just created —
-          // at which point autoplay has already started the SWF. Re-
-          // firing play() / GotoFrame(_currentframe, false) here is
-          // redundant AND visually disruptive: it seeks back to the
-          // queued goto target and makes the bubble grow animation
-          // restart from frame 1 after autoplay already played it.
-          //
-          // All we need to do is cancel any pending pin from a queued
-          // goto earlier in the same queue so the deferred stop
-          // doesn't undo the implicit play.
+          // Cancel any deferred gotoAndStop pin from a queued goto earlier in
+          // this queue, THEN actually resume playback from the current frame.
+          // A preceding queued `stop`/gotoAndStop (very common: the bogeyman's
+          // `#pickit` does `sprite(16).frame = 1` then `play(sprite 16)` on a
+          // just-swapped straw/longarm instance) leaves the clip PARKED — with a
+          // no-op here it stays at frame 1, so `#rollit`'s frame poll never
+          // advances, the grab never completes, and the sprite is stuck showing
+          // "straw". Playing from `_currentframe` (not a hardcoded 1) means an
+          // already-autoplayed clip isn't restarted.
           pinTarget.delete(spriteNum);
+          instance.stopped = false;
+          try {
+            instance.rufflePlayer.play();
+            const cur = parseInt(
+              instance.rufflePlayer.GetVariable?.('/:_currentframe') || '1', 10
+            ) || 1;
+            instance.rufflePlayer.GotoFrame(cur, false);
+          } catch (e) {
+            console.warn(`[Flash flush] sprite#${spriteNum} play resume error:`, e);
+          }
           break;
         case 'stop':
           // Mirror the live stopFlash: halt the root TIMELINE, don't suspend
@@ -1552,6 +1609,7 @@ export function initFlashBridge(): void {
   win.dirplayer_ruffleStop = stopFlash;
   win.dirplayer_rufflePlay = playFlash;
   win.dirplayer_ruffleRewind = rewindFlash;
+  win.dirplayer_ruffleSetSize = setFlashSize;
   win.dirplayer_ruffleIsPlaying = isPlaying;
   win.dirplayer_ruffleGetFrameCount = getFrameCount;
   win.dirplayer_ruffleGetCurrentFrame = getCurrentFrame;

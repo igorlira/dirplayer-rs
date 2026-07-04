@@ -635,6 +635,11 @@ impl SpriteDatumHandlers {
             }
             "play" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    // play() overrides a prior `sprite.frame = N` hold — clear
+                    // the asserted frame so a fresh instance plays, not pins.
+                    reserve_player_mut(|player| {
+                        player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                    });
                     ruffle_play(sn);
                 }
                 Ok(DatumRef::Void)
@@ -645,22 +650,19 @@ impl SpriteDatumHandlers {
                 }
                 Ok(DatumRef::Void)
             }
-            // Director 11.5 `hold()` — Flash sprite command. In Director the
-            // playhead advances a Flash sprite one SWF frame per Director frame;
-            // `hold` suppresses THAT Director-driven advance for the current
-            // frame while the SWF's own timeline and audio keep running. Movies
-            // call it every `exitFrame` (alongside `go the frame`) to stop the
-            // SWF being double-advanced.
-            //
-            // dirplayer doesn't drive the SWF frame-by-frame — the Ruffle
-            // instance free-runs its own timeline in real time — so there is no
-            // extra advance to suppress. Mapping `hold` to Ruffle `pause()`
-            // wrongly freezes an already-correctly-playing SWF (bogey_nights'
-            // characters stopped animating). The faithful behaviour here is a
-            // no-op: let Ruffle keep playing. Still recognised (not an error) so
-            // `hold(sprite N)` in a hot `exitFrame` loop doesn't abort the
-            // handler.
-            "hold" => Ok(DatumRef::Void),
+            // Director 11.5 `hold()` (spec: "stops a Flash movie sprite that is
+            // playing in the current frame, but any audio continues to play").
+            // We map it to the same root-timeline stop as `stop()` — stopFlash
+            // halts the root MovieClip while leaving the player alive to render
+            // (we don't split audio in the Ruffle bridge, an acceptable
+            // divergence). bogey_nights' bogeyman #hiding relies on hold to
+            // actually halt the idle SWF.
+            "hold" => {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    ruffle_stop(sn);
+                }
+                Ok(DatumRef::Void)
+            }
             "getvariable" => {
                 // Resolve the target sprite number FIRST, even if its cast
                 // member isn't resolvable at this instant. Director's

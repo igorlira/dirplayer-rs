@@ -131,6 +131,16 @@ pub struct Sprite {
     /// real viewport size. Set only on span exit (begin_sprites); reset() clears
     /// it, so a genuinely cleared channel still reports a zero rect.
     pub retained_rect: Option<(i32, i32, i32, i32)>,
+    /// Last frame Lingo asserted on this Flash sprite via `sprite.frame = N`
+    /// (numeric). Sprite-owned so it SURVIVES a member swap (Director contract:
+    /// the sprite `frame` property persists across `sprite.member =`) and is
+    /// re-projected onto a freshly (re)created Ruffle instance at load time —
+    /// which is how shared-member sprites show DIFFERENT frames (StoryScramble's
+    /// 3 story tiles show unique posters even though they share cast 2:1) and how
+    /// the bogeyman's `frame = 1` before a straw/longarm swap carries over.
+    /// `None` = Lingo never set a numeric frame (free-run / pausedAtStart).
+    /// Cleared by `reset()` (channel clear / endSprite / member=0).
+    pub flash_asserted_frame: Option<i32>,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -218,6 +228,7 @@ impl Sprite {
             w3d_camera: None,
             w3d_cameras: Vec::new(),
             retained_rect: None,
+            flash_asserted_frame: None,
         }
     }
 
@@ -280,5 +291,6 @@ impl Sprite {
         self.bitmap_size_owned_by_sprite = false;
         self.explicit_lingo_size = false;
         self.retained_rect = None;
+        self.flash_asserted_frame = None;
     }
 }
