@@ -2954,7 +2954,19 @@ pub fn render_score_to_bitmap_with_offset(
                     let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
                     if let Some(src_bitmap) = src_bitmap {
                         let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
-                        let dst_rect = sprite_rect;
+                        // Apply flipH/flipV by inverting the dst_rect (left↔right,
+                        // top↔bottom) so copy_pixels mirrors the content — the same
+                        // way the bitmap path does it. get_concrete_sprite_rect
+                        // already mirrored the reg point to place the box on the
+                        // correct side; without this inversion the Flash content
+                        // filled the box un-mirrored (bogey_nights' end-game grab
+                        // hands are flipV — they grabbed downward instead of up).
+                        let dst_rect = IntRect::from(
+                            if sprite.flip_h { sprite_rect.right } else { sprite_rect.left },
+                            if sprite.flip_v { sprite_rect.bottom } else { sprite_rect.top },
+                            if sprite.flip_h { sprite_rect.left } else { sprite_rect.right },
+                            if sprite.flip_v { sprite_rect.top } else { sprite_rect.bottom },
+                        );
 
                         let params = CopyPixelsParams {
                             blend: sprite.effective_blend(),
@@ -2967,7 +2979,7 @@ pub fn render_score_to_bitmap_with_offset(
                             skew: sprite.skew,
                             sprite: Some(sprite),
                             mask_offset: (0, 0),
-                            original_dst_rect: Some(dst_rect.clone()),
+                            original_dst_rect: Some(sprite_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
@@ -2998,6 +3010,7 @@ pub fn render_score_to_bitmap_with_offset(
                             .as_ref()
                             .map(|fi| fi.paused_at_start)
                             .unwrap_or(false);
+                        let asserted_frame = sprite.flash_asserted_frame.unwrap_or(-1);
                         JsApi::dispatch_flash_member_loaded(
                             channel_num as i32,
                             member_ref.cast_lib,
@@ -3006,6 +3019,7 @@ pub fn render_score_to_bitmap_with_offset(
                             w,
                             h,
                             paused_at_start,
+                            asserted_frame,
                         );
                         player.flash_sprite_loaded.insert(dispatch_key);
                     }

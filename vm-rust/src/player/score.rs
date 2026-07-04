@@ -826,6 +826,15 @@ impl Score {
                 // natural size. Drives get_concrete_sprite_rect's sprite-vs-bitmap
                 // dimension choice and `the stretch of sprite`.
                 sprite.stretch = data.stretch as i32;
+                // Apply the score channel's flipH/flipV bits (sprite_flags bit 5
+                // / bit 6). Previously only Lingo `sprite.flipH =` set these, so
+                // score-authored flipped Flash/bitmap sprites rendered
+                // un-mirrored — bogey_nights' end-game grab hands (sprites 17/20,
+                // authored flipH/flipV in the score) reached from the wrong side.
+                // A behavior that sets flipH in exitFrame still wins (scripts run
+                // after the channel update), matching Director's puppet semantics.
+                sprite.flip_h = data.flip_h();
+                sprite.flip_v = data.flip_v();
 
                 // Check if member is a shape to determine ink/blend handling
                 // Use find_member_by_ref which handles relative cast references (65535)
@@ -3579,10 +3588,27 @@ pub fn sprite_get_prop(
             }
         }
         "frameCount" => {
-            if sprite.and_then(|s| s.member.as_ref()).is_some() {
-                Ok(Datum::Int(ruffle_get_frame_count(sprite_id as i32)))
-            } else {
-                Ok(Datum::Int(0))
+            // Prefer the SWF header's FrameCount (parsed from the member bytes)
+            // over asking Ruffle: the header is correct even while the instance
+            // is still (re)loading, whereas ruffle_get_frame_count returns 0 in
+            // that window. A 0 here poisons movies that seed state from
+            // frameCount (bogey_nights #hiding). Fall back to Ruffle for
+            // compressed CWS members the header parser doesn't handle.
+            let header_fc = sprite
+                .and_then(|s| s.member.as_ref())
+                .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+                .and_then(|cm| match &cm.member_type {
+                    crate::player::cast_member::CastMemberType::Flash(f) => {
+                        crate::player::cast_member::CastMember::parse_swf_frame_count(&f.data)
+                    }
+                    _ => None,
+                });
+            match header_fc {
+                Some(n) => Ok(Datum::Int(n as i32)),
+                None if sprite.and_then(|s| s.member.as_ref()).is_some() => {
+                    Ok(Datum::Int(ruffle_get_frame_count(sprite_id as i32)))
+                }
+                None => Ok(Datum::Int(0)),
             }
         }
         "currentFrame" | "frame" => {
@@ -4144,6 +4170,15 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     .is_some()
             });
             if has_member {
+                // Record the asserted numeric frame on the SPRITE so it survives
+                // a member swap and re-projects onto a freshly-created Ruffle
+                // instance (StoryScramble poster tiles / bogeyman pre-swap
+                // frame). Non-numeric (label) targets don't set it.
+                if let Ok(n) = frame_or_label.parse::<i32>() {
+                    reserve_player_mut(|player| {
+                        player.movie.score.get_sprite_mut(sprite_id).flash_asserted_frame = Some(n);
+                    });
+                }
                 ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
             }
             Ok(())
@@ -5936,25 +5971,45 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let mut reg_x = flash_member.reg_point.0 as i32;
             let mut reg_y = flash_member.reg_point.1 as i32;
 
-            // If centerRegPoint, use center of the flash rect dimensions
-            if flash_member.flash_info.as_ref().map_or(true, |i| i.center_reg_point) {
-                if flash_width > 0 && flash_height > 0 {
-                    reg_x = flash_width / 2;
-                    reg_y = flash_height / 2;
-                }
+            // Director anchors a Flash sprite at the member's STORED regPoint
+            // even when centerRegPoint is set — it keeps that stored point synced
+            // to the member's center, and `member.regPoint` returns it verbatim
+            // (bogey_nights' arm: point(109, 63), NOT the geometric center
+            // (69, 43)). So only synthesize a center when there is no stored
+            // reg point; otherwise honor it, matching Director's placement.
+            if reg_x == 0 && reg_y == 0
+                && flash_member.flash_info.as_ref().map_or(true, |i| i.center_reg_point)
+                && flash_width > 0 && flash_height > 0
+            {
+                reg_x = flash_width / 2;
+                reg_y = flash_height / 2;
             }
 
             // Scale registration point proportionally when sprite is stretched
-            let scaled_reg_x = if flash_width > 0 {
+            let mut scaled_reg_x = if flash_width > 0 {
                 ((reg_x * sprite.width) as f32 / flash_width as f32).round() as i32
             } else {
                 reg_x
             };
-            let scaled_reg_y = if flash_height > 0 {
+            let mut scaled_reg_y = if flash_height > 0 {
                 ((reg_y * sprite.height) as f32 / flash_height as f32).round() as i32
             } else {
                 reg_y
             };
+
+            // When the sprite is flipped, Director mirrors the content around the
+            // registration point, moving the bounding box to the opposite side of
+            // loc. The renderers flip only the texture WITHIN the rect (webgl2 tex
+            // coords / CPU copy), so mirror the reg point here to place the rect on
+            // the correct side. Without this, bogey_nights' straw (always flipH)
+            // landed on the wrong side of the spit splash even though longarm
+            // (usually flipH:0) looked right.
+            if sprite.flip_h {
+                scaled_reg_x = sprite.width - scaled_reg_x;
+            }
+            if sprite.flip_v {
+                scaled_reg_y = sprite.height - scaled_reg_y;
+            }
 
             IntRect::from(
                 sprite.loc_h - scaled_reg_x,
