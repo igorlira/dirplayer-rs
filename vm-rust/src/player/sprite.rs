@@ -141,6 +141,11 @@ pub struct Sprite {
     /// `None` = Lingo never set a numeric frame (free-run / pausedAtStart).
     /// Cleared by `reset()` (channel clear / endSprite / member=0).
     pub flash_asserted_frame: Option<i32>,
+    /// Last sampled Flash root frame, used to detect a wrap (end-of-timeline)
+    /// so a `loop = false` Flash member is halted at its final frame instead of
+    /// looping forever (Director plays it once; `the playing of sprite`
+    /// becomes FALSE). 0 = not yet sampled.
+    pub flash_prev_frame: i32,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -229,6 +234,7 @@ impl Sprite {
             w3d_cameras: Vec::new(),
             retained_rect: None,
             flash_asserted_frame: None,
+            flash_prev_frame: 0,
         }
     }
 
@@ -292,5 +298,6 @@ impl Sprite {
         self.explicit_lingo_size = false;
         self.retained_rect = None;
         self.flash_asserted_frame = None;
+        self.flash_prev_frame = 0;
     }
 }

@@ -705,6 +705,56 @@ impl DirPlayer {
             }
         }
 
+        // LOOP=false stop-at-end pass. A Flash member with `loop` disabled plays
+        // once and halts at its last frame (Director: `the playing of sprite`
+        // then becomes FALSE — eds_kart_attack's "Wait for Flash" behavior loops
+        // the Director frame until sprite(1).playing = 0). Ruffle, however, loops
+        // the root timeline forever when the SWF has no internal stop(). So for
+        // loop-disabled Flash sprites, watch the root playhead and, once it
+        // reaches the last frame (or wraps past it), gotoAndStop the final frame.
+        let loop_check: Vec<(i16, i32)> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter_map(|channel| {
+                let cn = channel.number as i16;
+                let member_ref = channel.sprite.member.as_ref()?;
+                let member = self.movie.cast_manager.find_member_by_ref(member_ref)?;
+                if let CastMemberType::Flash(f) = &member.member_type {
+                    let loops = f.flash_info.as_ref().map_or(true, |i| i.loop_enabled);
+                    if !loops {
+                        let total = crate::player::cast_member::CastMember::parse_swf_frame_count(&f.data)
+                            .map(|n| n as i32)
+                            .unwrap_or(0);
+                        if total > 1 {
+                            return Some((cn, total));
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+        for (cn, total) in loop_check {
+            if !ruffle_is_playing(cn as i32) {
+                continue;
+            }
+            let cur = ruffle_get_current_frame(cn as i32);
+            if cur < 1 {
+                continue;
+            }
+            let prev = self
+                .movie
+                .score
+                .get_sprite(cn)
+                .map(|s| s.flash_prev_frame)
+                .unwrap_or(0);
+            let wrapped = prev >= 1 && cur < prev;
+            if cur >= total || wrapped {
+                ruffle_goto_frame_and_stop(cn as i32, &total.to_string());
+            }
+            self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
+        }
     }
 
     /// True if the given score channel currently holds a Flash (SWF) cast
@@ -3889,6 +3939,14 @@ extern "C" {
     /// sprite's current on-stage size (splashes grow, arm swaps dims).
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetSize")]
     fn ruffle_set_size(sprite_num: i32, w: i32, h: i32);
+
+    // Used to halt a `loop = false` Flash sprite at end-of-timeline.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
+    fn ruffle_is_playing(sprite_num: i32) -> bool;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
+    fn ruffle_get_current_frame(sprite_num: i32) -> i32;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop")]
+    fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str);
 }
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.
