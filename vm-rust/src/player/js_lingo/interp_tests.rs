@@ -975,3 +975,53 @@ fn synth_array_literal_via_initelem() {
     atoms.push(JsAtom::String("Array".into())); // atom[3]
     assert!(matches!(run_synth(bc, atoms).unwrap(), JsValue::Array(_)));
 }
+
+#[test]
+fn decompile_nested_short_circuit_expressions() {
+    // Regression test: `a && (b && c)` — the inner AND's join target is the
+    // same offset as the outer AND's, one instruction past the right-hand
+    // slice that render_subexpr re-runs. The child DecompState renumbers its
+    // instructions from 0, so resolving that jump through the parent's
+    // offset_to_idx (parent-relative indices) produced an out-of-range slice
+    // and panicked ("range end index N out of range").
+    use super::decompiler::decompile;
+
+    // a && (b && c);
+    // a || (b || c);
+    let atoms = vec![
+        JsAtom::String("a".into()),
+        JsAtom::String("b".into()),
+        JsAtom::String("c".into()),
+    ];
+    let mut bc = Vec::new();
+    for op in [JsOp::And, JsOp::Or] {
+        let join = bc.len() as i32 + 15;                      // offset of the POP below
+        bc.push(JsOp::Name as u8); bc.extend(u16_be(0));      // push a
+        let outer_pc = bc.len() as i32;
+        bc.push(op as u8); bc.extend(i16_be((join - outer_pc) as i16));
+        bc.push(JsOp::Name as u8); bc.extend(u16_be(1));      // push b
+        let inner_pc = bc.len() as i32;
+        bc.push(op as u8); bc.extend(i16_be((join - inner_pc) as i16));
+        bc.push(JsOp::Name as u8); bc.extend(u16_be(2));      // push c
+        bc.push(JsOp::Pop as u8);                              // statement boundary
+    }
+    let ir = super::xdr::JsScriptIR {
+        magic: 0xdead_0003,
+        bytecode: bc,
+        prolog_length: 0,
+        version: 150,
+        atoms,
+        source_notes: Vec::new(),
+        filename: None,
+        lineno: 1,
+        max_stack_depth: 2,
+        try_notes: Vec::new(),
+    };
+    let dec = decompile(&ir, &[]);
+    let source: String = dec.lines.iter()
+        .map(|l| l.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(source.contains("a && b && c;"), "got:\n{}", source);
+    assert!(source.contains("a || b || c;"), "got:\n{}", source);
+}
