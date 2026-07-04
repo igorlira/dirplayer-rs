@@ -719,11 +719,27 @@ impl<'a> DecompState<'a> {
     /// and ?:. Returns the expression text — if the slice produces multiple
     /// statements or no value, returns "/* expr */".
     fn render_subexpr(&self, start: usize, end: usize) -> String {
+        // The child state renumbers instructions from 0, so the parent's
+        // offset_to_idx (parent-relative indices) is wrong here — a nested
+        // &&/|| inside the subexpr would resolve its jump target to an index
+        // past the subslice and panic ("range end index N out of range").
+        // Rebuild the map in child coordinates, with a virtual entry for the
+        // end-boundary offset (mirroring the end-of-script sentinel in
+        // `new()`) so chained short-circuits whose join point is exactly
+        // `end` resolve to one-past-last instead of falling back.
+        let end = end.min(self.instructions.len());
+        let start = start.min(end);
+        let sub: Vec<DecodedIns> = self.instructions[start..end].to_vec();
+        let mut sub_map: std::collections::HashMap<usize, usize> =
+            sub.iter().enumerate().map(|(k, ins)| (ins.offset, k)).collect();
+        if let Some(boundary) = self.instructions.get(end) {
+            sub_map.insert(boundary.offset, sub.len());
+        }
         let mut child = DecompState {
             ir: self.ir,
             bindings: self.bindings,
-            instructions: self.instructions[start..end].to_vec(),
-            offset_to_idx: self.offset_to_idx.clone(),
+            instructions: sub,
+            offset_to_idx: sub_map,
             stack: Vec::new(),
             out: Vec::new(),
             indent: 0,
