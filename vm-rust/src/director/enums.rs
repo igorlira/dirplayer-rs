@@ -1213,8 +1213,24 @@ impl FlashInfo {
 
         let buffer_size = u32s[3];
         let direct_to_stage = u32s[4] != 0;
-        let reg_point = (u32s[6] as i32, u32s[7] as i32);
-        let flash_rect = (u32s[8] as i32, u32s[9] as i32, u32s[10] as i32, u32s[11] as i32);
+        // The FLSH struct stores geometry in classic QuickDraw order: a Point is
+        // (v, h) and a Rect is (top, left, bottom, right). Director's Lingo
+        // surface uses point(h, v) and rect(left, top, right, bottom), so swap
+        // the axes here. Verified against Director's Message window for
+        // bogey_nights' straw/longarm: raw u32s[6],[7] = (63, 109) →
+        // member.regPoint = point(109, 63); raw rect (0,0,86,138) →
+        // member width 138 × height 86 (matching the SWF's landscape FrameSize).
+        // Reading them un-swapped transposed the arm (86×138 portrait, reg 0,0).
+        let reg_point = (u32s[7] as i32, u32s[6] as i32); // (h, v) -> (x, y)
+        let flash_rect = (u32s[9] as i32, u32s[8] as i32, u32s[11] as i32, u32s[10] as i32); // (left, top, right, bottom)
+        // centerRegPoint lives in the FIXED section at u32s[5], NOT the variable
+        // section (the value read there — u32s[33] — is 1 for both centered and
+        // non-centered members, so it was the wrong field). Verified: pengapop's
+        // menuAdOnline (Director member.regPoint = center) has u32s[5]=1;
+        // bogey_nights' straw (Director member.regPoint = stored point) has
+        // u32s[5]=0. When set, Director resets the regPoint to the member rect's
+        // center — the getter AND the render use that center.
+        let center_reg_point = u32s[5] != 0;
         let bg_color = u32s[13];
         let image_enabled = u32s[14] != 0;
         let sound_enabled = u32s[15] != 0;
@@ -1255,7 +1271,10 @@ impl FlashInfo {
         let view_h = f32::from_bits(reader.read_u32().unwrap_or(0));
         let view_v = f32::from_bits(reader.read_u32().unwrap_or(0));
 
-        let center_reg_point = reader.read_u32().unwrap_or(0) != 0;
+        // This variable-section u32 is NOT centerRegPoint (that's u32s[5], read
+        // above) — it's 1 for both centered and non-centered members. Consume it
+        // to keep the reader aligned for the fields that follow.
+        let _var_unk = reader.read_u32().unwrap_or(0);
         let quality = match reader.read_u32().unwrap_or(3) {
             0 => FlashQuality::AutoHigh,
             1 => FlashQuality::AutoMedium,

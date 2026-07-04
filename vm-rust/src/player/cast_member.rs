@@ -3540,6 +3540,75 @@ impl CastMember {
         Some((width, height))
     }
 
+    /// Parse the SWF header's FrameCount (the root timeline's total frame
+    /// count) straight from the movie bytes — the authoritative value for
+    /// Director's Flash `member.frameCount` property. Reading it from the SWF
+    /// header (always present in `data`) is correct even while the Ruffle
+    /// instance is still (re)loading; asking Ruffle returns 0 during that
+    /// window, which poisons movies that seed state from `frameCount`
+    /// (bogey_nights' #hiding does `sprite.frame = member.frameCount`, and a 0
+    /// there pins the SWF root at frame 0 and stalls the grab machine).
+    ///
+    /// Header layout after the 8-byte prefix (FWS): RECT (variable), then u16
+    /// FrameRate (8.8 fixed), then u16 FrameCount. Only uncompressed FWS is
+    /// handled here (bogey_nights' straw/longarm are FWS); compressed CWS/ZWS
+    /// fall back to the Ruffle query at the call site.
+    pub fn parse_swf_frame_count(data: &[u8]) -> Option<u16> {
+        if data.len() < 9 || &data[0..3] != b"FWS" {
+            return None;
+        }
+        let rect_start = 8;
+        let nbits = (data[rect_start] >> 3) as usize;
+        let total_bits = 5 + nbits * 4;
+        let rect_bytes = (total_bits + 7) / 8;
+        // rect, then FrameRate (2), then FrameCount (2)
+        let fc_off = rect_start + rect_bytes + 2;
+        if data.len() < fc_off + 2 {
+            return None;
+        }
+        Some(u16::from_le_bytes([data[fc_off], data[fc_off + 1]]))
+    }
+
+    /// Resolve a Flash member's registration point, matching Director's
+    /// `member.regPoint`:
+    /// - `centerRegPoint == true` → the CENTER of the member rect. Director
+    ///   resets the regPoint to center and returns that (pengapop's
+    ///   menuAdOnline: 380×413 → point(190, 206)).
+    /// - `centerRegPoint == false` → the stored authored regPoint
+    ///   (QuickDraw-swapped in FlashInfo::from) — bogey_nights' straw/longarm:
+    ///   point(109, 63).
+    /// `swf_data` is the SWF bytes, used only as a size fallback when the member
+    /// rect is empty. Returns (0, 0) when no FlashInfo is available.
+    fn flash_reg_point(
+        flash_info: Option<&crate::director::enums::FlashInfo>,
+        swf_data: &[u8],
+    ) -> (i16, i16) {
+        match flash_info {
+            Some(info) if info.center_reg_point => {
+                let (l, t, r, b) = info.flash_rect;
+                if r - l > 0 && b - t > 0 {
+                    (((r - l) / 2) as i16, ((b - t) / 2) as i16)
+                } else if let Some((w, h)) = Self::parse_swf_dimensions(swf_data) {
+                    ((w / 2) as i16, (h / 2) as i16)
+                } else {
+                    (0, 0)
+                }
+            }
+            Some(info) if info.reg_point != (0, 0) => {
+                (info.reg_point.0 as i16, info.reg_point.1 as i16)
+            }
+            Some(info) => (info.origin_h as i16, info.origin_v as i16),
+            None => {
+                // No FlashInfo: default to center registration from SWF dims.
+                if let Some((w, h)) = Self::parse_swf_dimensions(swf_data) {
+                    ((w / 2) as i16, (h / 2) as i16)
+                } else {
+                    (0, 0)
+                }
+            }
+        }
+    }
+
     fn make_swf_member(number: u32, chunk: &CastMemberChunk, data: Vec<u8>) -> CastMember {
         // For native Flash members the FlashInfo was parsed during chunk
         // ingest (cast_member.rs:140 `MemberType::Flash` branch). For
@@ -3566,25 +3635,7 @@ impl CastMember {
         // wrong (the old code halved it, getting quarter-size offsets),
         // while parse_swf_dimensions reads straight from the SWF's
         // FrameSize record so it always matches what Ruffle renders.
-        let reg_point = if let Some(ref info) = flash_info {
-            if info.center_reg_point {
-                if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
-                    ((w / 2) as i16, (h / 2) as i16)
-                } else {
-                    (info.reg_point.0 as i16, info.reg_point.1 as i16)
-                }
-            } else {
-                (info.origin_h as i16, info.origin_v as i16)
-            }
-        } else {
-            // OLE-wrapped SWF without a parseable FlashInfo header:
-            // default to center registration from SWF dimensions
-            if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
-                ((w / 2) as i16, (h / 2) as i16)
-            } else {
-                (0, 0)
-            }
-        };
+        let reg_point = Self::flash_reg_point(flash_info.as_ref(), &data);
 
         CastMember {
             number,
@@ -3593,7 +3644,7 @@ impl CastMember {
             member_type: CastMemberType::Flash(FlashMember { data, reg_point, flash_info }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
-            reg_point: (0, 0),
+            reg_point: (reg_point.0 as i32, reg_point.1 as i32),
         }
     }
 
@@ -5042,30 +5093,40 @@ impl CastMember {
                 // make_swf_member site for the same rationale —
                 // FlashInfo.reg_point can be stale; parse_swf_dimensions
                 // reads the SWF FrameSize header directly).
-                let flash_info = chunk.specific_data.flash_info().cloned();
+                // Mirror make_swf_member: the FLSH payload is sometimes in the
+                // parsed specific_data and sometimes only in specific_data_raw.
+                // Without the raw fallback, native Flash members got flash_info
+                // = None → reg_point defaulted to (0,0) (bogey_nights' arm read
+                // regPoint point(0,0) instead of Director's point(109,63)).
+                let flash_info = chunk
+                    .specific_data
+                    .flash_info()
+                    .cloned()
+                    .or_else(|| crate::director::enums::FlashInfo::from(&chunk.specific_data_raw));
                 let bytes_opt = Self::get_first_child_bytes(member_def);
-                let reg_point = if let Some(ref info) = flash_info {
-                    if info.center_reg_point {
-                        if let Some((w, h)) = bytes_opt
-                            .as_deref()
-                            .and_then(Self::parse_swf_dimensions)
-                        {
-                            ((w / 2) as i16, (h / 2) as i16)
-                        } else {
-                            (info.reg_point.0 as i16, info.reg_point.1 as i16)
-                        }
-                    } else {
-                        (info.origin_h as i16, info.origin_v as i16)
-                    }
-                } else {
-                    (0, 0)
-                };
-                if let Some(bytes) = bytes_opt {
+                let reg_point = Self::flash_reg_point(
+                    flash_info.as_ref(),
+                    bytes_opt.as_deref().unwrap_or(&[]),
+                );
+                let flash_member_type = if let Some(bytes) = bytes_opt {
                     CastMemberType::Flash(FlashMember { data: bytes, reg_point, flash_info })
                 } else {
                     warn!("Flash cast member has no data chunk or it is invalid.");
                     CastMemberType::Flash(FlashMember { data: vec![], reg_point, flash_info })
-                }
+                };
+                // Early-return a full CastMember so the computed reg point lands
+                // on CastMember.reg_point too — `member.regPoint` reads that
+                // (CastMember-level) value, not the FlashMember's. Matches the
+                // make_swf_member (OLE) path.
+                return CastMember {
+                    number,
+                    name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                    comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                    member_type: flash_member_type,
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (reg_point.0 as i32, reg_point.1 as i32),
+                };
             }
             MemberType::Ole => {
                 Self::log_ole_start(number, cast_lib, chunk);

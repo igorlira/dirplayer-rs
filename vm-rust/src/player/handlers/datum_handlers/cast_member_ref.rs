@@ -897,6 +897,19 @@ impl CastMemberRefHandlers {
                             let rp = flash.reg_point;
                             Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
                         }
+                        // Flash cast-member frameCount (spec :60880, read-only):
+                        // the SWF root timeline's total frame count. Parse it
+                        // from the SWF header bytes — authoritative and correct
+                        // even while the Ruffle instance is still (re)loading
+                        // (asking Ruffle returns 0 during that window, which
+                        // makes bogey_nights' #hiding `sprite.frame =
+                        // member.frameCount` pin the SWF root at frame 0 and
+                        // stall the grab state machine into a stuck #retreat).
+                        "frameCount" => Ok(Datum::Int(
+                            crate::player::cast_member::CastMember::parse_swf_frame_count(&flash.data)
+                                .map(|n| n as i32)
+                                .unwrap_or(0),
+                        )),
                         _ => Ok(Datum::Void),
                     }
                 } else {
