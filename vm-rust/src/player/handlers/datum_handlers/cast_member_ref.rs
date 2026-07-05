@@ -910,6 +910,14 @@ impl CastMemberRefHandlers {
                                 .map(|n| n as i32)
                                 .unwrap_or(0),
                         )),
+                        // `member.size` — "size in memory, in bytes, of a cast
+                        // member. Read-only" (Director 11.5 Scripting Dictionary).
+                        // For a Flash member this is its SWF byte count. Neopets'
+                        // DGS `showPreLoader` gates on `member(x).size < 1000` to
+                        // detect a missing/empty preloader after linking it via
+                        // `x.fileName = <url>`, so this must reflect the bytes the
+                        // fileName setter loaded from the preload cache.
+                        "size" => Ok(Datum::Int(flash.data.len() as i32)),
                         _ => Ok(Datum::Void),
                     }
                 } else {
@@ -1076,8 +1084,43 @@ impl CastMemberRefHandlers {
                 VectorShapeMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
             CastMemberTypeId::Flash => {
-                // Flash members accept various properties silently
-                // (directToStage, quality, scaleMode, etc.)
+                // `member.fileName = <path/url>` — "refers to the name of the file
+                // assigned to a linked cast member. Read/write ... also accepts
+                // URLs ... to minimize download time, use preloadNetThing() ...
+                // then set the fileName property" (Director 11.5 Scripting
+                // Dictionary). Neopets' DGS `showPreLoader` does exactly that:
+                // `preloadNetThing(url)` then `x.fileName = url`, then checks
+                // `member(x).size`. So resolve the URL against the completed net
+                // task the loader already primed and copy its SWF bytes into the
+                // member; `effective_rect()` re-parses dimensions from the SWF
+                // header (flash_info left None). If the URL wasn't preloaded we
+                // leave the member empty (size stays 0) rather than block on a
+                // synchronous fetch — matching Director's "used next time" note.
+                if prop.eq_ignore_ascii_case("filename") || prop.eq_ignore_ascii_case("pathname") {
+                    let url = value.string_value()?;
+                    return reserve_player_mut(|player| {
+                        let bytes = player
+                            .net_manager
+                            .find_task_by_url(&url)
+                            .and_then(|id| player.net_manager.get_task_result(Some(id)))
+                            .and_then(|r| r.ok());
+                        if let Some(bytes) = bytes {
+                            if !bytes.is_empty() {
+                                if let Some(cm) =
+                                    player.movie.cast_manager.find_member_by_ref_mut(member_ref)
+                                {
+                                    if let CastMemberType::Flash(flash) = &mut cm.member_type {
+                                        flash.data = bytes;
+                                        flash.flash_info = None;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                // Other Flash props (directToStage, quality, scaleMode, etc.)
+                // are accepted silently.
                 Ok(())
             }
             CastMemberTypeId::Shockwave3d => reserve_player_mut(|player| {

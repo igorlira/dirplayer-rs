@@ -114,13 +114,25 @@ pub async fn player_dispatch_event_to_sprite_targeted(
 
     player_wait_available().await;
 
-     for instance_id in instance_ids {
-        player_invoke_targeted_event(
-            handler_name,
-            args,
-            Some(&vec![instance_id].as_ref()),
-        ).await;
-    }
+    // Dispatch to ALL of the sprite's behaviors in a single pass, then — if
+    // none of them handled it (or the sprite has no behaviors at all) — fall
+    // through to the frame + movie scripts. Director's message hierarchy for a
+    // sprite-directed event is behaviors → frame → movie, stopping at the first
+    // non-passing handler.
+    //
+    // The previous per-instance loop broke this two ways: with an EMPTY
+    // instance list (a Flash sprite carries no behaviors) the loop body never
+    // ran, so the static-script fall-through never fired — that's why a
+    // `getURL("event: FlashLoaderLoaded")` whose handler lives in a movie
+    // script (Neopets DGS `on FlashLoaderLoaded`) never reached it and the DGS
+    // loader stalled. And with multiple behaviors it fired the static scripts
+    // once per non-handling behavior. `player_invoke_targeted_event` with the
+    // full instance list does the right thing in both cases.
+    let _ = player_invoke_targeted_event(
+        handler_name,
+        args,
+        Some(&instance_ids),
+    ).await;
 }
 
 pub async fn player_invoke_event_to_instances(

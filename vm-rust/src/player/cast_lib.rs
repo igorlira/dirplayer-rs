@@ -21,8 +21,8 @@ use super::{
         manager::BitmapManager,
     },
     cast_member::{
-        BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, SoundMember,
-        TextMember, VectorShapeMember,
+        BitmapMember, CastMember, CastMemberType, FieldMember, FlashMember, PaletteMember,
+        SoundMember, TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -484,6 +484,20 @@ impl CastLib {
                     script_id: 0,
                     script_type: ScriptType::Movie,
                     name: String::new(),
+                }),
+            )),
+            // `new(#flash)` creates an empty Flash cast member; the script then
+            // points it at a SWF, typically by setting `.linked = TRUE` and
+            // `.pathName = "http://…/foo.swf"`, or by assigning preloaded bytes
+            // (Director 11.5 Scripting Dictionary — `new()`, `#flash` member).
+            // Neopets' DGS loader (`mainClass.showPreLoader`) uses this to host
+            // the downloaded preloader SWF. Empty until its source is assigned.
+            "flash" => Ok(CastMember::new(
+                number,
+                CastMemberType::Flash(FlashMember {
+                    data: Vec::new(),
+                    reg_point: (0, 0),
+                    flash_info: None,
                 }),
             )),
             _ => Err(ScriptError::new(format!(

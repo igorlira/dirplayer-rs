@@ -57,6 +57,30 @@ extern "C" {
     fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
 }
 
+/// Root a bare Flash variable/function path.
+///
+/// The Ruffle fork's GetVariable/SetVariable/CallFunction run on a
+/// `from_nothing` AVM1 activation where an unqualified timeline name does NOT
+/// resolve — only explicit `_root`/`_level0`/`_global`/`this`/slash paths do
+/// (confirmed empirically: `objMain` → undefined, `_root.objMain` → the
+/// object). Director's own Flash Asset resolves such names relative to
+/// `_level0`, so prefix a bare name with `_level0.` (JS translateLevel0 maps
+/// `_level0` → `_root` before it reaches Ruffle). Already-qualified paths are
+/// left untouched.
+fn root_flash_path(path: &str) -> String {
+    if path.is_empty()
+        || path.starts_with("_level0")
+        || path.starts_with("_root")
+        || path.starts_with("_global")
+        || path.starts_with("this")
+        || path.starts_with('/')
+    {
+        path.to_string()
+    } else {
+        format!("_level0.{}", path)
+    }
+}
+
 pub struct SpriteDatumHandlers {}
 
 pub struct SpriteDatumUtils {}
@@ -163,7 +187,7 @@ impl SpriteDatumHandlers {
         let is_sync_handler = matches!(name_lower.as_str(),
             "intersects" | "getprop" | "getat" | "setat" | "getaprop" | "setaprop" | "pointtoword" | "pointtoline" |
             "gotoframe" | "callframe" | "stop" | "play" | "rewind" | "hold" |
-            "getvariable" | "setvariable" | "callfunction" | "setcallback" |
+            "getvariable" | "setvariable" | "callfunction" | "setcallback" | "newobject" |
             "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
             "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
             "addcamera" | "removecamera" | "cameracount"
@@ -697,13 +721,19 @@ impl SpriteDatumHandlers {
                 })?;
 
                 if return_as_object {
+                    // Root a bare variable name so it addresses the real
+                    // timeline object — DGS `getVariable("objMain", 0)` returns a
+                    // handle used for `objMain.includeIsLoaded()` etc. See
+                    // root_flash_path for why bare names don't resolve.
+                    let rooted = root_flash_path(&path);
+
                     // In Director, getVariable(path, 0) returns an object reference.
                     // But if the Flash variable is a simple string/number, Director
                     // returns the value directly. We check via GetVariable first:
                     // if it returns a JS string, return as Datum::String so that
                     // stringp() works. If it returns an object or undefined, return
                     // a FlashObjectRef for setCallback/call usage.
-                    if let Ok(val) = ruffle_get_variable(sn as i32, &path) {
+                    if let Ok(val) = ruffle_get_variable(sn as i32, &rooted) {
                         if val.is_string() {
                             // Simple string variable - return as string
                             let s = val.as_string().unwrap();
@@ -718,18 +748,37 @@ impl SpriteDatumHandlers {
                     return reserve_player_mut(|player| {
                         use crate::director::lingo::datum::FlashObjectRef;
                         Ok(player.alloc_datum(Datum::FlashObjectRef(
-                            FlashObjectRef::from_path_with_sprite(&path, cl, cm, sn as i32),
+                            FlashObjectRef::from_path_with_sprite(&rooted, cl, cm, sn as i32),
                         )))
                     });
                 }
 
-                match ruffle_get_variable(sn as i32, &path) {
+                match ruffle_get_variable(sn as i32, &root_flash_path(&path)) {
                     Ok(val) => {
-                        if let Some(s) = val.as_string() {
-                            return reserve_player_mut(|player| {
-                                Ok(player.alloc_datum(Datum::String(s)))
-                            });
-                        }
+                        // Convert the AS value to a Lingo datum. GetVariable's
+                        // value form (2nd arg non-zero) isn't string-only — an AS
+                        // number or boolean must come back as a comparable value,
+                        // not VOID. Neopets DGS state 81 polls
+                        // `getVariable("preloaderTranslationSuccess", 1) = 1`,
+                        // where the AS var is a Number/Boolean; returning VOID for
+                        // those (`as_string()` is None) made the comparison never
+                        // true and stalled the loader. Bools → Int(0/1), integral
+                        // Numbers → Int, else Float, matching the callFunction
+                        // converter that already let `includeIsLoaded() = 1` work.
+                        let datum = if let Some(s) = val.as_string() {
+                            Datum::String(s)
+                        } else if let Some(b) = val.as_bool() {
+                            Datum::Int(if b { 1 } else { 0 })
+                        } else if let Some(n) = val.as_f64() {
+                            if n.fract() == 0.0 && n.abs() < i32::MAX as f64 {
+                                Datum::Int(n as i32)
+                            } else {
+                                Datum::Float(n)
+                            }
+                        } else {
+                            Datum::Void
+                        };
+                        return reserve_player_mut(|player| Ok(player.alloc_datum(datum)));
                     }
                     Err(e) => warn!("sprite.getVariable error: {:?}", e),
                 }
@@ -743,7 +792,7 @@ impl SpriteDatumHandlers {
                     let value = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Err(e) = ruffle_set_variable(sn, &path, &value) {
+                    if let Err(e) = ruffle_set_variable(sn, &root_flash_path(&path), &value) {
                         warn!("sprite.setVariable error: {:?}", e);
                     }
                 }
@@ -752,7 +801,7 @@ impl SpriteDatumHandlers {
             "callfunction" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).string_value()
+                        player.get_datum(&args[0]).string_value().map(|p| root_flash_path(&p))
                     })?;
                     let args_xml = if args.len() > 1 {
                         reserve_player_ref(|player| {
@@ -992,6 +1041,55 @@ impl SpriteDatumHandlers {
             "telltarget" | "findlabel" | "flashtostage" | "stagetoflash" => {
                 warn!("Flash sprite method '{}' called but not yet implemented", handler_name);
                 Ok(DatumRef::Void)
+            }
+            "newobject" => {
+                // Flash sprite command: sprite(N).newObject(objectType {, args...})
+                // Per the Director 11.5 Scripting Dictionary this "creates an
+                // ActionScript object of the specified type" in the Flash movie and
+                // returns a *reference* to it, for use with setCallback() / call() /
+                // connect() etc (e.g. `sprite(3).newObject("LocalConnection")`).
+                //
+                // We return a sprite-bound FlashObjectRef with a unique synthetic
+                // path — never VOID — mirroring getVariable()'s object form so the
+                // chained setCallback()/connect() calls resolve. The callback bridge
+                // (dirplayer_ruffleRegisterLingoCallback) and method dispatch
+                // (dirplayer_ruffleCallFunction) key off this path. NOTE: extra
+                // constructor args are not yet forwarded to a real AS constructor —
+                // that needs a Ruffle-side newObject bridge to physically host the
+                // object (e.g. so a LocalConnection can actually receive messages).
+                let object_type = reserve_player_ref(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "newObject requires at least one argument".to_string(),
+                        ));
+                    }
+                    player.get_datum(&args[0]).string_value()
+                })?;
+                reserve_player_mut(|player| {
+                    use crate::director::lingo::datum::FlashObjectRef;
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let (cl, cm) = player
+                        .movie
+                        .score
+                        .get_sprite(sprite_num)
+                        .and_then(|s| s.member.as_ref())
+                        .map(|m| (m.cast_lib, m.cast_member))
+                        .unwrap_or((0, 0));
+                    let id = super::flash_object::FLASH_OBJECT_COUNTER.with(|c| {
+                        let v = c.get() + 1;
+                        c.set(v);
+                        v
+                    });
+                    // Sanitise the class name into a readable, valid AS path segment.
+                    let safe: String = object_type
+                        .chars()
+                        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                        .collect();
+                    let path = format!("_root.__dpObj_{}_{}", safe, id);
+                    Ok(player.alloc_datum(Datum::FlashObjectRef(
+                        FlashObjectRef::from_path_with_sprite(&path, cl, cm, sprite_num as i32),
+                    )))
+                })
             }
             "setscriptlist" => {
                 // sprite.setScriptList(list)
