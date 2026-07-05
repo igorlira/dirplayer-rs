@@ -1701,8 +1701,38 @@ impl BuiltInHandlerManager {
                 Ok(DatumRef::Void)
             }
             "preload" => {
-                log::warn!("preload is not implemented");
-                Ok(DatumRef::Void)
+                // All cast data is resident in memory (WASM) — there's nothing to
+                // stream in, so preload completes instantly. Per the 11.5 Scripting
+                // Dictionary, preLoad returns the number of the last frame it loaded:
+                //   0 args -> current frame .. last frame of movie -> last frame
+                //   1 arg  -> current frame .. frameN              -> frameN
+                //   2 args -> frameA .. frameB                     -> frameB
+                // A frame arg may be a number or a marker label.
+                fn resolve_frame(player: &crate::player::DirPlayer, dref: &DatumRef) -> i32 {
+                    let d = player.get_datum(dref);
+                    if let Datum::String(s) = d {
+                        if let Some(fl) = player
+                            .movie
+                            .score
+                            .frame_labels
+                            .iter()
+                            .find(|fl| fl.label.eq_ignore_ascii_case(s.as_str()))
+                        {
+                            return fl.frame_num;
+                        }
+                    }
+                    d.int_value().unwrap_or(0)
+                }
+                reserve_player_mut(|player| {
+                    let last = if args.len() >= 2 {
+                        resolve_frame(player, &args[1])
+                    } else if args.len() == 1 {
+                        resolve_frame(player, &args[0])
+                    } else {
+                        player.movie.score.frame_count.unwrap_or(1) as i32
+                    };
+                    Ok(player.alloc_datum(Datum::Int(last)))
+                })
             }
             "charpostoloc" => {
                 reserve_player_mut(|player| {
