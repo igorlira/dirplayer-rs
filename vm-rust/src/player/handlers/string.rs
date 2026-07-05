@@ -52,6 +52,12 @@ impl StringHandlers {
                     let s = obj.string_value()?;
                     Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32)))
                 }
+                // Director coerces VOID to EMPTY in string contexts, so
+                // `length(VOID)` is `length("")` = 0. This underpins the very
+                // common "is this set?" idiom `if length(me.prop) > 0` on an
+                // uninitialised property (which reads VOID) — e.g. Neopets DGS
+                // `setFlashLoaderVars`: `if length(me.gameVersion) > 0`.
+                Datum::Void => Ok(player.alloc_datum(Datum::Int(0))),
                 _ => Err(ScriptError::new(
                     "Cannot get length of non-string".to_string(),
                 )),
