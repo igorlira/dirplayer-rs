@@ -165,7 +165,10 @@ const template = fs.readFileSync(
 const html = template
   .replaceAll("$WASM_JS_FILE", jsBasename)
   .replaceAll("$TEST_ENV_JSON", testEnvJson)
-  .replaceAll("$DEBUG_MODE", keepOpen ? "true" : "false");
+  .replaceAll("$DEBUG_MODE", keepOpen ? "true" : "false")
+  // Optional substring filter: `E2E_FILTER=lore npm run e2e-test-browser`
+  // runs only test_* functions whose name contains the string.
+  .replaceAll("$TEST_FILTER", (loadedEnv.E2E_FILTER || "").replace(/"/g, ""));
 fs.writeFileSync(path.join(RUNNER_DIR, "index.html"), html);
 
 // 7. Link the asset directory into the runner. Use a junction on Windows so
