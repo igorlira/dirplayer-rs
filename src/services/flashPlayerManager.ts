@@ -587,7 +587,13 @@ export async function createFlashInstance(
     // queue-flush `play` heuristic below.
     autoplay: 'on',
     unmuteOverlay: 'hidden',
-    logLevel: 'info',
+    // Ruffle logs to console at this level. `info` (the old hardcoded value)
+    // emits every AS `trace()` and unsupported-feature notice — for a busy SWF
+    // that's console output every frame, and the browser RETAINS each console
+    // entry (plus its arguments), so RAM climbs steadily over a long run. Honour
+    // the host's configured level (`__dirplayerFlashConfig.logLevel`) and default
+    // to `error` so the frame-capture loop doesn't flood the console.
+    logLevel: ((window as any).__dirplayerFlashConfig?.logLevel as string) ?? 'error',
     splashScreen: false,
     // Transparent stage so SWFs that layer over other Director sprites
     // (mello's fire/marshmello/stick) composite correctly. The downside:
