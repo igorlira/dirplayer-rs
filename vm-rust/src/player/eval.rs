@@ -894,7 +894,17 @@ pub fn parse_lingo_rule_runtime(
             let mut args = vec![];
             for child in pair.into_inner() {
                 if let Rule::term_arg = child.as_rule() {
-                    args.push(parse_lingo_rule_runtime(child, pratt)?);
+                    // Director marker-navigation keywords: `go next` / `go
+                    // previous` / `go loop`. As a bareword these parse as an
+                    // undefined variable (→ VOID) and the go handler rejects
+                    // it (mixmaster does `do("go next")`), so pass the keyword
+                    // as a string literal for go() to resolve to the marker.
+                    let low = child.as_str().trim().to_ascii_lowercase();
+                    if low == "next" || low == "previous" || low == "loop" {
+                        args.push(LingoExpr::StringLiteral(low));
+                    } else {
+                        args.push(parse_lingo_rule_runtime(child, pratt)?);
+                    }
                 }
             }
             Ok(LingoExpr::HandlerCall("go".to_owned(), args))

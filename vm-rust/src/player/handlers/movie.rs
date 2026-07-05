@@ -173,28 +173,58 @@ impl MovieHandlers {
             let dest = match datum_type {
                 DatumType::Int => Some(datum.int_value()? as u32),
 
-                DatumType::String => {
-                    let label = datum.string_value()?;
-                    player.movie.score.frame_labels
-                        .iter()
-                        .find(|fl| fl.label.eq_ignore_ascii_case(&label))
-                        .map(|fl| fl.frame_num as u32)
-                }
-
-                DatumType::Symbol => {
-                    let symbol = datum.string_value()?;
-                    match symbol.as_str() {
-                        "next" => {
-                            let next_frame = player.movie.current_frame + 1;
-                            debug!("🎬 go(#next): {} -> {}", player.movie.current_frame, next_frame);
-                            Some(next_frame)
-                        },
-                        "previous" => Some(if player.movie.current_frame > 1 { player.movie.current_frame - 1 } else { 1 }),
-                        "loop" => Some(player.movie.current_frame),
-                        _ => player.movie.score.frame_labels
+                // A frame label / marker keyword can arrive as either a string
+                // (`do("go next")`, `go "label"`) or a symbol (decompiled
+                // `go(#next)`), so handle both the same way.
+                DatumType::String | DatumType::Symbol => {
+                    let s = datum.string_value()?;
+                    let key = s.to_ascii_lowercase();
+                    // Director marker-navigation keywords: `next` == marker(1),
+                    // `previous` == marker(-1), `loop` == marker(0) — i.e. the
+                    // next/previous/current MARKER, not the next/previous frame
+                    // (Director 11.5 Scripting Dictionary: `next` keyword ≡
+                    // `the marker(+1)`). mixmaster's buttons do `do("go next")`.
+                    if key == "next" || key == "previous" || key == "loop" {
+                        let mut frames: Vec<u32> = player
+                            .movie
+                            .score
+                            .frame_labels
                             .iter()
-                            .find(|fl| fl.label.eq_ignore_ascii_case(&symbol))
-                            .map(|fl| fl.frame_num as u32),
+                            .map(|fl| fl.frame_num as u32)
+                            .collect();
+                        frames.sort_unstable();
+                        frames.dedup();
+                        let current = player.movie.current_frame;
+                        let offset: i32 = match key.as_str() {
+                            "next" => 1,
+                            "previous" => -1,
+                            _ => 0, // loop
+                        };
+                        // marker(offset): index of marker(0) (largest marker <=
+                        // current, i.e. current-if-marked else previous) is
+                        // pos-1, where pos = count of markers <= current.
+                        let dest_frame = if frames.is_empty() {
+                            None
+                        } else {
+                            let pos = frames.partition_point(|&f| f <= current) as i32;
+                            let target = (pos - 1) + offset;
+                            if target >= 0 {
+                                frames.get(target as usize).copied()
+                            } else {
+                                None
+                            }
+                        };
+                        // No such marker (e.g. `go next` past the last marker) →
+                        // stay on the current frame rather than erroring.
+                        Some(dest_frame.unwrap_or(current))
+                    } else {
+                        player
+                            .movie
+                            .score
+                            .frame_labels
+                            .iter()
+                            .find(|fl| fl.label.eq_ignore_ascii_case(&s))
+                            .map(|fl| fl.frame_num as u32)
                     }
                 }
 
@@ -479,7 +509,10 @@ impl MovieHandlers {
                         player.is_in_frame_update = false;
                     });
                 } else {
-                    warn!("Failed to run frame update in go function, already updating");
+                    // Benign re-entrancy guard (a `go` fired while a frame update
+                    // was already in progress); debug! to keep it out of the
+                    // browser console.
+                    debug!("Failed to run frame update in go function, already updating");
                 }
             }
         }

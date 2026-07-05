@@ -16,8 +16,16 @@ impl NetHandlers {
             } else {
                 None
             };
-            let task_state = player.net_manager.get_task_state(task_id);
-            let is_done = task_state.is_some_and(|state| state.is_done());
+            // Director 11.5: netDone returns TRUE (the default) when the
+            // operation is finished OR was terminated by a browser error, and
+            // FALSE only while genuinely in progress. An unknown / never-started
+            // id (e.g. mixmaster's Billboard polls netDone(-1) when there is no
+            // billboard URL) is therefore "done", not "in progress" — returning
+            // FALSE there made the movie spin on the download state.
+            let is_done = match player.net_manager.get_task_state(task_id) {
+                Some(state) => state.is_done(),
+                None => true,
+            };
             Ok(player.alloc_datum(datum_bool(is_done)))
         })
     }
@@ -137,14 +145,25 @@ impl NetHandlers {
             let task_id = args
                 .get(0)
                 .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            let task_state = player.net_manager.get_task_state(task_id).ok_or_else(|| ScriptError::new("Network task not found".to_string()))?;
-            let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
-            let error = if is_ok {
-                Datum::String("OK".to_owned())
-            } else if let Some(Err(error)) = task_state.result.as_ref() {
-                Datum::Int(*error)
-            } else {
-                Datum::Int(0)
+            // Director 11.5: netError returns an empty string when no background
+            // loading operation has started for this id (or it is still in
+            // progress), "OK" on success, else an error code. An unknown id must
+            // NOT raise — mixmaster's Billboard calls netError(-1) with no
+            // billboard URL, and raising aborts the exitFrame handler, leaving
+            // the stage's black bgColor stuck (blank screen).
+            let error = match player.net_manager.get_task_state(task_id) {
+                None => Datum::String("".to_owned()),
+                Some(task_state) => {
+                    let is_ok = task_state.is_done()
+                        && task_state.result.as_ref().is_some_and(|r| r.is_ok());
+                    if is_ok {
+                        Datum::String("OK".to_owned())
+                    } else if let Some(Err(error)) = task_state.result.as_ref() {
+                        Datum::Int(*error)
+                    } else {
+                        Datum::Int(0)
+                    }
+                }
             };
             Ok(player.alloc_datum(error))
         })
@@ -155,17 +174,22 @@ impl NetHandlers {
             let task_id = args
                 .get(0)
                 .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            let task_state = player.net_manager.get_task_state(task_id).ok_or_else(|| ScriptError::new("Network task not found".to_string()))?;
-            let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
-            let text = if is_ok {
-                let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
-                // UTF-8 strict first (modern editors), Win-1252 fallback
-                // (legacy Director-authored external_texts_*.txt etc.).
-                // Strips a UTF-8 BOM if present. See io::encoding for why
-                // strict-then-fallback is unambiguous in practice.
-                Datum::String(crate::io::encoding::decode_text_auto(bytes))
-            } else {
-                Datum::String("".to_owned())
+            // netTextResult returns the downloaded text, or an empty string if
+            // the operation failed, is in progress, or the id is unknown (Director
+            // does not raise on a bad id).
+            let text = match player.net_manager.get_task_state(task_id) {
+                Some(task_state)
+                    if task_state.is_done()
+                        && task_state.result.as_ref().is_some_and(|r| r.is_ok()) =>
+                {
+                    let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
+                    // UTF-8 strict first (modern editors), Win-1252 fallback
+                    // (legacy Director-authored external_texts_*.txt etc.).
+                    // Strips a UTF-8 BOM if present. See io::encoding for why
+                    // strict-then-fallback is unambiguous in practice.
+                    Datum::String(crate::io::encoding::decode_text_auto(bytes))
+                }
+                _ => Datum::String("".to_owned()),
             };
             Ok(player.alloc_datum(text))
         })
