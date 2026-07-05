@@ -371,7 +371,10 @@ impl FontManager {
             }
         }
 
-        warn!(
+        // Normal fallback (e.g. 'Arial' has no PFR strike — we drop to the
+        // embedded PFR / bitmap path below). Kept at debug so a per-frame text
+        // render doesn't flood the browser console (which retains every entry).
+        debug!(
             "[font] No PFR re-rasterization match for '{}' at size {}",
             font_name, requested_size,
         );
@@ -1015,7 +1018,7 @@ pub async fn player_load_system_font(path: &str) {
                 debug!("System font loaded successfully");
             });
 
-            warn!("Loaded system font image data: {:?}", image_data);
+            debug!("Loaded system font image data: {:?}", image_data);
         }
         Err(err) => {
             warn!("Error fetching system font: {:?}", err);

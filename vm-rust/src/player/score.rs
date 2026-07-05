@@ -372,10 +372,11 @@ impl Score {
         }
 
         if !script_exists {
-            web_sys::console::warn_1(
-                &format!("Script not found: {:?} (original cast_lib: {}, default_cast_lib: {:?}), skipping behavior creation",
-                    script_ref, cast_lib, default_cast_lib).into(),
-            );
+            // debug!, not console::warn_1 — the latter always prints to the
+            // browser console (which retains every entry); a missing behavior
+            // script is handled gracefully by skipping creation.
+            debug!("Script not found: {:?} (original cast_lib: {}, default_cast_lib: {:?}), skipping behavior creation",
+                script_ref, cast_lib, default_cast_lib);
             return None;
         }
 

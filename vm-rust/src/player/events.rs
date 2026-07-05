@@ -1542,7 +1542,7 @@ pub async fn dispatch_event_to_all_behaviors(
         }
         // Prevent re-entrant event dispatch (this can cause infinite loops)
         if player.is_dispatching_events {
-            warn!(
+            debug!(
                 "Blocking re-entrant event dispatch for '{}'",
                 handler_name
             );

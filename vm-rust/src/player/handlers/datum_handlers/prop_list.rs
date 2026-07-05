@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{warn, debug};
+use log::debug;
 
 use crate::PLAYER_OPT;
 use crate::{
@@ -656,7 +656,7 @@ impl PropListDatumHandlers {
                         );
                         Ok(result)
                     } else {
-                        warn!("get_a_prop: Key not found, returning void");
+                        debug!("get_a_prop: Key not found, returning void");
                         Ok(DatumRef::Void)
                     }
                 }

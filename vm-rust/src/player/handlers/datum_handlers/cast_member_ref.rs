@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{warn, debug};
+use log::debug;
 
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
@@ -956,11 +956,15 @@ impl CastMemberRefHandlers {
             match cast_member {
                 Some(cast_member) => Ok(Some(cast_member.member_type.member_type_id())),
                 None => {
-                    // Silently ignore setting props on erased members
-                    web_sys::console::warn_1(&format!(
+                    // Silently ignore setting props on erased members (Director
+                    // does the same). debug!, not console::warn_1 — the latter
+                    // always prints to the browser console and floods it (with
+                    // retained entries) for movies that poke a null member each
+                    // frame.
+                    debug!(
                         "Ignoring set prop {} on erased member {} of castLib {}",
                         prop, member_ref.cast_member, member_ref.cast_lib
-                    ).into());
+                    );
                     Ok(None)
                 }
             }
@@ -1158,7 +1162,11 @@ impl CastMemberRefHandlers {
                 (name, comments, slot_number, member_type, color, bg_color, member_num)
             }
             None => {
-                warn!(
+                // Ref (0,0) is Director's "no member" sentinel (an empty sprite
+                // channel); querying its props is normal and handled by
+                // get_invalid_member_prop. Keep at debug so a per-frame poll
+                // doesn't flood the browser console (which retains every entry).
+                debug!(
                     "Getting prop {} of non-existent castMember reference {}, {}",
                     prop, cast_member_ref.cast_lib, cast_member_ref.cast_member
                 );
@@ -1271,13 +1279,14 @@ impl CastMemberRefHandlers {
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {
-            // Silently ignore setting props on non-existent members
-            // This can happen when a script erases a member but still holds a reference
-            // Director silently ignores this case
-            web_sys::console::warn_1(&format!(
+            // Silently ignore setting props on non-existent members.
+            // This can happen when a script erases a member but still holds a
+            // reference; Director silently ignores this case. debug!, not
+            // console::warn_1 — the latter always floods the browser console.
+            debug!(
                 "Ignoring set prop {} on erased member {} of castLib {}",
                 prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
-            ).into());
+            );
             Ok(())
         };
         if result.is_ok() {
