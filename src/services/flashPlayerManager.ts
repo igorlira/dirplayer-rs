@@ -92,6 +92,30 @@ function applyFetchRewrite(url: URL): boolean {
   return false;
 }
 
+// Generic CORS proxy for "loader mode" (debugging a Shockwave game from its live
+// site). When `__dirplayerFlashConfig.corsProxy` is set to a base like
+// "http://127.0.0.1:3099/cors?url=", any CROSS-ORIGIN http(s) fetch is rewritten
+// to `<base><encoded url>` so the dev CORS proxy (cors-proxy.cjs) can fetch it
+// server-side and re-serve it with CORS. Opt-in: with no corsProxy configured
+// this returns null and fetch behaves exactly as before. Same-origin requests
+// (the dev app's own assets/xtras) and already-proxied URLs are left untouched.
+function getCorsProxyBase(): string | null {
+  const base = (window as any).__dirplayerFlashConfig?.corsProxy;
+  return typeof base === 'string' && base ? base : null;
+}
+
+function maybeCorsProxy(urlStr: string): string | null {
+  const base = getCorsProxyBase();
+  if (!base) return null;
+  let u: URL;
+  try { u = new URL(urlStr, window.location.origin); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  if (u.origin === window.location.origin) return null; // same-origin: leave alone
+  if (urlStr.startsWith(base)) return null;              // already proxied
+  try { if (new URL(base, window.location.origin).host === u.host) return null; } catch { /* */ }
+  return base + encodeURIComponent(u.toString());
+}
+
 const origFetch = window.fetch;
 window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   if (typeof input === 'string') {
@@ -99,13 +123,16 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
       const url = new URL(input, window.location.origin);
       if (applyFetchRewrite(url)) {
         input = url.toString();
+      } else {
+        const proxied = maybeCorsProxy(url.toString());
+        if (proxied) input = proxied;
       }
     } catch { /* ignore parse errors */ }
   } else if (input instanceof Request) {
     try {
       const url = new URL(input.url);
-      if (applyFetchRewrite(url)) {
-        const newUrl = url.toString();
+      const newUrl = applyFetchRewrite(url) ? url.toString() : maybeCorsProxy(url.toString());
+      if (newUrl) {
         const req = input;
         return req.arrayBuffer().then(bodyBuf => {
           const newInit: RequestInit = {
@@ -304,6 +331,44 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
     // Always swallow the navigation: even an unrecognised event:URL must
     // not open a popup. Director silently ignores malformed event: bodies.
     return true;
+  });
+}
+
+/**
+ * Register an fscommand handler on a Ruffle player so a SWF's
+ * `fscommand("handler", "args")` reaches Director's Lingo, matching the Flash
+ * Asset Xtra's Flash→Director bridge. This is the classic channel Director
+ * Flash movies use to call back into Lingo (distinct from `getURL("event:…")`).
+ *
+ * Neopets' DGS include movie (`objMain`) signals init readiness this way:
+ * `fscommand("FlashLoaderLoaded")` → Director's movie handler
+ * `on FlashLoaderLoaded` → `gMainObject.flashLoaderIsReady()`. Without this,
+ * the fscommand is dropped and the DGS loader stalls at load_state 6.
+ *
+ * The reference (Director 11.5 Scripting Dictionary) doesn't document the
+ * Xtra's fscommand→handler mapping, so this mirrors the observed contract:
+ * the command name is the handler; any args string is appended so
+ * dispatch_flash_event tokenises trailing args.
+ */
+function registerFSCommandHandler(player: any, castLib: number, castMember: number): void {
+  if (typeof player?.addFSCommandHandler !== 'function') {
+    console.warn(
+      `[Flash] ${castLib}:${castMember}: addFSCommandHandler missing on Ruffle player — ` +
+      `fscommand() calls from the SWF will be dropped.`
+    );
+    return;
+  }
+  player.addFSCommandHandler((command: string, args: string): void => {
+    if (typeof command !== 'string' || !command.trim()) return;
+    const body = (typeof args === 'string' && args.trim())
+      ? `${command.trim()} ${args.trim()}`
+      : command.trim();
+    const handled = dispatchFlashEvent(castLib, castMember, body);
+    if (!handled) {
+      console.warn(
+        `[Flash] ${castLib}:${castMember}: unhandled fscommand: ${JSON.stringify(command)} ${JSON.stringify(args)}`
+      );
+    }
   });
 }
 
@@ -661,6 +726,10 @@ export async function createFlashInstance(
   // `event:` get routed into dispatch_flash_event and the real open is
   // suppressed. Otherwise it's a safe no-op.
   registerEventUrlHandler(player, castLib, castMember);
+
+  // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
+  // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
+  registerFSCommandHandler(player, castLib, castMember);
 
   // Find the internal canvas element that Ruffle renders to
   await new Promise<void>((resolve) => {
