@@ -661,7 +661,7 @@ impl DirPlayer {
                     // (StoryScramble posters) never reflow. Only for on-stage
                     // sprites (positive channel); 3D-texture instances excluded
                     // in the JS twin.
-                    ruffle_set_size(
+                    let _ = ruffle_set_size(
                         channel_num as i32,
                         channel.sprite.width.max(1) as i32,
                         channel.sprite.height.max(1) as i32,
@@ -736,10 +736,12 @@ impl DirPlayer {
             })
             .collect();
         for (cn, total) in loop_check {
-            if !ruffle_is_playing(cn as i32) {
+            // Bridge not installed (test harness / pre-init) → treat as "not
+            // playing" and skip; the `catch` keeps the frame loop alive.
+            if !ruffle_is_playing(cn as i32).unwrap_or(false) {
                 continue;
             }
-            let cur = ruffle_get_current_frame(cn as i32);
+            let cur = ruffle_get_current_frame(cn as i32).unwrap_or(0);
             if cur < 1 {
                 continue;
             }
@@ -751,7 +753,7 @@ impl DirPlayer {
                 .unwrap_or(0);
             let wrapped = prev >= 1 && cur < prev;
             if cur >= total || wrapped {
-                ruffle_goto_frame_and_stop(cn as i32, &total.to_string());
+                let _ = ruffle_goto_frame_and_stop(cn as i32, &total.to_string());
             }
             self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
         }
@@ -1258,6 +1260,16 @@ impl DirPlayer {
 
     pub fn reset(&mut self) {
         self.stop();
+
+        // Silence any sound still playing from the movie we're leaving and tear
+        // down its Flash/Ruffle instances (their capture RAF loops + SWF audio),
+        // so switching movies doesn't leave old sounds looping or leak players.
+        self.sound_manager.stop_all();
+        self.flash_frame_buffers.clear();
+        JsApi::dispatch_flash_reset_all();
+        // JS-Lingo runtimes live in a thread_local map, not on the player, so
+        // they survive both this reset and a full player drop — clear them here.
+        crate::player::js_lingo_loader::clear_all_runtimes();
 
         // Cancel any outstanding on-demand xtra loads so leftover oneshot
         // receivers don't leak across movies. Each waiter sees `false`
@@ -3948,16 +3960,22 @@ extern "C" {
 
     /// Resize a live Ruffle instance so it re-renders the vector sharp at the
     /// sprite's current on-stage size (splashes grow, arm swaps dims).
-    #[wasm_bindgen(js_name = "dirplayer_ruffleSetSize")]
-    fn ruffle_set_size(sprite_num: i32, w: i32, h: i32);
+    ///
+    /// `catch`: these four are called from the per-frame loop, so a page that
+    /// hasn't installed the Flash bridge (`initFlashBridge`) — e.g. the e2e test
+    /// harness, or the dev app before startup wiring runs — would otherwise throw
+    /// a `ReferenceError` (`dirplayer_ruffleSetSize is not defined`) that aborts
+    /// the whole frame loop. With `catch` the missing global degrades to a no-op.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetSize", catch)]
+    fn ruffle_set_size(sprite_num: i32, w: i32, h: i32) -> Result<(), wasm_bindgen::JsValue>;
 
     // Used to halt a `loop = false` Flash sprite at end-of-timeline.
-    #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying")]
-    fn ruffle_is_playing(sprite_num: i32) -> bool;
-    #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame")]
-    fn ruffle_get_current_frame(sprite_num: i32) -> i32;
-    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop")]
-    fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str);
+    #[wasm_bindgen(js_name = "dirplayer_ruffleIsPlaying", catch)]
+    fn ruffle_is_playing(sprite_num: i32) -> Result<bool, wasm_bindgen::JsValue>;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetCurrentFrame", catch)]
+    fn ruffle_get_current_frame(sprite_num: i32) -> Result<i32, wasm_bindgen::JsValue>;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop", catch)]
+    fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str) -> Result<(), wasm_bindgen::JsValue>;
 }
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.

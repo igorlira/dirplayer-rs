@@ -252,6 +252,7 @@ extern "C" {
     pub fn onExternalEvent(event: &str);
     pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32);
     pub fn onFlashMemberUnloaded(sprite_num: i32);
+    pub fn onFlashResetAll();
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
@@ -290,6 +291,13 @@ impl JsApi {
     }
     pub fn dispatch_flash_member_unloaded(sprite_num: i32) {
         onFlashMemberUnloaded(sprite_num);
+    }
+    /// Tear down every live Flash/Ruffle instance. Called on movie reset so
+    /// a previous movie's Ruffle players (their per-frame capture RAF loops
+    /// and still-playing SWF audio) don't leak across a movie switch — the
+    /// per-sprite unload path only fires for sprites the new frame changed.
+    pub fn dispatch_flash_reset_all() {
+        onFlashResetAll();
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         onStageSizeChanged(width, height, center);
@@ -1939,6 +1947,7 @@ impl JsApi {
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32) {}
     pub fn dispatch_flash_member_unloaded(_: i32) {}
+    pub fn dispatch_flash_reset_all() {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}

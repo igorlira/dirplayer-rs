@@ -63,7 +63,16 @@ function flashManager() {
   if (_flashManager) return Promise.resolve(_flashManager);
   if (!_flashManagerPromise) {
     _flashManagerPromise = import('./flashPlayerManager.bundle.js')
-      .then(mod => (_flashManager = mod))
+      .then(mod => {
+        // Install the window.dirplayer_ruffle* globals the WASM frame loop
+        // calls into (setSize / isPlaying / getCurrentFrame / gotoFrameAndStop /
+        // getVariable / …). The dev app does this from callbacks.ts at startup;
+        // the test stub must do it here or those frame-loop externs reference
+        // undefined globals. (The Rust side also `catch`es them, so a failure
+        // here degrades to a no-op rather than killing the frame loop.)
+        try { mod.initFlashBridge?.(); } catch (e) { console.warn('[flash] initFlashBridge failed:', e); }
+        return (_flashManager = mod);
+      })
       .catch(err => {
         console.warn('[flash] bundle not available:', err?.message || err);
         return (_flashManager = { createFlashInstance: () => {}, destroyFlashInstance: () => {} });
@@ -71,15 +80,21 @@ function flashManager() {
   }
   return _flashManagerPromise;
 }
-export function onFlashMemberLoaded(castLib, castMember, swfData, width, height) {
+export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame) {
   const copy = new Uint8Array(swfData);
   flashManager().then(m => {
-    m.createFlashInstance?.(castLib, castMember, copy, width, height)
+    m.createFlashInstance?.(spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame)
       ?.catch?.(e => console.error('createFlashInstance failed:', e));
   });
 }
-export function onFlashMemberUnloaded(castLib, castMember) {
-  flashManager().then(m => m.destroyFlashInstance?.(castLib, castMember));
+export function onFlashMemberUnloaded(spriteNum) {
+  flashManager().then(m => m.destroyFlashInstance?.(spriteNum));
+}
+export function onFlashResetAll() {
+  // Only tear down if the Flash bundle was actually loaded by a prior movie;
+  // don't import it just to reset nothing on a pure non-Flash test run.
+  if (_flashManager) _flashManager.destroyAllFlashInstances?.();
+  else if (_flashManagerPromise) _flashManagerPromise.then(m => m.destroyAllFlashInstances?.());
 }
 export function onStageSizeChanged() {}
 

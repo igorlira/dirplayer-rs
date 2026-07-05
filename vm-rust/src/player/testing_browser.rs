@@ -34,13 +34,33 @@ impl BrowserTestPlayer {
         };
 
         // Stop the current movie and clear all timeouts before resetting.
+        // Stop every playing sound too: the old player is about to be dropped,
+        // but dropping an `Rc<AudioBufferSourceNode>` does NOT halt the node —
+        // the AudioContext keeps it running until it ends, so a looping sound
+        // from the previous movie would keep playing over the next test.
         unsafe {
             if let Some(player) = PLAYER_OPT.as_mut() {
                 player.stop();
+                player.sound_manager.stop_all();
                 player.timeout_manager.clear();
+                // Drop the outgoing movie's cast bitmaps up front (they're
+                // anchored, so nothing else frees them until the whole player is
+                // dropped below). Doing it here, before the ~120-frame drain and
+                // before the new player is allocated, releases a bitmap-heavy
+                // movie's pixels (Infestation ~10 MB+ decoded) early so it doesn't
+                // overlap the incoming movie's load — cutting the reset peak.
+                player.bitmap_manager.clear_movie_bitmaps();
             }
         }
         crate::js_api::JsApi::dispatch_clear_timeouts();
+        // Tear down every Ruffle/Flash instance from the previous movie so its
+        // per-frame capture RAF loop, Ruffle player, and SWF audio don't leak
+        // across the movie switch (the per-sprite unload path only fires for
+        // sprites the frame actually changed).
+        crate::js_api::JsApi::dispatch_flash_reset_all();
+        // JS-Lingo runtimes live in a thread_local, so dropping the old player
+        // below does NOT free them — clear them explicitly.
+        crate::player::js_lingo_loader::clear_all_runtimes();
 
         // Bump the generation so any in-flight loops from the previous movie
         // detect staleness on their next await and exit. Then drain: wait
@@ -89,7 +109,14 @@ impl BrowserTestPlayer {
 
         unsafe {
             if let Some(old) = PLAYER_OPT.take() {
-                std::mem::forget(old);
+                // Actually free the previous player. `DirPlayer` has no `Drop`
+                // impl, and the drain loop above already waited for every
+                // in-flight handler to unwind, so there is no outstanding
+                // borrow — dropping just reclaims its heap (cast bitmaps,
+                // datums, score). The old code `mem::forget`-ed it, which
+                // leaked the entire player (tens of MB of cast bitmaps) on
+                // every movie load — the browser test run climbed past a GB.
+                drop(old);
             }
 
             // Create fresh channels to disconnect any old command/event loops

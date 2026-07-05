@@ -54,6 +54,7 @@ type TVmCallbacks = {
   onExternalEvent?: (event: string) => void,
   onFlashMemberLoaded?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => void,
   onFlashMemberUnloaded?: (spriteNum: number) => void,
+  onFlashResetAll?: () => void,
   onStageSizeChanged?: (width: number, height: number, center: boolean) => void,
 }
 declare let vmCallbacks: TVmCallbacks | undefined;

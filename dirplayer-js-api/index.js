@@ -140,6 +140,12 @@ export function onFlashMemberUnloaded(spriteNum) {
   }
 }
 
+export function onFlashResetAll() {
+  if (vmCallbacks?.onFlashResetAll) {
+    vmCallbacks.onFlashResetAll();
+  }
+}
+
 export function onStageSizeChanged(width, height, center) {
   if (vmCallbacks?.onStageSizeChanged) {
     vmCallbacks.onStageSizeChanged(width, height, center);
