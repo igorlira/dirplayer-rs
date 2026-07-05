@@ -456,10 +456,13 @@ impl From<&[u8]> for ShapeInfo {
 
         ShapeInfo {
             shape_type: match shape_type_raw {
+                // Director shape-member encoding: 1=rect, 2=roundRect, 3=oval,
+                // 4=line (matches the Lingo `shapeType` symbols #rect/#roundRect/
+                // #oval/#line). 0x0008 kept as an observed fallback for line.
                 0x0001 => ShapeType::Rect,
                 0x0002 => ShapeType::OvalRect,
                 0x0003 => ShapeType::Oval,
-                0x0008 => ShapeType::Line,
+                0x0004 | 0x0008 => ShapeType::Line,
                 _ => {
                     warn!("Unknown shape type: {:x}", shape_type_raw);
                     ShapeType::Unknown
