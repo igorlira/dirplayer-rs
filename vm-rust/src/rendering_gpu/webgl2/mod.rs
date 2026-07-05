@@ -2958,6 +2958,21 @@ impl WebGL2Renderer {
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
         let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
+        // These sources rasterize a FRESH texture here every frame and, unlike
+        // Bitmap / FilmLoop / RenderedText, do NOT put it in any cache. Dropping a
+        // `WebGlTexture` handle does not call `gl.deleteTexture`, so without an
+        // explicit delete after drawing, each frame leaks one GL texture per such
+        // sprite — GPU/JS memory climbs and never comes back (the cause of the
+        // spike on vector-shape-heavy movies like Infestation and lore). Deleted
+        // after the draw below; cached sources must NOT be deleted (their texture
+        // is shared with the cache).
+        let owns_dynamic_texture = matches!(
+            texture_source,
+            TextureSource::VectorShapeBitmap { .. }
+                | TextureSource::ShapeBitmap { .. }
+                | TextureSource::ButtonBitmap { .. }
+        );
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -3155,7 +3170,8 @@ impl WebGL2Renderer {
                     if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
                         return;
                     }
-                    self.texture_cache.insert(cache_key, texture.clone(), width, height, filmloop_frame);
+                    let gl = self.context.gl().clone();
+                    self.texture_cache.insert(&gl, cache_key, texture.clone(), width, height, filmloop_frame);
                     texture
                 }
             }
@@ -3870,6 +3886,13 @@ impl WebGL2Renderer {
 
         // Unbind texture
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+
+        // Free the per-frame dynamic texture now that the quad is drawn — it is
+        // not held by any cache (see `owns_dynamic_texture`). Without this, each
+        // frame leaks one GL texture per vector-shape/shape/button sprite.
+        if owns_dynamic_texture {
+            gl.delete_texture(Some(&tex));
+        }
 
         // Reset blend equation if we used an ink that changes it from the default FUNC_ADD
         if effective_ink == InkMode::SubPin || effective_ink == InkMode::Light || effective_ink == InkMode::Dark {
@@ -4822,7 +4845,9 @@ impl WebGL2Renderer {
             .ok()?;
 
         // Cache the texture with current bitmap version
+        let gl = self.context.gl().clone();
         self.texture_cache.insert(
+            &gl,
             cache_key,
             texture.clone(),
             width,
@@ -6794,7 +6819,9 @@ impl WebGL2Renderer {
             .upload_texture_rgba(&texture, render_width as u32, upload_height, &text_bitmap.data)
             .ok()?;
         // Cache the texture
+        let gl = self.context.gl().clone();
         self.rendered_text_cache.insert(
+            &gl,
             cache_key.clone(),
             texture.clone(),
             render_width as u32,
