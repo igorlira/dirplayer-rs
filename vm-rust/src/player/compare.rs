@@ -391,6 +391,27 @@ pub fn datum_equals_member(
 
 #[allow(dead_code)]
 pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+    // See `datum_less_than`: a string chunk compares by its resolved text, and
+    // a sprite reference compares by its sprite (channel) number.
+    if let Datum::StringChunk(_, _, s) = left {
+        return datum_greater_than(&Datum::String(s.clone()), right, allocator);
+    }
+    if let Datum::StringChunk(_, _, s) = right {
+        return datum_greater_than(left, &Datum::String(s.clone()), allocator);
+    }
+    if let Datum::SpriteRef(n) = left {
+        return datum_greater_than(&Datum::Int(*n as i32), right, allocator);
+    }
+    if let Datum::SpriteRef(n) = right {
+        return datum_greater_than(left, &Datum::Int(*n as i32), allocator);
+    }
+    // A symbol compares as its string name (see `datum_less_than`).
+    if let Datum::Symbol(s) = left {
+        return datum_greater_than(&Datum::String(s.clone()), right, allocator);
+    }
+    if let Datum::Symbol(s) = right {
+        return datum_greater_than(left, &Datum::String(s.clone()), allocator);
+    }
     match (left, right) {
         // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left > *right),
@@ -447,6 +468,26 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             Ok(*n > (vals[0] as i32) || *n > (vals[1] as i32))
         }
 
+        // Linear list comparison — element-wise, mirroring `datum_less_than`
+        // (and the 11.5 dictionary's rect/point-as-list rule). True only if
+        // every corresponding element of the left is > the right's.
+        (Datum::List(_, left_items, _), Datum::List(_, right_items, _)) => {
+            if left_items.is_empty() || right_items.is_empty() {
+                return Ok(false);
+            }
+            for (l, r) in left_items.iter().zip(right_items.iter()) {
+                let ld = allocator.get_datum(l);
+                let rd = allocator.get_datum(r);
+                if !datum_greater_than(ld, rd, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
+        // Script instances compare by allocation id (see `datum_less_than`).
+        (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() > r.id()),
+
         // Catch-all
         _ => {
             warn!(
@@ -460,6 +501,34 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
 }
 
 pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+    // A string chunk (`char/word/item/line N of x`) evaluates to a plain
+    // string — compare by its resolved text. Without this, `char 1 of x < "m"`
+    // (and any chunk poll in a per-frame loop) falls through to the catch-all,
+    // returning a wrong result AND warning every frame.
+    if let Datum::StringChunk(_, _, s) = left {
+        return datum_less_than(&Datum::String(s.clone()), right, allocator);
+    }
+    if let Datum::StringChunk(_, _, s) = right {
+        return datum_less_than(left, &Datum::String(s.clone()), allocator);
+    }
+    // A sprite reference compares by its sprite (channel) number, so a movie
+    // that sorts/compares `sprite(a) < sprite(b)` works instead of hitting the
+    // catch-all (wrong result + per-frame warn).
+    if let Datum::SpriteRef(n) = left {
+        return datum_less_than(&Datum::Int(*n as i32), right, allocator);
+    }
+    if let Datum::SpriteRef(n) = right {
+        return datum_less_than(left, &Datum::Int(*n as i32), allocator);
+    }
+    // A symbol compares as its string name (Director treats `#foo` like "foo" in
+    // ordered comparisons), so route symbols through the string logic below. This
+    // covers int-vs-symbol, symbol-vs-symbol, etc. without dedicated arms.
+    if let Datum::Symbol(s) = left {
+        return datum_less_than(&Datum::String(s.clone()), right, allocator);
+    }
+    if let Datum::Symbol(s) = right {
+        return datum_less_than(left, &Datum::String(s.clone()), allocator);
+    }
     match (left, right) {
         // Int comparisons
         (Datum::Int(left), Datum::Int(right)) => Ok(*left < *right),
@@ -538,6 +607,30 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
                 Ok(false)
             }
         }
+
+        // Linear list comparison. Per the 11.5 dictionary `<` entry, rects/points
+        // (and by extension lists) compare "with each element of the first list
+        // compared to the corresponding element of the second list" — the same
+        // all-components rule the Point arm above uses. True only if every
+        // corresponding element of the left is < the right's.
+        (Datum::List(_, left_items, _), Datum::List(_, right_items, _)) => {
+            if left_items.is_empty() || right_items.is_empty() {
+                return Ok(false);
+            }
+            for (l, r) in left_items.iter().zip(right_items.iter()) {
+                let ld = allocator.get_datum(l);
+                let rd = allocator.get_datum(r);
+                if !datum_less_than(ld, rd, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
+        // Script instances have no meaningful ordering in Director, but a movie
+        // that sorts or compares them needs a stable result — compare by their
+        // allocation id.
+        (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() < r.id()),
 
         // Catch-all
         _ => {
