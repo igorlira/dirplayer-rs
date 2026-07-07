@@ -407,6 +407,43 @@ impl Score {
             player.alloc_datum(Datum::ScriptInstanceRef(script_instance_ref.clone()))
         });
 
+        // Snapshot the authored Score PARAMETER values BEFORE anything else runs.
+        // Behaviour parameters (e.g. RaycastCar's Chassis="chassis", set in the
+        // Score's parameter dialog) are applied to the instance during begin-sprite
+        // attachment, which happens BEFORE this init pass — so at this point the only
+        // non-void properties are those authored params (plus spriteNum). Director's
+        // order is `on new me` (code defaults) THEN the authored parameter overrides,
+        // but this function calls `on new` below (needed for behaviours like pengapop's
+        // Sparkle01 that do ALL setup there). A behaviour whose `on new` re-seeds its
+        // own defaults — RaycastCar sets pChassisName="None" etc. — would clobber the
+        // already-applied params back to those defaults, so `rigidBody("None")` then
+        // fails and the physics car never initialises. Capture the params here and
+        // re-apply them after `on new` so the Score values win, as Director does.
+        let param_snapshot: Vec<(String, Datum)> = reserve_player_ref(|player| {
+            let prop_refs: Vec<(String, DatumRef)> = match player
+                .allocator
+                .get_script_instance_opt(&script_instance_ref)
+            {
+                Some(inst) => inst
+                    .properties
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            prop_refs
+                .into_iter()
+                .filter_map(|(name, val_ref)| {
+                    let d = player.get_datum(&val_ref);
+                    if matches!(d, Datum::Void) {
+                        None
+                    } else {
+                        Some((name, d.clone()))
+                    }
+                })
+                .collect()
+        });
+
         // Try to call getPropertyDescriptionList
 
         let result = player_call_datum_handler(
@@ -569,6 +606,27 @@ impl Score {
                 &receivers,
             )
             .await;
+
+            // Re-apply the authored Score parameters captured before `on new`.
+            // Director applies behaviour parameters AFTER `on new me`, so the
+            // authored values must win over any code defaults the handler just
+            // re-seeded (RaycastCar's pChassisName="None" -> back to "chassis").
+            // gPDL-only props (not authored, not in the snapshot) keep whatever
+            // `on new` set, matching Director's gPDL-skips-non-void rule.
+            if !param_snapshot.is_empty() {
+                reserve_player_mut(|player| {
+                    for (name, datum) in &param_snapshot {
+                        let value_ref = player.alloc_datum(datum.clone());
+                        let _ = script_set_prop(
+                            player,
+                            &script_instance_ref,
+                            name,
+                            &value_ref,
+                            false,
+                        );
+                    }
+                });
+            }
         }
 
         Ok(())
