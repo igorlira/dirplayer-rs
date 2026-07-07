@@ -2265,6 +2265,101 @@ impl Bitmap {
             matte_mask = Some(mask);
         }
 
+        // ---------------- Fast path: unscaled, unrotated, same-palette 8-bit blit ----------------
+        // The dominant per-frame cost in tile/map compositing (drawmap terrain
+        // tiling, water copyPixels) is the O(256) nearest-color search inside
+        // set_pixel_fast, run once per destination pixel. When the source and
+        // destination are both 8-bit indexed sharing the same palette, index i
+        // maps to index i, so we can copy raw index bytes row-by-row and skip
+        // both the palette resolve AND the nearest-color search entirely.
+        {
+            let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
+            let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+            let no_colorize = !(sprite_bg
+                || sprite_fg
+                || params.bg_color_explicit
+                || params.fore_color_explicit);
+            let dst_span_w = max_dst_x - min_dst_x;
+            let dst_span_h = max_dst_y - min_dst_y;
+            let unscaled =
+                dst_span_w == src_rect.width() && dst_span_h == src_rect.height();
+            if self.bit_depth == 8
+                && src.bit_depth == 8
+                && src.palette_ref == self.palette_ref
+                && !has_sprite_rotation
+                && !has_skew_flip
+                && !flip_x
+                && !flip_y
+                && unscaled
+                && alpha >= 0.999
+                && mask_image.is_none()
+                && matte_mask.is_none()
+                && no_colorize
+                && (ink == 0 || ink == 2 || ink == 36)
+            {
+                // For color-key inks, precompute which source indices resolve to
+                // the transparent background color (mirrors the per-pixel
+                // `(r,g,b) == bg_color_resolved` skip).
+                let transparent: Option<[bool; 256]> = if ink == 2 || ink == 36 {
+                    let mut t = [false; 256];
+                    if let Some(cache) = &src_palette_cache {
+                        for (i, slot) in t.iter_mut().enumerate() {
+                            if let Some(&rgb) = cache.get(i) {
+                                *slot = rgb == bg_color_resolved;
+                            }
+                        }
+                    }
+                    Some(t)
+                } else {
+                    None
+                };
+
+                let dst_w = self.width as i32;
+                let dst_h = self.height as i32;
+                let sw = src.width as i32;
+                let sh = src.height as i32;
+
+                // Horizontal clip is constant across rows (no rotation/flip).
+                let dx0 = min_dst_x.max(0);
+                let dx1 = max_dst_x.min(dst_w);
+                let src_x_start = src_rect.left + (dx0 - min_dst_x);
+                let row_len = (dx1 - dx0).max(0) as usize;
+                if row_len > 0
+                    && src_x_start >= 0
+                    && src_x_start + row_len as i32 <= sw
+                {
+                    self.matte = None;
+                    let width = self.width as usize;
+                    let s_width = src.width as usize;
+                    for dst_y in min_dst_y.max(0)..max_dst_y.min(dst_h) {
+                        let src_y = src_rect.top + (dst_y - min_dst_y);
+                        if src_y < 0 || src_y >= sh {
+                            continue;
+                        }
+                        let d_row = dst_y as usize * width + dx0 as usize;
+                        let s_row = src_y as usize * s_width + src_x_start as usize;
+                        match &transparent {
+                            None => {
+                                // Ink 0 (Copy): fully opaque raw byte copy.
+                                self.data[d_row..d_row + row_len]
+                                    .copy_from_slice(&src.data[s_row..s_row + row_len]);
+                            }
+                            Some(t) => {
+                                // Ink 2/36: copy non-transparent indices only.
+                                for i in 0..row_len {
+                                    let idx = src.data[s_row + i];
+                                    if !t[idx as usize] {
+                                        self.data[d_row + i] = idx;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
         // ---------------- Pixel loop ----------------
         for dst_y in draw_min_y..draw_max_y {
             for dst_x in draw_min_x..draw_max_x {
