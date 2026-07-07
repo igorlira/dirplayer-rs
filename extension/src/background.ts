@@ -104,11 +104,104 @@ async function ensureRegistered(): Promise<void> {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => { void ensureRegistered(); });
-chrome.runtime.onStartup.addListener(() => { void ensureRegistered(); });
+// Cross-origin fetch proxy for the isolated-world content script. In MV3 a
+// content-script `fetch()` is page-privileged (subject to the page's CORS), so
+// `host_permissions` does NOT let it read cross-origin responses — but the
+// service worker (with host_permissions <all_urls>) can. Neopets' DGS loads its
+// game SWF (ml_maraqua.swf) and other assets from cross-origin neopets hosts;
+// flashPlayerManager's fetch shim routes those here. Bytes are base64-framed
+// because chrome.runtime messaging JSON-serializes payloads.
+interface CorsFetchRequest {
+  type: 'dirplayer-cors-fetch';
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string; // base64
+}
+
+chrome.runtime.onMessage.addListener((msg: CorsFetchRequest, _sender, sendResponse) => {
+  if (!msg || msg.type !== 'dirplayer-cors-fetch') return; // not ours — let others handle
+  (async () => {
+    try {
+      const body = msg.body
+        ? Uint8Array.from(atob(msg.body), (c) => c.charCodeAt(0))
+        : undefined;
+      const res = await fetch(msg.url, {
+        method: msg.method || 'GET',
+        headers: msg.headers,
+        body,
+        credentials: 'omit',
+      });
+      const buf = new Uint8Array(await res.arrayBuffer());
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < buf.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(
+          null,
+          buf.subarray(i, i + CHUNK) as unknown as number[],
+        );
+      }
+      sendResponse({
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        contentType: res.headers.get('content-type') || '',
+        bodyBase64: btoa(bin),
+      });
+    } catch (e) {
+      sendResponse({ ok: false, status: 0, error: String((e as Error)?.message || e) });
+    }
+  })();
+  return true; // keep the message channel open for the async sendResponse
+});
+
+// CORS relaxation for Ruffle's MAIN-world SWF loads. Ruffle runs in the page's
+// main world (no extension privileges), so its cross-origin asset fetches
+// (Neopets' swf.neopets.com dgs_include_v2.swf / game SWFs) are CORS-blocked.
+// Rather than monkey-patching the page's window.fetch (which reads as page
+// tampering to store reviewers), add the CORS response header declaratively via
+// declarativeNetRequest — an inspectable, Google-endorsed API. The rule is
+// scoped to the media/plugin/fetch resource types an emulator actually loads,
+// not arbitrary API traffic. Content-script (isolated-world) fetches keep going
+// through the background message proxy above; this rule is what unblocks the
+// main-world Ruffle player. `Access-Control-Allow-Origin: *` is safe here
+// because these are un-credentialed asset GETs.
+const CORS_DNR_RULE_ID = 2001;
+
+async function ensureCorsRules(): Promise<void> {
+  const dnr = (chrome as unknown as { declarativeNetRequest?: {
+    updateDynamicRules?: (opts: unknown) => Promise<void>;
+  } }).declarativeNetRequest;
+  if (!dnr?.updateDynamicRules) return;
+  try {
+    await dnr.updateDynamicRules({
+      removeRuleIds: [CORS_DNR_RULE_ID],
+      addRules: [{
+        id: CORS_DNR_RULE_ID,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          responseHeaders: [
+            { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
+          ],
+        },
+        condition: {
+          urlFilter: '*',
+          resourceTypes: ['media', 'object', 'xmlhttprequest', 'other', 'sub_frame'],
+        },
+      }],
+    });
+  } catch (e) {
+    console.warn('[DirPlayer] failed to install CORS DNR rule:', e);
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => { void ensureRegistered(); void ensureCorsRules(); });
+chrome.runtime.onStartup.addListener(() => { void ensureRegistered(); void ensureCorsRules(); });
 // Also register on service-worker activation in case the listeners above
 // missed (e.g. extension was loaded mid-session via reload).
 void ensureRegistered();
+void ensureCorsRules();
 
 // Note: the chrome-extension URL needed by Ruffle's chunk loader gets
 // stamped onto `<html data-dirplayer-ruffle-url="...">` by an isolated-

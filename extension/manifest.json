@@ -23,7 +23,7 @@
     }
   ],
   "host_permissions": ["<all_urls>"],
-  "permissions": ["scripting"],
+  "permissions": ["scripting", "declarativeNetRequest"],
   "background": {
     "service_worker": "extension/src/background.ts",
     "type": "module"
