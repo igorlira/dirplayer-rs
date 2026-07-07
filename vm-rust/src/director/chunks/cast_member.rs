@@ -69,7 +69,18 @@ impl CastMemberChunk {
         let specific_data_parsed;
 
         if dir_version >= 500 {
-            member_type = MemberType::from(reader.read_u32().unwrap());
+            let raw_member_type = reader.read_u32().unwrap();
+            // Standard Director numbers a Linked Movie (`#movie`) as type 9, but
+            // this (reverse-engineered) MemberType enum uses 9 for Shape, so
+            // `from(9)` would mislabel a Linked Movie member (e.g. Neopets DGS
+            // `place_holder.dcr`) as Shape. Remap raw 9 to Movie explicitly.
+            // Raw 8 is left as-is (the downstream shape-info disambiguator turns
+            // real QuickDraw shapes at 8 into Shapes; real Flash Asset members
+            // are Ole = 15), and raw 2 stays FilmLoop — both verified correct.
+            member_type = match raw_member_type {
+                9 => MemberType::Movie,
+                other => MemberType::from(other),
+            };
             info_len = reader.read_u32().unwrap() as usize;
             specific_data_len = reader.read_u32().unwrap() as usize;
 

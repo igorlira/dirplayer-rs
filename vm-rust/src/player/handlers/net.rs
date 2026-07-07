@@ -51,21 +51,68 @@ impl NetHandlers {
 
     pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // Support: no args (last task), int task ID, or URL string
-            let task_id = if args.is_empty() {
-                player.net_manager.get_last_task_id()
-                    .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?
+            // Support: no args (last task), int task ID, or URL string.
+            // Resolve to Option<task_id> first so the datum borrow is released
+            // before we (mutably) alloc the result — and so an unknown URL can
+            // return a status instead of raising (Director's getStreamStatus
+            // never throws on a bad URL).
+            let mut req_url: Option<String> = None;
+            let resolved: Option<u32> = if args.is_empty() {
+                Some(
+                    player
+                        .net_manager
+                        .get_last_task_id()
+                        .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?,
+                )
             } else {
                 let arg = player.get_datum(&args[0]);
                 match arg {
-                    Datum::Int(id) => *id as u32,
+                    Datum::Int(id) => Some(*id as u32),
                     Datum::String(url) => {
+                        req_url = Some(url.clone());
                         player.net_manager.find_task_by_url(url)
-                            .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
-                    },
-                    _ => return Err(ScriptError::new(
-                        "getStreamStatus requires an integer task ID or URL string".to_string()
-                    ))
+                    }
+                    _ => {
+                        return Err(ScriptError::new(
+                            "getStreamStatus requires an integer task ID or URL string".to_string(),
+                        ))
+                    }
+                }
+            };
+            let task_id = match resolved {
+                Some(id) => id,
+                None => {
+                    // Unknown URL. A `#movie`'s linked file is loaded into a
+                    // nested DirPlayer (its net task consumed), so a status poll
+                    // of its URL has no task here — report Complete so load-status
+                    // pollers proceed rather than the debugger pausing on an error.
+                    let url = req_url.unwrap_or_default();
+                    let result_map = Datum::PropList(
+                        VecDeque::from(vec![
+                            (
+                                player.alloc_datum(Datum::String("URL".to_owned())),
+                                player.alloc_datum(Datum::String(url)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("state".to_owned())),
+                                player.alloc_datum(Datum::String("Complete".to_owned())),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
+                                player.alloc_datum(Datum::Int(0)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("bytesTotal".to_owned())),
+                                player.alloc_datum(Datum::Int(0)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("error".to_owned())),
+                                player.alloc_datum(Datum::String("OK".to_owned())),
+                            ),
+                        ]),
+                        false,
+                    );
+                    return Ok(player.alloc_datum(result_map));
                 }
             };
 
@@ -86,7 +133,16 @@ impl NetHandlers {
                 }
                 None => {
                     if task_state.bytes_loaded > 0 {
-                        ("InProgress", "", task_state.bytes_loaded as i32, task_state.bytes_total as i32)
+                        // If the server (or a CORS proxy) didn't advertise a
+                        // total, `bytes_total` is 0. Report the bytes loaded so
+                        // far as the total so callers that divide by it don't hit
+                        // a divide-by-zero and pin progress at 0% forever — DGS's
+                        // showGameLoadStats computes
+                        // `percentloaded = bytesloaded / bytestotal * 100`.
+                        // Accurate mid-load % still needs Content-Length (which
+                        // the proxy now preserves); this is the graceful floor.
+                        let total = task_state.bytes_total.max(task_state.bytes_loaded);
+                        ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
                     } else {
                         ("Connecting", "", 0i32, 0i32)
                     }

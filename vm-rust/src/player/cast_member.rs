@@ -996,6 +996,64 @@ pub struct FilmLoopMember {
     pub cached_total_frames: Option<u32>,
 }
 
+/// A Linked Movie cast member (`#movie`) — references an external Director
+/// movie (.dir/.dcr) that plays inside a sprite (Director 11.5 Scripting
+/// Dictionary "Linked Movie" media type). Created at runtime via
+/// `new(#movie)`, linked via `member.fileName = <path/url>`, and played by
+/// assigning it to a sprite. The parsed movie is held behind an `Rc` so the
+/// member stays cheap to clone and the (large) file isn't deep-copied.
+///
+/// Phase 1 stores the parsed `DirectorFile` + the linked-movie properties;
+/// nested score advancement + script execution + compositing into the host
+/// sprite are Phase 2 (modelled on `FilmLoopMember`).
+#[derive(Clone)]
+pub struct MovieMember {
+    /// The linked file path/URL (`the fileName of member`).
+    pub file_name: String,
+    /// Whether the linked movie's Lingo runs (`scriptsEnabled`). Director
+    /// defaults linked-movie scripts OFF; callers opt in (DGS sets it to 1).
+    pub scripts_enabled: bool,
+    /// Crop (TRUE) vs scale-to-fit (FALSE) within the sprite rect.
+    pub crop: bool,
+    /// Center the movie within the sprite rect when cropping.
+    pub center: bool,
+    /// Play the linked movie's sound.
+    pub sound: bool,
+    /// Loop the linked movie's playback.
+    pub loops: bool,
+    /// Member width/height (from the authored rect: right-left, bottom-top).
+    pub width: u16,
+    pub height: u16,
+    pub reg_point: (i16, i16),
+    /// Raw .dir/.dcr bytes of the linked movie, captured by the `fileName`
+    /// setter from the net preload cache. `None` until linked. Held behind an
+    /// `Rc` so the member stays cheap to clone; the live nested `Movie` is
+    /// parsed/built from these bytes at activation into the player's nested
+    /// registry (a built `Movie` isn't `Clone`, so it can't live on the member).
+    pub bytes: Option<std::rc::Rc<Vec<u8>>>,
+    /// Base URL the linked movie's own relative references resolve against
+    /// (derived from the resolved net-task URL at fileName time).
+    pub base_url: String,
+}
+
+impl MovieMember {
+    pub fn new() -> Self {
+        Self {
+            file_name: String::new(),
+            scripts_enabled: false,
+            crop: true,
+            center: true,
+            sound: true,
+            loops: true,
+            width: 0,
+            height: 0,
+            reg_point: (0, 0),
+            bytes: None,
+            base_url: String::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SoundMember {
     pub info: SoundInfo,
@@ -2599,6 +2657,7 @@ pub enum CastMemberType {
     Sound(SoundMember),
     Font(FontMember),
     Flash(FlashMember),
+    Movie(MovieMember),
     Shockwave3d(Shockwave3dMember),
     HavokPhysics(HavokPhysicsMember),
     PhysXPhysics(PhysXPhysicsMember),
@@ -2619,6 +2678,7 @@ pub enum CastMemberTypeId {
     Sound,
     Font,
     Flash,
+    Movie,
     Shockwave3d,
     HavokPhysics,
     PhysXPhysics,
@@ -2664,6 +2724,9 @@ impl fmt::Debug for CastMemberType {
             Self::Flash(_) => {
                 write!(f, "Flash")
             }
+            Self::Movie(_) => {
+                write!(f, "Movie")
+            }
             Self::Shockwave3d(_) => {
                 write!(f, "Shockwave3d")
             }
@@ -2695,6 +2758,7 @@ impl CastMemberTypeId {
             Self::Sound => Ok("sound"),
             Self::Font => Ok("font"),
             Self::Flash => Ok("flash"),
+            Self::Movie => Ok("movie"),
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
@@ -2718,6 +2782,7 @@ impl CastMemberType {
             Self::Sound(_) => CastMemberTypeId::Sound,
             Self::Font(_) => CastMemberTypeId::Font,
             Self::Flash(_) => CastMemberTypeId::Flash,
+            Self::Movie(_) => CastMemberTypeId::Movie,
             Self::Shockwave3d(_) => CastMemberTypeId::Shockwave3d,
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
@@ -2739,6 +2804,7 @@ impl CastMemberType {
             Self::Sound(_) => "sound",
             Self::Font(_) => "font",
             Self::Flash(_) => "flash",
+            Self::Movie(_) => "movie",
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             Self::HavokPhysics(_) => "havok",
             Self::PhysXPhysics(_) => "physics",
@@ -2862,6 +2928,20 @@ impl CastMemberType {
     pub fn as_flash_mut(&mut self) -> Option<&mut FlashMember> {
         return match self {
             Self::Flash(data) => { Some(data) }
+            _ => { None }
+        }
+    }
+
+    pub fn as_movie(&self) -> Option<&MovieMember> {
+        return match self {
+            Self::Movie(data) => { Some(data) }
+            _ => { None }
+        }
+    }
+
+    pub fn as_movie_mut(&mut self) -> Option<&mut MovieMember> {
+        return match self {
+            Self::Movie(data) => { Some(data) }
             _ => { None }
         }
     }
@@ -5520,6 +5600,50 @@ impl CastMember {
                         cached_total_frames: None,
                     })
                 }
+            }
+            MemberType::Movie => {
+                // Linked Movie (`#movie`) member. The linked .dir/.dcr path is
+                // stored in the member info's file_name; content is fetched at
+                // play time (linked, not embedded), so `bytes` stay None until
+                // the fileName setter / activation loads them. Playback flags
+                // share the FilmLoop specific-data layout (reg_point + a flags
+                // byte: center=bit0, crop=1-bit1, sound=bit3, loop=1-bit5);
+                // scriptsEnabled is a Movie-only extra flag (bit TBD, mapped via
+                // the hex dump below).
+                let mut mv = MovieMember::new();
+                if let Some(info) = chunk.member_info.as_ref() {
+                    mv.file_name = info.file_name.clone();
+                }
+                // Specific-data layout (big-endian), fully verified by toggling
+                // each property in Director MX 2004 and diffing the flags byte:
+                //   [0..8]  QuickDraw rect: top, left, bottom, right (u16 each)
+                //   [8..11] reserved (0)
+                //   [11]    flags byte:
+                //             bit0 (0x01) center
+                //             bit1 (0x02) crop        (inverted: crop = !bit1)
+                //             bit3 (0x08) sound
+                //             bit4 (0x10) scriptsEnabled
+                //             bit5 (0x20) loop        (inverted: loop = !bit5)
+                //           (bit2 0x04 is an always-set flag, ignored)
+                //   [12..14] reserved (0)
+                // place_holder.dcr: rect(200,150,300,250) -> 100x100, regPoint
+                // center (50,50); flags 0x0E -> center=F crop=F sound=T
+                // scriptsEnabled=F loop=T (and 0x3E -> scriptsEnabled=T loop=F).
+                let sd = chunk.specific_data_raw.as_slice();
+                let be16 = |i: usize| -> u16 {
+                    if i + 1 < sd.len() { u16::from_be_bytes([sd[i], sd[i + 1]]) } else { 0 }
+                };
+                let (top, left, bottom, right) = (be16(0), be16(2), be16(4), be16(6));
+                let flags = sd.get(11).copied().unwrap_or(0);
+                mv.width = right.saturating_sub(left);
+                mv.height = bottom.saturating_sub(top);
+                mv.reg_point = ((mv.width / 2) as i16, (mv.height / 2) as i16);
+                mv.center = (flags & 0x01) != 0;
+                mv.crop = (flags & 0x02) == 0;
+                mv.sound = (flags & 0x08) != 0;
+                mv.scripts_enabled = (flags & 0x10) != 0;
+                mv.loops = (flags & 0x20) == 0;
+                CastMemberType::Movie(mv)
             }
             MemberType::Sound => {
                 // Log children

@@ -208,6 +208,12 @@ pub const MAX_STACK_SIZE: usize = 50;
 pub struct DirPlayer {
     pub net_manager: NetManager,
     pub movie: Movie,
+    /// Host-side composited stage image of each active nested `#movie` sub-player,
+    /// keyed by the Linked Movie member. Each host frame the sub-player's stage is
+    /// rendered (headless, CPU) and copied here into the HOST's bitmap_manager so
+    /// the WebGL2 `Movie` sprite arm can blit it at the sprite rect. One BitmapRef
+    /// per member, overwritten in place.
+    pub nested_movie_images: HashMap<CastMemberRef, BitmapRef>,
     pub is_playing: bool,
     pub is_script_paused: bool,
     pub next_frame: Option<u32>,
@@ -310,6 +316,12 @@ pub struct DirPlayer {
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
+    /// `tell <target> … end tell` stack. Each entry is the target a `tellcall`
+    /// should dispatch to: `Some(nested_player_id)` when the target is a `#movie`
+    /// sprite (the loader→game command bridge — DGS `on keyIsDown` does
+    /// `tell sprite(spShk) \n sendAllSprites(#keyWasPressed, k) \n end tell`),
+    /// or `None` for an unsupported/self target (tellcall runs on this player).
+    pub tell_target_stack: Vec<Option<usize>>,
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
@@ -436,42 +448,8 @@ impl DirPlayer {
         let now = chrono::Local::now();
 
         let mut result = DirPlayer {
-            movie: Movie {
-                rect: IntRect::from(0, 0, 0, 0),
-                cast_manager: CastManager::empty(),
-                score: Score::empty(),
-                current_frame: 1,
-                puppet_tempo: 0,
-                random_seed: None,
-                exit_lock: false,
-                dir_version: 0,
-                item_delimiter: ',',
-                alert_hook: None,
-                base_path: "".to_string(),
-                file_name: "".to_string(),
-                stage_color: (255, 255, 255),
-                stage_color_ref: ColorRef::PaletteIndex(255),
-                frame_rate: 30,
-                file: None,
-                update_lock: false,
-                mouse_down_script: None,
-                mouse_up_script: None,
-                key_down_script: None,
-                key_up_script: None,
-                timeout_script: None,
-                allow_custom_caching: false,
-                trace_script: false,
-                trace_log_file: String::new(),
-                debug_playback_enabled: false,
-                edit_shortcuts_enabled: true,
-                mouse_down: false,
-                right_mouse_down: false,
-                click_loc: (0,0),
-                frame_script_instance: None,
-                frame_script_member: None,
-                frame_script_span_start: None,
-                sound_device: String::new(),
-            },
+            movie: Movie::empty(),
+            nested_movie_images: HashMap::new(),
             net_manager: NetManager {
                 base_path: None,
                 override_base_path: None,
@@ -542,6 +520,7 @@ impl DirPlayer {
             is_in_frame_update: false,
             is_dispatching_events: false,
             is_in_send_all_sprites: false,
+            tell_target_stack: Vec::new(),
             system_start_time: now - chrono::Duration::days(8), // Simulated system start
             handler_stack_depth: 0,
             in_frame_script: false,
@@ -601,6 +580,18 @@ impl DirPlayer {
     /// before Lingo scripts try to access them. Per-sprite: each sprite that
     /// references a Flash member gets its own dedicated Ruffle instance.
     pub fn pre_dispatch_flash_members(&mut self) {
+        // When running a nested `#movie` sub-player, dispatch its Flash sprites
+        // to Ruffle under a synthetic per-player key so they don't collide with
+        // the host's channel keys and their captured frames route back into THIS
+        // sub's `flash_frame_buffers` (see NESTED_FLASH_BASE / update_flash_frame).
+        let active = unsafe { ACTIVE_PLAYER_ID };
+        let js_flash_key = |ch: i16| -> i32 {
+            if active == 0 {
+                ch as i32
+            } else {
+                nested_flash_key(active, ch)
+            }
+        };
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -639,7 +630,7 @@ impl DirPlayer {
             // channel no longer shows ANY live Flash member; otherwise just drop
             // the stale bookkeeping entry and leave the new instance alone.
             if !self.channel_holds_live_flash(ch) {
-                JsApi::dispatch_flash_member_unloaded(ch as i32);
+                JsApi::dispatch_flash_member_unloaded(js_flash_key(ch));
                 self.flash_frame_buffers.remove(&ch);
             }
             self.flash_sprite_loaded.remove(&(ch, cl, cm));
@@ -662,7 +653,7 @@ impl DirPlayer {
                     // sprites (positive channel); 3D-texture instances excluded
                     // in the JS twin.
                     let _ = ruffle_set_size(
-                        channel_num as i32,
+                        js_flash_key(channel_num),
                         channel.sprite.width.max(1) as i32,
                         channel.sprite.height.max(1) as i32,
                     );
@@ -689,7 +680,7 @@ impl DirPlayer {
                                 w, h, data.len(), paused_at_start, asserted_frame,
                             );
                             JsApi::dispatch_flash_member_loaded(
-                                channel_num as i32,
+                                js_flash_key(channel_num),
                                 member_ref.cast_lib,
                                 member_ref.cast_member,
                                 &data,
@@ -840,6 +831,229 @@ impl DirPlayer {
         Ok(())
     }
 
+    /// Instantiate a full nested `DirPlayer` for a Linked `#movie` member whose
+    /// linked bytes are loaded, register it in `NESTED_PLAYERS`, and start it
+    /// (load + play + its own command loop) on its own active-player id. The sub
+    /// runs the entire engine against itself — its own scripts/score/cast — via
+    /// the active-player indirection; the loader keeps running independently.
+    /// Synchronous: the async load+play happens in a spawned task bound to the
+    /// sub's id (a manual `ACTIVE_PLAYER_ID` set can't span an await here, since
+    /// the enclosing task's `WithActivePlayer` wrapper would restore it).
+    pub fn spawn_nested_player(&self, member_ref: CastMemberRef) {
+        if nested_player_id(&member_ref).is_some() {
+            return;
+        }
+        let (bytes, base_url, file_name) = match self
+            .movie
+            .cast_manager
+            .find_member_by_ref(&member_ref)
+            .and_then(|m| {
+                if let CastMemberType::Movie(mv) = &m.member_type {
+                    mv.bytes.as_ref().map(|b| {
+                        let fname = mv
+                            .file_name
+                            .rsplit(|c| c == '/' || c == '\\')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("nested.dcr")
+                            .to_string();
+                        (b.clone(), mv.base_url.clone(), fname)
+                    })
+                } else {
+                    None
+                }
+            }) {
+            Some(t) => t,
+            None => return,
+        };
+        let dir = match crate::director::file::read_director_file_bytes(&bytes, &file_name, &base_url)
+        {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("[nested-player] parse '{}' failed: {}", file_name, e);
+                return;
+            }
+        };
+        let (tx, rx) = async_std::channel::unbounded();
+        // The sub gets its OWN event channel (parallel to its command channel) so
+        // its events are processed by its own event loop with ACTIVE_PLAYER_ID =
+        // its id — otherwise a sub's script-instance ids resolve against the host
+        // allocator and panic (see NESTED_EVENT_TX).
+        let (event_tx, event_rx) = async_std::channel::unbounded();
+        let id = unsafe {
+            NESTED_PLAYERS.push(Some(DirPlayer::new(tx)));
+            NESTED_PLAYER_KEYS.push(Some(member_ref.clone()));
+            NESTED_EVENT_TX.push(Some(event_tx));
+            NESTED_PLAYERS.len()
+        };
+        // The sub never receives the frontend's `SetSystemFontPath` command, so
+        // its font_manager has no system font — text whose font isn't a cast
+        // member (Verdana etc.) falls back to `get_system_font()` and, finding
+        // none, fails to render ("No font found for 'Verdana'"). Inherit the
+        // host's system font (a shared `Rc<BitmapFont>`, cheap to clone).
+        let host_system_font = self.font_manager.system_font.clone();
+        let prev = unsafe { ACTIVE_PLAYER_ID };
+        // Bind the load/play task (and everything it spawns, incl. the sub's
+        // frame loop via play()) to the sub's id; spawn_player_local captures
+        // the id set right here.
+        unsafe {
+            ACTIVE_PLAYER_ID = id;
+        }
+        crate::player::spawn_player_local(async move {
+            reserve_player_mut_async(|p| Box::pin(p.load_movie_from_dir(dir))).await;
+            if host_system_font.is_some() {
+                reserve_player_mut(|p| {
+                    if p.font_manager.system_font.is_none() {
+                        p.font_manager.system_font = host_system_font.clone();
+                    }
+                });
+            }
+            reserve_player_mut(|p| p.play());
+            crate::player::spawn_player_local(crate::player::commands::run_command_loop(rx));
+            // Bound to the sub's id (spawn_player_local captured it above), so
+            // reserve_player_* inside the loop resolves to THIS sub.
+            crate::player::spawn_player_local(crate::player::events::run_event_loop(event_rx));
+            let (rw, rh, ver) = reserve_player_ref(|p| {
+                (p.movie.rect.width(), p.movie.rect.height(), p.movie.dir_version)
+            });
+            debug!(
+                "[nested-player] id={} started '{}' dir_version={} rect={}x{}",
+                id, file_name, ver, rw, rh
+            );
+        });
+        unsafe {
+            ACTIVE_PLAYER_ID = prev;
+        }
+    }
+
+    /// Scan the host movie's on-stage sprites for Linked Movie (`#movie`)
+    /// members whose linked bytes are loaded, and start a nested `DirPlayer` for
+    /// any not yet running. Called each frame so assigning a #movie member to a
+    /// sprite (DGS `sprite(spShk).member = member(gMember)`) activates playback.
+    pub fn activate_nested_players(&self) {
+        let to_build: Vec<CastMemberRef> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter_map(|channel| channel.sprite.member.clone())
+            .filter(|m| nested_player_id(m).is_none())
+            .filter(|m| {
+                matches!(
+                    self.movie.cast_manager.find_member_by_ref(m).map(|mem| &mem.member_type),
+                    Some(CastMemberType::Movie(mv)) if mv.bytes.is_some()
+                )
+            })
+            .collect();
+        for member_ref in to_build {
+            self.spawn_nested_player(member_ref);
+        }
+    }
+
+    /// Render each on-stage nested `#movie` sub-player's stage (headless, CPU)
+    /// and copy it into THIS (host) player's `bitmap_manager`, keyed by member,
+    /// so the WebGL2 `Movie` sprite arm can blit it. Called on the host each
+    /// frame. The sub-player renders from its own score/cast/bitmap_manager under
+    /// its active-player id; the resulting stage bitmap is a plain owned `Bitmap`
+    /// which is then stored in the host's manager (a separate manager, so the
+    /// pixels are copied across — no id collision).
+    pub fn render_nested_player_stages(&mut self) {
+        use std::collections::HashSet;
+        let refs: Vec<CastMemberRef> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter_map(|ch| ch.sprite.member.clone())
+            .filter(|m| nested_player_id(m).is_some())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        for member_ref in refs {
+            let id = match nested_player_id(&member_ref) {
+                Some(i) => i,
+                None => continue,
+            };
+            // Render the sub-player headlessly. Set ACTIVE_PLAYER_ID = id so any
+            // internal reserve_player_* inside the renderer resolves to the sub;
+            // no await here, so the manual set is safe. `self` (host) and the sub
+            // are distinct DirPlayers, so the &mut aliasing is only the usual
+            // raw-pointer re-entrancy the engine already relies on.
+            let prev = unsafe { ACTIVE_PLAYER_ID };
+            let rendered = unsafe {
+                ACTIVE_PLAYER_ID = id;
+                let out = match NESTED_PLAYERS.get_mut(id - 1).and_then(|o| o.as_mut()) {
+                    Some(sub) if {
+                        // Guard against a transient bad/huge sub stage rect (seen
+                        // when the window is unfocused and the sub is mid-reset):
+                        // a large width*height*32 in Bitmap::new aborts with an
+                        // allocation error. Movie stages are never > 4096.
+                        let (rw, rh) = (sub.movie.rect.width(), sub.movie.rect.height());
+                        let ok = rw >= 1 && rh >= 1 && rw <= 4096 && rh <= 4096;
+                        if !ok {
+                            warn!("[nested] skip render: bad sub rect {}x{}", rw, rh);
+                        }
+                        ok
+                    } => {
+                        let w = (sub.movie.rect.width().max(1)) as u16;
+                        let h = (sub.movie.rect.height().max(1)) as u16;
+                        // Render the sub-movie through the full WebGL2 pipeline
+                        // (off-screen FBO → readback) so it matches the host's
+                        // fidelity — the CPU rasterizer's text/ink quality is
+                        // visibly worse. Fall back to CPU if the live renderer
+                        // isn't WebGL2 (e.g. Canvas2D backend or none yet).
+                        let webgl_bmp = crate::rendering::with_renderer_mut(|r| match r {
+                            Some(crate::rendering_gpu::DynamicRenderer::WebGL2(webgl)) => {
+                                Some(webgl.render_player_to_bitmap(sub, id, w as u32, h as u32))
+                            }
+                            _ => None,
+                        });
+                        let bmp = webgl_bmp.unwrap_or_else(|| {
+                            let mut bmp = crate::player::bitmap::bitmap::Bitmap::new(
+                                w,
+                                h,
+                                32,
+                                32,
+                                0,
+                                crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                                    crate::player::bitmap::bitmap::get_system_default_palette(),
+                                ),
+                            );
+                            crate::rendering::render_stage_to_bitmap(sub, &mut bmp, None);
+                            bmp
+                        });
+                        Some(bmp)
+                    }
+                    _ => None,
+                };
+                ACTIVE_PLAYER_ID = prev;
+                out
+            };
+            // Store into the host's bitmap_manager (ACTIVE is back to host).
+            if let Some(bmp) = rendered {
+                let (w, h) = (bmp.width, bmp.height);
+                let reuse = self.nested_movie_images.get(&member_ref).copied().filter(|r| {
+                    matches!(self.bitmap_manager.get_bitmap(*r), Some(b) if b.width == w && b.height == h)
+                });
+                match reuse {
+                    Some(r) => {
+                        // `replace_bitmap` bumps the bitmap version so the WebGL
+                        // texture cache re-uploads this frame's content. A plain
+                        // `*slot = bmp` reset version to 0, so the composite went
+                        // STALE after the first frame (only refreshing when the
+                        // texture was LRU-evicted) — that was the hover-highlight
+                        // "flickers to the state where it should be showing".
+                        self.bitmap_manager.replace_bitmap(r, bmp);
+                    }
+                    None => {
+                        let r = self.bitmap_manager.add_bitmap(bmp);
+                        self.nested_movie_images.insert(member_ref.clone(), r);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
         // Pick the platform-correct default system palette before loading. Mac
         // movies (Director 4 titles like thead) default to System-Mac, Windows
@@ -918,13 +1132,18 @@ impl DirPlayer {
             .cast_manager
             .load_fonts_into_manager(&mut self.font_manager);
 
-        with_renderer_mut(|renderer_opt| {
-            if let Some(renderer) = renderer_opt {
-                use crate::rendering_gpu::Renderer;
-                let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
-                renderer.set_size(stage_w, stage_h);
-            }
-        });
+        // A nested `#movie` sub-player is headless — it must never resize the
+        // shared WebGL2 renderer (that canvas belongs to the host stage). Only
+        // the host player (active id 0) owns the on-screen renderer size.
+        if unsafe { ACTIVE_PLAYER_ID } == 0 {
+            with_renderer_mut(|renderer_opt| {
+                if let Some(renderer) = renderer_opt {
+                    use crate::rendering_gpu::Renderer;
+                    let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
+                    renderer.set_size(stage_w, stage_h);
+                }
+            });
+        }
 
         let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
         crate::js_api::JsApi::dispatch_stage_size_changed(stage_w, stage_h, self.center_stage);
@@ -948,7 +1167,7 @@ impl DirPlayer {
         use crate::js_api::safe_string;
         debug!("Loading Movie: {} (version: {})", safe_string(&self.movie.file_name), self.movie.dir_version);
 
-        async_std::task::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             run_movie_init_sequence().await;
             run_frame_loop().await;
         });
@@ -1070,7 +1289,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -1081,7 +1300,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -1092,7 +1311,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -1103,7 +1322,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -1114,7 +1333,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -1125,7 +1344,7 @@ impl DirPlayer {
         let breakpoint = self.current_breakpoint.take();
 
         if let Some(breakpoint) = breakpoint {
-            spawn_local(breakpoint.completer.complete(()));
+            crate::player::spawn_player_local(breakpoint.completer.complete(()));
         }
     }
 
@@ -2623,6 +2842,36 @@ impl DirPlayer {
         })
     }
 
+    /// Human-readable dump of the current handler call stack (`script::handler`
+    /// per scope, outer→inner). Used to surface a nested `#movie` sub-player's
+    /// stack in the console — the Dev UI panels are bound to the main player, so
+    /// a sub-player's error is otherwise uninspectable there.
+    pub fn call_stack_string(&self) -> String {
+        let mut trace = String::new();
+        for i in 0..self.scope_count {
+            if let Some(scope) = self.scopes.get(i as usize) {
+                let handler_info = if let Some(script) =
+                    self.movie.cast_manager.get_script_by_ref(&scope.script_ref)
+                {
+                    let handler_name = script
+                        .handlers
+                        .iter()
+                        .find(|(_, h)| h.name_id == scope.handler_name_id)
+                        .map(|(name, _)| name.as_str().to_owned())
+                        .unwrap_or_else(|| format!("#{}", scope.handler_name_id));
+                    format!("{}::{}", script.name, handler_name)
+                } else {
+                    format!("?::#{}", scope.handler_name_id)
+                };
+                trace.push_str(&format!(
+                    "  {}: {} (pc={})\n",
+                    i, handler_info, scope.bytecode_index
+                ));
+            }
+        }
+        trace
+    }
+
     fn on_script_error(&mut self, err: &ScriptError) {
         // abort is flow control (exits handler chain), not a real error
         if err.code == ScriptErrorCode::Abort {
@@ -2892,7 +3141,7 @@ impl DirPlayer {
 pub fn player_alloc_datum(datum: Datum) -> DatumRef {
     // let mut player_opt = PLAYER_LOCK.try_write().unwrap();
     unsafe {
-        let player = PLAYER_OPT.as_mut().unwrap();
+        let player = crate::player::player_mut();
         player.alloc_datum(datum)
     }
 }
@@ -2950,7 +3199,7 @@ pub async fn player_call_global_handler(
 ) -> Result<DatumRef, ScriptError> {
     let receiver_handler = unsafe {
         // let player_opt = PLAYER_LOCK.try_read().unwrap();
-        let player = PLAYER_OPT.as_mut().unwrap();
+        let player = crate::player::player_mut();
 
         let mut receiver_handler = None;
 
@@ -3047,13 +3296,97 @@ pub fn player_global_handler_exists(player: &DirPlayer, handler_name: &str) -> b
         })
 }
 
+/// Which player `reserve_player_*` / `player_*` currently resolve to.
+/// `0` = the main/host player (`PLAYER_OPT`); `N>0` = `NESTED_PLAYERS[N-1]`, a
+/// Linked `#movie` sub-player. A task sets this to run the engine against a
+/// specific player; because all ~1300 `reserve_player_*` call sites funnel
+/// through the accessors below, switching this one value redirects the whole
+/// engine — which is how a nested movie runs its own frame/scripts in the same
+/// wasm instance (no second wasm, no cross-realm bridge). Task-scoping this so
+/// each async task restores its own id on poll is a later step; today it stays
+/// `0`, making these accessors identical to the previous `PLAYER_OPT`-only form.
+pub static mut ACTIVE_PLAYER_ID: usize = 0;
+/// Registry of Linked `#movie` sub-players, indexed by `ACTIVE_PLAYER_ID - 1`.
+pub static mut NESTED_PLAYERS: Vec<Option<DirPlayer>> = Vec::new();
+/// Parallel to `NESTED_PLAYERS`: which `#movie` member owns each sub-player,
+/// so `activate` can skip already-built members and callers can map member→id.
+pub static mut NESTED_PLAYER_KEYS: Vec<Option<CastMemberRef>> = Vec::new();
+/// Parallel to `NESTED_PLAYERS`: each sub-player's OWN event channel sender.
+/// Events (mouseEnter/mouseWithin/mouseLeave, targeted callbacks) must be
+/// processed by the sub's own event loop with `ACTIVE_PLAYER_ID` = its id, so
+/// script-instance refs resolve against the sub's allocator. Routing them to the
+/// host's `PLAYER_EVENT_TX` (as the old single-global path did) processed a sub's
+/// instance ids against the HOST allocator → `get_script_instance` unwrap panic.
+pub static mut NESTED_EVENT_TX: Vec<Option<Sender<PlayerVMEvent>>> = Vec::new();
+
+/// The event-channel sender for the currently active player (host id 0 →
+/// `PLAYER_EVENT_TX`, else the sub's `NESTED_EVENT_TX` slot). Used by the
+/// `player_dispatch_*` event helpers so a sub's events reach the sub's loop.
+pub fn active_event_tx() -> Option<Sender<PlayerVMEvent>> {
+    unsafe {
+        if ACTIVE_PLAYER_ID == 0 {
+            PLAYER_EVENT_TX.clone()
+        } else {
+            NESTED_EVENT_TX
+                .get(ACTIVE_PLAYER_ID - 1)
+                .and_then(|o| o.clone())
+        }
+    }
+}
+
+/// A nested `#movie` sub-player's Flash sprites dispatch to Ruffle under a
+/// synthetic positive sprite key `BASE + player_id*STRIDE + local_channel` so
+/// they neither collide with the host's channel keys nor look like the negative
+/// off-screen-3D-texture keys (which are capture-count-limited). `update_flash_frame`
+/// decodes it back to (player_id, channel) and routes the captured frame into the
+/// SUB's `flash_frame_buffers`. STRIDE bounds a sub's channel count; BASE keeps
+/// the synthetic keys clear of real channels.
+pub const NESTED_FLASH_BASE: i32 = 100_000;
+pub const NESTED_FLASH_STRIDE: i32 = 1_000;
+
+/// Encode a nested sub-player's Flash dispatch key (see `NESTED_FLASH_BASE`).
+pub fn nested_flash_key(player_id: usize, channel: i16) -> i32 {
+    NESTED_FLASH_BASE + (player_id as i32) * NESTED_FLASH_STRIDE + channel as i32
+}
+
+/// Decode a synthetic nested Flash key back to `(player_id, channel)`, or `None`
+/// if it's an ordinary host channel key.
+pub fn decode_nested_flash_key(key: i32) -> Option<(usize, i16)> {
+    if key < NESTED_FLASH_BASE {
+        return None;
+    }
+    let rel = key - NESTED_FLASH_BASE;
+    Some(((rel / NESTED_FLASH_STRIDE) as usize, (rel % NESTED_FLASH_STRIDE) as i16))
+}
+
+/// Active-player id (`>0`) of the sub-player built for `member_ref`, if any.
+pub fn nested_player_id(member_ref: &CastMemberRef) -> Option<usize> {
+    unsafe {
+        NESTED_PLAYER_KEYS
+            .iter()
+            .position(|k| k.as_ref() == Some(member_ref))
+            .map(|i| i + 1)
+    }
+}
+
 #[inline(always)]
+unsafe fn active_player_ptr() -> *mut DirPlayer {
+    if ACTIVE_PLAYER_ID == 0 {
+        PLAYER_OPT.as_mut().unwrap_unchecked() as *mut DirPlayer
+    } else {
+        NESTED_PLAYERS
+            .get_unchecked_mut(ACTIVE_PLAYER_ID - 1)
+            .as_mut()
+            .unwrap_unchecked() as *mut DirPlayer
+    }
+}
+
 pub fn reserve_player_ref<T, F>(callback: F) -> T
 where
     F: FnOnce(&DirPlayer) -> T,
 {
     unsafe {
-        let player = PLAYER_OPT.as_ref().unwrap_unchecked();
+        let player = &*active_player_ptr();
         callback(player)
     }
 }
@@ -3064,7 +3397,7 @@ where
     F: FnOnce(&mut DirPlayer) -> T,
 {
     unsafe {
-        let player = PLAYER_OPT.as_mut().unwrap_unchecked();
+        let player = &mut *active_player_ptr();
         callback(player)
     }
 }
@@ -3073,14 +3406,97 @@ where
 /// Caller must ensure no mutable references exist.
 #[inline(always)]
 pub unsafe fn player_ref() -> &'static DirPlayer {
-    PLAYER_OPT.as_ref().unwrap_unchecked()
+    &*active_player_ptr()
 }
 
 /// Direct mutable reference access without closure overhead.
 /// Caller must ensure no other references exist.
 #[inline(always)]
 pub unsafe fn player_mut() -> &'static mut DirPlayer {
-    PLAYER_OPT.as_mut().unwrap_unchecked()
+    &mut *active_player_ptr()
+}
+
+/// Future wrapper that sets `ACTIVE_PLAYER_ID` to a captured id for the duration
+/// of every poll, then restores it. This is what makes multi-player safe under
+/// the shared async executor: a task spawned for player X always runs against X
+/// even when it's polled while another player's frame is on the stack.
+struct WithActivePlayer<F> {
+    id: usize,
+    inner: F,
+}
+impl<F: std::future::Future> std::future::Future for WithActivePlayer<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: standard pin-projection of the single `inner` field; `id` is Copy.
+        let this = unsafe { self.get_unchecked_mut() };
+        let inner = unsafe { std::pin::Pin::new_unchecked(&mut this.inner) };
+        unsafe {
+            let prev = ACTIVE_PLAYER_ID;
+            ACTIVE_PLAYER_ID = this.id;
+            let r = inner.poll(cx);
+            ACTIVE_PLAYER_ID = prev;
+            r
+        }
+    }
+}
+
+/// Await `fut` with `ACTIVE_PLAYER_ID` pinned to `id` across every poll, so async
+/// awaits inside it keep resolving the engine against `id` even after yielding
+/// (a plain `ACTIVE_PLAYER_ID = id` before an `.await` is undone by the enclosing
+/// task's own `WithActivePlayer` on the next poll). Used by `tellcall` to run a
+/// command inside a nested `#movie` sub-player.
+pub fn with_active_player<F: std::future::Future>(
+    id: usize,
+    fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+    WithActivePlayer { id, inner: fut }
+}
+
+/// Deep-copy a datum's VALUE from one player's allocator into another's (for
+/// `tellcall` arg/result marshaling across the `#movie` boundary). Simple,
+/// self-contained datums (Int/Float/String/Symbol/bool/etc.) copy by value;
+/// List/PropList recurse. Player-specific refs (script instances, member refs)
+/// are copied verbatim — meaningful only for the value types that cross a tell,
+/// which in practice are the simple ones (`sendAllSprites(#sym, k)`).
+pub fn marshal_datum(from: &DirPlayer, to: &mut DirPlayer, r: &crate::player::DatumRef) -> crate::player::DatumRef {
+    use crate::director::lingo::datum::{Datum, DatumType};
+    let value = from.get_datum(r).clone();
+    match value {
+        Datum::List(t, items, sorted) => {
+            let new_items: std::collections::VecDeque<_> =
+                items.iter().map(|i| marshal_datum(from, to, i)).collect();
+            to.alloc_datum(Datum::List(t, new_items, sorted))
+        }
+        Datum::PropList(pairs, sorted) => {
+            let new_pairs = pairs
+                .iter()
+                .map(|(k, v)| (marshal_datum(from, to, k), marshal_datum(from, to, v)))
+                .collect();
+            to.alloc_datum(Datum::PropList(new_pairs, sorted))
+        }
+        other => {
+            let _ = DatumType::Void;
+            to.alloc_datum(other)
+        }
+    }
+}
+
+/// Spawn a local task bound to the *currently active* player, so its async work
+/// always resolves the engine against the player it was spawned for — even when
+/// interleaved with another player's frame. Replaces raw `spawn_local` across
+/// the engine; the captured id is `0` (main player) everywhere today.
+pub fn spawn_player_local<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    // `use ... as raw` (no trailing `(`) so the bulk `crate::player::spawn_player_local(`
+    // → `spawn_player_local(` rewrite doesn't turn this into infinite recursion.
+    use async_std::task::spawn_local as raw;
+    let id = unsafe { ACTIVE_PLAYER_ID };
+    raw(WithActivePlayer { id, inner: fut });
 }
 
 fn reserve_player_mut_async<F, R>(callback: F) -> impl Future<Output = R>
@@ -3089,7 +3505,7 @@ where
 {
     async move {
         unsafe {
-            let player = PLAYER_OPT.as_mut().unwrap();
+            let player = crate::player::player_mut();
             callback(player).await
         }
     }
@@ -3207,13 +3623,36 @@ pub async fn player_call_script_handler_raw_args(
             }
         }?;
 
+        let _ = script_type;
+        let is_instance_receiver = receiver.is_some();
         let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
             Some(Datum::ScriptInstanceRef(script_instance_ref.clone()))
-        } else if script_type != ScriptType::Movie {
-            // TODO: check if this is right
-            Some(Datum::ScriptRef(handler_ref.0.clone()))
         } else {
-            None
+            // No explicit instance receiver: `me` is the script itself (a
+            // ScriptRef). Director binds `me` to the script for
+            // `script("x").handler()` calls — for MOVIE scripts too, whose
+            // sibling-handler calls rely on it (Neopets DGS `secure` movie
+            // script does `me.sub(...)` inside `decrypt_pc927634892`, which
+            // errored with `me`=VOID).
+            Some(Datum::ScriptRef(handler_ref.0.clone()))
+        };
+
+        // Whether the handler declares `me` as its first parameter. The receiver
+        // is only PREPENDED as arg0 (filling that param) when it does. Instance
+        // receivers (behaviors/parents) always declare `me`, so they always
+        // prepend. Movie scripts are the subtle case: `script("x").handler()`
+        // calls whose handler declares `me` (DGS `decrypt_pc927634892`) prepend,
+        // but a plain global/event handler like `on streamStatus url, state,
+        // bytesSoFar, bytesTotal` must NOT — prepending shifted every param by
+        // one (bogey_nights got `bytesSoFar` = the "Complete" state string).
+        let first_param_is_me = unsafe {
+            let handler_def = &*handler_ptr;
+            let names = &*names_ptr;
+            handler_def
+                .argument_name_ids
+                .first()
+                .and_then(|id| names.get(*id as usize))
+                .map_or(false, |n| n.eq_ignore_ascii_case("me"))
         };
 
         let scope_ref = player.push_scope();
@@ -3225,7 +3664,7 @@ pub async fn player_call_script_handler_raw_args(
         };
 
         if let Some(receiver_arg) = receiver_arg {
-            if !use_raw_arg_list {
+            if !use_raw_arg_list && (is_instance_receiver || first_param_is_me) {
                 let arg_ref = player.alloc_datum(receiver_arg);
                 let scope = player.scopes.get_mut(scope_ref).unwrap();
                 scope.args.push(arg_ref);
@@ -3271,6 +3710,21 @@ pub async fn player_call_script_handler_raw_args(
     let scope_generation = reserve_player_ref(|player| {
         player.scopes.get(scope_ref).unwrap().generation
     });
+    // Cooperative-yield budget for synchronous busy-wait loops. A Lingo
+    // `repeat while keyPressed(" ")` (waiting for key release) or
+    // `repeat while the mouseDown` runs entirely in bytecode with no `.await`
+    // that ever returns Pending, so the WASM never unwinds to the JS event loop
+    // — the key-up/mouse-up event can't be processed and the loop spins forever.
+    // On each BACKWARD jump (a loop iteration) we check elapsed time and, past a
+    // frame's worth, yield a real macrotask so queued input events fire, then
+    // resume. Time-budgeted so ordinary fast compute loops are unaffected.
+    let mut last_yield_ms = chrono::Local::now().timestamp_millis();
+    // Count backward jumps to distinguish a TIGHT busy-wait (thousands of
+    // iterations/ms — `repeat while keyPressed`) from a heavy COMPUTE loop (a
+    // few iterations, each doing real work — the game's `drawmap`/water
+    // `copyPixels` tiling). Only the former should yield; yielding inside compute
+    // loops fired ~15×/frame at ~4ms each and tanked the sub to ~3fps.
+    let mut backjumps: u32 = 0;
 
     loop {
         // Check if scope was reused (generation changed = scope was popped and re-pushed)
@@ -3424,6 +3878,38 @@ pub async fn player_call_script_handler_raw_args(
                 return Err(err);
             }
             HandlerExecutionResult::Jump => {}
+        }
+
+        // Busy-wait cooperative yield (see `last_yield_ms` above). A backward
+        // jump means we looped; if we've run >16ms without unwinding, yield a
+        // real 1ms macrotask so the JS event loop can deliver queued key/mouse
+        // events (letting `keyPressed`/`the mouseDown` actually change).
+        if !should_return {
+            let new_index = reserve_player_ref(|player| {
+                player.scopes.get(scope_ref).map(|s| s.bytecode_index)
+            });
+            if let Some(new_index) = new_index {
+                if new_index < bytecode_index {
+                    backjumps += 1;
+                    // Only re-check the clock every 4096 backward jumps. A tight
+                    // busy-wait reaches this in well under a frame; a compute loop
+                    // (drawmap ~hundreds of iterations total) never does, so it
+                    // never yields. When a tight loop HAS run ≥16ms, yield a real
+                    // macrotask so queued key/mouse events are delivered.
+                    if backjumps >= 4096 {
+                        backjumps = 0;
+                        let now = chrono::Local::now().timestamp_millis();
+                        if now - last_yield_ms >= 16 {
+                            last_yield_ms = now;
+                            let _ = timeout(
+                                Duration::from_millis(1),
+                                future::pending::<()>(),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
         }
 
         // end_profiling(profile_token);
@@ -4070,7 +4556,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     }
     if new_frame > 1 && prev_frame <= 1 {
         unsafe {
-            let player = PLAYER_OPT.as_mut().unwrap();
+            let player = crate::player::player_mut();
             player
                 .movie
                 .cast_manager
@@ -4244,6 +4730,22 @@ pub async fn run_single_frame() -> (bool, bool) {
     });
 
     player_wait_available().await;
+
+    // Activate any Linked Movie (`#movie`) sprites that just gained their linked
+    // bytes: start a nested DirPlayer running each one on its own active-player
+    // id. Only the main loop reaches here (this whole frame loop runs at id 0);
+    // sub-players get their own frame loops via spawn_nested_player -> play().
+    if unsafe { ACTIVE_PLAYER_ID } == 0 {
+        reserve_player_ref(|player| player.activate_nested_players());
+        // Composite each on-stage sub-player's stage into the host so the WebGL2
+        // `Movie` sprite arm can draw it. Only when sub-players exist.
+        if unsafe { !NESTED_PLAYERS.is_empty() } {
+            reserve_player_mut(|player| {
+                player.render_nested_player_stages();
+                player.stage_dirty = true;
+            });
+        }
+    }
 
     let changed_filmloops = reserve_player_mut_async(|player| {
         Box::pin(async move {
@@ -4759,7 +5261,17 @@ pub fn compute_char_at(player: &mut DirPlayer, sprite_num: i16, mx: i32, my: i32
 /// zero-gain node and is gone by the time the frame loop resumes.
 fn tick_sound_manager(delta: f64) {
     unsafe {
-        if let Some(player) = PLAYER_OPT.as_mut() {
+        // Route to the ACTIVE player's sound manager, not always the host. A
+        // nested `#movie` sub-player's frame loop runs under its own active id;
+        // ticking PLAYER_OPT (the host) here left the sub's sounds un-updated
+        // (fades/loops/cue-points/stop never progressed) — the same
+        // de-globalization gap as DatumRef::drop.
+        let player_opt = if ACTIVE_PLAYER_ID == 0 {
+            PLAYER_OPT.as_mut()
+        } else {
+            NESTED_PLAYERS.get_mut(ACTIVE_PLAYER_ID - 1).and_then(|o| o.as_mut())
+        };
+        if let Some(player) = player_opt {
             // Aliasing the player via a raw pointer because
             // SoundManager::update needs `&mut DirPlayer` for
             // bookkeeping but lives inside the same player.
@@ -4773,7 +5285,7 @@ fn tick_sound_manager(delta: f64) {
 
 pub async fn run_frame_loop() {
     unsafe {
-        let player = PLAYER_OPT.as_ref().unwrap();
+        let player = crate::player::player_ref();
         if !player.is_playing {
             return;
         }
@@ -4925,10 +5437,52 @@ pub async fn run_frame_loop() {
         // Get the target frame delay based on cached tempo for current frame
         let target_delay_ms = reserve_player_ref(|player| {
             let tempo = player.current_frame_tempo;
-            if tempo == 0 {
+            let base = if tempo == 0 {
                 1000.0 / 30.0  // Default to 30fps if tempo is 0
             } else {
                 1000.0 / tempo as f64
+            };
+            // While an async net fetch is in flight, use a longer per-frame
+            // yield (>= ~12 ms) so the browser's fetch/stream gets enough
+            // event-loop time to complete. A tight high-tempo loop
+            // (DGS puppetTempo(999) ≈ 1 ms/frame) that calls into Flash every
+            // frame (showGameLoadStats) otherwise starves the fetch, so
+            // gameLoaded()/netDone never turns true and the loader hangs on its
+            // loading frame — only a debugger pause (which yields the event
+            // loop) unstuck it. The slowdown lasts only while a task loads.
+            // Also cover Ruffle-side browser fetches (LoadVars/URLLoader/XML)
+            // that dirplayer's net_manager never sees: flashPlayerManager's
+            // fetch monkey-patch publishes the count of outstanding requests as
+            // `window.__dirplayerPendingNetCount`. The DGS loader spins at load
+            // state 81 waiting on the preloader's translation POST (Ruffle-side,
+            // 1-3 s) to set `preloaderTranslationSuccess`; without this the tight
+            // loop starves that fetch's completion callback and the login links
+            // (asfunction hyperlinks in the translated IDS strings) never load.
+            let read_window_count = |key: &str| -> f64 {
+                web_sys::window()
+                    .and_then(|w| {
+                        js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str(key)).ok()
+                    })
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            };
+            let browser_fetch_pending = read_window_count("__dirplayerPendingNetCount") > 0.0;
+            // Offscreen Ruffle instances self-tick via requestAnimationFrame; a
+            // tight high-tempo Director loop (DGS puppetTempo(999) guest-gate
+            // poll at load-state 350) hogs the main thread and starves those
+            // ticks, so a preloader text field whose htmlText was just updated
+            // (the login links) never re-renders — the movie only worked with a
+            // debugger pause, which yields the loop. Floor the per-frame yield
+            // to ~one RAF interval while any Flash sprite is on stage AND the
+            // movie is spinning faster than 60fps (base < 16ms), so normal-tempo
+            // Flash playback is unaffected but a busy-poll can't starve Ruffle.
+            let flash_active = read_window_count("__dirplayerActiveFlashCount") > 0.0;
+            if player.net_manager.has_in_progress_tasks() || browser_fetch_pending {
+                base.max(25.0)
+            } else if flash_active {
+                base.max(16.0)
+            } else {
+                base
             }
         });
 
@@ -5010,7 +5564,7 @@ pub async fn player_trigger_error_pause(
 }
 
 pub async fn player_is_playing() -> bool {
-    unsafe { PLAYER_OPT.as_ref().unwrap().is_playing }
+    unsafe { crate::player::player_ref().is_playing }
 }
 
 pub(crate) static mut PLAYER_TX: Option<Sender<PlayerVMExecutionItem>> = None;
@@ -5046,12 +5600,12 @@ pub fn init_player() {
     // let mut player = //PLAYER_LOCK.try_write().unwrap();
     // *player = Some(DirPlayer::new(tx, allocator_rx, allocator_tx));
 
-    async_std::task::spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         // player_load_system_font().await;
-        async_std::task::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             run_command_loop(rx).await;
         });
-        async_std::task::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             run_event_loop(event_rx).await;
         });
     });

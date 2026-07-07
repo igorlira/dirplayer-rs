@@ -213,7 +213,7 @@ impl FileIoXtraManager {
 
                 // Await the fetch outside of reserve_player_mut
                 {
-                    let player = unsafe { crate::PLAYER_OPT.as_mut().unwrap() };
+                    let player = unsafe { crate::player::player_mut() };
                     if !player.net_manager.is_task_done(Some(task_id)) {
                         player.net_manager.await_task(task_id).await;
                     }

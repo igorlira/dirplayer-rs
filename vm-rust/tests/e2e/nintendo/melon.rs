@@ -17,15 +17,15 @@ browser_e2e_test!(test_nintendo_melon_load, |player| async move {
 
     player.step_until(datum("_movie.frame").equals(StaticDatum::Int(1))).timeout(10.0).await?;
 
-    player.step_frames(1).await;
+    player.step_frames(250).await;
 
     snapshots.verify("start_game", player.snapshot_stage())?;
 
-    player.step_frames(15).await;
+    player.step_frames(250).await;
 
     player.click_sprite(sprite().member("play_button")).await?;
 
-    player.step_frames(5).await;
+    player.step_frames(250).await;
 
     snapshots.verify("in_match", player.snapshot_stage())?;
 

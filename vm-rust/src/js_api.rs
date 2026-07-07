@@ -300,6 +300,14 @@ impl JsApi {
         onFlashResetAll();
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
+        // Only the host player (id 0) owns the frontend stage. A nested `#movie`
+        // sub-player renders headless into a bitmap; if it sets `the stage.rect`
+        // / `drawRect` / `centerStage` it must NOT resize the real frontend stage
+        // (that caused the host stage to snap to the sub's dimensions → "zoomed"
+        // flicker, since the sub re-set its rect during play).
+        if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+            return;
+        }
         onStageSizeChanged(width, height, center);
     }
     pub fn dispatch_movie_loaded(dir_file: &DirectorFile) {
@@ -921,16 +929,16 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
             onCastLibNameChanged(cast_number, &cast.name);
         });
     }
 
     pub fn dispatch_cast_list_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let names = player
                 .movie
                 .cast_manager
@@ -949,8 +957,8 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -968,8 +976,8 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let subscribed_members = &player.subscribed_member_refs;
             if !subscribed_members.contains(&member_ref) {
                 return;
@@ -994,8 +1002,8 @@ impl JsApi {
     }
 
     pub fn on_cast_member_name_changed(slot_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
                 for channel in player.movie.score.channels.iter() {
@@ -1018,8 +1026,8 @@ impl JsApi {
     }
 
     pub fn dispatch_score_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             onScoreChanged(snapshot.to_js_object());
@@ -1042,8 +1050,8 @@ impl JsApi {
         });
 
         if selected_channel == Some(channel) {
-            async_std::task::spawn_local(async move {
-                let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            crate::player::spawn_player_local(async move {
+                let player = unsafe { crate::player::player_ref() };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 onChannelChanged(channel, snapshot.to_js_object());
             });
@@ -1462,8 +1470,8 @@ impl JsApi {
     }
 
     pub fn dispatch_channel_name_changed(channel: i16) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
                 let display_name =
@@ -1906,8 +1914,8 @@ impl JsApi {
     }
 
     pub fn dispatch_breakpoint_list_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let breakpoints = player
                 .breakpoint_manager
                 .breakpoints

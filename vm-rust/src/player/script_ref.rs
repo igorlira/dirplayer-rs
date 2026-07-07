@@ -1,4 +1,4 @@
-use super::{allocator::{ScriptInstanceAllocatorTrait, ALLOCATOR_RESETTING}, script::ScriptInstanceId, PLAYER_OPT};
+use super::{allocator::{ScriptInstanceAllocatorTrait, ALLOCATOR_RESETTING}, script::ScriptInstanceId, ACTIVE_PLAYER_ID, NESTED_PLAYERS, PLAYER_OPT};
 
 #[derive(Debug)]
 pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
@@ -45,7 +45,16 @@ impl Drop for ScriptInstanceRef {
             let rc = &mut *self.1;
             *rc -= 1;
             if *rc == 0 {
-                if let Some(player) = PLAYER_OPT.as_mut() {
+                // Route to the ACTIVE player's allocator (a nested sub-player owns
+                // its own script instances) — see the DatumRef::drop note.
+                let player_opt = if ACTIVE_PLAYER_ID == 0 {
+                    PLAYER_OPT.as_mut()
+                } else {
+                    NESTED_PLAYERS
+                        .get_mut(ACTIVE_PLAYER_ID - 1)
+                        .and_then(|o| o.as_mut())
+                };
+                if let Some(player) = player_opt {
                     player.allocator.on_script_instance_ref_dropped(self.0);
                 }
             }

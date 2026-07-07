@@ -2997,7 +2997,10 @@ pub fn render_score_to_bitmap_with_offset(
                     // First time this sprite renders a Flash member — ask
                     // JS to spin up a dedicated Ruffle instance for it.
                     let dispatch_key = (channel_num as i16, member_ref.cast_lib, member_ref.cast_member);
-                    if !player.flash_sprite_loaded.contains(&dispatch_key) {
+                    // Host-only: a nested sub-player's Flash lifecycle is owned by
+                    // its own pre_dispatch_flash_members (see webgl2 render_sprite).
+                    let is_host = unsafe { crate::player::ACTIVE_PLAYER_ID } == 0;
+                    if is_host && !player.flash_sprite_loaded.contains(&dispatch_key) {
                         let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                         let w = sprite.width.max(1) as u32;
                         let h = sprite.height.max(1) as u32;
@@ -3467,6 +3470,17 @@ where
 
 pub fn draw_frame_immediate() {
     use crate::rendering_gpu::Renderer;
+    // A nested `#movie` sub-player is headless: its stage is composited by the
+    // HOST once per host frame via render_nested_player_stages into an
+    // off-screen FBO. If the sub calls updateStage()/nothing() (very common
+    // during keyboard movement and busy-wait loops), draw_frame here would run
+    // against the HOST's framebuffer + size, smearing the sub's sprites (wide
+    // scrolling background, off-screen tiles) across the whole host stage
+    // unclipped — flickering on every such call. Never let a sub draw directly
+    // to the host stage; leave stage_dirty so the host recomposites its FBO.
+    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+        return;
+    }
     let (tempo, dirty) = reserve_player_ref(|player| {
         (player.current_frame_tempo as f64, player.stage_dirty)
     });
@@ -3888,7 +3902,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
             // renderer was dropped between movies) reuse the existing loop.
             if !DRAW_LOOP_SPAWNED.with(|f| f.get()) {
                 DRAW_LOOP_SPAWNED.with(|f| f.set(true));
-                spawn_local(async {
+                crate::player::spawn_player_local(async {
                     run_draw_loop().await;
                 });
             }

@@ -582,7 +582,14 @@ impl CastMemberRefHandlers {
                     member_ref.cast_member.min(-1)
                 },
             )),
-            "type" => Ok(Datum::String("empty".to_string())),
+            // A valid member's `.type` returns a Symbol (see get_prop's "type"
+            // arm), so the invalid/empty member must too — Director's `#empty`.
+            // Returning a String made `member("x").type = #empty` FALSE (String
+            // vs Symbol), so the common lazy-create idiom
+            //   `if member(name).type = #empty then member = new(#bitmap) ...`
+            // took the else branch and used the invalid (-1,-1) ref instead of
+            // creating the member (g349 cave-door `drawframes`).
+            "type" => Ok(Datum::Symbol("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
             "memberNum" => Ok(Datum::Int(-1)),
             "text" | "comments" => Ok(Datum::String("".to_string())),
@@ -924,6 +931,35 @@ impl CastMemberRefHandlers {
                     Ok(Datum::Void)
                 }
             }
+            CastMemberTypeId::Movie => {
+                // Linked Movie member props (Director 11.5 Scripting Dictionary).
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                if let CastMemberType::Movie(mv) = &cast_member.member_type {
+                    match prop {
+                        "fileName" | "pathName" => Ok(Datum::String(mv.file_name.clone())),
+                        "scriptsEnabled" => Ok(Datum::Int(mv.scripts_enabled as i32)),
+                        "crop" => Ok(Datum::Int(mv.crop as i32)),
+                        "center" => Ok(Datum::Int(mv.center as i32)),
+                        "sound" => Ok(Datum::Int(mv.sound as i32)),
+                        "loop" => Ok(Datum::Int(mv.loops as i32)),
+                        "width" => Ok(Datum::Int(mv.width as i32)),
+                        "height" => Ok(Datum::Int(mv.height as i32)),
+                        "rect" => Ok(Datum::Rect(
+                            [0.0, 0.0, mv.width as f64, mv.height as f64],
+                            0,
+                        )),
+                        "linked" => Ok(Datum::Int(1)),
+                        "regPoint" => Ok(Datum::Point(
+                            [mv.reg_point.0 as f64, mv.reg_point.1 as f64],
+                            0,
+                        )),
+                        _ => Ok(Datum::Void),
+                    }
+                } else {
+                    Ok(Datum::Void)
+                }
+            }
             _ => {
                 // SWA/streaming media properties — return sensible defaults
                 match prop {
@@ -1122,6 +1158,65 @@ impl CastMemberRefHandlers {
                 // Other Flash props (directToStage, quality, scaleMode, etc.)
                 // are accepted silently.
                 Ok(())
+            }
+            CastMemberTypeId::Movie => {
+                // Linked Movie member props (Director 11.5 Scripting Dictionary).
+                if prop.eq_ignore_ascii_case("filename") || prop.eq_ignore_ascii_case("pathname") {
+                    // `member.fileName = <url>` links the external .dir/.dcr.
+                    // Like the Flash member, grab the bytes from the net task the
+                    // caller already preloadNetThing'd (Director's preload-then-set
+                    // pattern) and stash them on the member; the live nested Movie
+                    // is parsed/built from them at activation. Left unlinked (bytes
+                    // None) if the URL wasn't preloaded.
+                    let url = value.string_value()?;
+                    return reserve_player_mut(|player| {
+                        let captured: Option<(std::rc::Rc<Vec<u8>>, String)> =
+                            player.net_manager.find_task_by_url(&url).and_then(|id| {
+                                let bytes = player
+                                    .net_manager
+                                    .get_task_result(Some(id))
+                                    .and_then(|r| r.ok())?;
+                                if bytes.is_empty() {
+                                    return None;
+                                }
+                                let base_url = player
+                                    .net_manager
+                                    .get_task(id)
+                                    .map(|task| crate::utils::get_base_url(&task.resolved_url).to_string())
+                                    .unwrap_or_default();
+                                Some((std::rc::Rc::new(bytes), base_url))
+                            });
+                        if let Some(cm) = player.movie.cast_manager.find_member_by_ref_mut(member_ref) {
+                            if let CastMemberType::Movie(mv) = &mut cm.member_type {
+                                mv.file_name = url.clone();
+                                if let Some((bytes, base_url)) = captured {
+                                    mv.bytes = Some(bytes);
+                                    mv.base_url = base_url;
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                return reserve_player_mut(|player| {
+                    if let Some(cm) = player.movie.cast_manager.find_member_by_ref_mut(member_ref) {
+                        if let CastMemberType::Movie(mv) = &mut cm.member_type {
+                            let truthy = value.to_bool().unwrap_or(false);
+                            match prop.to_lowercase().as_str() {
+                                "scriptsenabled" => mv.scripts_enabled = truthy,
+                                "crop" => mv.crop = truthy,
+                                "center" => mv.center = truthy,
+                                "regpoint" => {
+                                    if let Datum::Point(pt, _) = &value {
+                                        mv.reg_point = (pt[0] as i16, pt[1] as i16);
+                                    }
+                                }
+                                _ => {} // other linked-movie props accepted silently
+                            }
+                        }
+                    }
+                    Ok(())
+                });
             }
             CastMemberTypeId::Shockwave3d => reserve_player_mut(|player| {
                 Shockwave3dMemberHandlers::set_prop(player, member_ref, prop, &value)

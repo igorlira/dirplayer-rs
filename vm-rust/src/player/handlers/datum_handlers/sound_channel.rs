@@ -433,7 +433,7 @@ impl SoundChannelDatumHandlers {
             drop(ch);
 
             // Spawn async task that doesn't block
-            spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 SoundChannel::play_current_segment_async(channel_rc).await;
             });
         } else {
@@ -1555,7 +1555,7 @@ impl SoundChannel {
         // We call play_file with Rc to ensure no borrow conflicts
         let rc_clone = channel_rc.clone();
         debug!("🚀 About to spawn MP3 decode task (play_current_segment_async)");
-        wasm_bindgen_futures::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             debug!("mp3 task started");
             // call into existing play_file entry which handles MP3 and PCM paths
             SoundChannel::play_file(rc_clone, member_ref);
@@ -1825,11 +1825,25 @@ impl SoundChannel {
             (this.channel_num, this.audio_context.clone().unwrap(), this.loop_count)
         };
 
-        let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+        // Resolve the member against the ACTIVE player, not always the host: a
+        // nested `#movie` sub-player's `puppetSound` runs under its own active id
+        // and its member_ref/datum + sound cast member live in the SUB's
+        // allocator/cast. Using PLAYER_OPT (host) looked up a different datum at
+        // that id (the "datum type: string/symbol/int" mismatch) and never found
+        // the sound member.
+        let player_opt = unsafe {
+            if crate::player::ACTIVE_PLAYER_ID == 0 {
+                crate::PLAYER_OPT.as_mut()
+            } else {
+                crate::player::NESTED_PLAYERS
+                    .get_mut(crate::player::ACTIVE_PLAYER_ID - 1)
+                    .and_then(|o| o.as_mut())
+            }
+        };
         let player = match player_opt {
             Some(p) => p,
             None => {
-                error!("❌ No global player found");
+                error!("❌ No active player found");
                 return;
             }
         };
@@ -1898,7 +1912,7 @@ impl SoundChannel {
                 let mp3_sound_member = sound_member.clone();
 
                 debug!("🚀 About to spawn MP3 decode task (start_sound)");
-                wasm_bindgen_futures::spawn_local(async move {
+                crate::player::spawn_player_local(async move {
                     {
                         let mut ch = self_rc_clone.borrow_mut();
                         ch.status = SoundStatus::Loading;
@@ -1986,7 +2000,7 @@ impl SoundChannel {
             // see the matching site further down.
             let sound_member_for_cues = sound_member.clone();
 
-            wasm_bindgen_futures::spawn_local(async move {
+            crate::player::spawn_player_local(async move {
 
                 {
                     let mut ch = self_rc_clone.borrow_mut();
@@ -2564,11 +2578,25 @@ impl SoundChannel {
         let mut this = self_rc.borrow_mut();
 
         // Get global player
-        let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
+        // Resolve the member against the ACTIVE player, not always the host: a
+        // nested `#movie` sub-player's `puppetSound` runs under its own active id
+        // and its member_ref/datum + sound cast member live in the SUB's
+        // allocator/cast. Using PLAYER_OPT (host) looked up a different datum at
+        // that id (the "datum type: string/symbol/int" mismatch) and never found
+        // the sound member.
+        let player_opt = unsafe {
+            if crate::player::ACTIVE_PLAYER_ID == 0 {
+                crate::PLAYER_OPT.as_mut()
+            } else {
+                crate::player::NESTED_PLAYERS
+                    .get_mut(crate::player::ACTIVE_PLAYER_ID - 1)
+                    .and_then(|o| o.as_mut())
+            }
+        };
         let player = match player_opt {
             Some(p) => p,
             None => {
-                error!("❌ No global player found");
+                error!("❌ No active player found");
                 return;
             }
         };
@@ -4384,7 +4412,7 @@ impl SoundChannel {
                 );
             let channel_num = self.channel_num;
             
-            spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                     if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize) {
                         SoundChannel::play_file(channel_rc, queued_ref);
@@ -4410,7 +4438,7 @@ impl SoundChannel {
                     let member_ref_clone = member_ref.clone();
                     let channel_num = self.channel_num;
                     
-                    spawn_local(async move {
+                    crate::player::spawn_player_local(async move {
                         if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                             if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize) {
                                 SoundChannel::play_file(channel_rc, member_ref_clone);
@@ -4431,7 +4459,7 @@ impl SoundChannel {
                     let member_ref_clone = member_ref.clone();
                     let channel_num = self.channel_num;
                     
-                    spawn_local(async move {
+                    crate::player::spawn_player_local(async move {
                         if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                             if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize) {
                                 SoundChannel::play_file(channel_rc, member_ref_clone);
@@ -4451,7 +4479,7 @@ impl SoundChannel {
                 if !self.replay_cached_buffer() {
                     let member_ref = self.playlist_segments[0].member_ref.clone();
                     let channel_num = self.channel_num;
-                    spawn_local(async move {
+                    crate::player::spawn_player_local(async move {
                         if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                             if let Some(channel_rc) =
                                 player.sound_manager.get_channel(channel_num as usize)
@@ -4503,7 +4531,7 @@ impl SoundChannel {
 
             // Fall back to full decode path
             let channel_num = self.channel_num;
-            spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                     if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize)
                     {
@@ -4533,7 +4561,7 @@ impl SoundChannel {
             if !self.replay_cached_buffer() {
                 // Fall back to full decode path
                 let channel_num = self.channel_num;
-                spawn_local(async move {
+                crate::player::spawn_player_local(async move {
                     if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
                         if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize)
                         {
@@ -4609,7 +4637,7 @@ impl SoundChannel {
         // For now, use a workaround with global player
         let channel_num = self.channel_num;
 
-        spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             let player_opt = unsafe { crate::PLAYER_OPT.as_mut() };
             if let Some(player) = player_opt {
                 if let Some(channel_rc) = player.sound_manager.get_channel(channel_num as usize) {

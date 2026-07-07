@@ -781,7 +781,7 @@ impl BuiltInHandlerManager {
             player.net_manager.preload_net_thing(file_or_url.clone())
         });
         {
-            let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+            let player = unsafe { crate::player::player_mut() };
             if !player.net_manager.is_task_done(Some(task_id)) {
                 player.net_manager.await_task(task_id).await;
             }
@@ -2218,6 +2218,18 @@ impl BuiltInHandlerManager {
                         Ok(player.alloc_datum(Datum::Point([x as f64, y as f64], 0)))
                     }
                 })
+            }
+            "locvtolinepos" | "linepostolocv" | "loctocharpos" | "charpostoloc"
+                if !args.is_empty() =>
+            {
+                // Global form `locVToLinePos(member, loc)` etc. Director exposes
+                // these text/field position helpers both as member methods and as
+                // globals whose first arg is the member. Delegate to the member's
+                // own handler (implemented in cast_member/text.rs & field.rs).
+                let rest = args[1..].to_vec();
+                crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
+                    &args[0], name, &rest,
+                )
             }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler

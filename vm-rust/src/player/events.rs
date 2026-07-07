@@ -24,7 +24,7 @@ pub enum PlayerVMEvent {
 }
 
 pub fn player_dispatch_global_event(handler_name: &str, args: &Vec<DatumRef>) {
-    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+    if let Some(tx) = crate::player::active_event_tx() {
         let _ = tx.try_send(PlayerVMEvent::Global(
             handler_name.to_owned(),
             args.to_owned(),
@@ -37,7 +37,7 @@ pub fn player_dispatch_callback_event(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) {
-    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+    if let Some(tx) = crate::player::active_event_tx() {
         let _ = tx.try_send(PlayerVMEvent::Callback(
             receiver,
             handler_name.to_owned(),
@@ -51,7 +51,7 @@ pub fn player_dispatch_targeted_event(
     args: &Vec<DatumRef>,
     instance_ids: Option<&Vec<ScriptInstanceRef>>,
 ) {
-    if let Some(tx) = unsafe { PLAYER_EVENT_TX.clone() } {
+    if let Some(tx) = crate::player::active_event_tx() {
         let _ = tx.try_send(PlayerVMEvent::Targeted(
             handler_name.to_owned(),
             args.to_owned(),
@@ -81,7 +81,7 @@ pub fn player_dispatch_event_to_sprite(
         return;
     }
     let instance_ids = instance_ids.unwrap();
-    let tx = unsafe { PLAYER_EVENT_TX.clone() }.unwrap();
+    let tx = crate::player::active_event_tx().unwrap();
     tx.try_send(PlayerVMEvent::Targeted(
         handler_name.to_owned(),
         args.to_owned(),

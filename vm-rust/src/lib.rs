@@ -579,6 +579,7 @@ pub fn mouse_down(x: f64, y: f64) {
         player.movie.mouse_down = true;
     });
     player_dispatch(PlayerVMCommand::MouseDown((ix, iy)));
+    forward_mouse_to_nested(0, ix, iy);
 }
 
 #[wasm_bindgen]
@@ -589,6 +590,92 @@ pub fn mouse_up(x: f64, y: f64) {
         player.movie.mouse_down = false;
     });
     player_dispatch(PlayerVMCommand::MouseUp((ix, iy)));
+    forward_mouse_to_nested(1, ix, iy);
+}
+
+/// Forward a mouse event to a nested `#movie` sub-player when the cursor is over
+/// its sprite: find the on-stage #movie sprite whose rect contains `(ix,iy)`, map
+/// the point into the sub-player's stage rect, set the sub's `mouse_loc`, and
+/// dispatch the event to the sub's own command queue so its behaviours
+/// (`checkMouse` / `on mouseDown`) respond. `kind`: 0=down, 1=up, 2=move.
+fn forward_mouse_to_nested(kind: u8, ix: i32, iy: i32) {
+    use crate::player::{
+        nested_player_id, reserve_player_mut, reserve_player_ref, ACTIVE_PLAYER_ID, NESTED_PLAYERS,
+    };
+    let target = reserve_player_ref(|host| {
+        for channel in &host.movie.score.channels {
+            let Some(member_ref) = channel.sprite.member.as_ref() else {
+                continue;
+            };
+            let Some(id) = nested_player_id(member_ref) else {
+                continue;
+            };
+            if !channel.sprite.visible {
+                continue;
+            }
+            let rect = crate::player::score::get_concrete_sprite_rect(host, &channel.sprite);
+            if ix >= rect.left && ix < rect.right && iy >= rect.top && iy < rect.bottom {
+                let sub_rect = unsafe {
+                    NESTED_PLAYERS
+                        .get(id - 1)
+                        .and_then(|o| o.as_ref())
+                        .map(|s| s.movie.rect.clone())
+                };
+                if let Some(sr) = sub_rect {
+                    let sw = rect.width().max(1);
+                    let sh = rect.height().max(1);
+                    // The sub renders 0-origin (the composite uses ortho at the
+                    // sub's WIDTH/HEIGHT, ignoring movie.rect's left/top — g349's
+                    // rect origin is (20,20) but its sprites live at 0..600). Map
+                    // the click to that same 0-origin space; adding sr.left/top
+                    // shifted every click ~20px and made small buttons (Restart /
+                    // Quit) miss.
+                    let sx = (ix - rect.left) * sr.width() / sw;
+                    let sy = (iy - rect.top) * sr.height() / sh;
+                    return Some((id, sx, sy));
+                }
+            }
+        }
+        None
+    });
+    let Some((id, sx, sy)) = target else {
+        return;
+    };
+    // Update the sub-player's mouse STATE synchronously (so polling handlers like
+    // the DGS `checkMouse` see `the mouseLoc`/`the mouseDown` immediately) AND
+    // dispatch the event into the sub's own command queue so its sprite
+    // behaviours fire — the Restart button is `on mouseDown me` and Quit is
+    // `on mouseUp me`, which only run on an actual event, not state polling.
+    // player_dispatch routes to the ACTIVE player's queue while ACTIVE_PLAYER_ID
+    // = id; the sub's command loop resolves instance ids against the sub's own
+    // allocator (de-globalization is in place, so the earlier cross-boundary
+    // concern no longer applies).
+    let prev = unsafe { ACTIVE_PLAYER_ID };
+    unsafe {
+        ACTIVE_PLAYER_ID = id;
+    }
+    reserve_player_mut(|sub| {
+        sub.mouse_loc = (sx, sy);
+        match kind {
+            0 => sub.movie.mouse_down = true,
+            1 => sub.movie.mouse_down = false,
+            _ => {}
+        }
+    });
+    match kind {
+        0 => player_dispatch(PlayerVMCommand::MouseDown((sx, sy))),
+        1 => player_dispatch(PlayerVMCommand::MouseUp((sx, sy))),
+        // MouseMove drives the sub's rollover events (mouseEnter / mouseWithin /
+        // mouseLeave) — dispatched in the MouseMove command handler by hover
+        // hit-testing. Without this the sub never fires mouseWithin, so
+        // hold-to-scroll behaviours ("scrolldisplay arrow bhv") highlight but
+        // never scroll.
+        2 => player_dispatch(PlayerVMCommand::MouseMove((sx, sy))),
+        _ => {}
+    }
+    unsafe {
+        ACTIVE_PLAYER_ID = prev;
+    }
 }
 
 #[wasm_bindgen]
@@ -608,6 +695,7 @@ pub fn mouse_move(x: f64, y: f64) {
         player.mouse_loc = (ix, iy);
     });
     player_dispatch(PlayerVMCommand::MouseMove((ix, iy)));
+    forward_mouse_to_nested(2, ix, iy);
 }
 
 /// Right-mouse-button down. Tracked via a separate flag because Director
@@ -662,6 +750,7 @@ pub fn key_down(key: String, code: u16) {
     reserve_player_mut(|player| {
         player.keyboard_manager.key_down(key.clone(), code);
     });
+    forward_key_to_nested(true, &key, code);
     player_dispatch(PlayerVMCommand::KeyDown(key, code));
 }
 
@@ -672,7 +761,48 @@ pub fn key_up(key: String, code: u16) {
     reserve_player_mut(|player| {
         player.keyboard_manager.key_up(&key, code);
     });
+    forward_key_to_nested(false, &key, code);
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
+}
+
+/// Mirror the keyboard state into every on-stage nested `#movie` sub-player so
+/// its polling `keyPressed(code)` (e.g. g349's arrow-key list scrolling) sees
+/// the same keys as the host. State-only, like `forward_mouse_to_nested` — no
+/// event dispatch across the player boundary (that resolves instance ids against
+/// the wrong allocator). Keyboard has no cursor position, so it goes to all
+/// visible nested sub-players (typically one active game).
+fn forward_key_to_nested(is_down: bool, key: &str, code: u16) {
+    use crate::player::{nested_player_id, reserve_player_mut, reserve_player_ref, ACTIVE_PLAYER_ID};
+    let ids = reserve_player_ref(|host| {
+        let mut ids: Vec<usize> = Vec::new();
+        for channel in &host.movie.score.channels {
+            if !channel.sprite.visible {
+                continue;
+            }
+            if let Some(id) = channel.sprite.member.as_ref().and_then(nested_player_id) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    });
+    for id in ids {
+        let prev = unsafe { ACTIVE_PLAYER_ID };
+        unsafe {
+            ACTIVE_PLAYER_ID = id;
+        }
+        reserve_player_mut(|sub| {
+            if is_down {
+                sub.keyboard_manager.key_down(key.to_string(), code);
+            } else {
+                sub.keyboard_manager.key_up(key, code);
+            }
+        });
+        unsafe {
+            ACTIVE_PLAYER_ID = prev;
+        }
+    }
 }
 
 // Picking mode commands bypass the command queue for synchronous access.
@@ -1098,8 +1228,8 @@ pub fn trigger_alert_hook() {
 
 #[wasm_bindgen]
 pub fn subscribe_to_channel_names() {
-    spawn_local(async {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
 
         player.is_subscribed_to_channel_names = true;
         for channel in &player.movie.score.channels {
@@ -1110,8 +1240,8 @@ pub fn subscribe_to_channel_names() {
 
 #[wasm_bindgen]
 pub fn unsubscribe_from_channel_names() {
-    spawn_local(async {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
 
         player.is_subscribed_to_channel_names = false;
     });
@@ -1121,7 +1251,7 @@ pub fn unsubscribe_from_channel_names() {
 pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     // Directly fulfill the task without going through the command queue to avoid deadlock
     // This is safe because we only access the shared state which is behind a mutex
-    async_std::task::spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         let shared_state_arc =
             reserve_player_ref(|player| std::sync::Arc::clone(&player.net_manager.shared_state));
         let result = Ok(data);
@@ -1132,7 +1262,7 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
 
 #[wasm_bindgen]
 pub fn provide_net_task_error(task_id: u32) {
-    async_std::task::spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         let shared_state_arc =
             reserve_player_ref(|player| std::sync::Arc::clone(&player.net_manager.shared_state));
         let result: player::net_task::NetResult = Err(4);
@@ -1172,6 +1302,25 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
     bitmap.use_alpha = true;
 
     unsafe {
+        // Nested `#movie` sub-player Flash: a synthetic key encodes
+        // (player_id, local_channel). Route the captured frame into THAT sub's
+        // flash_frame_buffers so its own draw_frame composites it into the sub
+        // stage — not the host's buffers.
+        if let Some((pid, ch)) = crate::player::decode_nested_flash_key(sprite_num) {
+            if let Some(sub) = crate::player::NESTED_PLAYERS
+                .get_mut(pid.wrapping_sub(1))
+                .and_then(|o| o.as_mut())
+            {
+                if let Some(&existing_ref) = sub.flash_frame_buffers.get(&ch) {
+                    sub.bitmap_manager.replace_bitmap(existing_ref, bitmap);
+                } else {
+                    let bitmap_ref = sub.bitmap_manager.add_bitmap(bitmap);
+                    sub.flash_frame_buffers.insert(ch, bitmap_ref);
+                }
+            }
+            return;
+        }
+
         if let Some(player) = PLAYER_OPT.as_mut() {
             let key = sprite_num as i16;
 
@@ -1450,7 +1599,7 @@ pub fn dispatch_flash_lingo(body: String) -> bool {
     // Run asynchronously (like eval_command): the caller is inside a
     // synchronous Flash mouse-event forward, so we must let the current
     // command unwind before reserving the player to run the handler.
-    spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         let result = eval_lingo_command(trimmed).await;
         if let Err(err) = result {
             reserve_player_ref(|player| {
@@ -1499,7 +1648,7 @@ fn player_dispatch_with_result(command: PlayerVMCommand) -> bool {
 
 #[wasm_bindgen]
 pub fn eval_command(command: String) {
-    spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         JsApi::dispatch_debug_message(&command);
         let result = eval_lingo_command(command).await;
         if let Err(err) = result {

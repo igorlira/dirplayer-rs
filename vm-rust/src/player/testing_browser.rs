@@ -134,10 +134,10 @@ impl BrowserTestPlayer {
             crate::player::xtra::curl::CURL_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::curl::CurlXtraManager::new());
             // Spawn fresh command and event loops for the new channels
-            async_std::task::spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 crate::player::commands::run_command_loop(rx).await;
             });
-            async_std::task::spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 crate::player::events::run_event_loop(event_rx).await;
             });
         }
@@ -209,7 +209,7 @@ impl TestHarness for BrowserTestPlayer {
             player.is_playing = false;
         });
         unsafe {
-            let player = PLAYER_OPT.as_mut().unwrap();
+            let player = crate::player::player_mut();
             player.play();
         }
     }
@@ -229,7 +229,7 @@ impl TestHarness for BrowserTestPlayer {
         Self::reset_player().await;
 
         unsafe {
-            let player = PLAYER_OPT.as_mut().unwrap();
+            let player = crate::player::player_mut();
             let _ = player.load_movie_from_file(&full_url).await;
         }
 

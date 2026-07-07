@@ -986,7 +986,7 @@ impl PropListDatumHandlers {
         }
 
         let key = args[0].clone();
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let player = unsafe { crate::player::player_mut() };
         let base = player.get_datum(datum);
 
         let result = match base {

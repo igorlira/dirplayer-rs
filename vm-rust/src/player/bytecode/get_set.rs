@@ -102,7 +102,7 @@ impl GetSetBytecodeHandler {
     }
 
     pub fn get_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let player = unsafe { crate::player::player_mut() };
         let (receiver, script_ref, cached) = {
             let scope = player.scopes.get(ctx.scope_ref).unwrap();
             (scope.receiver.clone(), scope.script_ref.clone(), scope.cached_handler_instance.clone())
@@ -134,7 +134,7 @@ impl GetSetBytecodeHandler {
     }
 
     pub fn set_prop(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
 
         reserve_player_mut(|player| {
@@ -174,7 +174,7 @@ impl GetSetBytecodeHandler {
     pub async fn set_obj_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
         let (value, obj_datum_ref) = reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -189,7 +189,7 @@ impl GetSetBytecodeHandler {
     pub fn get_obj_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
         reserve_player_mut(|player| {
             // Pop the object reference from the stack
@@ -222,7 +222,7 @@ impl GetSetBytecodeHandler {
     pub fn get_movie_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let result_ref = player.get_movie_prop(prop_name)?;
@@ -477,7 +477,7 @@ impl GetSetBytecodeHandler {
     }
 
     pub fn get_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let value_ref = player
@@ -492,7 +492,7 @@ impl GetSetBytecodeHandler {
     }
 
     pub fn set_global(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let value_ref = {
@@ -641,7 +641,7 @@ impl GetSetBytecodeHandler {
     pub fn set_movie_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
@@ -655,7 +655,7 @@ impl GetSetBytecodeHandler {
     pub fn the_built_in(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let result_id = GetSetUtils::get_the_built_in_prop(player, ctx, prop_name)?;
@@ -670,7 +670,7 @@ impl GetSetBytecodeHandler {
     pub fn get_chained_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id).to_owned();
         reserve_player_mut(|player| {
             let obj_ref = {
@@ -1257,7 +1257,7 @@ impl GetSetBytecodeHandler {
     pub fn get_top_level_prop(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let name_id = unsafe { PLAYER_OPT.as_ref().unwrap() }.get_ctx_current_bytecode(ctx).obj as u16;
+        let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             let result = GetSetUtils::get_top_level_prop(player, prop_name)?;

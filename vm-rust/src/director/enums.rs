@@ -26,6 +26,12 @@ pub enum MemberType {
     Ole = (15),
     Font = (16),
     Shockwave3d = (17),
+    // Linked Movie (`#movie`). Standard Director numbers this 9, but this
+    // (reverse-engineered) enum already uses 9 for Shape, so the D5+ reader
+    // remaps a raw 9 to this variant explicitly (see chunks/cast_member.rs).
+    // The discriminant here is a sentinel that never appears as a real raw
+    // type id, so `from()` never produces Movie by accident.
+    Movie = (200),
     Unknown = (255),
 }
 

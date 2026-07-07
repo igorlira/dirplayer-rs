@@ -44,7 +44,7 @@ impl TestPlayer {
             PLAYER_OPT = Some(DirPlayer::new(tx.clone()));
         }
 
-        async_std::task::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             run_event_loop(event_rx).await;
         });
 
@@ -88,7 +88,7 @@ impl TestHarness for TestPlayer {
         });
 
         unsafe {
-            let player = PLAYER_OPT.as_mut().unwrap();
+            let player = crate::player::player_mut();
             player.load_movie_from_dir(dir_file).await;
         }
     }

@@ -21,8 +21,8 @@ use super::{
         manager::BitmapManager,
     },
     cast_member::{
-        BitmapMember, CastMember, CastMemberType, FieldMember, FlashMember, PaletteMember,
-        SoundMember, TextMember, VectorShapeMember,
+        BitmapMember, CastMember, CastMemberType, FieldMember, FlashMember, MovieMember,
+        PaletteMember, SoundMember, TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -333,7 +333,7 @@ impl CastLib {
         }
         JsApi::dispatch_cast_member_list_changed(self.number);
         unsafe {
-            let player_mut = &mut PLAYER_OPT.as_mut().unwrap();
+            let player_mut = &mut crate::player::player_mut();
 
             player_mut.movie.cast_manager.clear_movie_script_cache();
             player_mut.movie.cast_manager.invalidate_member_name_cache();
@@ -500,6 +500,15 @@ impl CastLib {
                     flash_info: None,
                 }),
             )),
+            // `new(#movie)` creates an empty Linked Movie member; the script
+            // links it to an external .dir/.dcr via `member.fileName = <url>`
+            // and plays it by assigning the member to a sprite (Director 11.5
+            // Scripting Dictionary "Linked Movie"). Neopets' DGS loader
+            // (`showAndStartShockwaveGame`) uses this to run the downloaded game.
+            "movie" => Ok(CastMember::new(
+                number,
+                CastMemberType::Movie(MovieMember::new()),
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",
                 member_type
@@ -625,7 +634,7 @@ pub async fn player_cast_lib_set_prop(
     prop_name: &str,
     value: Datum,
 ) -> Result<(), ScriptError> {
-    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let player = unsafe { crate::player::player_mut() };
 
     let cast_manager = &mut player.movie.cast_manager;
     let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);

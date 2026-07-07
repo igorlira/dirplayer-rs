@@ -6036,6 +6036,43 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 reg_y,
             )
         }
+        CastMemberType::Movie(_) => {
+            // Linked movie (`#movie`): Director displays the sub-movie at its own
+            // native stage size, anchored at the sprite location — it does NOT
+            // scale the movie to fill the sprite rect. The DGS loader sizes the
+            // #movie sprite to the whole stage (1190x575) as a container; without
+            // this the 600x440 sub-stage bitmap stretched to fill it ≈ 2x zoom.
+            // Match the sub-player's actual rendered bitmap dims (rendered at
+            // `sub.movie.rect`) so compositing is 1:1. `sprite.stretch` still
+            // honors an explicit resize.
+            // Native stage dims: prefer the nested player's movie.rect; fall back
+            // to the composited bitmap dims (both equal the sub-stage size).
+            let native = unsafe {
+                sprite
+                    .member
+                    .as_ref()
+                    .and_then(|m| crate::player::nested_player_id(m))
+                    .and_then(|id| crate::player::NESTED_PLAYERS.get(id - 1))
+                    .and_then(|o| o.as_ref())
+                    .map(|sub| (sub.movie.rect.width(), sub.movie.rect.height()))
+            }
+            .or_else(|| {
+                sprite
+                    .member
+                    .as_ref()
+                    .and_then(|m| player.nested_movie_images.get(m).copied())
+                    .and_then(|img| player.bitmap_manager.get_bitmap(img))
+                    .map(|b| (b.width as i32, b.height as i32))
+            });
+            // A linked movie plays at its own stage size — it does NOT scale to
+            // fill the sprite rect (ignore the score's stretch flag/oversized box).
+            if let Some((w, h)) = native {
+                if w > 1 && h > 1 {
+                    return IntRect::from_size(sprite.loc_h, sprite.loc_v, w, h);
+                }
+            }
+            IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height)
+        }
         _ => IntRect::from_size(sprite.loc_h, sprite.loc_v, sprite.width, sprite.height),
     }
 }

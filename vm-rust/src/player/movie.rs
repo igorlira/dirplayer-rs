@@ -68,6 +68,49 @@ pub struct Movie {
 }
 
 impl Movie {
+    /// Construct an empty movie with default state (no cast/score loaded).
+    /// Used for the player's primary movie and for nested linked-movie
+    /// (`#movie`) playback, which builds a second Movie from the linked .dcr
+    /// and drives it through the same engine.
+    pub fn empty() -> Self {
+        Movie {
+            rect: IntRect::from(0, 0, 0, 0),
+            cast_manager: CastManager::empty(),
+            score: Score::empty(),
+            current_frame: 1,
+            puppet_tempo: 0,
+            random_seed: None,
+            exit_lock: false,
+            dir_version: 0,
+            item_delimiter: ',',
+            alert_hook: None,
+            base_path: "".to_string(),
+            file_name: "".to_string(),
+            stage_color: (255, 255, 255),
+            stage_color_ref: ColorRef::PaletteIndex(255),
+            frame_rate: 30,
+            file: None,
+            update_lock: false,
+            mouse_down_script: None,
+            mouse_up_script: None,
+            key_down_script: None,
+            key_up_script: None,
+            timeout_script: None,
+            allow_custom_caching: false,
+            trace_script: false,
+            trace_log_file: String::new(),
+            debug_playback_enabled: false,
+            edit_shortcuts_enabled: true,
+            mouse_down: false,
+            right_mouse_down: false,
+            click_loc: (0, 0),
+            frame_script_instance: None,
+            frame_script_member: None,
+            frame_script_span_start: None,
+            sound_device: String::new(),
+        }
+    }
+
     pub async fn load_from_file(
         &mut self,
         file: DirectorFile,

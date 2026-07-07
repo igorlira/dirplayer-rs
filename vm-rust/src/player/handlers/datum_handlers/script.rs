@@ -107,6 +107,52 @@ impl ScriptDatumHandlers {
             "rawNew" => Self::raw_new(datum),
             "handler" => Self::handler(datum, args),
             "handlers" => Self::handlers(datum, args),
+            // A movie script's static properties are addressable through the
+            // script reference (Neopets DGS uses `script("globals")` as a global
+            // data store: `g.levellist = []`, `g.levellist.add(...)`, etc.).
+            // getPropRef returns the property's shared DatumRef so in-place list
+            // mutation persists, mirroring the ScriptInstance handler.
+            "getProp" | "getPropRef" | "getaProp" => reserve_player_mut(|player| {
+                let script_ref = match player.get_datum(datum) {
+                    Datum::ScriptRef(s) => s.clone(),
+                    _ => return Err(ScriptError::new("Expected script reference".to_string())),
+                };
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let prop_ref =
+                    crate::player::script::script_get_static_prop(player, &script_ref, &prop_name)?;
+                if args.len() >= 2 {
+                    // `g.prop[index]` — the bytecode passes (script, #prop, index),
+                    // so index into the property value (e.g. list element). Without
+                    // this the whole property was returned, ignoring the index.
+                    crate::player::handlers::types::TypeUtils::get_sub_prop(
+                        &prop_ref, &args[1], player,
+                    )
+                } else {
+                    Ok(prop_ref)
+                }
+            }),
+            "setProp" | "setaProp" => reserve_player_mut(|player| {
+                let script_ref = match player.get_datum(datum) {
+                    Datum::ScriptRef(s) => s.clone(),
+                    _ => return Err(ScriptError::new("Expected script reference".to_string())),
+                };
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                if args.len() >= 3 {
+                    // `g.prop[index] = value`
+                    let prop_ref = crate::player::script::script_get_static_prop(
+                        player, &script_ref, &prop_name,
+                    )?;
+                    crate::player::handlers::types::TypeUtils::set_sub_prop(
+                        &prop_ref, &args[1], &args[2], player,
+                    )?;
+                    Ok(args[2].clone())
+                } else {
+                    crate::player::script::script_set_static_prop(
+                        player, &script_ref, &prop_name, &args[1], false,
+                    )?;
+                    Ok(args[1].clone())
+                }
+            }),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for script datum"
             ))),

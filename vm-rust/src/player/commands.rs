@@ -191,16 +191,18 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
 }
 
 pub fn player_dispatch(command: PlayerVMCommand) {
-    if let Some(tx) = unsafe { PLAYER_TX.clone() } {
-        if let Err(e) = tx.try_send(PlayerVMExecutionItem {
-            command,
-            completer: None,
-        }) {
-            // The channel is closed or full
-            eprintln!("Failed to send command to player: {:?}", e);
-        }
-    } else {
-        eprintln!("PLAYER_TX not initialized");
+    // Route to the ACTIVE player's own command channel (not the global
+    // PLAYER_TX) so a nested `#movie` sub-player's commands land in its own
+    // queue, processed by its own command loop with its own active-player id.
+    // For the main player this is identical (main.queue_tx == the PLAYER_TX
+    // channel). Fall back to PLAYER_TX before any player exists (early boot).
+    let tx = reserve_player_ref(|p| p.queue_tx.clone());
+    if let Err(e) = tx.try_send(PlayerVMExecutionItem {
+        command,
+        completer: None,
+    }) {
+        // The channel is closed or full
+        eprintln!("Failed to send command to player: {:?}", e);
     }
 }
 
@@ -261,7 +263,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             player_load_system_font(&path).await;
         }
         PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
-            let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+            let player = unsafe { crate::player::player_mut() };
             match player.load_movie_from_file(&file_path).await {
                 Ok(()) => {
                     if autoplay {
