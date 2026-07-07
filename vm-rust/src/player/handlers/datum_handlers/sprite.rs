@@ -55,6 +55,31 @@ extern "C" {
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
     fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
+    /// True once the sprite's Ruffle instance has loaded AND finished AS init.
+    /// Used to BLOCK a Flash interop call until the SWF is ready (see call_async).
+    #[wasm_bindgen(js_name = "dirplayer_isFlashInstanceReady", catch)]
+    fn is_flash_instance_ready(sprite_num: i32) -> Result<JsValue, JsValue>;
+}
+
+/// Yield the frame loop until the sprite's Ruffle instance is ready (loaded +
+/// AS-initialized), so a Flash interop call reads/writes a live instance rather
+/// than returning null. Bounded (~10s) so a sprite that never gets a ready
+/// instance falls back to the caller's existing lazy-handle / VOID behaviour.
+async fn wait_for_flash_ready(sprite_num: i16) {
+    for _ in 0..100u32 {
+        let ready = is_flash_instance_ready(sprite_num as i32)
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if ready {
+            return;
+        }
+        let _ = async_std::future::timeout(
+            std::time::Duration::from_millis(100),
+            std::future::pending::<()>(),
+        )
+        .await;
+    }
 }
 
 /// Root a bare Flash variable/function path.
@@ -184,10 +209,30 @@ impl SpriteDatumHandlers {
     pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler (case-insensitive)
         let name_lower = handler_name.to_lowercase();
+
+        // Flash interop: async ONLY on the first access to a sprite whose Ruffle
+        // instance isn't confirmed ready yet — call_async waits for readiness,
+        // then whitelists the sprite (flash_ready_sprites). Every later call
+        // finds it whitelisted and takes the SYNC fast path below, so the
+        // hundreds of per-frame interop calls (Coke Studios) don't pay
+        // async-dispatch overhead. Cleared on member unload/swap so it re-waits.
+        if matches!(
+            name_lower.as_str(),
+            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+        ) {
+            let ready = reserve_player_ref(|player| {
+                match player.get_datum(datum).to_sprite_ref() {
+                    Ok(sn) => player.flash_ready_sprites.contains(&sn),
+                    Err(_) => false,
+                }
+            });
+            return Ok(!ready);
+        }
+
         let is_sync_handler = matches!(name_lower.as_str(),
             "intersects" | "getprop" | "getat" | "setat" | "getaprop" | "setaprop" | "pointtoword" | "pointtoline" |
             "gotoframe" | "callframe" | "stop" | "play" | "rewind" | "hold" |
-            "getvariable" | "setvariable" | "callfunction" | "setcallback" | "newobject" |
+            "newobject" |
             "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
             "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
             "addcamera" | "removecamera" | "cameracount"
@@ -1200,6 +1245,47 @@ impl SpriteDatumHandlers {
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // Flash (SWF) interop: block until the sprite's Ruffle instance has
+        // loaded + finished AS init, THEN run the (sync) op against a live
+        // instance. A one-shot Lingo init that reads Flash objects (Coke
+        // Studios' SF gateway: oLoginServlet / oStatusServlet / ...) runs before
+        // the async createFlashInstance completes, so without this wait every
+        // read comes back null and the gateway never connects. The wait is
+        // per-sprite (see wait_for_flash_ready), so it can't stall unrelated
+        // display-only Flash sprites.
+        let name_lower = handler_name.to_lowercase();
+        if matches!(
+            name_lower.as_str(),
+            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+        ) {
+            // Reached only for a sprite NOT yet whitelisted (has_async_handler
+            // routes whitelisted sprites straight to the sync path). If its
+            // instance is ALREADY ready, don't pay for pre_dispatch/the wait —
+            // just whitelist and fall through to the sync arm. Only a genuinely
+            // not-ready sprite kicks off the dispatch + waits: a script can call
+            // into a Flash sprite before the render loop has dispatched its
+            // Ruffle instance (Coke Studios' one-shot `SESSION_createSession`
+            // runs before sprite#1's SWF is dispatched), and without triggering
+            // the dispatch here the wait would block the frame before render ever
+            // dispatches it (deadlock). Whitelist so all later calls are sync.
+            if let Ok(sn) =
+                reserve_player_ref(|player| player.get_datum(&datum).to_sprite_ref())
+            {
+                let ready = is_flash_instance_ready(sn as i32)
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if !ready {
+                    reserve_player_mut(|player| player.pre_dispatch_flash_members());
+                    wait_for_flash_ready(sn).await;
+                }
+                reserve_player_mut(|player| {
+                    player.flash_ready_sprites.insert(sn);
+                });
+            }
+            return Self::call(&datum, handler_name, args);
+        }
+
         // First, try the sprite's attached script instances
         let instance_refs =
             reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;

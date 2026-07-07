@@ -936,8 +936,12 @@ function translateLevel0(path: string): string {
 function getVariable(spriteNum: number, path: string): string | null {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
-  if (!instance) {
-    // Expected during lazy load: the SWF instance hasn't been created yet.
+  if (!instance || !instance.ready) {
+    // Not ready: either the SWF instance hasn't been created yet, or it has
+    // loaded but its ActionScript hasn't finished initializing (so the objects
+    // a caller wants — e.g. Coke Studios' `_level0.oLoginServlet` — don't exist
+    // yet). `getVariable` must gate on `.ready` like setVariable/callFunction do;
+    // reading a not-fully-initialized SWF hands back undefined/garbage.
     // We can't hand a value back to an already-returned synchronous Lingo
     // call, but this isn't lost data for the common case — the Rust
     // getVariable(sprite, path, 0) handler falls back to a lazy
@@ -1766,6 +1770,27 @@ export function initFlashBridge(): void {
   // in flight. Those sprites are never scripted, so blocking for them is pure
   // lost time; they just pop in when their background load finishes.
   win.dirplayer_isFlashLoading = () => flashAccessBeforeReady;
+
+  // Per-sprite readiness, used by the WASM side to BLOCK an individual Flash
+  // interop call (getVariable / setVariable / callFunction / setCallback) until
+  // that sprite's Ruffle instance has loaded AND finished AS init — so a
+  // one-shot Lingo init (Coke Studios' SF gateway reading _level0.oLoginServlet
+  // etc.) gets live objects instead of null. Unlike dirplayer_isFlashLoading
+  // this is scoped to one sprite, so it never stalls unrelated display-only
+  // Flash sprites. Returns true (proceed) when the instance is ready OR when no
+  // instance exists and nothing is loading (so the caller can't hang forever on
+  // a sprite that will never get an instance).
+  win.dirplayer_isFlashInstanceReady = (spriteNum: number): boolean => {
+    const inst = instances.get(instanceKey(spriteNum));
+    // Only "ready" once the instance exists AND has finished AS init. A missing
+    // instance is NOT ready: the sprite's SWF is (or is about to be) loading, so
+    // the WASM-side wait must keep polling until it lands — otherwise a very
+    // early one-shot call (Coke Studios' SESSION_createSession, made before the
+    // instance dispatches) gets deferred and returns null, killing the session.
+    // The WASM wait is bounded, so a sprite that never gets an instance can't
+    // hang forever.
+    return !!(inst && inst.ready);
+  };
 
   // Hand-fired test entry for Flash `event: …` dispatch — lets you prove
   // the WASM dispatch chain end-to-end from DevTools without waiting for

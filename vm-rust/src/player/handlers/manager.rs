@@ -1207,6 +1207,7 @@ impl BuiltInHandlerManager {
             "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
             "mousedown" => {
                 reserve_player_mut(|player| {
+                    player.input_polled = true;
                     Ok(player.alloc_datum(datum_bool(player.movie.mouse_down)))
                 })
             }
@@ -2317,6 +2318,9 @@ impl BuiltInHandlerManager {
 
     pub fn key_pressed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            // Mark this iteration as input-polling so the bytecode busy-wait
+            // yield only kicks in for `repeat while keyPressed(...)` spins.
+            player.input_polled = true;
             let arg_datum = player.get_datum(&args[0]);
 
             // An INTEGER argument is a direct key code (this is how games store

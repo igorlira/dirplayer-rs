@@ -337,6 +337,27 @@ pub struct DirPlayer {
     /// duplicate `createFlashInstance` calls every frame before the
     /// instance's first pixels arrive.
     pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
+    /// Sprites whose Ruffle instance has been confirmed loaded + AS-initialized
+    /// at least once. Flash interop (getVariable/setVariable/callFunction/
+    /// setCallback) takes the SYNC fast path for these; only the FIRST access to
+    /// a sprite ever goes through the async wait (which then adds it here).
+    /// STICKY on purpose — never cleared: once a sprite has had a ready instance
+    /// we always take the sync path, which safely returns null/void if the
+    /// instance is transiently not ready (a member swap / reload), exactly as
+    /// interop behaved before the ready-wait existed. The async path exists only
+    /// to make the one-shot startup call (Coke Studios' SESSION_createSession,
+    /// which runs before its SWF is dispatched) get a live instance; clearing
+    /// this would re-arm the async path mid-game and reload the instance on
+    /// ordinary interactions (navigator windows vanishing/rebuilding). Keeps the
+    /// hundreds of per-frame interop calls sync with no async-dispatch overhead.
+    pub flash_ready_sprites: HashSet<i16>,
+    /// Set true whenever a script reads live input state — `keyPressed(...)`,
+    /// `the mouseDown`, `the stillDown`. The bytecode loop's busy-wait yield
+    /// counts a loop iteration toward yielding ONLY when this was set that
+    /// iteration, so it cooperatively yields for input-wait spins (Neopets'
+    /// `repeat while keyPressed(" ") end`) but NEVER for compute/AMF loops (Coke
+    /// Studios' object-graph conversion), where a yield only adds latency.
+    pub input_polled: bool,
     /// Off-screen Flash members rendered into W3D textures (frog01's environment:
     /// `newTexture(#fromCastMember, flashMember)`). Keyed by a synthetic NEGATIVE
     /// sprite number (so it never collides with on-stage positive channels);
@@ -526,6 +547,8 @@ impl DirPlayer {
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
+            flash_ready_sprites: HashSet::new(),
+            input_polled: false,
             flash_texture_targets: HashMap::new(),
             w3d_frame_buffers: HashMap::new(),
             in_enter_frame: false,
@@ -2370,7 +2393,7 @@ impl DirPlayer {
                 let val = compute_mouse_line(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             },
-            "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
+            "stillDown" => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) },
             "rollover" => {
                 let sprite = get_sprite_at(self, self.mouse_loc.0, self.mouse_loc.1, false);
                 Ok(self.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
@@ -2680,9 +2703,9 @@ impl DirPlayer {
                 let val = compute_mouse_line(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
             }
-            "mouseDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
-            "mouseUp" => Ok(self.alloc_datum(datum_bool(!self.movie.mouse_down))),
-            "stillDown" => Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))),
+            "mouseDown" => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) }
+            "mouseUp" => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(!self.movie.mouse_down))) }
+            "stillDown" => { self.input_polled = true; Ok(self.alloc_datum(datum_bool(self.movie.mouse_down))) }
             "rightMouseDown" => Ok(self.alloc_datum(datum_bool(self.movie.right_mouse_down))),
             "rightMouseUp" => Ok(self.alloc_datum(datum_bool(!self.movie.right_mouse_down))),
             _ => Err(ScriptError::new(format!("Unknown _mouse prop {}", prop))),
@@ -3877,25 +3900,20 @@ pub async fn player_call_script_handler_raw_args(
                 });
                 return Err(err);
             }
-            HandlerExecutionResult::Jump => {}
-        }
-
-        // Busy-wait cooperative yield (see `last_yield_ms` above). A backward
-        // jump means we looped; if we've run >16ms without unwinding, yield a
-        // real 1ms macrotask so the JS event loop can deliver queued key/mouse
-        // events (letting `keyPressed`/`the mouseDown` actually change).
-        if !should_return {
-            let new_index = reserve_player_ref(|player| {
-                player.scopes.get(scope_ref).map(|s| s.bytecode_index)
-            });
-            if let Some(new_index) = new_index {
-                if new_index < bytecode_index {
-                    backjumps += 1;
-                    // Only re-check the clock every 4096 backward jumps. A tight
-                    // busy-wait reaches this in well under a frame; a compute loop
-                    // (drawmap ~hundreds of iterations total) never does, so it
-                    // never yields. When a tight loop HAS run ≥16ms, yield a real
-                    // macrotask so queued key/mouse events are delivered.
+            HandlerExecutionResult::Jump => {
+                // Busy-wait cooperative yield, scoped to INPUT-polling loops.
+                // Added for Neopets' `repeat while keyPressed(" ") end` — an empty
+                // tight loop that must yield so the JS event loop can deliver the
+                // key-up, else it spins forever. Only count this jump toward the
+                // yield when the iteration actually read live input (keyPressed /
+                // the mouseDown / the stillDown set `input_polled`); a heavy
+                // compute/AMF loop (Coke Studios' object-graph conversion) never
+                // sets it, so it never yields — a yield there only adds latency
+                // and was the source of the navigator stalls. Reading+clearing a
+                // bool is far cheaper than the old per-instruction scope lookup.
+                let polled = reserve_player_mut(|player| std::mem::take(&mut player.input_polled));
+                if polled {
+                    backjumps = backjumps.wrapping_add(1);
                     if backjumps >= 4096 {
                         backjumps = 0;
                         let now = chrono::Local::now().timestamp_millis();
