@@ -66,6 +66,21 @@
   var RES_EVENT = 'dirplayer-ruffle-bridge-response';
   var EVT_EVENT = 'dirplayer-ruffle-bridge-event';
 
+  // dirplayer LocalConnection.send bridge (main world → isolated). The Ruffle
+  // fork runs HERE (main world) and calls window.dirplayer_localConnectionSend
+  // when a SWF does LocalConnection.send; dirplayer's WASM export that dispatches
+  // the Lingo setCallback handler lives in the ISOLATED world. Re-fire it there
+  // as a DOM event (shared document, wombat-safe). Fire-and-forget — the fork
+  // ignores the return. dirplayer_-namespaced so it never collides with stock.
+  window.dirplayer_localConnectionSend = function (name, method, argsJson) {
+    try {
+      window.dispatchEvent(new CustomEvent('dirplayer-lc-send', {
+        detail: { name: name, method: method, argsJson: argsJson },
+      }));
+    } catch (e) { /* ignore */ }
+    return false;
+  };
+
   function respond(requestId, payload, error) {
     window.dispatchEvent(new CustomEvent(RES_EVENT, {
       detail: {
@@ -115,9 +130,69 @@
     }
   }
 
+  // Shared, dirplayer-namespaced node for the SYNCHRONOUS request/response path
+  // (GetVariable / SetVariable / CallFunction). Lingo consumes these inline, and
+  // the async Promise transport below can't answer synchronously — so the sync
+  // handler runs DURING the isolated world's dispatchEvent and writes the result
+  // here before dispatch returns. Plain DOM text crosses worlds, is untouched by
+  // wombat, and is invisible to stock Ruffle.
+  var SYNC_NODE_ID = '__dirplayer_ruffle_sync_channel';
+
+  function writeSyncResult(syncId, result, error) {
+    var el = document.getElementById(SYNC_NODE_ID);
+    if (!el) return; // client creates it before dispatch; nothing to write to otherwise
+    el.textContent = JSON.stringify({
+      syncId: syncId,
+      result: error == null ? result : undefined,
+      error: error == null ? null : ((error && error.message) || String(error)),
+    });
+  }
+
+  // Synchronous handler for the inline Lingo reads. MUST stay non-async and
+  // fully synchronous so the result node is populated before the isolated
+  // world's dispatchEvent returns. Ruffle's GetVariable/SetVariable/CallFunction
+  // all return synchronously, so this is safe (unlike `load`, which is async and
+  // stays on the Promise transport below).
+  window.addEventListener(REQ_EVENT, function (ev) {
+    var m = ev.detail;
+    if (!m || !m.sync) return;
+    var syncId = m.syncId;
+    try {
+      var player = players.get(m.playerId);
+      if (!player) throw new Error('player not registered: ' + m.playerId);
+      var args = m.args || [];
+      var result;
+      switch (m.method) {
+        case 'getVariableSync':
+          result = player.GetVariable(args[0]);
+          break;
+        case 'setVariableSync':
+          result = player.SetVariable(args[0], args[1]);
+          if (result === undefined) result = true;
+          break;
+        case 'callFunctionSync':
+          result = player.CallFunction(args[0], args[1] || []);
+          break;
+        case 'callMethodSync': {
+          // Generic sync method call: args = [methodName, methodArgs].
+          var fn = player[args[0]];
+          result = (typeof fn === 'function') ? fn.apply(player, args[1] || []) : undefined;
+          break;
+        }
+        default:
+          throw new Error('unknown sync bridge method: ' + m.method);
+      }
+      writeSyncResult(syncId, result == null ? null : result, null);
+    } catch (e) {
+      writeSyncResult(syncId, undefined, e);
+    }
+  });
+
   window.addEventListener(REQ_EVENT, async (ev) => {
     const m = ev.detail;
     if (!m) return;
+    // Sync requests are handled by the synchronous listener above.
+    if (m.sync) return;
 
     const { requestId, method, playerId, methodName, propName, args } = m;
     try {
@@ -184,6 +259,35 @@
           const player = players.get(playerId);
           if (!player) throw new Error('player not registered: ' + playerId);
           player[propName] = m.value;
+          respond(requestId, null);
+          break;
+        }
+        case 'registerCallbackForwarders': {
+          // Flash->Director callbacks (getURL "event:"/"lingo:" and fscommand)
+          // are functions, which can't cross the world boundary. Register
+          // host-side handlers that forward each invocation to the isolated
+          // world as a bridge event. The open-URL handler must decide
+          // SYNCHRONOUSLY whether it claims the navigation — it does so for our
+          // lingo:/event: schemes (mirroring the isolated-world logic) and
+          // forwards the body for the actual Lingo dispatch there.
+          const player = players.get(playerId);
+          if (!player) throw new Error('player not registered: ' + playerId);
+          if (typeof player.dirplayer_addOpenUrlHandler === 'function') {
+            player.dirplayer_addOpenUrlHandler(function (url, target) {
+              if (typeof url === 'string'
+                && (url.indexOf('lingo:') === 0 || url.indexOf('event:') === 0)) {
+                announceEvent(playerId, 'openUrl', { url: url, target: target });
+                return true; // claimed — suppress navigation
+              }
+              return false; // not ours — let Ruffle's openUrlMode decide
+            });
+          }
+          var fsReg = player.dirplayer_addFSCommandHandler || player.addFSCommandHandler;
+          if (typeof fsReg === 'function') {
+            fsReg.call(player, function (command, args) {
+              announceEvent(playerId, 'fsCommand', { command: command, args: args });
+            });
+          }
           respond(requestId, null);
           break;
         }

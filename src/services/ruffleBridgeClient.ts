@@ -120,6 +120,122 @@ export function bridgeDestroyPlayer(playerId: string): Promise<void> {
 }
 
 /**
+ * Ask the main-world host to register its own Flash→Director callback handlers
+ * (getURL "event:"/"lingo:" and fscommand) on the player and forward each
+ * invocation back as a bridge event (subscribe via bridgeOnEvent). Needed
+ * because the callback functions themselves can't cross the world boundary.
+ */
+export function bridgeRegisterCallbackForwarders(playerId: string): Promise<void> {
+  return bridgeCall({ method: 'registerCallbackForwarders', playerId });
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous bridge — for the handful of Ruffle calls Lingo consumes INLINE
+// (GetVariable / SetVariable / CallFunction). The Promise transport above can't
+// satisfy a synchronous Lingo read, but `dispatchEvent` runs listeners
+// synchronously, so the main-world host answers the request DURING dispatch and
+// writes the result onto a shared, `dirplayer_`-namespaced hidden DOM node. Plain
+// DOM text crosses the isolated↔main boundary, is untouched by wombat (which only
+// wraps navigation / postMessage), and is invisible to stock Ruffle (its own
+// surface is un-prefixed). We read the node back the instant `dispatchEvent`
+// returns. No new event name, no postMessage, no un-namespaced global.
+const SYNC_NODE_ID = '__dirplayer_ruffle_sync_channel';
+let syncNode: HTMLElement | null = null;
+let nextSyncId = 1;
+
+function ensureSyncNode(): HTMLElement {
+  if (syncNode && syncNode.isConnected) return syncNode;
+  let el = document.getElementById(SYNC_NODE_ID);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = SYNC_NODE_ID;
+    el.style.display = 'none';
+    (document.documentElement || document.body).appendChild(el);
+  }
+  syncNode = el as HTMLElement;
+  return syncNode;
+}
+
+/**
+ * Synchronous bridge call. Dispatches the (already-namespaced) request event —
+ * whose listener the main-world host runs synchronously — and reads the result
+ * the host wrote to the shared node before `dispatchEvent` returned. Returns
+ * `undefined` if the host didn't answer (bridge not ready, method not sync),
+ * which callers treat like a null Flash read. Throws if the host reported an
+ * error for the call.
+ */
+function bridgeCallSync(payload: Record<string, unknown>): unknown {
+  const node = ensureSyncNode();
+  const syncId = nextSyncId++;
+  node.textContent = '';
+  window.dispatchEvent(new CustomEvent(REQ_EVENT, {
+    detail: { sync: true, syncId, ...payload },
+  }));
+  const raw = node.textContent;
+  if (!raw) return undefined;
+  let msg: { syncId?: number; result?: unknown; error?: string | null };
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!msg || msg.syncId !== syncId) return undefined;
+  if (msg.error) throw new Error(msg.error);
+  return msg.result;
+}
+
+export function bridgeGetVariableSync(
+  playerId: string,
+  path: string,
+): string | null {
+  const r = bridgeCallSync({ method: 'getVariableSync', playerId, args: [path] });
+  return r == null ? null : String(r);
+}
+
+export function bridgeSetVariableSync(
+  playerId: string,
+  path: string,
+  value: string,
+): boolean {
+  const r = bridgeCallSync({
+    method: 'setVariableSync',
+    playerId,
+    args: [path, value],
+  });
+  return !!r;
+}
+
+/**
+ * Synchronous generic method call on the main-world player (e.g.
+ * `dirplayer_hitTest`, which must return its classification immediately).
+ */
+export function bridgeCallMethodSync(
+  playerId: string,
+  method: string,
+  args: unknown[],
+): unknown {
+  return bridgeCallSync({ method: 'callMethodSync', playerId, args: [method, args] });
+}
+
+export function bridgeCallFunctionSync(
+  playerId: string,
+  path: string,
+  args: unknown[],
+): unknown {
+  // Return the RAW value (boolean / number / string / object / null), NOT a
+  // stringified form. dirplayer's ruffle_call_function extern receives this as a
+  // JsValue and branches on its type — AS `true` must stay a boolean so it maps
+  // to Lingo Int(1) (DGS `includeIsLoaded() = 1`); `String(true)` = "true" would
+  // become Datum::String and break the comparison. The bridge's JSON round-trip
+  // already preserves JSON types.
+  return bridgeCallSync({
+    method: 'callFunctionSync',
+    playerId,
+    args: [path, args],
+  });
+}
+
+/**
  * Find the DOM element corresponding to a bridge-managed player. The
  * main-world host stamps `data-dirplayer-bridge-id` on each player so
  * the isolated world can locate it via querySelector.

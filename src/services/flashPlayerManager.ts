@@ -6,7 +6,7 @@
  * can be composited with Director sprites (Director sprites can layer on top).
  */ 
 
-import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event, dispatch_flash_lingo } from 'vm-rust';
+import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event, dispatch_flash_lingo, local_connection_send } from 'vm-rust';
 import {
   isBridgeRequired,
   waitForBridge,
@@ -14,6 +14,12 @@ import {
   bridgeFindElement,
   bridgeCallMethod,
   bridgeDestroyPlayer,
+  bridgeGetVariableSync,
+  bridgeSetVariableSync,
+  bridgeCallFunctionSync,
+  bridgeCallMethodSync,
+  bridgeOnEvent,
+  bridgeRegisterCallbackForwarders,
 } from './ruffleBridgeClient';
 
 interface FlashInstance {
@@ -116,6 +122,130 @@ function maybeCorsProxy(urlStr: string): string | null {
   return base + encodeURIComponent(u.toString());
 }
 
+// Mixed Content upgrade: a Director movie served over HTTPS (Neopets' DGS loader
+// at https://www.neopets.com/games/dgs/play_shockwave.phtml) still fetches its
+// game data over a hardcoded http:// URL
+// (http://www.neopets.com/games/dgs/dgs_get_game_data.phtml). Chrome blocks
+// active mixed content outright, so the fetch never completes and the loader
+// loops retrying. The resource is served over https on the same host, so upgrade
+// the scheme. Never touch localhost/127.0.0.1 — the dev proxies are deliberately
+// http and are matched by applyFetchRewrite/maybeCorsProxy by hostname regardless
+// of scheme. Returns true if the URL was changed. No-op when the page itself is
+// http (no mixed-content restriction) or the request is already https.
+function upgradeInsecureUrl(url: URL): boolean {
+  if (
+    window.location.protocol === 'https:' &&
+    url.protocol === 'http:' &&
+    url.hostname !== 'localhost' &&
+    url.hostname !== '127.0.0.1'
+  ) {
+    url.protocol = 'https:';
+    return true;
+  }
+  return false;
+}
+
+// Cross-origin fetch proxy (MV3 extension). A content-script `fetch()` is
+// page-privileged, so a cross-origin request (Neopets' game SWF lives on
+// swf.neopets.com while the loader page is www.neopets.com) is CORS-blocked even
+// though the extension has host_permissions. The service worker CAN read those
+// responses, so we relay cross-origin requests through it. Standalone/electron
+// (no chrome.runtime) and same-origin / localhost-proxy requests stay direct.
+// `chrome` isn't in the app's TS lib; access it structurally.
+const extChrome = (globalThis as unknown as {
+  chrome?: { runtime?: { id?: string; sendMessage?: (msg: unknown) => Promise<unknown> } };
+}).chrome;
+
+function isExtensionContext(): boolean {
+  return !!extChrome?.runtime?.id;
+}
+
+function shouldProxyCrossOrigin(url: URL): boolean {
+  if (!isExtensionContext()) return false;
+  try {
+    if (url.origin === window.location.origin) return false; // same-origin: no CORS
+  } catch {
+    return false;
+  }
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return false; // dev proxy handles its own CORS
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+  }
+  return btoa(bin);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bodyInitToBytes(body: BodyInit): Uint8Array | undefined {
+  if (typeof body === 'string') return new TextEncoder().encode(body);
+  if (body instanceof Uint8Array) return body;
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  return undefined; // Blob / FormData / URLSearchParams — not used by our asset fetches
+}
+
+function headersToObject(h?: HeadersInit): Record<string, string> | undefined {
+  if (!h) return undefined;
+  const out: Record<string, string> = {};
+  if (h instanceof Headers) h.forEach((v, k) => { out[k] = v; });
+  else if (Array.isArray(h)) h.forEach(([k, v]) => { out[k] = v; });
+  else Object.assign(out, h);
+  return out;
+}
+
+interface BgFetchResult {
+  ok?: boolean;
+  status?: number;
+  statusText?: string;
+  contentType?: string;
+  bodyBase64?: string;
+  error?: string;
+}
+
+async function corsFetchRawViaBackground(
+  url: string,
+  method: string,
+  headers?: Record<string, string>,
+  bodyBytes?: Uint8Array,
+): Promise<BgFetchResult> {
+  const resp = await extChrome!.runtime!.sendMessage!({
+    type: 'dirplayer-cors-fetch',
+    url,
+    method,
+    headers,
+    body: bodyBytes && bodyBytes.byteLength ? bytesToBase64(bodyBytes) : undefined,
+  }) as BgFetchResult | undefined;
+  return resp || { error: 'no response from background' };
+}
+
+async function corsFetchViaBackground(
+  url: string,
+  method: string,
+  headers?: Record<string, string>,
+  bodyBytes?: Uint8Array,
+): Promise<Response> {
+  const resp = await corsFetchRawViaBackground(url, method, headers, bodyBytes);
+  if (resp.error) throw new Error('cors-fetch: ' + resp.error);
+  const bytes = base64ToBytes(resp.bodyBase64 || '');
+  const status = resp.status && resp.status >= 200 ? resp.status : 200;
+  return new Response(bytes as unknown as BodyInit, {
+    status,
+    statusText: resp.statusText || '',
+    headers: resp.contentType ? { 'content-type': resp.contentType } : undefined,
+  });
+}
+
 const origFetch = window.fetch;
 // Count outstanding browser fetches so dirplayer's Rust frame loop can lengthen
 // its per-frame yield while any request is in flight — including Ruffle-side
@@ -138,20 +268,44 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
   if (typeof input === 'string') {
     try {
       const url = new URL(input, window.location.origin);
+      const upgraded = upgradeInsecureUrl(url);
       if (applyFetchRewrite(url)) {
         input = url.toString();
       } else {
         const proxied = maybeCorsProxy(url.toString());
         if (proxied) input = proxied;
+        else if (upgraded) input = url.toString();
+      }
+      // Cross-origin in the MV3 extension: relay through the service worker,
+      // which (unlike this page-privileged content script) can read the
+      // response. swf.neopets.com game SWFs hit this from www.neopets.com.
+      const finalUrl = new URL(input as string, window.location.origin);
+      if (shouldProxyCrossOrigin(finalUrl)) {
+        const method = (init?.method || 'GET').toUpperCase();
+        const bodyBytes = init?.body ? bodyInitToBytes(init.body) : undefined;
+        return trackFetch(corsFetchViaBackground(
+          finalUrl.toString(), method, headersToObject(init?.headers), bodyBytes,
+        ));
       }
     } catch { /* ignore parse errors */ }
   } else if (input instanceof Request) {
     try {
       const url = new URL(input.url);
-      const newUrl = applyFetchRewrite(url) ? url.toString() : maybeCorsProxy(url.toString());
-      if (newUrl) {
+      const upgraded = upgradeInsecureUrl(url);
+      const rewritten = applyFetchRewrite(url)
+        ? url.toString()
+        : (maybeCorsProxy(url.toString()) || (upgraded ? url.toString() : null));
+      const finalUrl = rewritten || url.toString();
+      const crossOrigin = shouldProxyCrossOrigin(new URL(finalUrl, window.location.origin));
+      if (rewritten || crossOrigin) {
         const req = input;
         return trackFetch(req.arrayBuffer().then(bodyBuf => {
+          if (crossOrigin) {
+            const bodyBytes = bodyBuf.byteLength > 0 ? new Uint8Array(bodyBuf) : undefined;
+            return corsFetchViaBackground(
+              finalUrl, req.method, headersToObject(req.headers), bodyBytes,
+            );
+          }
           const newInit: RequestInit = {
             method: req.method,
             headers: req.headers,
@@ -159,7 +313,7 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
             mode: 'cors' as RequestMode,
             credentials: 'omit' as RequestCredentials,
           };
-          return origFetch.call(window, newUrl, newInit);
+          return origFetch.call(window, finalUrl, newInit);
         }));
       }
     } catch (e) { console.error('[fetch-intercept] Error:', e); }
@@ -248,8 +402,8 @@ function dispatchMouseEvent(
 ): boolean {
   const inst = instances.get(instanceKey(spriteNum));
   if (!inst) {
-    console.warn(`[Flash mouse] no instance for sprite#${spriteNum}; known=`,
-      Array.from(instances.keys()));
+    // No Flash instance for this sprite (e.g. a click on a non-Flash sprite, or
+    // before the SWF instance is created) — nothing to forward.
     return false;
   }
 
@@ -263,12 +417,20 @@ function dispatchMouseEvent(
     }
   }
 
+  // Bridge mode (MV3 extension): dirplayer_dispatchPointer lives on the
+  // main-world player element, invisible on the isolated-world stub. Forward it
+  // through the bridge — fire-and-forget (a click's "handled" return isn't
+  // consumed synchronously). Without this, Director-side clicks never reach the
+  // offscreen Ruffle preloader, so DGS's "Play" button never flips `playGame`.
+  if (inst.bridgeId) {
+    void bridgeCallMethod(inst.bridgeId, 'dirplayer_dispatchPointer', [type, canvasX, canvasY]);
+    return true;
+  }
+
   const player = inst.rufflePlayer as
     | { dirplayer_dispatchPointer?: (t: string, x: number, y: number) => boolean }
     | undefined;
   if (typeof player?.dirplayer_dispatchPointer !== 'function') {
-    console.warn(`[Flash mouse] sprite#${spriteNum} player has no dirplayer_dispatchPointer; ` +
-      `bridgeId=${inst.bridgeId}, player keys=`, player ? Object.keys(player as object) : 'no player');
     return false;
   }
   const handled = !!player.dirplayer_dispatchPointer(type, canvasX, canvasY);
@@ -380,14 +542,18 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
  * dispatch_flash_event tokenises trailing args.
  */
 function registerFSCommandHandler(player: any, castLib: number, castMember: number): void {
-  if (typeof player?.addFSCommandHandler !== 'function') {
+  // Prefer the fork's namespaced `dirplayer_addFSCommandHandler` (binds only to
+  // our player, never a stock Ruffle sharing the page); fall back to the stock
+  // `addFSCommandHandler` if an older bundle is loaded.
+  const reg = player?.dirplayer_addFSCommandHandler || player?.addFSCommandHandler;
+  if (typeof reg !== 'function') {
     console.warn(
-      `[Flash] ${castLib}:${castMember}: addFSCommandHandler missing on Ruffle player — ` +
+      `[Flash] ${castLib}:${castMember}: dirplayer_addFSCommandHandler missing on Ruffle player — ` +
       `fscommand() calls from the SWF will be dropped.`
     );
     return;
   }
-  player.addFSCommandHandler((command: string, args: string): void => {
+  reg.call(player, (command: string, args: string): void => {
     if (typeof command !== 'string' || !command.trim()) return;
     const body = (typeof args === 'string' && args.trim())
       ? `${command.trim()} ${args.trim()}`
@@ -399,6 +565,41 @@ function registerFSCommandHandler(player: any, castLib: number, castMember: numb
       );
     }
   });
+}
+
+/**
+ * Bridge-mode counterpart to registerEventUrlHandler + registerFSCommandHandler.
+ * The Flash→Director callbacks (getURL("event:"/"lingo:") and fscommand) are
+ * functions, which can't cross the isolated↔main world boundary. So the
+ * main-world host registers its OWN handlers on the player — it decides
+ * synchronously whether to claim an open-URL (for our lingo:/event: schemes) and
+ * forwards the body back here via the bridge event channel, where the actual
+ * Lingo dispatch runs. Neopets' DGS include movie fires `fscommand("FlashLoader
+ * Loaded")` this way; without it the loader stalls at load_state 6.
+ */
+function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: number): void {
+  bridgeOnEvent(bridgeId, (name, detail) => {
+    const d = detail as { url?: string; target?: string; command?: string; args?: string } | undefined;
+    if (!d) return;
+    if (name === 'openUrl') {
+      const url = d.url;
+      if (typeof url !== 'string') return;
+      if (url.startsWith('lingo:')) {
+        dispatchFlashLingo(url.slice('lingo:'.length).trim());
+      } else if (url.startsWith('event:')) {
+        dispatchFlashEvent(castLib, castMember, url.slice('event:'.length).trim());
+      }
+    } else if (name === 'fsCommand') {
+      const command = d.command;
+      const args = d.args;
+      if (typeof command !== 'string' || !command.trim()) return;
+      const body = (typeof args === 'string' && args.trim())
+        ? `${command.trim()} ${args.trim()}`
+        : command.trim();
+      dispatchFlashEvent(castLib, castMember, body);
+    }
+  });
+  void bridgeRegisterCallbackForwarders(bridgeId);
 }
 
 /**
@@ -740,9 +941,9 @@ export async function createFlashInstance(
       // Two-step: gotoAndPlay so Ruffle paints the frame (it skips paint for an
       // already-stopped MovieClip), wait one RAF so the paint lands, then
       // gotoAndStop to halt there.
-      player.GotoFrame(initialPin, false);
+      playerExec(instance, 'GotoFrame', [initialPin, false]);
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-      player.GotoFrame(initialPin, true);
+      playerExec(instance, 'GotoFrame', [initialPin, true]);
       instance.stopped = true;
     } catch (e) {
       console.warn(`[Flash] Instance ${key} initial-frame pin (${initialPin}) failed:`, e);
@@ -755,11 +956,18 @@ export async function createFlashInstance(
   // the Ruffle-fork patch is present, navigations whose URL starts with
   // `event:` get routed into dispatch_flash_event and the real open is
   // suppressed. Otherwise it's a safe no-op.
-  registerEventUrlHandler(player, castLib, castMember);
-
   // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
   // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
-  registerFSCommandHandler(player, castLib, castMember);
+  if (bridgeId) {
+    // Bridge mode (MV3 extension): the player + its handlers live in the main
+    // world, and callback functions can't cross worlds — so the host registers
+    // its own forwarders and posts each event/fscommand back here. Handles both
+    // the event:/lingo: URL channel and fscommand in one call.
+    registerBridgeCallbacks(bridgeId, castLib, castMember);
+  } else {
+    registerEventUrlHandler(player, castLib, castMember);
+    registerFSCommandHandler(player, castLib, castMember);
+  }
 
   // Find the internal canvas element that Ruffle renders to
   await new Promise<void>((resolve) => {
@@ -808,9 +1016,9 @@ export async function createFlashInstance(
     // reflects that).
     if (assertedFrame >= 0 && live && live.stopped) {
       try {
-        live.rufflePlayer.GotoFrame(assertedFrame, false);
+        playerExec(live, 'GotoFrame', [assertedFrame, false]);
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        live.rufflePlayer.GotoFrame(assertedFrame, true);
+        playerExec(live, 'GotoFrame', [assertedFrame, true]);
       } catch (e) {
         console.warn(`[Flash] asserted-frame re-pin failed for ${key}:`, e);
       }
@@ -956,6 +1164,12 @@ function getVariable(spriteNum: number, path: string): string | null {
   }
 
   try {
+    // Bridge mode (MV3 extension): the real player lives in the main world, so
+    // its GetVariable method isn't visible on the isolated-world element — route
+    // the read through the synchronous bridge instead.
+    if (instance.bridgeId) {
+      return bridgeGetVariableSync(instance.bridgeId, translateLevel0(path));
+    }
     const val = instance.rufflePlayer.GetVariable(translateLevel0(path));
     return val;
   } catch (e) {
@@ -982,6 +1196,10 @@ function setVariable(spriteNum: number, path: string, value: string): boolean {
   }
 
   try {
+    // Bridge mode: route through the synchronous bridge (see getVariable).
+    if (instance.bridgeId) {
+      return bridgeSetVariableSync(instance.bridgeId, translateLevel0(path), value);
+    }
     return instance.rufflePlayer.SetVariable(translateLevel0(path), value);
   } catch (e) {
     console.warn(`ruffleSetVariable error:`, e);
@@ -1031,6 +1249,30 @@ const pendingOps = new Map<number, PendingOp[]>();
  */
 const pinTarget = new Map<number, number>();
 
+// Fire-and-forget Ruffle player method. In the MV3 extension the player lives in
+// the main world, so its methods are invisible on the isolated-world stub —
+// route through the bridge; direct otherwise. Used for playback control
+// (GotoFrame / play / pause / CallFunction-as-command).
+function playerExec(instance: FlashInstance, method: string, args: unknown[] = []): void {
+  if (instance.bridgeId) {
+    void bridgeCallMethod(instance.bridgeId, method, args);
+    return;
+  }
+  const p = instance.rufflePlayer as Record<string, ((...a: unknown[]) => unknown) | undefined> | undefined;
+  const fn = p?.[method];
+  if (typeof fn === 'function') {
+    try { fn.apply(p, args); } catch (e) { console.warn(`[Flash ${method}] error:`, e); }
+  }
+}
+
+// Synchronous GetVariable that also works in bridge mode (frameCount /
+// currentFrame / findLabel / getFlashProperty need the value immediately).
+function playerGetVar(instance: FlashInstance, path: string): string | null {
+  if (instance.bridgeId) return bridgeGetVariableSync(instance.bridgeId, path);
+  const v = (instance.rufflePlayer as { GetVariable?: (p: string) => string | null } | undefined)?.GetVariable?.(path);
+  return v ?? null;
+}
+
 /**
  * Numeric seek that LEAVES THE PLAYHEAD RUNNING — matches Director's
  * `sprite(N).gotoFrame(frame)` method semantic (the Flash Asset Xtra's
@@ -1040,11 +1282,7 @@ const pinTarget = new Map<number, number>();
  * each label points to an animated frame range that must keep playing.
  */
 function applyGotoPlay(instance: FlashInstance, frame: number): void {
-  try {
-    instance.rufflePlayer.GotoFrame(frame, false);
-  } catch (e) {
-    console.warn(`[Flash gotoPlay] error:`, e);
-  }
+  playerExec(instance, 'GotoFrame', [frame, false]);
   // Cancel any pending pin from a previous gotoAndStop on this sprite —
   // play-mode wins over a stale pin target.
   pinTarget.delete(instance.spriteNum);
@@ -1056,18 +1294,7 @@ function applyGotoPlay(instance: FlashInstance, frame: number): void {
  * `_root.gotoAndPlay(label)` via CallFunction.
  */
 function applyGotoLabelPlay(instance: FlashInstance, label: string): void {
-  const player = instance.rufflePlayer as unknown as {
-    CallFunction?: (path: string, args: unknown[]) => unknown;
-  };
-  if (typeof player.CallFunction !== 'function') {
-    console.warn(`[Flash gotoLabelPlay] sprite#${instance.spriteNum} player has no CallFunction`);
-    return;
-  }
-  try {
-    player.CallFunction('_root.gotoAndPlay', [label]);
-  } catch (e) {
-    console.warn(`[Flash gotoLabelPlay] error:`, e);
-  }
+  playerExec(instance, 'CallFunction', ['_root.gotoAndPlay', [label]]);
 }
 
 /**
@@ -1078,16 +1305,10 @@ function applyGotoLabelPlay(instance: FlashInstance, label: string): void {
  * a render race against Ruffle's RAF; see schedulePin for the rationale.
  */
 function applyGotoAndPin(instance: FlashInstance, frame: number): void {
-  try {
-    // Goto+play first forces Ruffle to render frame N synchronously
-    // (Ruffle skips paint for already-stopped MovieClips, so a bare
-    // gotoAndStop wouldn't show frame N until something else triggered
-    // a repaint).
-    instance.rufflePlayer.GotoFrame(frame, false);
-  } catch (e) {
-    console.warn(`[Flash goto] play-step error:`, e);
-    return;
-  }
+  // Goto+play first forces Ruffle to render frame N synchronously (Ruffle skips
+  // paint for already-stopped MovieClips, so a bare gotoAndStop wouldn't show
+  // frame N until something else triggered a repaint).
+  playerExec(instance, 'GotoFrame', [frame, false]);
   pinTarget.set(instance.spriteNum, frame);
   schedulePin(instance, frame);
 }
@@ -1097,29 +1318,13 @@ function applyGotoAndPin(instance: FlashInstance, frame: number): void {
  * AS1 CallFunction.
  */
 function applyGotoLabelAndPin(instance: FlashInstance, label: string): void {
-  const player = instance.rufflePlayer as unknown as {
-    CallFunction?: (path: string, args: unknown[]) => unknown;
-  };
-  if (typeof player.CallFunction !== 'function') {
-    console.warn(`[Flash gotoLabel] sprite#${instance.spriteNum} player has no CallFunction`);
-    return;
-  }
-  try {
-    player.CallFunction('_root.gotoAndPlay', [label]);
-  } catch (e) {
-    console.warn(`[Flash gotoLabel] play-step error:`, e);
-    return;
-  }
+  playerExec(instance, 'CallFunction', ['_root.gotoAndPlay', [label]]);
   queueMicrotask(() => {
-    try {
-      player.CallFunction!('_root.stop', []);
-      // Resume the player so the seeked label frame paints — see schedulePin
-      // for the full rationale (a movie pinning the sprite via per-frame
-      // stop()/hold keeps the player suspended, so the goto never repaints).
-      (instance.rufflePlayer as { play?: () => void }).play?.();
-    } catch (e) {
-      console.warn(`[Flash gotoLabel] pin-step error:`, e);
-    }
+    playerExec(instance, 'CallFunction', ['_root.stop', []]);
+    // Resume the player so the seeked label frame paints — see schedulePin
+    // for the full rationale (a movie pinning the sprite via per-frame
+    // stop()/hold keeps the player suspended, so the goto never repaints).
+    playerExec(instance, 'play', []);
   });
 }
 
@@ -1144,6 +1349,12 @@ function schedulePin(instance: FlashInstance, frame: number): void {
     // different frame) cleared / overwrote our target in the meantime.
     if (pinTarget.get(instance.spriteNum) !== frame) return;
     pinTarget.delete(instance.spriteNum);
+    if (instance.bridgeId) {
+      // Bridge mode: fire-and-forget goto+play through the bridge.
+      playerExec(instance, 'GotoFrame', [frame, true]);
+      playerExec(instance, 'play', []);
+      return;
+    }
     try {
       instance.rufflePlayer.GotoFrame(frame, true);
       // Resume the PLAYER (not the clip) so the seeked frame actually paints
@@ -1201,14 +1412,10 @@ function flushPendingGoto(spriteNum: number): void {
           // already-autoplayed clip isn't restarted.
           pinTarget.delete(spriteNum);
           instance.stopped = false;
-          try {
-            instance.rufflePlayer.play();
-            const cur = parseInt(
-              instance.rufflePlayer.GetVariable?.('/:_currentframe') || '1', 10
-            ) || 1;
-            instance.rufflePlayer.GotoFrame(cur, false);
-          } catch (e) {
-            console.warn(`[Flash flush] sprite#${spriteNum} play resume error:`, e);
+          {
+            playerExec(instance, 'play');
+            const cur = parseInt(playerGetVar(instance, '/:_currentframe') || '1', 10) || 1;
+            playerExec(instance, 'GotoFrame', [cur, false]);
           }
           break;
         case 'stop':
@@ -1222,22 +1429,15 @@ function flushPendingGoto(spriteNum: number): void {
           // player alive lets the seeked frame render.
           pinTarget.delete(spriteNum);
           instance.stopped = true;
-          {
-            const p = instance.rufflePlayer as {
-              CallFunction?: (path: string, args: unknown[]) => unknown;
-              pause?: () => void;
-            };
-            if (typeof p.CallFunction === 'function') p.CallFunction('_root.stop', []);
-            else p.pause?.();
-          }
+          playerExec(instance, 'CallFunction', ['_root.stop', []]);
           break;
         case 'rewind':
           pinTarget.delete(spriteNum);
           instance.stopped = true;
-          instance.rufflePlayer.GotoFrame(1, true);
+          playerExec(instance, 'GotoFrame', [1, true]);
           break;
         case 'setVariable':
-          instance.rufflePlayer.SetVariable(translateLevel0(op.path), op.value);
+          playerExec(instance, 'SetVariable', [translateLevel0(op.path), op.value]);
           break;
         case 'callFunction': {
           // Replay a pre-ready callFunction. Decode args exactly like the
@@ -1251,7 +1451,7 @@ function flushPendingGoto(spriteNum: number): void {
             if (typeof arg === 'string' && arg.startsWith('__ruffle_path:')) return { __ruffle_path: arg.substring('__ruffle_path:'.length) };
             return arg;
           });
-          instance.rufflePlayer.CallFunction(translateLevel0(op.path), args);
+          playerExec(instance, 'CallFunction', [translateLevel0(op.path), args]);
           break;
         }
       }
@@ -1329,7 +1529,11 @@ function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
  * Call a Flash function on a Ruffle instance.
  * Called from WASM via window.dirplayer_ruffleCallFunction.
  */
-function callFunction(spriteNum: number, path: string, argsXml: string): string | null {
+// Returns the RAW Ruffle value (boolean/number/string/object/null), not just a
+// string — the WASM `ruffle_call_function` extern receives it as a JsValue and
+// type-branches (bool → Int(1/0), object → FlashObjectRef, …). Stringifying here
+// broke DGS's `includeIsLoaded() = 1` (AS true → "true" ≠ 1).
+function callFunction(spriteNum: number, path: string, argsXml: string): unknown {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   // Instance not created / AS-init not finished yet: a beginSprite (or a
@@ -1355,6 +1559,10 @@ function callFunction(spriteNum: number, path: string, argsXml: string): string 
       if (typeof arg === 'string' && arg.startsWith('__ruffle_path:')) return { __ruffle_path: arg.substring('__ruffle_path:'.length) };
       return arg;
     });
+    // Bridge mode: route through the synchronous bridge (see getVariable).
+    if (instance.bridgeId) {
+      return bridgeCallFunctionSync(instance.bridgeId, translateLevel0(path), args);
+    }
     return instance.rufflePlayer.CallFunction(translateLevel0(path), args);
   } catch (e) {
     console.warn(`ruffleCallFunction error:`, e);
@@ -1385,16 +1593,8 @@ function stopFlash(spriteNum: number): void {
     // Halting only the root MovieClip freezes the timeline in place while
     // leaving the player alive to paint frame changes. `sprite.playing` reads
     // `instance.stopped` since the player itself keeps running.
-    const player = instance.rufflePlayer as {
-      CallFunction?: (path: string, args: unknown[]) => unknown;
-      pause?: () => void;
-    };
-    if (typeof player.CallFunction === 'function') {
-      player.CallFunction('_root.stop', []);
-    } else {
-      // Bridge mode / no CallFunction: fall back to the old full-player pause.
-      player.pause?.();
-    }
+    // Bridge mode routes CallFunction through the main-world player.
+    playerExec(instance, 'CallFunction', ['_root.stop', []]);
   } catch (e) {
     console.warn(`ruffleStop error:`, e);
   }
@@ -1423,15 +1623,9 @@ function playFlash(spriteNum: number): void {
   // would undo our play() a frame later (BS69 shrink animation).
   pinTarget.delete(spriteNum);
   instance.stopped = false;
-  try {
-    instance.rufflePlayer.play();
-    const cur = parseInt(
-      instance.rufflePlayer.GetVariable?.('/:_currentframe') || '1', 10
-    ) || 1;
-    instance.rufflePlayer.GotoFrame(cur, false);
-  } catch (e) {
-    console.warn(`rufflePlay error:`, e);
-  }
+  playerExec(instance, 'play');
+  const cur = parseInt(playerGetVar(instance, '/:_currentframe') || '1', 10) || 1;
+  playerExec(instance, 'GotoFrame', [cur, false]);
 }
 
 /**
@@ -1446,11 +1640,7 @@ function rewindFlash(spriteNum: number): void {
   }
   pinTarget.delete(spriteNum);
   instance.stopped = true;
-  try {
-    instance.rufflePlayer.GotoFrame(1, true);
-  } catch (e) {
-    console.warn(`ruffleRewind error:`, e);
-  }
+  playerExec(instance, 'GotoFrame', [1, true]);
 }
 
 /**
@@ -1465,6 +1655,9 @@ function isPlaying(spriteNum: number): boolean {
   // player-level isPlaying is no longer a reliable proxy for the movie's
   // stopped state. Honour the tracked intent first.
   if (instance.stopped) return false;
+  // Bridge mode: the isPlaying property isn't on the isolated-world stub; past
+  // the `stopped` gate the intent is "playing".
+  if (instance.bridgeId) return true;
   try {
     return instance.rufflePlayer.isPlaying ?? false;
   } catch (e) {
@@ -1480,8 +1673,7 @@ function getFrameCount(spriteNum: number): number {
   const instance = instances.get(key);
   if (!instance) return 0;
   try {
-    // Use GetVariable to read _totalframes
-    return parseInt(instance.rufflePlayer.GetVariable("/:_totalframes") || "0", 10);
+    return parseInt(playerGetVar(instance, "/:_totalframes") || "0", 10);
   } catch (e) {
     return 0;
   }
@@ -1495,7 +1687,7 @@ function getCurrentFrame(spriteNum: number): number {
   const instance = instances.get(key);
   if (!instance) return 0;
   try {
-    return parseInt(instance.rufflePlayer.GetVariable("/:_currentframe") || "0", 10);
+    return parseInt(playerGetVar(instance, "/:_currentframe") || "0", 10);
   } catch (e) {
     return 0;
   }
@@ -1510,13 +1702,9 @@ function callFrame(spriteNum: number, frame: number): void {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
   if (!instance) return;
-  try {
-    // callFrame in Director executes the actions on a given frame
-    // Best approximation: go to that frame (which runs its scripts) and stop
-    instance.rufflePlayer.GotoFrame(frame, true);
-  } catch (e) {
-    console.warn(`ruffleCallFrame error:`, e);
-  }
+  // callFrame in Director executes the actions on a given frame.
+  // Best approximation: go to that frame (which runs its scripts) and stop.
+  playerExec(instance, 'GotoFrame', [frame, true]);
 }
 
 /**
@@ -1558,6 +1746,12 @@ function hitTest(spriteNum: number, localX: number, localY: number): number {
     }
   }
 
+  // Bridge mode: dirplayer_hitTest lives on the main-world player; call it
+  // synchronously (the classification 0–3 must return to Lingo inline).
+  if (inst.bridgeId) {
+    const r = bridgeCallMethodSync(inst.bridgeId, 'dirplayer_hitTest', [canvasX, canvasY]);
+    return (typeof r === 'number' ? r : 0) | 0;
+  }
   const player = inst.rufflePlayer as
     | { dirplayer_hitTest?: (x: number, y: number) => number }
     | undefined;
@@ -1595,7 +1789,7 @@ function getFlashProperty(spriteNum: number, target: string, propNum: number): s
 
   try {
     const path = target ? `${target}:${propName}` : `/:${propName}`;
-    return instance.rufflePlayer.GetVariable(path)?.toString() ?? null;
+    return playerGetVar(instance, path)?.toString() ?? null;
   } catch (e) {
     return null;
   }
@@ -1620,7 +1814,7 @@ function setFlashProperty(spriteNum: number, target: string, propNum: number, va
 
   try {
     const path = target ? `${target}:${propName}` : `/:${propName}`;
-    instance.rufflePlayer.SetVariable(path, value);
+    playerExec(instance, 'SetVariable', [path, value]);
   } catch (e) {
     console.warn(`ruffleSetFlashProperty error:`, e);
   }
@@ -1637,7 +1831,7 @@ function tellTarget(spriteNum: number, target: string, action: string): void {
   try {
     // tellTarget + action: best effort via SetVariable/CallFunction
     if (action === "play") {
-      instance.rufflePlayer.SetVariable(`${target}:_visible`, "1");
+      playerExec(instance, 'SetVariable', [`${target}:_visible`, "1"]);
       // Can't directly play a sub-timeline from JS, use CallFunction
     } else if (action === "stop") {
       // Similar limitation
@@ -1711,6 +1905,23 @@ function registerLingoCallback(
  */
 export function initFlashBridge(): void {
   const win = window as any;
+  // Flash LocalConnection.send bridge (Neopets DGS score/protocol). The Ruffle
+  // fork calls dirplayer_localConnectionSend(connName, method, argsJson); route
+  // it into the WASM export that dispatches the Lingo setCallback handler.
+  // Direct in dev (fork + this run in one world); in the MV3 extension the fork
+  // is main-world, so the bridge host re-fires it here as a `dirplayer-lc-send`
+  // DOM event (below).
+  win.dirplayer_localConnectionSend = (name: string, method: string, argsJson: string): boolean => {
+    try { return !!local_connection_send(name, method, argsJson); } catch { return false; }
+  };
+  if (isExtensionContext()) {
+    window.addEventListener('dirplayer-lc-send', (ev) => {
+      const d = (ev as CustomEvent).detail as
+        { name?: string; method?: string; argsJson?: string } | undefined;
+      if (!d || typeof d.name !== 'string') return;
+      try { local_connection_send(d.name, d.method || '', d.argsJson || '[]'); } catch { /* ignore */ }
+    });
+  }
   win.dirplayer_ruffleGetVariable = getVariable;
   win.dirplayer_flashInstances = instances;
   win.dirplayer_ruffleSetVariable = setVariable;
