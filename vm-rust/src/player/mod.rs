@@ -351,6 +351,18 @@ pub struct DirPlayer {
     /// ordinary interactions (navigator windows vanishing/rebuilding). Keeps the
     /// hundreds of per-frame interop calls sync with no async-dispatch overhead.
     pub flash_ready_sprites: HashSet<i16>,
+    /// Flash `LocalConnection` receiver registry (Neopets DGS score/protocol).
+    /// A Director-created LocalConnection is `newObject("LocalConnection")` →
+    /// synthetic `_root.__dpObj_LocalConnection_N` ref, `connect(name)` claims a
+    /// name, and `setCallback(lc, method, #handler, target)` wires a method. The
+    /// SWF's AS `LocalConnection.send(name, method, args)` is forwarded by the
+    /// Ruffle fork to `local_connection_send`, which routes name→lc_path→handler.
+    /// `flash_lc_connections`: connection name → lc synthetic path.
+    pub flash_lc_connections: std::collections::HashMap<String, String>,
+    /// `(lc_path, method)` → `(lingo handler, target instance)` — the target keeps
+    /// `me` correct in `on <handler> me, aInfo, aMessage`.
+    pub flash_lc_callbacks:
+        std::collections::HashMap<(String, String), (String, ScriptInstanceRef)>,
     /// Set true whenever a script reads live input state — `keyPressed(...)`,
     /// `the mouseDown`, `the stillDown`. The bytecode loop's busy-wait yield
     /// counts a loop iteration toward yielding ONLY when this was set that
@@ -548,6 +560,8 @@ impl DirPlayer {
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
             flash_ready_sprites: HashSet::new(),
+            flash_lc_connections: std::collections::HashMap::new(),
+            flash_lc_callbacks: std::collections::HashMap::new(),
             input_polled: false,
             flash_texture_targets: HashMap::new(),
             w3d_frame_buffers: HashMap::new(),

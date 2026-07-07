@@ -1513,6 +1513,55 @@ pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler
     })
 }
 
+/// Flash `LocalConnection.send(connName, method, …args)` forwarded from the
+/// Ruffle fork's AVM1 hook. Routes to the Lingo handler a Director-created
+/// LocalConnection registered via `setCallback` (connName → lc_path →
+/// (handler, target)), dispatched to the exact target instance so `me` is
+/// correct. Returns false for a connection dirplayer doesn't own — the caller
+/// (fork) has already run Ruffle's normal routing, so a real SWF↔SWF
+/// LocalConnection is unaffected. Neopets DGS uses this for the encrypted-score
+/// / protocol channel (`send("gObjLC", "createESCORE", score)`).
+#[wasm_bindgen]
+pub fn local_connection_send(
+    connection_name: String,
+    method_name: String,
+    args_json: String,
+) -> bool {
+    use director::lingo::datum::Datum;
+
+    let params = player::reserve_player_ref(|player| {
+        let lc_path = player.flash_lc_connections.get(&connection_name)?.clone();
+        let cb = player.flash_lc_callbacks.get(&(lc_path, method_name.clone()))?;
+        Some(cb.clone())
+    });
+    let (handler, target) = match params {
+        Some(p) => p,
+        None => return false, // not dirplayer-owned — Ruffle handled it normally
+    };
+
+    let args_js_value = match js_sys::JSON::parse(&args_json) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut arg_refs = Vec::new();
+    // Director LocalConnection callback shape: `on <handler> me, aInfo, aMessage`.
+    // aInfo is a status/info arg Director supplies; pass VOID.
+    arg_refs.push(player::player_alloc_datum(Datum::Void));
+    if js_sys::Array::is_array(&args_js_value) {
+        let array = js_sys::Array::from(&args_js_value);
+        for i in 0..array.length() {
+            let item = array.get(i);
+            arg_refs.push(js_value_to_datum_ref(&item));
+        }
+    }
+
+    player_dispatch_with_result(PlayerVMCommand::TriggerLocalConnectionCallback {
+        target,
+        handler_name: handler,
+        args: arg_refs,
+    })
+}
+
 /// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
 ///
 /// Called from the JS Flash bridge whenever a SWF tries to navigate to a

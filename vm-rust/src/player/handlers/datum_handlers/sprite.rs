@@ -1019,6 +1019,28 @@ impl SpriteDatumHandlers {
                             }
                         };
 
+                        // dirplayer LocalConnection: also record
+                        // (lc_path, method) -> (handler, target instance) so a
+                        // forwarded AS `LocalConnection.send` can dispatch the
+                        // Lingo handler on the ORIGINAL instance (keeps `me`
+                        // correct in `on myOnStatus me, aInfo, aMessage`). Harmless
+                        // for non-LC setCallbacks — never looked up unless a
+                        // matching connect()+send() arrives for that path/method.
+                        let lc_target = if args.len() >= 4 {
+                            match player.get_datum(&args[3]) {
+                                Datum::ScriptInstanceRef(r) => Some(r.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(target_ref) = lc_target {
+                            player.flash_lc_callbacks.insert(
+                                (translated_path.clone(), flash_method.clone()),
+                                (lingo_handler.clone(), target_ref),
+                            );
+                        }
+
                         // Call the JS bridge to register the callback in Ruffle.
                         // The export is exposed under the dirplayer_ prefix
                         // (see ruffle/web/src/lib.rs and the matching JS in

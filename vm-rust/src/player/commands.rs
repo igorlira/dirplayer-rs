@@ -69,6 +69,14 @@ pub enum PlayerVMCommand {
         handler_name: String,
         args: Vec<DatumRef>,
     },
+    /// Flash `LocalConnection.send` → the Lingo handler registered via
+    /// `setCallback` on a Director-created LocalConnection, dispatched to the
+    /// EXACT target instance (so `me` in `on myOnStatus me, ...` is correct).
+    TriggerLocalConnectionCallback {
+        target: ScriptInstanceRef,
+        handler_name: String,
+        args: Vec<DatumRef>,
+    },
     SetLingoScriptProperty {
         cast_lib: i32,
         cast_member: i32,
@@ -118,6 +126,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         }
         PlayerVMCommand::TriggerLingoCallbackOnScript { cast_lib, cast_member, handler_name, .. } => {
             format!("TriggerLingoCallbackOnScript(cast_lib: {}, cast_member: {}, handler: {})", cast_lib, cast_member, handler_name)
+        }
+        PlayerVMCommand::TriggerLocalConnectionCallback { handler_name, .. } => {
+            format!("TriggerLocalConnectionCallback(handler: {})", handler_name)
         }
         PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, .. } => {
             format!("SetLingoScriptProperty(cast_lib: {}, cast_member: {}, prop: {})", cast_lib, cast_member, prop_name)
@@ -1263,6 +1274,23 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     &receiver_datum,
                     &handler.1,
                     &args
+                ).await;
+            }
+        }
+        PlayerVMCommand::TriggerLocalConnectionCallback { target, handler_name, args } => {
+            use super::handlers::datum_handlers::script_instance::ScriptInstanceDatumHandlers;
+            // Dispatch to the EXACT registered instance so `me` is right.
+            let handler_ref = reserve_player_ref(|player| {
+                let si = player.allocator.get_script_instance_opt(&target)?;
+                let script = player.movie.cast_manager.get_script_by_ref(&si.script)?;
+                script.get_own_handler_ref(&handler_name)
+            });
+            if let Some(handler) = handler_ref {
+                let receiver_datum = player_alloc_datum(Datum::ScriptInstanceRef(target));
+                let _ = ScriptInstanceDatumHandlers::call_async(
+                    &receiver_datum,
+                    &handler.1,
+                    &args,
                 ).await;
             }
         }

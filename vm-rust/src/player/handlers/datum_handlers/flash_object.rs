@@ -145,6 +145,35 @@ impl FlashObjectDatumHandlers {
                 }
             };
 
+            // dirplayer LocalConnection: intercept connect()/close() on a
+            // Director-created LocalConnection. The synthetic
+            // `__dpObj_LocalConnection_*` ref has no real AS object, so a Ruffle
+            // call would just return null. Instead register the connection name
+            // → this LC's path, so the Ruffle fork's forwarded AS
+            // `LocalConnection.send(name, method, ...)` (local_connection_send)
+            // can route to the setCallback handler bound to this LC.
+            if flash_ref.path.contains("__dpObj_LocalConnection") {
+                if handler_name == "connect" {
+                    let name = args
+                        .get(0)
+                        .map(|a| player.get_datum(a).string_value().unwrap_or_default())
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        player
+                            .flash_lc_connections
+                            .insert(name, flash_ref.path.clone());
+                    }
+                    // AS LocalConnection.connect() returns true on success.
+                    return Ok(player.alloc_datum(Datum::Int(1)));
+                }
+                if handler_name == "close" {
+                    player
+                        .flash_lc_connections
+                        .retain(|_, v| v != &flash_ref.path);
+                    return Ok(player.alloc_datum(Datum::Void));
+                }
+            }
+
             let method_path = format!("{}.{}", flash_ref.path, handler_name);
 
             // Convert Lingo arguments to a JSON array string for the bridge
