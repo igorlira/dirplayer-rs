@@ -254,6 +254,12 @@ impl TypeUtils {
                     player.alloc_datum(Datum::Void)
                 }
             }
+            // Subscripting a VOID value yields VOID in Director — it never
+            // raises. g349's `on particle` does `g.particles[g.cparticle]`;
+            // before `g.particles` is populated (or after teardown) it is VOID,
+            // so `VOID[n]` reads VOID and the subsequent `.spawn(Args)` is a
+            // silent no-op on VOID rather than an error.
+            Datum::Void => player.alloc_datum(Datum::Void),
             _ => {
                 web_sys::console::log_1(
                     &format!(

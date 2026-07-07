@@ -884,6 +884,12 @@ impl Datum {
         match d {
             Datum::Int(n) => Ok((*n as f64, false)),
             Datum::Float(f) => Ok((*f, true)),
+            // Director coerces VOID to 0 in numeric contexts, so
+            // `point(h, V)` with an uninitialized property still builds a
+            // valid point. g349's "show treasure complete item bhv" relies on
+            // this: its `V` property is VOID until the item is activated, yet
+            // every exitFrame ends with `my.loc = point(h, V)`.
+            Datum::Void => Ok((0.0, false)),
             other => Err(ScriptError::new(format!(
                 "Point/Rect component must be numeric, got {}",
                 other.type_str()
