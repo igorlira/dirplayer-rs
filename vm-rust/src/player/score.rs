@@ -574,6 +574,34 @@ impl Score {
         Ok(())
     }
 
+    /// Deferred revert for sprites unpuppeted via `puppetSprite(N, FALSE)` that
+    /// were NOT re-puppeted (or given a new member) before the next frame tick.
+    /// Director defers reverting an unpuppeted sprite to the Score until the next
+    /// frame update; a PURE-PUPPET channel (no Score span this frame — Coke
+    /// Studios' furniture pool) reverts to empty via reset(). Span-backed
+    /// channels are left alone (begin_sprites reloads them). Returns true if any
+    /// sprite was reset so the caller can invalidate the render cache. Runs every
+    /// frame (not just on frame change) so single-frame movies revert too.
+    pub fn process_pending_unpuppet_reverts(&mut self, frame_num: u32) -> bool {
+        let span_channels: std::collections::HashSet<usize> = self
+            .active_channel_numbers_for_frame(frame_num)
+            .into_iter()
+            .collect();
+        let mut any = false;
+        for channel in &mut self.channels {
+            let sprite = &mut channel.sprite;
+            if !sprite.pending_unpuppet_revert {
+                continue;
+            }
+            sprite.pending_unpuppet_revert = false;
+            if !sprite.puppet && !span_channels.contains(&channel.number) {
+                sprite.reset();
+                any = true;
+            }
+        }
+        any
+    }
+
     pub fn begin_sprites(&mut self, score_ref: ScoreRef, frame_num: u32) {
         // Clean up sound channel triggers - but only once per frame to prevent double-triggering
         // Check if we already processed this frame
@@ -4448,6 +4476,11 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Assign the new member
                 sprite.member = mem_ref.clone();
 
+                // The sprite is being given a member (e.g. reused from a pool),
+                // so cancel any pending deferred unpuppet-revert — it must not be
+                // reset out from under a fresh assignment on the next tick.
+                sprite.pending_unpuppet_revert = false;
+
                 // Initialize size and reset rotation/skew ONLY if:
                 //  - member actually changed
                 if member_changed {
@@ -4815,6 +4848,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         sprite.member = None;
                         sprite.puppet = false;
                     }
+                    // Either way the sprite was explicitly set here, so cancel a
+                    // pending deferred unpuppet-revert.
+                    sprite.pending_unpuppet_revert = false;
                     Ok(())
                 },
             )

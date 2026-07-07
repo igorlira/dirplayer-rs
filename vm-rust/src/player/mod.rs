@@ -4532,6 +4532,19 @@ pub async fn run_single_frame() -> (bool, bool) {
         return (false, is_script_paused);
     }
 
+    // Deferred puppetSprite(N,FALSE) revert: a sprite unpuppeted on a prior tick
+    // and not re-puppeted / re-membered since reverts to the Score now (Director
+    // defers the revert to the next frame update). Runs every tick so it fires
+    // even for single-frame movies — Coke Studios' WallItems unpuppet furniture
+    // WITHOUT setting visible=0 and relied on the old immediate wipe to clear it.
+    reserve_player_mut(|player| {
+        let frame = player.movie.current_frame;
+        if player.movie.score.process_pending_unpuppet_reverts(frame) {
+            player.movie.score.invalidate_render_channel_cache();
+            player.stage_dirty = true;
+        }
+    });
+
     // Dispatch streamStatus for any net tasks that completed since last check
     stream_status::dispatch_pending_stream_status().await;
 

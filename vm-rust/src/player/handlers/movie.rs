@@ -565,6 +565,14 @@ impl MovieHandlers {
                 sprite.entered = false;
                 sprite.exited = false;
                 sprite.script_instance_list.clear();
+                // Mark for revert on the NEXT frame tick. If the sprite is not
+                // re-puppeted / re-membered before then it reverts to the Score
+                // (a reset to empty for a pure-puppet channel with no span). This
+                // matches Director's deferred revert AND keeps BrickOut working
+                // (it re-puppets in the same handler, clearing the flag), while
+                // fixing Coke Studios' WallItems which unpuppet furniture WITHOUT
+                // setting visible=0 and relied on the old immediate wipe to clear.
+                sprite.pending_unpuppet_revert = true;
                 player.movie.score.invalidate_render_channel_cache();
                 player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
                 player.invalidate_active_stage_filmloop_cache();
@@ -573,6 +581,8 @@ impl MovieHandlers {
 
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
             sprite.puppet = is_puppet;
+            // Re-puppeted before the deferred revert ran → keep its data.
+            sprite.pending_unpuppet_revert = false;
             player.movie.score.invalidate_render_channel_cache();
             player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
             player.invalidate_active_stage_filmloop_cache();

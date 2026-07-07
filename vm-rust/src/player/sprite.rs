@@ -94,6 +94,14 @@ pub struct Sprite {
     pub trails: bool,
     pub entered: bool,
     pub exited: bool,
+    /// Set by `puppetSprite(N, FALSE)`: the sprite keeps its member/visual state
+    /// for the rest of the CURRENT handler (Director defers the revert), but if
+    /// it is still unpuppeted at the next frame tick it reverts to the Score.
+    /// For a pure-puppet channel (no Score span — Coke Studios' furniture pool)
+    /// that revert is a reset to empty. Cleared the moment the sprite is
+    /// re-puppeted or given a new member (BrickOut re-puppets in the same
+    /// handler, so it never reverts and keeps its makeStage member).
+    pub pending_unpuppet_revert: bool,
     pub quad: Option<[(i32, i32); 4]>, // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
     pub fore_color: i32,
     pub has_fore_color: bool,
@@ -211,6 +219,7 @@ impl Sprite {
             trails: false,
             entered: false,
             exited: false,
+            pending_unpuppet_revert: false,
             quad: None,
             fore_color: 255,
             has_fore_color: false,
@@ -287,6 +296,7 @@ impl Sprite {
         self.constraint = 0;
         self.entered = false;
         self.exited = false;
+        self.pending_unpuppet_revert = false;
         self.quad = None;
         self.fore_color = 255;
         self.has_fore_color = false;
