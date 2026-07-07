@@ -94,6 +94,15 @@ function proxyRequest(targetUrl, clientReq, res, bodyChunks, redirectsLeft) {
       for (const [k, v] of Object.entries(up.headers)) {
         if (!STRIP_RES_HEADERS.has(k.toLowerCase())) outHeaders[k] = v;
       }
+      // Preserve Content-Length when the body is identity-encoded. We strip
+      // `accept-encoding` from the request (so upstream returns identity) and
+      // pipe the body unchanged, so the upstream length is accurate. Without it
+      // Director's getStreamStatus(netID)[#bytestotal] is 0, so preloadNetThing
+      // progress (percentloaded) sits at 0% forever and DGS loading bars never
+      // advance. Only skipped if upstream actually sent a content-encoding.
+      if (!up.headers["content-encoding"] && up.headers["content-length"]) {
+        outHeaders["content-length"] = up.headers["content-length"];
+      }
       res.writeHead(status, outHeaders);
       up.pipe(res);
     }
