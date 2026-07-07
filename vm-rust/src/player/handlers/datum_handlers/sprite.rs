@@ -780,13 +780,24 @@ impl SpriteDatumHandlers {
                     // a FlashObjectRef for setCallback/call usage.
                     if let Ok(val) = ruffle_get_variable(sn as i32, &rooted) {
                         if val.is_string() {
-                            // Simple string variable - return as string
                             let s = val.as_string().unwrap();
-                            return reserve_player_mut(|player| {
-                                Ok(player.alloc_datum(Datum::String(s)))
-                            });
+                            // Ruffle's GetVariable ALWAYS returns a string, coercing
+                            // an AS OBJECT to "[object Object]" / "[type Object]" /
+                            // "[object MovieClip]". The object form
+                            // (getVariable(path, 0)) must return a FlashObjectRef for
+                            // those, NOT the coercion text — DGS does
+                            // `objMain = getVariable("objMain", 0)` then
+                            // `objMain.setBaseUrls(...)` (a method call). Only a
+                            // genuine primitive string returns as Datum::String.
+                            let is_object_coercion =
+                                s.starts_with("[object ") || s.starts_with("[type ");
+                            if !is_object_coercion {
+                                return reserve_player_mut(|player| {
+                                    Ok(player.alloc_datum(Datum::String(s)))
+                                });
+                            }
                         }
-                        // Object or other type - fall through to FlashObjectRef
+                        // Object / object-coercion / undefined → FlashObjectRef.
                     }
                     // Return a sprite-bound FlashObjectRef for use with
                     // setCallback / call / play etc. Never VOID for the object form.
