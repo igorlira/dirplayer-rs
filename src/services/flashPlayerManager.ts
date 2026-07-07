@@ -117,6 +117,23 @@ function maybeCorsProxy(urlStr: string): string | null {
 }
 
 const origFetch = window.fetch;
+// Count outstanding browser fetches so dirplayer's Rust frame loop can lengthen
+// its per-frame yield while any request is in flight — including Ruffle-side
+// requests (LoadVars/URLLoader/XML) that dirplayer's own net_manager never sees.
+// The DGS loader spins a tight high-tempo frame loop (puppetTempo(999)) waiting
+// on `preloaderTranslationSuccess`, which is only set once the preloader's
+// `LoadVars` POST to gettranslationxml.phtml (1-3 s) completes; without a yield
+// the loop starves that fetch's completion callback and the login links never
+// resolve. Tracked as a window global (read from Rust via Reflect).
+let pendingNetCount = 0;
+function trackFetch(p: Promise<Response>): Promise<Response> {
+  pendingNetCount += 1;
+  (window as any).__dirplayerPendingNetCount = pendingNetCount;
+  return p.finally(() => {
+    pendingNetCount -= 1;
+    (window as any).__dirplayerPendingNetCount = pendingNetCount;
+  });
+}
 window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   if (typeof input === 'string') {
     try {
@@ -134,7 +151,7 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
       const newUrl = applyFetchRewrite(url) ? url.toString() : maybeCorsProxy(url.toString());
       if (newUrl) {
         const req = input;
-        return req.arrayBuffer().then(bodyBuf => {
+        return trackFetch(req.arrayBuffer().then(bodyBuf => {
           const newInit: RequestInit = {
             method: req.method,
             headers: req.headers,
@@ -143,11 +160,11 @@ window.fetch = function(input: RequestInfo | URL, init?: RequestInit): Promise<R
             credentials: 'omit' as RequestCredentials,
           };
           return origFetch.call(window, newUrl, newInit);
-        });
+        }));
       }
     } catch (e) { console.error('[fetch-intercept] Error:', e); }
   }
-  return origFetch.call(window, input, init);
+  return trackFetch(origFetch.call(window, input, init));
 };
 
 // Monkey-patch HTMLCanvasElement.getContext to force preserveDrawingBuffer: true
@@ -197,6 +214,17 @@ function instanceKey(spriteNum: number): string {
   return `${spriteNum}`;
 }
 
+// Publish the count of live Ruffle instances so dirplayer's Rust frame loop can
+// floor its per-frame yield while any Flash sprite is on stage. The offscreen
+// Ruffle instances self-tick via requestAnimationFrame; a tight high-tempo
+// Director loop (DGS puppetTempo(999) guest-gate poll) otherwise hogs the main
+// thread and starves those RAF ticks, so a text field whose htmlText was just
+// updated (the preloader login links) never re-renders. Only affects movies
+// running faster than ~60fps — see the yield logic in player/mod.rs.
+function syncActiveFlashCount(): void {
+  (window as any).__dirplayerActiveFlashCount = instances.size;
+}
+
 /**
  * Forward a Director sprite mouse event into a Ruffle player so the SWF's
  * own AS1 button handlers (`on (press)` / `on (release)`) actually run.
@@ -243,7 +271,8 @@ function dispatchMouseEvent(
       `bridgeId=${inst.bridgeId}, player keys=`, player ? Object.keys(player as object) : 'no player');
     return false;
   }
-  return !!player.dirplayer_dispatchPointer(type, canvasX, canvasY);
+  const handled = !!player.dirplayer_dispatchPointer(type, canvasX, canvasY);
+  return handled;
 }
 
 /**
@@ -604,6 +633,7 @@ export async function createFlashInstance(
   };
 
   instances.set(key, instance);
+  syncActiveFlashCount();
 
   // Copy data out of WASM memory immediately — the underlying ArrayBuffer
   // can be detached/invalidated when WASM memory grows
@@ -880,6 +910,7 @@ export function destroyFlashInstance(spriteNum: number): void {
 
   instance.container.remove();
   instances.delete(key);
+  syncActiveFlashCount();
 }
 
 /**
@@ -921,7 +952,8 @@ function getVariable(spriteNum: number, path: string): string | null {
   }
 
   try {
-    return instance.rufflePlayer.GetVariable(translateLevel0(path));
+    const val = instance.rufflePlayer.GetVariable(translateLevel0(path));
+    return val;
   } catch (e) {
     console.warn(`ruffleGetVariable error:`, e);
     return null;
@@ -1780,6 +1812,7 @@ export function destroyAllFlashInstances(): void {
     instance.container.remove();
   });
   instances.clear();
+  syncActiveFlashCount();
 }
 
 /**
