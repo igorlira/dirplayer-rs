@@ -17,6 +17,9 @@ type RecentMovie = {
   url: string;
   params: ExternalParam[];
   fakeMoviePath?: string;
+  // Whether this entry routes its cross-origin fetches through the CORS proxy.
+  // Opt-in per movie (advanced-options checkbox); undefined/false = direct.
+  useCorsProxy?: boolean;
   timestamp: number;
 };
 
@@ -116,9 +119,9 @@ function loadRecentMovies(): RecentMovie[] {
   }
 }
 
-function saveRecentMovie(url: string, params: ExternalParam[], fakeMoviePath?: string): RecentMovie[] {
+function saveRecentMovie(url: string, params: ExternalParam[], fakeMoviePath?: string, useCorsProxy?: boolean): RecentMovie[] {
   const existing = loadRecentMovies().filter(m => m.url !== url);
-  const updated = [{ url, params, fakeMoviePath, timestamp: Date.now() }, ...existing].slice(0, MAX_RECENT_MOVIES);
+  const updated = [{ url, params, fakeMoviePath, useCorsProxy, timestamp: Date.now() }, ...existing].slice(0, MAX_RECENT_MOVIES);
   window.localStorage.setItem(RECENT_MOVIES_KEY, JSON.stringify(updated));
   return updated;
 }
@@ -148,6 +151,8 @@ export default function LoadMovie() {
   const [paramsExpanded, setParamsExpanded] = useState(() => getEnvExternalParams().length > 0);
   const [loaderUrl, setLoaderUrl] = useState<string>('');
   const [corsProxy, setCorsProxy] = useState<string>(DEFAULT_CORS_PROXY);
+  // CORS proxy is OPT-IN per movie (default OFF); persisted per recent entry.
+  const [useCorsProxy, setUseCorsProxy] = useState<boolean>(false);
   const isInElectron = isElectron();
 
   const addParam = useCallback(() => {
@@ -163,20 +168,20 @@ export default function LoadMovie() {
     setExternalParams(prev => prev.map((p, i) => i === index ? { ...p, [field]: val } : p));
   }, []);
 
-  const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string) => {
+  const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string, useProxy?: boolean) => {
     try {
       setIsLoading(true);
       setHasError(false);
-      // The CORS-proxy field is the control: if it holds a base URL, route this
-      // movie's CROSS-ORIGIN http(s) fetches through it (e.g. Neopets DGS's
-      // `preloadNetThing("http://swf.neopets.com/...")`); if it's empty, route
-      // direct. maybeCorsProxy() only rewrites cross-origin requests, so a
-      // same-origin local movie is unaffected either way. We re-apply it on
-      // EVERY load — setting when non-empty, and CLEARING when empty — because
-      // `__dirplayerFlashConfig.corsProxy` is a persistent window global; without
-      // the clear, a proxy set by a prior load (or loader mode) leaked into
-      // later loads that shouldn't use it. Clear the field to disable.
-      const proxyBase = corsProxy.trim();
+      // The CORS proxy is OPT-IN per movie (advanced-options checkbox, persisted
+      // per recent entry). Only route this movie's CROSS-ORIGIN http(s) fetches
+      // through it when ENABLED and a base URL is set (e.g. Neopets DGS's
+      // `preloadNetThing("http://swf.neopets.com/...")`); otherwise route direct.
+      // We re-apply on EVERY load — setting when enabled, CLEARING otherwise —
+      // because `__dirplayerFlashConfig.corsProxy` is a persistent window global;
+      // without the clear, a proxy enabled for a PRIOR game leaked into later
+      // loads (incl. previously-added recent entries) that shouldn't use it.
+      const proxyEnabled = useProxy ?? useCorsProxy;
+      const proxyBase = proxyEnabled ? corsProxy.trim() : '';
       if (proxyBase) {
         (window as any).__dirplayerFlashConfig = {
           ...((window as any).__dirplayerFlashConfig || {}),
@@ -217,14 +222,14 @@ export default function LoadMovie() {
     } finally {
       setIsLoading(false);
     }
-  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy]);
+  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy, useCorsProxy]);
 
   const onLoadClick = useCallback(async () => {
     if (!movieUrl.trim()) { setHasError(true); return; }
-    const updated = saveRecentMovie(movieUrl, externalParams, fakeMoviePath);
+    const updated = saveRecentMovie(movieUrl, externalParams, fakeMoviePath, useCorsProxy);
     setRecentMovies(updated);
-    await loadMovieFile(movieUrl);
-  }, [movieUrl, externalParams, fakeMoviePath, loadMovieFile]);
+    await loadMovieFile(movieUrl, undefined, undefined, useCorsProxy);
+  }, [movieUrl, externalParams, fakeMoviePath, useCorsProxy, loadMovieFile]);
 
   // Loader mode: fetch a Shockwave loader page through the dev CORS proxy,
   // extract the Director embed (movie URL + sw* external params), enable proxy
@@ -254,8 +259,11 @@ export default function LoadMovie() {
       setMovieUrl(parsed.movieUrl);
       setExternalParams(parsed.params);
       if (parsed.params.length > 0) setParamsExpanded(true);
-      setRecentMovies(saveRecentMovie(parsed.movieUrl, parsed.params));
-      await loadMovieFile(parsed.movieUrl, parsed.params);
+      // Loader mode inherently requires the proxy (the game's own cross-origin
+      // fetches route through it), so force it on and persist that for the entry.
+      setUseCorsProxy(true);
+      setRecentMovies(saveRecentMovie(parsed.movieUrl, parsed.params, undefined, true));
+      await loadMovieFile(parsed.movieUrl, parsed.params, undefined, true);
     } catch (e) {
       console.error('[LoadMovie] Loader load failed', e);
       setHasError(true);
@@ -280,15 +288,19 @@ export default function LoadMovie() {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
     setFakeMoviePath(movie.fakeMoviePath ?? '');
-    const updated = saveRecentMovie(movie.url, movie.params, movie.fakeMoviePath);
+    // Honor the per-entry opt-in (default OFF for legacy entries with no flag).
+    const proxy = movie.useCorsProxy ?? false;
+    setUseCorsProxy(proxy);
+    const updated = saveRecentMovie(movie.url, movie.params, movie.fakeMoviePath, proxy);
     setRecentMovies(updated);
-    loadMovieFile(movie.url, movie.params, movie.fakeMoviePath);
+    loadMovieFile(movie.url, movie.params, movie.fakeMoviePath, proxy);
   }, [loadMovieFile]);
 
   const onEditRecent = useCallback((movie: RecentMovie) => {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
     setFakeMoviePath(movie.fakeMoviePath ?? '');
+    setUseCorsProxy(movie.useCorsProxy ?? false);
     if (movie.params.length > 0 || movie.fakeMoviePath) {
       setParamsExpanded(true);
     }
@@ -392,11 +404,23 @@ export default function LoadMovie() {
                     Fetch &amp; Load
                   </button>
                 </div>
+                <label
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer' }}
+                  title="When off, this movie's cross-origin fetches go direct. Enable only for games that need the proxy (e.g. Neopets DGS). Saved per entry."
+                >
+                  <input
+                    type="checkbox"
+                    checked={useCorsProxy}
+                    onChange={e => setUseCorsProxy(e.currentTarget.checked)}
+                    disabled={isLoading}
+                  />
+                  Use CORS proxy for this movie
+                </label>
                 <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
-                  Fetches the loader page through the CORS proxy, extracts the
-                  Director embed + sw params, and loads it (the game's own
-                  cross-origin fetches then route through the proxy too). Start
-                  the proxy first: <code>node cors-proxy.cjs</code>.
+                  CORS proxy is <strong>opt-in per movie</strong> (default off) and
+                  saved with each recent entry. Enable it only for games whose
+                  cross-origin fetches need proxying. Fetch &amp; Load turns it on
+                  automatically. Start the proxy first: <code>node cors-proxy.cjs</code>.
                 </div>
               </div>
               <div className={styles.fieldContainer}>
