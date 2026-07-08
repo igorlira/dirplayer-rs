@@ -48,6 +48,14 @@ pub struct Movie {
     /// so this is stored for round-trip read/write but has no side effect.
     /// Default TRUE for movies authored in Director 8+ (Scripting Dict p.890).
     pub edit_shortcuts_enabled: bool,
+    /// `the enableFlashLingo` — Director movie property (Scripting Dict p.897).
+    /// Gates whether a Flash sprite may run Lingo via Flash's `getURL()` (the
+    /// `lingo:` / `event:` schemes); default FALSE for movies of unknown origin.
+    /// We store it for round-trip read/write ONLY and DO NOT gate the actual
+    /// callback dispatch on it: real movies fire `event:`/`lingo:` without ever
+    /// setting this property, so honoring it as a hard gate would break them
+    /// (see [[flash-lingo-geturl-scheme]]). dirplayer always allows the callback.
+    pub enable_flash_lingo: bool,
     pub mouse_down: bool,
     /// Tracks the right mouse button independently of `mouse_down` — set by
     /// `right_mouse_down(x, y)` / `right_mouse_up(x, y)` from the JS host.
@@ -101,6 +109,7 @@ impl Movie {
             trace_log_file: String::new(),
             debug_playback_enabled: false,
             edit_shortcuts_enabled: true,
+            enable_flash_lingo: false,
             mouse_down: false,
             right_mouse_down: false,
             click_loc: (0, 0),
@@ -356,6 +365,7 @@ impl Movie {
             },
             "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
             "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
+            "enableFlashLingo" => Ok(datum_bool(self.enable_flash_lingo)),
             // No-op system prop: nothing to preload-abort in dirplayer.
             // Return the Director default (FALSE) so read-backs don't error.
             "preLoadEventAbort" => Ok(datum_bool(false)),
@@ -384,6 +394,12 @@ impl Movie {
             },
             "editShortCutsEnabled" => {
                 self.edit_shortcuts_enabled = value.int_value()? != 0;
+                Ok(())
+            },
+            "enableFlashLingo" => {
+                // Store the flag for read-back; does NOT restrict Flash->Lingo
+                // callbacks (see field comment). Round-trip only.
+                self.enable_flash_lingo = value.int_value()? != 0;
                 Ok(())
             },
             "alertHook" => {
