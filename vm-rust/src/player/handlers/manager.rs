@@ -892,7 +892,16 @@ impl BuiltInHandlerManager {
                     b.info.bit_depth = 32;
                     b.info.pitch = w.saturating_mul(4);
                     b.info.trim_white_space = trim_white_space;
+                    // Director centers a bitmap member's regPoint on its image
+                    // when content is (re)imported — the same rule the
+                    // `member.image = ...` setter applies. Without this, a
+                    // `new(#bitmap)` member filled via importFileInto keeps its
+                    // (0,0) regPoint, so its sprite renders offset by half the
+                    // image. (Tetris imports bgpicture.jpg into member 18 and its
+                    // full-stage sprite drew shifted down-right by ~180x200.)
+                    b.reg_point = ((w as i32 / 2) as i16, (h as i32 / 2) as i16);
                 }
+                member.reg_point = (w as i32 / 2, h as i32 / 2);
             }
             player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
             JsApi::dispatch_cast_member_changed(member_ref.clone());
