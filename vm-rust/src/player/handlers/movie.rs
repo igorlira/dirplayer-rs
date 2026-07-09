@@ -106,7 +106,37 @@ impl MovieHandlers {
                     Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
                 }
             } else {
-                Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
+                // `member(N)` with no cast lib and no existing member: Director
+                // returns a valid BY-NUMBER reference to member N of the default
+                // cast even when that slot is empty — `member(19)` IS member 19,
+                // allocated or not (11.5 Scripting Dictionary: a numbered
+                // reference addresses a slot; it does not require the slot to be
+                // filled). Without this the ref was INVALID (-1,-1), so
+                // `new(#bitmap, member(19))` couldn't target slot 19 (it fell
+                // back to the first free slot) and `member(19).image = ...`
+                // errored. Tetris reserves empty slots 10-14 / 19-21 and fills
+                // them at runtime with exactly that pattern. A failed name
+                // lookup or a non-positive number stays invalid.
+                let numeric = match &member_name_or_num {
+                    Datum::Int(n) => Some(*n),
+                    Datum::Float(f) => Some(*f as i32),
+                    _ => None,
+                };
+                match numeric {
+                    Some(n) if n > 0 => {
+                        // High 16 bits may encode the cast lib (slot-number
+                        // form); a bare member number has cast_lib 0 → default
+                        // to the first cast (mirrors member_ref_from_slot_number).
+                        let cast_lib = (n >> 16) as i32;
+                        let cast_member = (n & 0xFFFF) as i32;
+                        let cast_lib = if cast_lib == 0 { 1 } else { cast_lib };
+                        Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
+                            cast_lib,
+                            cast_member,
+                        })))
+                    }
+                    _ => Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF))),
+                }
             }
         })
     }
