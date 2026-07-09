@@ -950,7 +950,8 @@ impl GetSetBytecodeHandler {
                 }
             } else if prop_type == 0x07 {
                 // anim prop
-                Ok(player.alloc_datum(player.get_anim_prop(prop_id as u16)?))
+                let anim_datum = player.get_anim_prop(prop_id as u16)?;
+                Ok(player.alloc_datum(anim_datum))
             } else if prop_type == 0x08 {
                 // anim2 prop
                 let datum = if prop_id == 0x02 && player.movie.dir_version >= 500 {

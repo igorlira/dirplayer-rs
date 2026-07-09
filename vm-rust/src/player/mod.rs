@@ -363,12 +363,15 @@ pub struct DirPlayer {
     /// `me` correct in `on <handler> me, aInfo, aMessage`.
     pub flash_lc_callbacks:
         std::collections::HashMap<(String, String), (String, ScriptInstanceRef)>,
-    /// Set true whenever a script reads live input state — `keyPressed(...)`,
-    /// `the mouseDown`, `the stillDown`. The bytecode loop's busy-wait yield
-    /// counts a loop iteration toward yielding ONLY when this was set that
-    /// iteration, so it cooperatively yields for input-wait spins (Neopets'
-    /// `repeat while keyPressed(" ") end`) but NEVER for compute/AMF loops (Coke
-    /// Studios' object-graph conversion), where a yield only adds latency.
+    /// Set true whenever a script reads live input OR a wall clock —
+    /// `keyPressed(...)`, `the keyPressed`, `the key`, `the keyCode`,
+    /// `the mouseDown`, `the stillDown`, `the ticks`, `the milliSeconds`,
+    /// `the timer`. The bytecode loop's busy-wait yield counts a loop iteration
+    /// toward yielding ONLY when this was set that iteration, so it cooperatively
+    /// yields for input-wait spins (Neopets' `repeat while keyPressed(" ") end`)
+    /// and for time-based frame throttles (`repeat while (the ticks - t0) < N`),
+    /// but NEVER for compute/AMF loops (Coke Studios' object-graph conversion),
+    /// which read neither, so a yield there only adds latency.
     pub input_polled: bool,
     /// Off-screen Flash members rendered into W3D textures (frog01's environment:
     /// `newTexture(#fromCastMember, flashMember)`). Keyed by a synthetic NEGATIVE
@@ -2346,11 +2349,17 @@ impl DirPlayer {
             "time" => Ok(self.alloc_datum(Datum::String(
                 chrono::Local::now().format("%H:%M %p").to_string(),
             ))),
-            "milliSeconds" => Ok(self.alloc_datum(Datum::Int(
-                chrono::Local::now()
-                    .signed_duration_since(self.system_start_time)
-                    .num_milliseconds() as i32,
-            ))),
+            "milliSeconds" => {
+                // Reading a clock in a loop condition is a time-based busy-wait
+                // (`repeat while (the milliSeconds - t0) < N`); mark it so the
+                // backward-jump handler yields cooperatively (see input_polled).
+                self.input_polled = true;
+                Ok(self.alloc_datum(Datum::Int(
+                    chrono::Local::now()
+                        .signed_duration_since(self.system_start_time)
+                        .num_milliseconds() as i32,
+                )))
+            },
             "keyboardFocusSprite" => {
                 Ok(self.alloc_datum(Datum::Int(self.keyboard_focus_sprite as i32)))
             },
@@ -2423,10 +2432,12 @@ impl DirPlayer {
             },
             "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
-            "keyPressed" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))),
+            "keyPressed" => { self.input_polled = true; Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key_pressed()))) },
             "floatPrecision" => Ok(self.alloc_datum(Datum::Int(self.float_precision as i32))),
             "doubleClick" => Ok(self.alloc_datum(datum_bool(self.is_double_click))),
-            "ticks" => Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))),
+            // Time read in a loop condition = busy-wait throttle; flag it so the
+            // backward-jump handler yields cooperatively (see input_polled).
+            "ticks" => { self.input_polled = true; Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))) },
             "frameLabel" => {
                 let frame_label = self
                     .movie
@@ -2769,8 +2780,17 @@ impl DirPlayer {
         }
     }
 
-    fn get_anim_prop(&self, prop_id: u16) -> Result<Datum, ScriptError> {
+    fn get_anim_prop(&mut self, prop_id: u16) -> Result<Datum, ScriptError> {
         let prop_name = get_anim_prop_name(prop_id);
+        // `the timer` / `the keyPressed` / `the key` / `the keyCode` are the
+        // classic-syntax time/input polls. Reading any in a `repeat while`
+        // condition (`repeat while the timer < N`, nomiss's Simon delays; or a
+        // key spin) is a busy-wait — flag it so the backward-jump handler yields
+        // cooperatively to the JS event loop (see input_polled). Mirrors the
+        // object-syntax reads in get_movie_prop.
+        if matches!(prop_name, "timer" | "keyPressed" | "key" | "keyCode") {
+            self.input_polled = true;
+        }
         match prop_name {
             "colorDepth" => Ok(Datum::Int(32)),
             "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
@@ -3936,16 +3956,23 @@ pub async fn player_call_script_handler_raw_args(
                 return Err(err);
             }
             HandlerExecutionResult::Jump => {
-                // Busy-wait cooperative yield, scoped to INPUT-polling loops.
-                // Added for Neopets' `repeat while keyPressed(" ") end` — an empty
-                // tight loop that must yield so the JS event loop can deliver the
-                // key-up, else it spins forever. Only count this jump toward the
-                // yield when the iteration actually read live input (keyPressed /
-                // the mouseDown / the stillDown set `input_polled`); a heavy
-                // compute/AMF loop (Coke Studios' object-graph conversion) never
-                // sets it, so it never yields — a yield there only adds latency
-                // and was the source of the navigator stalls. Reading+clearing a
-                // bool is far cheaper than the old per-instruction scope lookup.
+                // Busy-wait cooperative yield, scoped to INPUT- and TIME-polling
+                // loops. Added for Neopets' `repeat while keyPressed(" ") end` — an
+                // empty tight loop that must yield so the JS event loop can deliver
+                // the key-up, else it spins forever. Also covers TIME-based frame
+                // throttles that read a clock in the loop condition
+                // (`repeat while (the ticks - t0) < N`, 100s-Marios' game loop;
+                // `repeat while the timer < toneDelay`, nomiss's Simon delays):
+                // without yielding, real time can't advance predictably between
+                // iterations, so the throttle collapses and the game runs at the
+                // wrong speed. Only count this jump toward the yield when the
+                // iteration actually read live input or a clock (keyPressed / the
+                // mouseDown / the stillDown / the ticks / the milliSeconds / the
+                // timer set `input_polled`); a heavy compute/AMF loop (Coke
+                // Studios' object-graph conversion) never sets it, so it never
+                // yields — a yield there only adds latency and was the source of
+                // the navigator stalls. Reading+clearing a bool is far cheaper
+                // than the old per-instruction scope lookup.
                 let polled = reserve_player_mut(|player| std::mem::take(&mut player.input_polled));
                 if polled {
                     backjumps = backjumps.wrapping_add(1);
