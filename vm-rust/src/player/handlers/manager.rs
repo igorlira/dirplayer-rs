@@ -366,7 +366,22 @@ impl BuiltInHandlerManager {
             
             // Validate the new_value type BEFORE taking mutable borrow
             let new_value_datum = player.get_datum(&new_value).clone();
-            
+
+            // Director 11.5 Scripting Dictionary (setAt): when the position is
+            // past the end of a LINEAR list, Director grows the list, filling
+            // the intervening "blank" entries with 0. Pre-allocate that fill
+            // here — before the &mut borrow below, since alloc needs its own
+            // borrow — but only when growth is actually required. (Property
+            // lists intentionally error instead; see the PropList arm.)
+            let list_grow_fill = match player.get_datum(list_ref) {
+                Datum::List(_, list, ..)
+                    if (is_zero_based || position >= 1) && index >= list.len() =>
+                {
+                    Some(player.alloc_datum(Datum::Int(0)))
+                }
+                _ => None,
+            };
+
             // Now take the mutable borrow
             let list_datum = player.get_datum_mut(list_ref);
             match list_datum {
@@ -399,20 +414,23 @@ impl BuiltInHandlerManager {
                     Ok(())
                 }
                 Datum::List(_, list, ..) => {
-                    if index < list.len() {
+                    if !is_zero_based && position < 1 {
+                        // Director tolerates setAt at position <= 0 on a linear
+                        // list as a no-op (mirrors ListDatumHandlers::set_at);
+                        // guarding here also avoids the usize underflow of
+                        // `index` below turning a grow into a huge allocation.
+                        Ok(())
+                    } else if index < list.len() {
                         list[index] = new_value;
-                        
-                        debug!(
-                            "setAt complete: list is now {}", 
-                            format_concrete_datum(
-                                &Datum::List(DatumType::List, list.clone(), false),
-                                player
-                            )
-                        );
-                        
                         Ok(())
                     } else {
-                        Err(ScriptError::new(format!("Index {} out of bounds", position)))
+                        // Grow to `position`, padding the blank entries with 0.
+                        let fill = list_grow_fill.clone().unwrap_or(DatumRef::Void);
+                        while list.len() < index {
+                            list.push_back(fill.clone());
+                        }
+                        list.push_back(new_value);
+                        Ok(())
                     }
                 }
                 Datum::PropList(prop_list, ..) => {
