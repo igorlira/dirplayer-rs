@@ -1097,6 +1097,39 @@ impl MovieHandlers {
                 || player.movie.mouse_down)
         })?;
 
+        // While a keyDown busy-wait loop is running (command_handler_yielding),
+        // the main frame loop is paused to keep its frame scripts from
+        // interleaving with the handler's bytecodes and corrupting the shared
+        // scope stack. But that also freezes any frame-driven animation (fish's
+        // `on prepareFrame` swimming fish) for as long as the key is held. Run
+        // the frame update HERE instead — on this task, nested in the keyDown
+        // handler, so it's sequential (no concurrent scope-stack corruption) —
+        // throttled to the movie tempo so a tight `repeat while keyPressed`
+        // loop calling updateStage() rapidly doesn't fast-forward the movie.
+        // execute_frame_update()'s is_in_frame_update guard blocks the recursive
+        // updateStage() that fires from inside prepareFrame.
+        let run_frame_anim = reserve_player_mut(|player| {
+            if !player.command_handler_yielding || player.is_in_frame_update {
+                return false;
+            }
+            let now = js_sys::Date::now();
+            let tempo = player.current_frame_tempo.max(1);
+            let interval = 1000.0 / tempo as f64;
+            if now - player.last_kb_loop_frame_ms >= interval {
+                player.last_kb_loop_frame_ms = now;
+                true
+            } else {
+                false
+            }
+        });
+        if run_frame_anim {
+            if let Err(err) = Self::execute_frame_update().await {
+                if err.code != ScriptErrorCode::Abort {
+                    reserve_player_mut(|player| player.on_script_error(&err));
+                }
+            }
+        }
+
         // Director's updateStage() forces an immediate stage redraw even from
         // inside enterFrame/prepareFrame loops. Yielding to the browser event loop
         // is only needed for busy-wait input handlers.

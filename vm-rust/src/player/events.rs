@@ -321,6 +321,23 @@ pub async fn player_invoke_static_event(
             continue;
         }
         
+        // Re-entrancy guard: don't re-invoke this frame/movie-script handler if
+        // it's already active on the call stack for the SAME event. Director
+        // won't re-dispatch a message to a handler already processing it —
+        // fish's movie `on keyDown` calls `sendSprite(4, #keyDown)`, which (when
+        // sprite 4 has no keyDown behavior) propagates back up to the movie
+        // script per the sendSprite hierarchy and would otherwise recurse into
+        // this same handler forever.
+        let already_active = reserve_player_ref(|player| {
+            player
+                .active_static_event_handlers
+                .iter()
+                .any(|(m, h)| *m == script_member_ref && h == handler_name)
+        });
+        if already_active {
+            continue;
+        }
+
         // NEW: Check if this is the frame script
         let receiver = reserve_player_ref(|player| {
             if player.movie.frame_script_member.as_ref() == Some(&script_member_ref) {
@@ -329,13 +346,22 @@ pub async fn player_invoke_static_event(
                 None
             }
         });
-        
-        let result = player_call_script_handler(
+
+        reserve_player_mut(|player| {
+            player
+                .active_static_event_handlers
+                .push((script_member_ref.clone(), handler_name.to_owned()));
+        });
+        let call_result = player_call_script_handler(
             receiver,  // Changed from None to receiver
             (script_member_ref, handler_name.to_owned()),
             args
-        ).await?;
-        
+        ).await;
+        reserve_player_mut(|player| {
+            player.active_static_event_handlers.pop();
+        });
+        let result = call_result?;
+
         if !result.passed {
             handled = true;
             break;

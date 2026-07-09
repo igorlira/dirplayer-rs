@@ -387,6 +387,20 @@ pub struct DirPlayer {
     pub in_step_frame: bool,
     pub in_event_dispatch: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
+    /// Frame/movie-script handlers currently executing via player_invoke_static_event,
+    /// as (script member, handler name). Guards against a static-event handler
+    /// being re-invoked while it's already on the call stack for the SAME event —
+    /// Director's message system won't re-dispatch a message to a handler already
+    /// processing it. Fish's movie `on keyDown` does `sendSprite(4, #keyDown)`,
+    /// which (when sprite 4 has no keyDown behavior) propagates back up to the
+    /// movie script per the sendSprite hierarchy; without this guard it recurses
+    /// into the same `on keyDown` forever (stack overflow).
+    pub active_static_event_handlers: Vec<(CastMemberRef, String)>,
+    /// Timestamp (Date.now ms) of the last frame update driven from updateStage()
+    /// while `command_handler_yielding`. The frame loop is paused during a keyDown
+    /// busy-wait loop, so updateStage() runs the frame's animation itself,
+    /// throttled by tempo — see MovieHandlers::update_stage.
+    pub last_kb_loop_frame_ms: f64,
     pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
     pub nothing_call_count: u32,    // Consecutive nothing() calls, reset after yield
     pub last_nothing_yield_ms: f64, // Timestamp of last nothing() yield for time-throttled rendering
@@ -573,6 +587,8 @@ impl DirPlayer {
             in_step_frame: false,
             in_event_dispatch: false,
             command_handler_yielding: false,
+            active_static_event_handlers: Vec::new(),
+            last_kb_loop_frame_ms: 0.0,
             in_mouse_command: false,
             nothing_call_count: 0,
             last_nothing_yield_ms: 0.0,
