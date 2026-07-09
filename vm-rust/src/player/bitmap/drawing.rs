@@ -458,6 +458,53 @@ impl Bitmap {
         }
     }
 
+    /// Write a raw palette index at (x, y) for indexed (<=8-bit) bitmaps, with
+    /// NO RGB round-trip. The copyPixels fast path uses this for same-depth,
+    /// same-palette indexed copies so index i stays index i — the general
+    /// per-pixel path resolves each index to RGB and re-quantizes on write,
+    /// which collapses distinct indices that fall in the same brightness bucket
+    /// (Tetris' 1-bit `game_plane` row-shift otherwise turned every occupied
+    /// cell empty, desyncing collision from the visual board).
+    pub fn set_pixel_index(&mut self, x: i32, y: i32, idx: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        let w = self.width as usize;
+        match self.bit_depth {
+            1 => {
+                let bit_index = y * w + x;
+                let byte_index = bit_index / 8;
+                let mask = 1u8 << (7 - (bit_index % 8));
+                if idx & 1 != 0 {
+                    self.data[byte_index] |= mask;
+                } else {
+                    self.data[byte_index] &= !mask;
+                }
+            }
+            2 => {
+                let pix = y * w + x;
+                let byte_index = pix / 4;
+                let shift = 6 - (pix % 4) * 2; // MSB-first: 6,4,2,0
+                self.data[byte_index] =
+                    (self.data[byte_index] & !(0b11 << shift)) | ((idx & 0b11) << shift);
+            }
+            4 => {
+                let byte_index = (y * w + x) / 2;
+                if x % 2 == 0 {
+                    self.data[byte_index] = (self.data[byte_index] & 0x0F) | ((idx & 0x0F) << 4);
+                } else {
+                    self.data[byte_index] = (self.data[byte_index] & 0xF0) | (idx & 0x0F);
+                }
+            }
+            8 => {
+                self.data[y * w + x] = idx;
+            }
+            _ => {}
+        }
+    }
+
     /// Like `set_pixel`, but uses a pre-resolved palette table for indexed formats.
     /// For 4-bit/8-bit bitmaps, this avoids calling `resolve_color_ref` 16/256 times per pixel.
     pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &[(u8, u8, u8)]) {
@@ -545,6 +592,21 @@ impl Bitmap {
         }
 
         match self.bit_depth {
+            1 => {
+                // 1-bit images pack 8 pixels per byte, MSB first — the same bit
+                // order set_pixel writes (`mask = 1 << (7 - bit_offset)`). Return
+                // the stored bit as the palette index so a 1-bit image used as an
+                // index bitmask round-trips: fill(paletteIndex(N)) / setPixel(N)
+                // -> getPixel().paletteIndex == N. Without this arm every 1-bit
+                // pixel fell through to `get_bg_color_ref()` (PaletteIndex 0), so
+                // Tetris' game board read as fully occupied and every piece
+                // reported game-over immediately.
+                let bit_index = y * self.width as usize + x;
+                let byte_index = bit_index / 8;
+                let bit_offset = bit_index % 8;
+                let bit = (self.data[byte_index] >> (7 - bit_offset)) & 1;
+                ColorRef::PaletteIndex(bit)
+            }
             4 => {
                 let bit_index = (y * self.width as usize + x) * 4;
                 let byte_index = bit_index / 8;
@@ -2357,6 +2419,64 @@ impl Bitmap {
                     }
                     return;
                 }
+            }
+        }
+
+        // -------- Index-preserving fast path: same-depth same-palette 1/4-bit --------
+        // A copyPixels between two indexed bitmaps of the SAME low bit depth and
+        // palette maps index i -> index i. The general per-pixel path below
+        // resolves each index to RGB and re-quantizes on write, collapsing
+        // distinct indices that share a brightness bucket (Tetris' 1-bit
+        // game_plane row-shift on a line clear turned every occupied cell empty,
+        // wiping the collision board). Copy the raw index straight across.
+        // (8-bit already handled by the byte-copy path above; 1/4-bit have a real
+        // get_pixel_color_ref index arm, 2-bit does not, so it's excluded.)
+        {
+            let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
+            let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+            let no_colorize = !(sprite_bg
+                || sprite_fg
+                || params.bg_color_explicit
+                || params.fore_color_explicit);
+            let unscaled = (max_dst_x - min_dst_x) == src_rect.width()
+                && (max_dst_y - min_dst_y) == src_rect.height();
+            if self.bit_depth == src.bit_depth
+                && (self.bit_depth == 1 || self.bit_depth == 4)
+                && src.palette_ref == self.palette_ref
+                && !has_sprite_rotation
+                && !has_skew_flip
+                && !flip_x
+                && !flip_y
+                && unscaled
+                && alpha >= 0.999
+                && mask_image.is_none()
+                && matte_mask.is_none()
+                && no_colorize
+                && ink == 0
+            {
+                self.matte = None;
+                let dst_w = self.width as i32;
+                let dst_h = self.height as i32;
+                let sw = src.width as i32;
+                let sh = src.height as i32;
+                for dst_y in min_dst_y.max(0)..max_dst_y.min(dst_h) {
+                    let src_y = src_rect.top + (dst_y - min_dst_y);
+                    if src_y < 0 || src_y >= sh {
+                        continue;
+                    }
+                    for dst_x in min_dst_x.max(0)..max_dst_x.min(dst_w) {
+                        let src_x = src_rect.left + (dst_x - min_dst_x);
+                        if src_x < 0 || src_x >= sw {
+                            continue;
+                        }
+                        if let ColorRef::PaletteIndex(idx) =
+                            src.get_pixel_color_ref(src_x as u16, src_y as u16)
+                        {
+                            self.set_pixel_index(dst_x, dst_y, idx);
+                        }
+                    }
+                }
+                return;
             }
         }
 
