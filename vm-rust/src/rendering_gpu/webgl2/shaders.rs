@@ -56,6 +56,26 @@ impl InkMode {
             40 => InkMode::Lighten,
             41 => InkMode::Darken,
             2 => InkMode::Reverse,
+            // Ink 6 (Not Reverse): like Reverse, the background color is
+            // transparent. dirplayer has no distinct "not reverse" compositing
+            // (the CPU path falls through to a normal blend), so render it as a
+            // background-transparent copy — the visible fix Director users
+            // expect is the transparent background, not a colour inversion.
+            6 => InkMode::BackgroundTransparent,
+            // Ink 38 (Subtract): dst - src with the background color transparent.
+            // Visually identical to Sub Pin (35) on the GPU — both clamp to 0 via
+            // GL_FUNC_REVERSE_SUBTRACT — so reuse it (SubPin already color-keys
+            // the bgColor). Without this, ink 38 fell back to opaque Copy.
+            38 => InkMode::SubPin,
+            // Ink 34 (Add): dst + src with the background transparent. Same GPU
+            // result as Add Pin (33) — both clamp to 255 via additive blend and
+            // color-key the bgColor — so reuse it. (Was opaque Copy.)
+            34 => InkMode::AddPin,
+            // Ink 4 (Not Copy): an inverted copy with the background transparent.
+            // The Reverse shader already does invert-RGB + bgColor color-key,
+            // which matches Not Copy's "inverted source, background out". (Was
+            // opaque Copy — showing the white bounding box.)
+            4 => InkMode::Reverse,
             _ => InkMode::Copy, // Default to copy for unknown inks
         }
     }
@@ -509,7 +529,10 @@ void main() {
         Self::compile_program(context, Self::vertex_shader_source(), frag_source)
     }
 
-    /// Compile Ink 2 (Not Copy / Reverse) shader — inverts RGB, preserves alpha
+    /// Compile Ink 2 (Reverse) shader — inverts RGB, preserves alpha, and
+    /// color-keys the background color (Director's Reverse ink treats the
+    /// bgColor as transparent; the CPU path mattes it via should_matte_sprite).
+    /// Without the color-key the sprite drew an opaque inverted rectangle.
     fn compile_ink_reverse(context: &WebGL2Context) -> Result<ShaderProgram, JsValue> {
         let frag_source = r#"#version 300 es
 precision highp float;
@@ -518,6 +541,8 @@ in vec2 v_texcoord;
 
 uniform sampler2D u_texture;
 uniform float u_blend;
+uniform vec4 u_bg_color;
+uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
@@ -525,6 +550,11 @@ void main() {
     vec4 src = texture(u_texture, v_texcoord);
 
     if (src.a < 0.01) discard;
+
+    // Color-key transparency: discard pixels matching the sprite's bgColor.
+    vec3 diff = abs(src.rgb - u_bg_color.rgb);
+    float dist = max(max(diff.r, diff.g), diff.b);
+    if (dist < u_color_tolerance) discard;
 
     // Invert RGB, keep alpha
     float alpha = src.a * u_blend;

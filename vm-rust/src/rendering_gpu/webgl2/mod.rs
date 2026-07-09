@@ -4023,6 +4023,7 @@ impl WebGL2Renderer {
             || effective_ink == InkMode::AddPin
             || effective_ink == InkMode::SubPin
             || effective_ink == InkMode::Lighten
+            || effective_ink == InkMode::Reverse
         {
             if let Some(ref loc) = u_bg_color {
                 gl.uniform4f(
