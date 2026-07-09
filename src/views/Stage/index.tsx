@@ -761,7 +761,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         // every key — both here on bubble and from the input's handler.
         if (document.activeElement === hiddenInputRef.current) return;
         e.preventDefault();
-        if (e.repeat) return; // Skip browser key repeats; Lingo handles held keys via keyPressed()
+        // Pass browser key-repeats through: Director fires `on keyDown`
+        // repeatedly while a key is held (OS auto-repeat), and event-driven
+        // movies rely on that — e.g. Tetris soft-drops one row per repeated
+        // keyDown while the down arrow is held. Movies that instead poll
+        // `the keyPressed` in a loop are unaffected (they don't read keyDown).
         key_down(e.key, e.keyCode);
       }}
       onKeyUp={e => {
