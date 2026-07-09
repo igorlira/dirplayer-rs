@@ -3234,6 +3234,27 @@ pub async fn player_call_global_handler(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
+    // Director 6 `birth(script, args)` constructor: when the first arg is a
+    // ScriptRef this is the pre-`new` idiom — allocate a FRESH instance and run
+    // its `on birth me, args`. This MUST run before the generic first-arg
+    // handler lookup below, which would otherwise find the script's `on birth`
+    // and invoke it statically (no instance), so every same-script `birth`
+    // shared one property set. (100s-Marios births 200 marios via
+    // `birth(script "MarioScript", 3+i)`; the shared `sn`/`timr`/`pipe` made all
+    // 50 same-script marios drive one sprite and emerge at once.)
+    if handler_name == "birth" && !args.is_empty() {
+        let first_is_script = reserve_player_ref(|player| {
+            Ok(matches!(player.get_datum(&args[0]), Datum::ScriptRef(_)))
+        })?;
+        if first_is_script {
+            return crate::player::handlers::datum_handlers::script::ScriptDatumHandlers::birth(
+                &args[0],
+                &args[1..].to_vec(),
+            )
+            .await;
+        }
+    }
+
     let receiver_handler = unsafe {
         // let player_opt = PLAYER_LOCK.try_read().unwrap();
         let player = crate::player::player_mut();

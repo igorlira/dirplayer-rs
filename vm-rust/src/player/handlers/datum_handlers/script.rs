@@ -18,6 +18,8 @@ impl ScriptDatumHandlers {
     pub fn has_async_handler(obj_ref: &DatumRef, name: &str) -> bool {
         match name {
             "new" => true,
+            // `birth` on a ScriptRef is the Director 6 constructor (see `birth`).
+            "birth" => true,
             "rawNew" => false,
             "handler" => false,
             _ => {
@@ -47,6 +49,7 @@ impl ScriptDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "new" => Self::new(obj_ref, args).await,
+            "birth" => Self::birth(obj_ref, args).await,
             "rawNew" => Self::raw_new(obj_ref),
             _ => {
                 // Try to call a handler defined in the script itself
@@ -262,6 +265,24 @@ impl ScriptDatumHandlers {
     }
 
     pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::construct(datum, args, "new").await
+    }
+
+    /// Director 6 `birth(script, args)` — the pre-`new` constructor idiom. It is
+    /// exactly `new` except it runs the instance's `on birth me, args` handler
+    /// instead of `on new`. The 11.5 Scripting Dictionary dropped `birth`, so we
+    /// mirror the documented `new` / parent-script contract: a FRESH instance
+    /// with its OWN property storage per call. (100s-Marios births 200 marios
+    /// via `birth(script "MarioScript", 3+i)`; without a fresh instance each
+    /// call, all same-script marios shared one `sn`/`timr`/`pipe` and only ~4
+    /// sprites were ever driven.)
+    pub async fn birth(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::construct(datum, args, "birth").await
+    }
+
+    /// Shared constructor for `new`/`birth`: allocate a fresh instance, then run
+    /// its `ctor` handler (`on new` / `on birth`) with the instance as `me`.
+    async fn construct(datum: &DatumRef, args: &Vec<DatumRef>, ctor: &str) -> Result<DatumRef, ScriptError> {
         let (script_ref, script_instance_ref, datum_ref) = Self::create_uninit_instance(datum)?;
 
         let (new_handler_ref, expected_param_count, script_name) =
@@ -271,10 +292,10 @@ impl ScriptDatumHandlers {
                     .cast_manager
                     .get_script_by_ref(&script_ref)
                     .unwrap();
-                let new_handler_ref = script.get_own_handler_ref(&"new".to_string());
+                let new_handler_ref = script.get_own_handler_ref(&ctor.to_string());
 
                 let param_count = if let Some(_) = &new_handler_ref {
-                    let handler_def = script.get_own_handler(&"new".to_string()).unwrap();
+                    let handler_def = script.get_own_handler(&ctor.to_string()).unwrap();
                     handler_def.argument_name_ids.len()
                 } else {
                     0
@@ -288,7 +309,7 @@ impl ScriptDatumHandlers {
             })?;
 
         let virtual_new_result = reserve_player_mut(|player| {
-            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), "new", args)
+            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), ctor, args)
         });
         match virtual_new_result {
             Ok(Some(_)) => return Ok(datum_ref),
@@ -308,7 +329,7 @@ impl ScriptDatumHandlers {
                 {
                     Ok(scope) => scope,
                     Err(err) => {
-                        error!("❌ Error in {}.new(): {}", script_name, err.message);
+                        error!("❌ Error in {}.{}(): {}", script_name, ctor, err.message);
                         return Err(err);
                     }
                 };
