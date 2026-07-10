@@ -10,6 +10,7 @@ pub mod context;
 mod geometry;
 pub mod mesh3d;
 pub mod scene3d;
+pub mod groove_scene;
 mod shaders;
 mod texture_cache;
 
@@ -106,6 +107,8 @@ pub struct WebGL2Renderer {
     stage_image_texture: Option<web_sys::WebGlTexture>,
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
+    /// 3D Groove Xtra scene renderer
+    groove: groove_scene::GrooveSceneRenderer,
     native_cursor_cache: crate::cursor::NativeCursorCache,
     /// Off-screen framebuffer for rendering nested `#movie` sub-players via the
     /// full WebGL2 pipeline (so they match the host's fidelity instead of the
@@ -195,6 +198,7 @@ impl WebGL2Renderer {
             trails_size: (0, 0),
             stage_image_texture: None,
             scene3d: scene3d::Scene3dRenderer::new(),
+            groove: groove_scene::GrooveSceneRenderer::new(),
             native_cursor_cache: None,
             nested_fbo: None,
             nested_fbo_texture: None,
@@ -739,6 +743,15 @@ impl WebGL2Renderer {
         // even when a HUD has been blitted into `(the stage).image`.
         for ch in &deferred_dts_3d {
             self.render_sprite(player, *ch);
+        }
+
+        // Draw the active 3D Groove Xtra world onto the stage (RenderToStage),
+        // on top of the 2D layer — like the directToStage 3D above.
+        {
+            let w = player.movie.rect.width() as i32;
+            let h = player.movie.rect.height() as i32;
+            self.groove.draw(&self.context, player, w, h);
+            self.shader_manager.clear_active();
         }
 
         // Update native CSS cursor (no per-frame draw needed)
@@ -1458,8 +1471,14 @@ impl WebGL2Renderer {
                         );
                         if crate::rendering::has_swf_signature(&flash_member.data) {
                             let data = flash_member.data.clone();
-                            let w = sprite_width.max(1) as u32;
-                            let h = sprite_height.max(1) as u32;
+                            // Size the Ruffle capture from the resolved sprite rect
+                            // (which is the member's natural size when the sprite
+                            // isn't stretched — 626x100 for leo3d's "menue"), NOT
+                            // the raw score cell (100x320). Using the cell captured
+                            // the 626x100 SWF into a wrong-aspect canvas that
+                            // resampled to a thin strip in the corrected quad.
+                            let w = sprite_rect.width().max(1) as u32;
+                            let h = sprite_rect.height().max(1) as u32;
                             let paused_at_start = flash_member
                                 .flash_info
                                 .as_ref()

@@ -6063,6 +6063,23 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let flash_height = if b != t { (b - t) as i32 } else { sprite.height };
             let _ = (l, t);
 
+            // When the sprite hasn't been explicitly resized, a Flash member
+            // displays at its natural (SWF stage / member) dimensions — Director
+            // ignores the score channel's approximate box, exactly as it does for
+            // an un-stretched bitmap (see the Bitmap arm above). leo3d's "menue"
+            // (626x100, regPoint 313,50) landed in a 100x320 score box and
+            // rendered squashed until this used the member dims. A genuine resize
+            // (stretch flag / size tween) still honours the sprite dimensions.
+            let stretched = sprite.stretch != 0 || sprite.has_size_tweened;
+            let (render_width, render_height) =
+                if stretched && sprite.width > 0 && sprite.height > 0 {
+                    (sprite.width, sprite.height)
+                } else if flash_width > 0 && flash_height > 0 {
+                    (flash_width, flash_height)
+                } else {
+                    (sprite.width, sprite.height)
+                };
+
             let mut reg_x = flash_member.reg_point.0 as i32;
             let mut reg_y = flash_member.reg_point.1 as i32;
 
@@ -6080,14 +6097,15 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 reg_y = flash_height / 2;
             }
 
-            // Scale registration point proportionally when sprite is stretched
+            // Scale registration point proportionally to the rendered size (equals
+            // 1:1 at natural size, scaled up/down when the sprite was resized).
             let mut scaled_reg_x = if flash_width > 0 {
-                ((reg_x * sprite.width) as f32 / flash_width as f32).round() as i32
+                ((reg_x * render_width) as f32 / flash_width as f32).round() as i32
             } else {
                 reg_x
             };
             let mut scaled_reg_y = if flash_height > 0 {
-                ((reg_y * sprite.height) as f32 / flash_height as f32).round() as i32
+                ((reg_y * render_height) as f32 / flash_height as f32).round() as i32
             } else {
                 reg_y
             };
@@ -6100,17 +6118,17 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // landed on the wrong side of the spit splash even though longarm
             // (usually flipH:0) looked right.
             if sprite.flip_h {
-                scaled_reg_x = sprite.width - scaled_reg_x;
+                scaled_reg_x = render_width - scaled_reg_x;
             }
             if sprite.flip_v {
-                scaled_reg_y = sprite.height - scaled_reg_y;
+                scaled_reg_y = render_height - scaled_reg_y;
             }
 
             IntRect::from(
                 sprite.loc_h - scaled_reg_x,
                 sprite.loc_v - scaled_reg_y,
-                sprite.loc_h - scaled_reg_x + sprite.width,
-                sprite.loc_v - scaled_reg_y + sprite.height,
+                sprite.loc_h - scaled_reg_x + render_width,
+                sprite.loc_v - scaled_reg_y + render_height,
             )
         }
         CastMemberType::Shockwave3d(w3d) => {

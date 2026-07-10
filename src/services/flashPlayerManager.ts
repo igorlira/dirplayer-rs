@@ -399,6 +399,8 @@ function dispatchMouseEvent(
   type: 'down' | 'up' | 'move',
   localX: number,
   localY: number,
+  spriteW?: number,
+  spriteH?: number,
 ): boolean {
   const inst = instances.get(instanceKey(spriteNum));
   if (!inst) {
@@ -407,9 +409,17 @@ function dispatchMouseEvent(
     return false;
   }
 
+  // `localX/localY` are in the sprite's DISPLAY space (0..spriteW). The SWF renders
+  // at its own native size (`canvas.width/height`), which the sprite may scale — so
+  // map sprite-space → canvas internal space by the sprite dimensions (NOT the canvas
+  // DOM rect, which equals the native size and would be a no-op). A 626x468 SWF shown
+  // in a 600x320 sprite: local 288 → 288/600*626 ≈ 300.
   let canvasX = localX;
   let canvasY = localY;
-  if (inst.canvas) {
+  if (inst.canvas && spriteW && spriteH && spriteW > 0 && spriteH > 0) {
+    canvasX = (localX / spriteW) * inst.canvas.width;
+    canvasY = (localY / spriteH) * inst.canvas.height;
+  } else if (inst.canvas) {
     const rect = inst.canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       canvasX = (localX / rect.width) * inst.canvas.width;

@@ -42,6 +42,11 @@ extern "C" {
         event_type: &str,
         local_x: i32,
         local_y: i32,
+        // Sprite display size, so JS can rebase sprite-local coords into the SWF's
+        // internal (native) coordinate space — the sprite often shows the SWF scaled
+        // (e.g. a 626x468 SWF displayed in a 600x320 sprite).
+        sprite_w: i32,
+        sprite_h: i32,
     ) -> Result<JsValue, JsValue>;
 }
 

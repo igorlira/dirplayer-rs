@@ -554,7 +554,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
                 let rect = super::score::get_concrete_sprite_rect(player, sprite);
                 (
-                    Some((any_sprite as i32, x - rect.left, y - rect.top)),
+                    Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top)),
                     format!("Flash sprite#{} member={}:{} rect=({},{})-({},{})",
                         any_sprite, member_ref.cast_lib, member_ref.cast_member,
                         rect.left, rect.top, rect.right, rect.bottom),
@@ -604,7 +604,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
             });
             debug!("[click sprite scripts] {}", sprite_scripts_dump);
-            if let Some((sn, lx, ly)) = flash_forward {
+            if let Some((sn, lx, ly, sw, sh)) = flash_forward {
                 // AVM1 button hit-testing reads the stage-mouse position
                 // that's last updated by MouseMove. A real browser always
                 // emits pointermove before pointerdown, so the position is
@@ -613,10 +613,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 // input ever reached the SWF), and Ruffle's button test
                 // misses the click. Send a MouseMove first to seed it.
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly,
+                    sn, "move", lx, ly, sw, sh,
                 );
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "down", lx, ly,
+                    sn, "down", lx, ly, sw, sh,
                 );
             }
 
@@ -858,15 +858,15 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     return None;
                 }
                 let rect = super::score::get_concrete_sprite_rect(player, sprite);
-                Some((any_sprite as i32, x - rect.left, y - rect.top))
+                Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top))
             });
-            if let Some((sn, lx, ly)) = flash_forward_up {
+            if let Some((sn, lx, ly, sw, sh)) = flash_forward_up {
                 // Same MouseMove-before-MouseUp seeding as the down handler.
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly,
+                    sn, "move", lx, ly, sw, sh,
                 );
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "up", lx, ly,
+                    sn, "up", lx, ly, sw, sh,
                 );
             }
 

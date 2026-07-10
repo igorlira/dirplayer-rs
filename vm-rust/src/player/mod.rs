@@ -88,6 +88,7 @@ use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
 use xtra::curl::{CurlXtraManager, CURL_XTRA_MANAGER_OPT};
+use xtra::groove::{GrooveXtraManager, GROOVE_XTRA_MANAGER_OPT};
 use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
@@ -708,10 +709,15 @@ impl DirPlayer {
                     // (StoryScramble posters) never reflow. Only for on-stage
                     // sprites (positive channel); 3D-texture instances excluded
                     // in the JS twin.
+                    // Match the Ruffle render resolution to the RESOLVED sprite
+                    // rect (member natural size when un-stretched), not the raw
+                    // score cell — otherwise a 626x100 member in a 100x320 cell
+                    // captures at the wrong aspect and resamples to a thin strip.
+                    let rect = crate::player::score::get_concrete_sprite_rect(self, &channel.sprite);
                     let _ = ruffle_set_size(
                         js_flash_key(channel_num),
-                        channel.sprite.width.max(1) as i32,
-                        channel.sprite.height.max(1) as i32,
+                        rect.width().max(1),
+                        rect.height().max(1),
                     );
                     continue;
                 }
@@ -719,8 +725,11 @@ impl DirPlayer {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
                         if crate::rendering::has_swf_signature(&flash_member.data) {
                             let data = flash_member.data.clone();
-                            let w = channel.sprite.width.max(1) as u32;
-                            let h = channel.sprite.height.max(1) as u32;
+                            // Capture at the resolved sprite rect (member natural
+                            // size when un-stretched), not the raw score cell.
+                            let rect = crate::player::score::get_concrete_sprite_rect(self, &channel.sprite);
+                            let w = rect.width().max(1) as u32;
+                            let h = rect.height().max(1) as u32;
                             let paused_at_start = flash_member
                                 .flash_info
                                 .as_ref()
@@ -5701,6 +5710,7 @@ pub fn init_player() {
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
         CURL_XTRA_MANAGER_OPT = Some(CurlXtraManager::new());
+        GROOVE_XTRA_MANAGER_OPT = Some(GrooveXtraManager::new());
     }
 
     unsafe {
