@@ -1702,7 +1702,7 @@ pub async fn dispatch_event_to_all_behaviors(
                     return;
                 }
                 web_sys::console::error_1(
-                    &format!("Error in {} for sprite {}: {}", handler_name, sprite_number, err.message).into()
+                    &format!("Error in {} for sprite {} behavior '{}': {}", handler_name, sprite_number, ascii_safe(&script_name.to_string()), err.message).into()
                 );
                 reserve_player_mut(|player| {
                     player.on_script_error(&err);

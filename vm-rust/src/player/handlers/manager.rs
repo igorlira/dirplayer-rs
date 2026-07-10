@@ -1649,6 +1649,21 @@ impl BuiltInHandlerManager {
             "color" => TypeHandlers::color(args),
             "date" => TypeHandlers::date(args),
             "keypressed" => Self::key_pressed(args),
+            // Legacy function-call forms of the modifier-key state properties (Director
+            // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /
+            // `optionDown` / `commandDown`, read-only). Movies call e.g. `shiftDown()`.
+            "shiftdown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_shift_down())))
+            }),
+            "controldown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_control_down())))
+            }),
+            "optiondown" | "altdown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_alt_down())))
+            }),
+            "commanddown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_command_down())))
+            }),
             "showglobals" => Self::show_globals(),
             "tellstreamstatus" => Self::tell_stream_status(args),
             "frame" => {

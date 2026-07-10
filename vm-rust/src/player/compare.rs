@@ -488,6 +488,12 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         // Script instances compare by allocation id (see `datum_less_than`).
         (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() > r.id()),
 
+        // Two strings compare lexicographically, case-insensitively — the mirror of
+        // `datum_less_than`. (Symbols are pre-converted to strings above.) Director
+        // uses this for text/version checks like `GrooveVersion() >= "1.7"`.
+        (Datum::String(left), Datum::String(right)) =>
+            Ok(left.to_ascii_lowercase() > right.to_ascii_lowercase()),
+
         // Catch-all
         _ => {
             warn!(

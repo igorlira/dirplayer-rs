@@ -369,6 +369,14 @@ impl Movie {
             // No-op system prop: nothing to preload-abort in dirplayer.
             // Return the Director default (FALSE) so read-backs don't error.
             "preLoadEventAbort" => Ok(datum_bool(false)),
+            // soundMixMedia (Sound property, read/write) — Flash sound mixing is a
+            // Windows-only nuance we don't model. Return the Director 7+ default (TRUE).
+            "soundMixMedia" => Ok(datum_bool(true)),
+            // machineType (classic Director system property, absent from the 11.5
+            // dictionary): a Macintosh model code, or 256 on Windows/Intel. dirplayer
+            // emulates Windows Shockwave playback, so report 256 — movies branch their
+            // path separators and platform paths on this.
+            "machineType" => Ok(Datum::Int(256)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         })
     }
@@ -506,7 +514,12 @@ impl Movie {
             },
             "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
             | "timeoutLapsed" | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" => {
+            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize"
+            // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
+            // read/write) toggles whether Flash cast members mix their audio into the
+            // Score sound channels — a Windows-only playback nuance. dirplayer uses
+            // WebAudio, so we accept the set without acting on it.
+            | "soundMixMedia" => {
                 // Anim props that are set via property_type 0x07 - accept silently
                 Ok(())
             },

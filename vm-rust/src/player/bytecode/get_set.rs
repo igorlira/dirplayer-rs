@@ -480,11 +480,23 @@ impl GetSetBytecodeHandler {
         let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
-            let value_ref = player
-                .globals
-                .get(prop_name)
-                .unwrap_or(&DatumRef::Void)
-                .clone();
+            let value_ref = match player.globals.get(prop_name) {
+                Some(v) => v.clone(),
+                None => {
+                    // Lingo globals are case-insensitive. An Xtra may write a global
+                    // in a different case than a script reads it — 3D Groove's
+                    // GetCollide writes `collidez` while leo3d reads `CollideZ` — so
+                    // fall back to a case-insensitive match before yielding VOID.
+                    // Only runs on a miss, so exact hits (constants like PI) are
+                    // unaffected.
+                    player
+                        .globals
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(prop_name))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(DatumRef::Void)
+                }
+            };
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(value_ref);
             Ok(HandlerExecutionResult::Advance)

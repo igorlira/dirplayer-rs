@@ -82,6 +82,12 @@ impl ListDatumHandlers {
     pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let (list_type, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+            // A VOID index (e.g. `list[uninitializedGlobal]`) yields VOID in Director
+            // rather than raising — real movies rely on this (leo3d's checkbonbon does
+            // `SetObjectVisible(pbonbon[weg], 0)` with `weg` VOID before any is collected).
+            if matches!(player.get_datum(&args[0]), Datum::Void) {
+                return Ok(DatumRef::Void);
+            }
             let index_value = player.get_datum(&args[0]).int_value()?;
 
             // Handle different indexing schemes based on list type
