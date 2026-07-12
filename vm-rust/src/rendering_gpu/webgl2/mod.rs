@@ -10,7 +10,7 @@ pub mod context;
 mod geometry;
 pub mod mesh3d;
 pub mod scene3d;
-pub mod groove_scene;
+pub mod xtra_scene;
 mod shaders;
 mod texture_cache;
 
@@ -107,8 +107,9 @@ pub struct WebGL2Renderer {
     stage_image_texture: Option<web_sys::WebGlTexture>,
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
-    /// 3D Groove Xtra scene renderer
-    groove: groove_scene::GrooveSceneRenderer,
+    /// Engine-agnostic external-Xtra 3D scene renderer (scene3d host API — used
+    /// by the Groove plugin and any future 3D xtra)
+    xtra_scenes: xtra_scene::XtraSceneRenderer,
     native_cursor_cache: crate::cursor::NativeCursorCache,
     /// Off-screen framebuffer for rendering nested `#movie` sub-players via the
     /// full WebGL2 pipeline (so they match the host's fidelity instead of the
@@ -198,7 +199,7 @@ impl WebGL2Renderer {
             trails_size: (0, 0),
             stage_image_texture: None,
             scene3d: scene3d::Scene3dRenderer::new(),
-            groove: groove_scene::GrooveSceneRenderer::new(),
+            xtra_scenes: xtra_scene::XtraSceneRenderer::new(),
             native_cursor_cache: None,
             nested_fbo: None,
             nested_fbo_texture: None,
@@ -745,12 +746,13 @@ impl WebGL2Renderer {
             self.render_sprite(player, *ch);
         }
 
-        // Draw the active 3D Groove Xtra world onto the stage (RenderToStage),
-        // on top of the 2D layer — like the directToStage 3D above.
+        // Draw external-Xtra 3D scenes (scene3d host API) onto the stage
+        // (RenderToStage), on top of the 2D layer — like the directToStage 3D
+        // above. The Groove plugin drives these.
         {
             let w = player.movie.rect.width() as i32;
             let h = player.movie.rect.height() as i32;
-            self.groove.draw(&self.context, player, w, h);
+            self.xtra_scenes.draw(&self.context, player, w, h);
             self.shader_manager.clear_active();
         }
 

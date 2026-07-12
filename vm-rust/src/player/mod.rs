@@ -88,7 +88,6 @@ use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
 use xtra::curl::{CurlXtraManager, CURL_XTRA_MANAGER_OPT};
-use xtra::groove::{GrooveXtraManager, GROOVE_XTRA_MANAGER_OPT};
 use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
@@ -1562,6 +1561,9 @@ impl DirPlayer {
         // found" ScriptError instead of hanging forever.
         debug!("Cancelling pending external-xtra loads");
         crate::player::xtra::external::cancel_all_pending_loads();
+        // Drop any external-Xtra 3D scenes from the previous movie; their GL
+        // resources are freed the next time the renderer sees them gone.
+        crate::player::xtra::scene3d::clear_all();
 
         // Clear all references before resetting the allocator
         // This ensures all DatumRef and ScriptInstanceRef objects are dropped properly
@@ -5710,7 +5712,6 @@ pub fn init_player() {
         MULTIUSER_XTRA_MANAGER_OPT = Some(MultiuserXtraManager::new());
         XMLPARSER_XTRA_MANAGER_OPT = Some(XmlParserXtraManager::new());
         CURL_XTRA_MANAGER_OPT = Some(CurlXtraManager::new());
-        GROOVE_XTRA_MANAGER_OPT = Some(GrooveXtraManager::new());
     }
 
     unsafe {

@@ -318,9 +318,32 @@ pub fn movie_required_xtras() -> js_sys::Array {
                     }
                 }
             }
+            // The 3D Groove engine is provided by an external plugin, but Groove
+            // movies call its commands as bare globals (`InitGroove()`), never
+            // `new(xtra "Groove")` — so nothing triggers an on-demand load. When
+            // the movie carries any `.3GM` model (a `Groove3gm` cast member),
+            // surface a synthetic "Groove" dependency so the JS resolver loads
+            // the plugin from the registry before Lingo runs. (The name may also
+            // appear in XTRl above; the JS side de-dupes by normalized key.)
+            if movie_has_groove3gm(player) {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"filename".into(), &"Groove".into());
+                let _ = js_sys::Reflect::set(&obj, &"displayName".into(), &"Groove".into());
+                result.push(&obj);
+            }
         }
     }
     result
+}
+
+/// True if any cast member of the loaded movie is a `.3GM` Groove model.
+fn movie_has_groove3gm(player: &crate::player::DirPlayer) -> bool {
+    use crate::player::cast_member::CastMemberType;
+    player.movie.cast_manager.casts.iter().any(|cast| {
+        cast.members
+            .values()
+            .any(|m| matches!(m.member_type, CastMemberType::Groove3gm(_)))
+    })
 }
 
 #[wasm_bindgen]
@@ -1899,12 +1922,17 @@ fn build_zip_with_glb(
         files.push((format!("{}.{}", tex_name, ext), image_data));
     }
 
+    build_zip_files(&files)
+}
+
+/// Build a minimal uncompressed (stored) ZIP from a list of (name, bytes).
+fn build_zip_files(files: &[(String, &[u8])]) -> Vec<u8> {
     let mut zip = Vec::new();
     let mut central_dir = Vec::new();
     let mut offsets: Vec<u32> = Vec::new();
 
     // Write local file headers + data
-    for (name, data) in &files {
+    for (name, data) in files {
         offsets.push(zip.len() as u32);
         let name_bytes = name.as_bytes();
         let crc = crc32(data);

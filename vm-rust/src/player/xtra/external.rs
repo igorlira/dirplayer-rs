@@ -22,15 +22,18 @@
 //! Three places. No JS-side change required (the JS dispatcher is a pure
 //! passthrough that doesn't decode postcard).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use futures::channel::oneshot;
 
-use crate::director::lingo::datum::{Datum, XtraInstanceId, datum_bool};
-use crate::player::{DatumRef, ScriptError, reserve_player_mut};
+use crate::director::lingo::datum::{Datum, DatumType, XtraInstanceId, datum_bool};
+use crate::player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, reserve_player_ref};
 
 use xtra_sdk::Datum as XDatum;
+use xtra_sdk::scene3d::{FrameData as SceneFrameData, MeshData as SceneMeshData};
 use xtra_sdk::wire;
+
+use super::scene3d;
 
 /// Discriminator for the single `dx_host_call` extern that every plugin
 /// imports. Must match `HostOp` in `dirplayer-xtra/src/host_env.rs` and
@@ -48,6 +51,17 @@ enum HostOp {
     CreateXtraInstance = 5,
     CallXtraHandler = 6,
     DestroyXtraInstance = 7,
+    Scene3dCreate = 8,
+    Scene3dUploadMesh = 9,
+    Scene3dDropMesh = 10,
+    Scene3dUploadTexture = 11,
+    Scene3dSubmitFrame = 12,
+    Scene3dDestroy = 13,
+    CastMemberBytes = 14,
+    StageInfo = 15,
+    MouseLoc = 16,
+    KeyDown = 17,
+    SetLingoGlobal = 18,
 }
 
 impl HostOp {
@@ -60,6 +74,17 @@ impl HostOp {
             5 => HostOp::CreateXtraInstance,
             6 => HostOp::CallXtraHandler,
             7 => HostOp::DestroyXtraInstance,
+            8 => HostOp::Scene3dCreate,
+            9 => HostOp::Scene3dUploadMesh,
+            10 => HostOp::Scene3dDropMesh,
+            11 => HostOp::Scene3dUploadTexture,
+            12 => HostOp::Scene3dSubmitFrame,
+            13 => HostOp::Scene3dDestroy,
+            14 => HostOp::CastMemberBytes,
+            15 => HostOp::StageInfo,
+            16 => HostOp::MouseLoc,
+            17 => HostOp::KeyDown,
+            18 => HostOp::SetLingoGlobal,
             _ => return None,
         })
     }
@@ -292,6 +317,28 @@ pub fn call_static_handler(
     Some(decode_return_to_datum_ref(&result_bytes, xtra_name, handler_name))
 }
 
+/// Try every registered external xtra as the owner of a **bare** global
+/// (no-instance) handler — the shape Groove uses (`InitGroove()`,
+/// `MoveObject(...)`). Unlike [`call_static_handler`], the caller doesn't know
+/// which xtra owns the name, so we ask each registered plugin
+/// `__xtra_has_static_handler(handler)` and dispatch to the first that claims
+/// it. Returns `None` when no external plugin owns the handler, so the caller
+/// falls through to built-ins.
+///
+/// Because external plugins are consulted before the built-in Groove fallback
+/// in `manager.rs`, a loaded Groove plugin transparently shadows the built-in.
+pub fn try_any_static_handler(
+    handler_name: &str,
+    args: &Vec<DatumRef>,
+) -> Option<Result<DatumRef, ScriptError>> {
+    for name in registered_names() {
+        if has_static_handler(&name, handler_name) {
+            return call_static_handler(&name, handler_name, args);
+        }
+    }
+    None
+}
+
 /// Create an instance on an external xtra. Returns `Some(id)` or
 /// `Some(Err(...))`; `None` means the xtra isn't external.
 pub fn create_instance(
@@ -490,6 +537,144 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
             // hanging.
             wire::encode_error("inter-xtra dispatch not yet implemented")
         }
+
+        // ── 3D scene rendering ────────────────────────────────────────────
+        // These arrive mid-Lingo-execution (no GL context in scope), so they
+        // only mutate the CPU-side scene store; the webgl2 `XtraSceneRenderer`
+        // uploads and composites during the normal draw pass. Note the player
+        // lock is free here — `call_static_handler`/`call_instance_handler`
+        // release `reserve_player_mut` (in `encode_args_from_refs`) before the
+        // JS hop that runs the plugin, so these may re-take it safely.
+        HostOp::Scene3dCreate => {
+            let tag = match args.first() {
+                Some(XDatum::String(s)) => s.clone(),
+                _ => return wire::encode_error("scene3d_create: expected String tag"),
+            };
+            let id = scene3d::with_store_mut(|s| s.create(&tag));
+            wire::encode_return(&XDatum::Int(id))
+        }
+        HostOp::Scene3dUploadMesh => {
+            let (scene_id, mesh_id, bytes) = match (args.first(), args.get(1), args.get(2)) {
+                (Some(XDatum::Int(s)), Some(XDatum::Int(m)), Some(XDatum::ByteArray(b))) => {
+                    (*s, *m as u32, b)
+                }
+                _ => return wire::encode_error("scene3d_upload_mesh: expected (Int, Int, ByteArray)"),
+            };
+            match SceneMeshData::from_bytes(bytes) {
+                Ok(data) => {
+                    scene3d::with_store_mut(|s| s.upload_mesh(scene_id, mesh_id, data));
+                    Vec::new()
+                }
+                Err(e) => wire::encode_error(&format!("scene3d_upload_mesh: bad MeshData: {:?}", e)),
+            }
+        }
+        HostOp::Scene3dDropMesh => {
+            let (scene_id, mesh_id) = match (args.first(), args.get(1)) {
+                (Some(XDatum::Int(s)), Some(XDatum::Int(m))) => (*s, *m as u32),
+                _ => return wire::encode_error("scene3d_drop_mesh: expected (Int, Int)"),
+            };
+            scene3d::with_store_mut(|s| s.drop_mesh(scene_id, mesh_id));
+            Vec::new()
+        }
+        HostOp::Scene3dUploadTexture => {
+            let (scene_id, name, w, h, rgba) = match (
+                args.first(), args.get(1), args.get(2), args.get(3), args.get(4),
+            ) {
+                (
+                    Some(XDatum::Int(s)), Some(XDatum::String(n)),
+                    Some(XDatum::Int(w)), Some(XDatum::Int(h)), Some(XDatum::ByteArray(b)),
+                ) => (*s, n.clone(), *w as u32, *h as u32, b.clone()),
+                _ => {
+                    return wire::encode_error(
+                        "scene3d_upload_texture: expected (Int, String, Int, Int, ByteArray)",
+                    );
+                }
+            };
+            scene3d::with_store_mut(|s| s.upload_texture(scene_id, &name, w, h, rgba));
+            Vec::new()
+        }
+        HostOp::Scene3dSubmitFrame => {
+            let (scene_id, bytes) = match (args.first(), args.get(1)) {
+                (Some(XDatum::Int(s)), Some(XDatum::ByteArray(b))) => (*s, b),
+                _ => return wire::encode_error("scene3d_submit_frame: expected (Int, ByteArray)"),
+            };
+            match SceneFrameData::from_bytes(bytes) {
+                Ok(frame) => {
+                    let movie_frame =
+                        reserve_player_mut(|player| player.movie.current_frame as i32);
+                    scene3d::with_store_mut(|s| s.submit_frame(scene_id, frame, movie_frame));
+                    Vec::new()
+                }
+                Err(e) => wire::encode_error(&format!("scene3d_submit_frame: bad FrameData: {:?}", e)),
+            }
+        }
+        HostOp::Scene3dDestroy => {
+            let scene_id = match args.first() {
+                Some(XDatum::Int(s)) => *s,
+                _ => return wire::encode_error("scene3d_destroy: expected Int scene_id"),
+            };
+            scene3d::with_store_mut(|s| s.destroy(scene_id));
+            Vec::new()
+        }
+
+        // ── Host state a compute-only plugin reads ────────────────────────
+        HostOp::CastMemberBytes => {
+            use crate::player::cast_member::CastMemberType;
+            let (name, kind) = match (args.first(), args.get(1)) {
+                (Some(XDatum::String(n)), Some(XDatum::String(k))) => (n.clone(), k.to_lowercase()),
+                _ => return wire::encode_error("cast_member_bytes: expected (String, String)"),
+            };
+            let bytes = reserve_player_ref(|player| {
+                let mref = player.movie.cast_manager.find_member_ref_by_name(&name)?;
+                let member = player.movie.cast_manager.find_member_by_ref(&mref)?;
+                match (kind.as_str(), &member.member_type) {
+                    ("groove3gm", CastMemberType::Groove3gm(m)) => Some(m.data.clone()),
+                    _ => None,
+                }
+            });
+            match bytes {
+                Some(b) => wire::encode_return(&XDatum::ByteArray(b)),
+                None => wire::encode_return(&XDatum::Void),
+            }
+        }
+        HostOp::StageInfo => {
+            let (w, h, frame) = reserve_player_ref(|player| {
+                (
+                    player.movie.rect.width(),
+                    player.movie.rect.height(),
+                    player.movie.current_frame as i32,
+                )
+            });
+            wire::encode_return(&XDatum::List(vec![
+                XDatum::Int(w),
+                XDatum::Int(h),
+                XDatum::Int(frame),
+            ]))
+        }
+        HostOp::MouseLoc => {
+            let (x, y) = reserve_player_ref(|player| player.mouse_loc);
+            wire::encode_return(&XDatum::Point(x as f64, y as f64))
+        }
+        HostOp::KeyDown => {
+            let key = match args.first() {
+                Some(XDatum::String(s)) => s.clone(),
+                _ => return wire::encode_error("key_down: expected String key"),
+            };
+            let down = reserve_player_ref(|player| player.keyboard_manager.is_key_down(&key));
+            wire::encode_return(&XDatum::Bool(down))
+        }
+        HostOp::SetLingoGlobal => {
+            let (name, value) = match (args.first(), args.get(1)) {
+                (Some(XDatum::String(n)), Some(v)) => (n.clone(), v.clone()),
+                _ => return wire::encode_error("set_lingo_global: expected (String, value)"),
+            };
+            // Allocate the value into the datum arena, then bind the global.
+            let value_ref = xdatum_to_host_datum_ref(&value);
+            reserve_player_mut(|player| {
+                player.globals.insert(name, value_ref);
+            });
+            Vec::new()
+        }
     }
 }
 
@@ -515,13 +700,35 @@ fn encode_args_from_refs(args: &Vec<DatumRef>) -> Option<Vec<u8>> {
 /// Director represents booleans as `Datum::Int(0)` / `Datum::Int(1)`
 /// (there is no separate Bool variant on the host), so we forward Ints
 /// as-is. Plugins that want bool semantics can compare to `Int(0)`.
-fn host_datum_to_xdatum(d: &Datum, _player: &crate::player::DirPlayer) -> XDatum {
+fn host_datum_to_xdatum(d: &Datum, player: &DirPlayer) -> XDatum {
     match d {
         Datum::Void => XDatum::Void,
         Datum::Int(i) => XDatum::Int(*i),
         Datum::Float(f) => XDatum::Float(*f),
         Datum::String(s) => XDatum::String(s.clone()),
         Datum::Symbol(s) => XDatum::Symbol(s.clone()),
+        // Container variants recurse, resolving each child DatumRef through
+        // the player's datum arena. Groove passes/returns lists, prop-lists,
+        // points and rects, so these must survive the boundary intact.
+        Datum::List(_, items, _) => XDatum::List(
+            items
+                .iter()
+                .map(|r| host_datum_to_xdatum(player.get_datum(r), player))
+                .collect(),
+        ),
+        Datum::PropList(pairs, _) => XDatum::PropList(
+            pairs
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        host_datum_to_xdatum(player.get_datum(k), player),
+                        host_datum_to_xdatum(player.get_datum(v), player),
+                    )
+                })
+                .collect(),
+        ),
+        Datum::Point([x, y], _) => XDatum::Point(*x, *y),
+        Datum::Rect([l, t, r, b], _) => XDatum::Rect(*l, *t, *r, *b),
         _ => XDatum::Void,
     }
 }
@@ -530,18 +737,47 @@ fn host_datum_to_xdatum(d: &Datum, _player: &crate::player::DirPlayer) -> XDatum
 /// into the player's datum manager, returning a fresh `DatumRef`.
 fn xdatum_to_host_datum_ref(d: &XDatum) -> DatumRef {
     reserve_player_mut(|player| {
-        let host = xdatum_to_host_datum(d);
+        let host = xdatum_to_host_datum(d, player);
         player.alloc_datum(host)
     })
 }
 
-fn xdatum_to_host_datum(d: &XDatum) -> Datum {
+fn xdatum_to_host_datum(d: &XDatum, player: &mut DirPlayer) -> Datum {
     match d {
         XDatum::Void => Datum::Void,
         XDatum::Int(i) => Datum::Int(*i),
         XDatum::Float(f) => Datum::Float(*f),
         XDatum::String(s) => Datum::String(s.clone()),
         XDatum::Symbol(s) => Datum::Symbol(s.clone()),
+        // Container variants recurse: each child is converted and allocated
+        // into the player's datum arena first, then the parent references the
+        // fresh DatumRefs. Mirrors `host_datum_to_xdatum` in the other
+        // direction so Groove's list/prop-list/point/rect returns survive.
+        XDatum::List(items) => {
+            let refs: VecDeque<DatumRef> = items
+                .iter()
+                .map(|it| {
+                    let child = xdatum_to_host_datum(it, player);
+                    player.alloc_datum(child)
+                })
+                .collect();
+            Datum::List(DatumType::List, refs, false)
+        }
+        XDatum::PropList(pairs) => {
+            let entries: VecDeque<(DatumRef, DatumRef)> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let kd = xdatum_to_host_datum(k, player);
+                    let kr = player.alloc_datum(kd);
+                    let vd = xdatum_to_host_datum(v, player);
+                    let vr = player.alloc_datum(vd);
+                    (kr, vr)
+                })
+                .collect();
+            Datum::PropList(entries, false)
+        }
+        XDatum::Point(x, y) => Datum::Point([*x, *y], 0),
+        XDatum::Rect(l, t, r, b) => Datum::Rect([*l, *t, *r, *b], 0),
         // Director booleans are Int(0)/Int(1). Use the helper so a future
         // change to the bool representation only touches one place.
         XDatum::Bool(b) => datum_bool(*b),

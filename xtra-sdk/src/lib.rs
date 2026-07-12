@@ -48,6 +48,7 @@ pub mod abi;
 pub mod datum;
 pub mod host_env;
 pub mod plugin;
+pub mod scene3d;
 pub mod wire;
 
 pub use datum::{Datum, InstanceId};
