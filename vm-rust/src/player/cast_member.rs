@@ -2642,6 +2642,14 @@ impl PhysXPhysicsMember {
     pub fn new() -> Self { Self { state: PhysXPhysicsState::default() } }
 }
 
+/// A 3D Groove `.3GM` model cast member (type-15 Xtra media whose XMED payload
+/// begins with the `3DGM` magic). Holds the raw bytes; the Groove Xtra parses
+/// them into a model when the movie calls `LoadShape(memberName)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Groove3gmMember {
+    pub data: Vec<u8>,
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -2661,6 +2669,7 @@ pub enum CastMemberType {
     Shockwave3d(Shockwave3dMember),
     HavokPhysics(HavokPhysicsMember),
     PhysXPhysics(PhysXPhysicsMember),
+    Groove3gm(Groove3gmMember),
     Unknown,
 }
 
@@ -2682,6 +2691,7 @@ pub enum CastMemberTypeId {
     Shockwave3d,
     HavokPhysics,
     PhysXPhysics,
+    Groove3gm,
     Unknown,
 }
 
@@ -2736,6 +2746,9 @@ impl fmt::Debug for CastMemberType {
             Self::PhysXPhysics(_) => {
                 write!(f, "PhysXPhysics")
             }
+            Self::Groove3gm(_) => {
+                write!(f, "Groove3gm")
+            }
             Self::Unknown => {
                 write!(f, "Unknown")
             }
@@ -2762,6 +2775,7 @@ impl CastMemberTypeId {
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
+            Self::Groove3gm => Ok("groove"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -2786,6 +2800,7 @@ impl CastMemberType {
             Self::Shockwave3d(_) => CastMemberTypeId::Shockwave3d,
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
+            Self::Groove3gm(_) => CastMemberTypeId::Groove3gm,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -4007,6 +4022,22 @@ impl CastMember {
                     name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
                     comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
                     member_type: CastMemberType::HavokPhysics(HavokPhysicsMember::new(hke_data)),
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (0, 0),
+                });
+            }
+
+            // 1b) 3D Groove `.3GM` model — XMED payload starts with the `3DGM` magic.
+            // Retain the raw bytes so the Groove Xtra can build a shape from them
+            // when the movie calls `LoadShape(memberName)`.
+            if xm.raw_data.len() >= 4 && &xm.raw_data[0..4] == b"3DGM" {
+                debug!("Groove .3GM member #{} detected ({} bytes)", number, xm.raw_data.len());
+                return Some(CastMember {
+                    number,
+                    name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                    comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                    member_type: CastMemberType::Groove3gm(Groove3gmMember { data: xm.raw_data.clone() }),
                     color: ColorRef::PaletteIndex(255),
                     bg_color: ColorRef::PaletteIndex(0),
                     reg_point: (0, 0),
