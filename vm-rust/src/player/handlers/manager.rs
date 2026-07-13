@@ -1584,6 +1584,15 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
                 }
             }),
+            "findposnear" => reserve_player_mut(|player| {
+                let list = &args[0];
+                let args = &args[1..].to_vec();
+                match player.get_datum(list) {
+                    Datum::List(..) => ListDatumHandlers::find_pos_near(list, &args),
+                    Datum::PropList(..) => PropListDatumHandlers::find_pos_near(list, &args),
+                    _ => Err(ScriptError::new("Cannot findPosNear on non-list".to_string())),
+                }
+            }),
             "setprop" => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
