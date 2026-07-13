@@ -809,6 +809,24 @@ impl SpriteDatumHandlers {
                     });
                 }
 
+                // Member-swap guard: when the score has just swapped this
+                // sprite to a NEW Flash member, the PREVIOUS member's Ruffle
+                // instance can still be resident until the new one loads.
+                // Reading the old member's variables is wrong — e.g. BioBoxing's
+                // menu frame swaps sprite 1 loading.swf -> start.swf, and reading
+                // loading.swf's stale `/:cont="1"` (instead of start.swf's "00")
+                // skips the whole menu. If the sprite's CURRENT (cl,cm) isn't in
+                // `flash_sprite_loaded`, treat the value read as not-ready (VOID)
+                // so the frame's `if cont = 1 ... else go(the frame)` loop holds
+                // until the new member loads and its real value can be read.
+                let member_ready = reserve_player_ref(|player| {
+                    (cl == 0 && cm == 0)
+                        || player.flash_sprite_loaded.contains(&(sn, cl, cm))
+                });
+                if !member_ready {
+                    return Ok(DatumRef::Void);
+                }
+
                 match ruffle_get_variable(sn as i32, &root_flash_path(&path)) {
                     Ok(val) => {
                         // Convert the AS value to a Lingo datum. GetVariable's

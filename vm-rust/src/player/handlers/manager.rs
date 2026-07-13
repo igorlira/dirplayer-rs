@@ -1340,6 +1340,27 @@ impl BuiltInHandlerManager {
                                 .map(|m| (m.cast_lib as i32, m.cast_member as i32))
                                 .unwrap_or((0, 0)))
                         })?;
+                        // Member-swap guard: when the score just swapped this
+                        // sprite to a NEW Flash member, the PREVIOUS member's
+                        // Ruffle instance can still be resident until the new one
+                        // loads. Reading the old member's variables is wrong —
+                        // BioBoxing's menu frame swaps sprite 1 loading.swf ->
+                        // start.swf, and reading loading.swf's stale `/:cont="1"`
+                        // (instead of start.swf's "00") skips the menu. If the
+                        // sprite's CURRENT (cl,cm) isn't in `flash_sprite_loaded`,
+                        // treat the VALUE read as not-ready (VOID) so the frame's
+                        // `if cont = 1 ... else go(the frame)` loop holds until the
+                        // new member loads. (Object form below still returns a
+                        // sprite-bound handle.) Safe for Storyscramble in-place
+                        // same-number reloads: its `invalidate_flash_for_cast_lib`
+                        // already pulls the entry from this set.
+                        let member_ready = (cl == 0 && cm == 0)
+                            || reserve_player_ref(|player| {
+                                Ok(player.flash_sprite_loaded.contains(&(sn, cl, cm)))
+                            })?;
+                        if !return_as_object && !member_ready {
+                            return Ok(DatumRef::Void);
+                        }
                         match ruffle_get_variable(sn as i32, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {

@@ -1744,17 +1744,27 @@ impl TypeHandlers {
 
     pub fn atan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]);
-            
-            let num = if let Ok(f) = value.float_value() {
-                f
-            } else if let Ok(i) = value.int_value() {
-                i as f64
-            } else {
-                return Err(ScriptError::new("atan requires a number".to_string()));
+            let num = |dr: &DatumRef| -> Result<f64, ScriptError> {
+                let value = player.get_datum(dr);
+                if let Ok(f) = value.float_value() {
+                    Ok(f)
+                } else if let Ok(i) = value.int_value() {
+                    Ok(i as f64)
+                } else {
+                    Err(ScriptError::new("atan requires a number".to_string()))
+                }
             };
-            
-            let result = num.atan();
+            let a0 = num(&args[0])?;
+            // Two-arg `atan(y, x)` is arctangent-of-two-values (atan2). Director's
+            // built-in atan is single-arg, but the 3D Groove Xtra exports a 2-arg
+            // `atan` (RE: `atan(a1,a2) = atan2(a2,a1)`) that movies call to aim one
+            // object at another (e.g. BioBoxing's `atan(dx, dy)` enemy heading).
+            // Built-ins resolve before xtra commands, so handle the 2-arg form here.
+            let result = if args.len() >= 2 {
+                a0.atan2(num(&args[1])?)
+            } else {
+                a0.atan()
+            };
             Ok(player.alloc_datum(Datum::Float(result)))
         })
     }
