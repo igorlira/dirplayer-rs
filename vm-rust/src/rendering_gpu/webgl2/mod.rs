@@ -4129,7 +4129,7 @@ impl WebGL2Renderer {
     /// destructively strip artwork whose fill happens to equal the bg.
     /// Plain authored 32-bit bitmaps with embedded alpha (PNG imports) still
     /// need the color-key to make ink 36 actually do its job.
-    fn bitmap_to_rgba(
+    pub(crate) fn bitmap_to_rgba(
         bitmap: &Bitmap,
         palettes: &crate::player::bitmap::palette_map::PaletteMap,
         ink: i32,

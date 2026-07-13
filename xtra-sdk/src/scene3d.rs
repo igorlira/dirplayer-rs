@@ -106,6 +106,11 @@ pub struct OverlayCmd {
     pub size: [i32; 2],
     pub blend: f32,
     pub channel: i32,
+    /// Transparency/blit mode, decided by the PLUGIN from the sprite's Groove
+    /// extension (the host must not re-parse `tex_name`): 0 = Normal (straight
+    /// alpha — a `.s`/`.a` color+mask pair or an opaque sprite), 1 = Greenscreen
+    /// (`.g`, green color key), 2 = Chroma (`.c`, translucent-lens chroma alpha).
+    pub blit_mode: u8,
 }
 
 /// A full frame to composite. `render_rect` (stage pixels, l/t/r/b) bounds the

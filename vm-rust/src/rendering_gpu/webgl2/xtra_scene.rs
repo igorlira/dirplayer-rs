@@ -89,39 +89,43 @@ precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_alpha;
-uniform int u_greenkey;
+uniform int u_mode; // OverlayCmd.blit_mode: 0=Normal, 1=Greenscreen, 2=Chroma
 out vec4 frag;
 void main() {
     vec4 t = texture(u_tex, v_uv);
-    if (u_greenkey == 1) {
-        // Groove `.g` sprites bake transparency as a green color key (dirplayer
-        // loads them opaque). Key out green-dominant texels; soft edge kills halo.
+    if (u_mode == 1) {
+        // Greenscreen (`.g`): key out green-dominant texels; soft edge kills halo.
         float greenness = t.g - max(t.r, t.b);
         float key = 1.0 - smoothstep(0.15, 0.35, greenness);
         frag = vec4(t.rgb, t.a * u_alpha * key);
-    } else if (u_alpha < 0.999) {
-        // Translucent `.c` sprite (leo3d's glas.c lens) — active ONLY when a
-        // `DefineMaterials` translucent material scoped u_alpha below 1 (strict, so
-        // it can't affect movies without one). The lens tint is a vivid (high-chroma)
-        // blue, while the frame (black), the reflection highlight (white) and the dark
-        // rim are all low-chroma — so opacity tracks CHROMA (max-min): vivid blue →
-        // the transparent window (world shows); black vignette, white highlight AND
-        // the dark edge stay opaque, giving a smooth rim instead of a jagged one.
+    } else if (u_mode == 2) {
+        // Chroma (`.c`, leo3d's glas.c lens): opacity tracks CHROMA (max-min) —
+        // vivid blue tint → the transparent window (world shows through); the black
+        // vignette, the white highlight AND the dark rim are low-chroma so they stay
+        // opaque, giving a smooth rim instead of a jagged one.
         float mx = max(t.r, max(t.g, t.b));
         float mn = min(t.r, min(t.g, t.b));
         frag = vec4(t.rgb, 1.0 - (mx - mn));
     } else {
-        frag = vec4(t.rgb, t.a);
+        // Normal: straight alpha (a `.s`/`.a` mask, the corner matte, or an opaque
+        // bitmap) scaled by the overlay's blend.
+        frag = vec4(t.rgb, t.a * u_alpha);
     }
 }
 "#;
+
+/// Grace period (in stage draws) a Groove scene keeps compositing after its last
+/// `submit_frame`. Continuously-driven scenes reset the counter every frame, so
+/// this only bounds how long a scene the game has NAVIGATED AWAY FROM lingers
+/// before it fades out (e.g. BioBoxing's title arena when you open Instructions).
+const STALE_DRAWS: i32 = 125;
 
 struct OverlayShader {
     program: WebGlProgram,
     u_rect: Option<WebGlUniformLocation>,
     u_tex: Option<WebGlUniformLocation>,
     u_alpha: Option<WebGlUniformLocation>,
-    u_greenkey: Option<WebGlUniformLocation>,
+    u_mode: Option<WebGlUniformLocation>,
     vao: web_sys::WebGlVertexArrayObject,
 }
 
@@ -144,10 +148,6 @@ struct GlBatch {
     tex_name: String,
     mesh: Mesh3dBuffers,
 }
-
-/// Only composite while the game is actively driving the scene: it must have
-/// submitted on the current movie frame AND within the last couple of draws.
-const STALE_DRAWS: i32 = 2;
 
 /// GL-side caches + shader. Lazily initialized.
 pub struct XtraSceneRenderer {
@@ -213,7 +213,7 @@ impl XtraSceneRenderer {
             u_rect: gl.get_uniform_location(&program, "u_rect"),
             u_tex: gl.get_uniform_location(&program, "u_tex"),
             u_alpha: gl.get_uniform_location(&program, "u_alpha"),
-            u_greenkey: gl.get_uniform_location(&program, "u_greenkey"),
+            u_mode: gl.get_uniform_location(&program, "u_mode"),
             vao,
             program,
         });
@@ -259,14 +259,23 @@ impl XtraSceneRenderer {
         // Collect the scene ids to draw, gating on staleness. We bump
         // `draws_since_submit` here (a store write) then release the store
         // borrow so the GL work below can freely re-borrow it read-only.
-        let current_frame = player.movie.current_frame as i32;
         let scene_ids: Vec<i32> = with_store_mut(|store| {
             let mut ids = Vec::new();
             for (id, scene) in store.scenes.iter_mut() {
+                // Composite the last submitted frame, and keep compositing it for a
+                // short GRACE period after the game stops submitting. Two failure
+                // modes to avoid:
+                //  - The old strict gate (`last_submit_frame == current_frame`) cut
+                //    the scene the instant the movie changed frame → hard-cut
+                //    transitions, and it blacked out a menu that submits once then
+                //    holds while the movie plays on.
+                //  - Persisting FOREVER left a stale scene (e.g. BioBoxing's title
+                //    arena) composited over a later Director-only screen
+                //    (Instructions), hiding it.
+                // The grace (draws_since_submit) smooths transitions yet lets a scene
+                // the game has navigated away from fade out. A continuously-driven
+                // scene resets the counter every submit and always renders.
                 if scene.frame.is_none() {
-                    continue;
-                }
-                if scene.last_submit_frame != current_frame {
                     continue;
                 }
                 scene.draws_since_submit += 1;
@@ -305,7 +314,13 @@ impl XtraSceneRenderer {
             Some(f) => f,
             None => return,
         };
-        if frame.draws.is_empty() {
+        // Bail only when there's nothing to composite at all. A menu / title
+        // screen is 2D overlays over a background with NO 3D models, so
+        // `frame.draws` is empty while `frame.overlays` is not — returning here
+        // would skip the overlay pass (draw_overlays, below) and leave the menu
+        // blank. The 3D mesh/texture/draw loops that follow all iterate
+        // `frame.draws`, so they naturally no-op when it's empty.
+        if frame.draws.is_empty() && frame.overlays.is_empty() {
             return;
         }
 
@@ -630,20 +645,15 @@ impl XtraSceneRenderer {
             let vh = viewport_h.max(1) as f32;
             let ndc_x = |x: f32| x / vw * 2.0 - 1.0;
             let ndc_y = |y: f32| 1.0 - y / vh * 2.0;
-            // `.c` sprites (leo3d's glas.c lens) draw ADDITIVE — a translucent tint
-            // you see the world through; `.g` sprites (BioBoxing logo) are green-keyed
-            // alpha. Groove picks this per the sprite's texture format; the extension
-            // is our proxy.
-            // `.c` sprites are translucent (alpha blend at the material-defined
-            // opacity carried in `ov.blend`, no color key); `.g` sprites are
-            // green-keyed. Both use normal alpha blending.
-            let translucent = ov.tex_name.len() >= 2
-                && ov.tex_name[ov.tex_name.len() - 2..].eq_ignore_ascii_case(".c");
+            // Transparency mode comes from the PLUGIN (OverlayCmd.blit_mode):
+            // 0 = Normal alpha, 1 = Greenscreen (`.g`), 2 = Chroma (`.c`). The host
+            // no longer sniffs `tex_name` — the plugin owns the extension decision.
+            // All modes use standard SRC_ALPHA over-blending.
             gl.blend_func(
                 WebGl2RenderingContext::SRC_ALPHA,
                 WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
             );
-            gl.uniform1i(ov_shader.u_greenkey.as_ref(), if translucent { 0 } else { 1 });
+            gl.uniform1i(ov_shader.u_mode.as_ref(), ov.blit_mode as i32);
             // u_rect = (left,bottom)→(right,top) so corner (0,0)=bottom-left.
             gl.uniform4f(ov_shader.u_rect.as_ref(), ndc_x(left), ndc_y(bottom), ndc_x(right), ndc_y(top));
             gl.uniform1f(ov_shader.u_alpha.as_ref(), (ov.blend / 100.0).clamp(0.0, 1.0));
@@ -713,8 +723,9 @@ fn upload_rgba(context: &WebGL2Context, w: u32, h: u32, rgba: &[u8]) -> Option<W
     Some(tex)
 }
 
-/// Resolve `name` to a movie bitmap cast member and upload it as a GL texture.
-fn upload_named_texture(context: &WebGL2Context, player: &DirPlayer, name: &str) -> Option<WebGlTexture> {
+/// Resolve a movie bitmap cast member by name and expand it to opaque RGBA
+/// (native-depth `bitmap.data` — 8-bit indexed / 16 / 32 — via the cast palette).
+fn resolve_bitmap_rgba(player: &DirPlayer, name: &str) -> Option<(usize, usize, Vec<u8>)> {
     let mref = player.movie.cast_manager.find_member_ref_by_name(name)?;
     let member = player.movie.cast_manager.find_member_by_ref(&mref)?;
     let bref = match &member.member_type {
@@ -722,7 +733,85 @@ fn upload_named_texture(context: &WebGL2Context, player: &DirPlayer, name: &str)
         _ => return None,
     };
     let bitmap = player.bitmap_manager.get_bitmap(bref)?;
-    upload_rgba(context, bitmap.width as u32, bitmap.height as u32, &bitmap.data)
+    let palettes = player.movie.cast_manager.palettes();
+    let rgba = super::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, false);
+    Some((bitmap.width as usize, bitmap.height as usize, rgba))
+}
+
+/// Resolve `name` to a movie bitmap cast member and upload it as a GL texture.
+///
+/// Groove sprites carry transparency as a SEPARATE companion bitmap: `<base>.s`
+/// is the 32-bit color image and `<base>.a` is an 8-bit **grayscale alpha mask**
+/// (white = opaque, black = transparent — the sprite silhouette). The two are
+/// authored as a pair. So load the `.s` color, then load the `.a` mask and use
+/// its luminance as the alpha channel. Only when there is no `.a` companion do we
+/// fall back to the corner-color matte (plain sprites like the character glyphs,
+/// which have no mask).
+fn upload_named_texture(context: &WebGL2Context, player: &DirPlayer, name: &str) -> Option<WebGlTexture> {
+    let (w, h, mut rgba) = resolve_bitmap_rgba(player, name)?;
+    // Companion alpha mask name: `foo.s` -> `foo.a`.
+    let alpha_name = name
+        .strip_suffix(".s")
+        .or_else(|| name.strip_suffix(".S"))
+        .map(|base| format!("{}.a", base));
+    let mut used_mask = false;
+    if let Some(an) = alpha_name {
+        if let Some((aw, ah, amask)) = resolve_bitmap_rgba(player, &an) {
+            if aw == w && ah == h {
+                // Grayscale mask → R == G == B; take R as the alpha value.
+                for i in 0..(w * h) {
+                    rgba[i * 4 + 3] = amask[i * 4];
+                }
+                used_mask = true;
+            }
+        }
+    }
+    if !used_mask {
+        matte_edge_transparent(&mut rgba, w, h);
+    }
+    upload_rgba(context, w as u32, h as u32, &rgba)
+}
+
+/// Color-key matte for plain Groove overlay sprites that have NO `.a` alpha
+/// companion (the character glyphs). The key color is the most common color
+/// along the border (the sprite's background). EVERY pixel of that color is
+/// keyed to alpha 0 — not just the edge-connected region — so the enclosed
+/// holes of letters like O/G also become transparent and reveal the button
+/// behind, instead of showing the key color. Glyphs are single-color letters on
+/// a flat key background, so keying all key-color pixels is safe. Sprites that
+/// carry a real silhouette (title/buttons) use their `.a` mask and never reach
+/// this path.
+fn matte_edge_transparent(rgba: &mut [u8], w: usize, h: usize) {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    let px = |x: usize, y: usize| (y * w + x) * 4;
+    // Dominant border color = the background key.
+    let mut counts: std::collections::HashMap<[u8; 3], u32> = std::collections::HashMap::new();
+    let mut tally = |x: usize, y: usize| {
+        let p = px(x, y);
+        if rgba[p + 3] != 0 {
+            *counts.entry([rgba[p], rgba[p + 1], rgba[p + 2]]).or_insert(0) += 1;
+        }
+    };
+    for x in 0..w {
+        tally(x, 0);
+        tally(x, h - 1);
+    }
+    for y in 0..h {
+        tally(0, y);
+        tally(w - 1, y);
+    }
+    let key = match counts.into_iter().max_by_key(|&(_, c)| c) {
+        Some((color, _)) => color,
+        None => return,
+    };
+    for i in 0..(w * h) {
+        let p = i * 4;
+        if rgba[p] == key[0] && rgba[p + 1] == key[1] && rgba[p + 2] == key[2] {
+            rgba[p + 3] = 0;
+        }
+    }
 }
 
 // ---- minimal column-major mat4 helpers (GL order) ----
