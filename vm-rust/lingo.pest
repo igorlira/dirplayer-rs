@@ -209,7 +209,17 @@ if_inline   =  { if_kw ~ expr ~ then_kw ~ command }
 pass_kw     = @{ ^"pass" ~ !(alpha | digit | "_") }
 pass_stmt   =  { pass_kw }
 
-command    = _{ if_inline | pass_stmt | set_statement | delete_statement | assignment | put_statement | go_inline | command_inline | expr }
+// Legacy `sound <verb> <args>` command form, e.g. `sound fadeIn 2, 60`,
+// `sound stop 3`, `sound playFile 1, "snd"`. Director treats the word after
+// `sound` as a verb keyword (not a variable); the evaluator turns it into the
+// #verb symbol so it dispatches through the same path as `sound(2).fadeIn(60)`.
+// `sound_kw` is atomic-with-word-boundary so `soundLevel` / `sound(2)` /
+// `sound = 5` don't tokenise as this command.
+sound_kw        = @{ ^"sound" ~ !(alpha | digit | "_") }
+sound_verb      =  { ident }
+sound_statement =  { sound_kw ~ sound_verb ~ command_inline_args? }
+
+command    = _{ if_inline | pass_stmt | set_statement | delete_statement | assignment | put_statement | go_inline | sound_statement | command_inline | expr }
 obj_prop   =  { "." }
 add        =  { "+" }
 subtract   =  { "-" }

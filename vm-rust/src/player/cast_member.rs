@@ -2775,7 +2775,11 @@ impl CastMemberTypeId {
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
-            Self::Groove3gm => Ok("groove"),
+            // Director/Groove report .3GM shape members as #G3D — the Groove
+            // Lingo gates shape loading on `member.type = #G3D`
+            // (gGroove: LoadShape only if #G3D), so returning #groove made every
+            // shape get skipped → ShapeID -1 → no 3D world.
+            Self::Groove3gm => Ok("g3d"),
             Self::Unknown => Ok("unknown"),
         };
     }

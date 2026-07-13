@@ -80,7 +80,7 @@ impl PropListUtils {
         Ok(-1)
     }
 
-    fn datum_equals_for_lookup(
+    pub fn datum_equals_for_lookup(
         left: &Datum,
         right: &Datum,
         allocator: &DatumAllocator,
@@ -531,7 +531,14 @@ impl PropListDatumHandlers {
             let position = prop_list
                 .iter()
                 .position(|(k, _)| {
-                    datum_equals(player.get_datum(&k), find, &player.allocator).unwrap()
+                    // Use the lookup-aware equality so a STRING argument matches a
+                    // SYMBOL key (and vice-versa), matching Director: e.g.
+                    // `[#dozer: "none"].findPos("dozer")` -> 6, and the doc's
+                    // `foodList.findPos("breakfast")` -> 1 for key #breakfast.
+                    // Plain datum_equals is type-strict (#dozer != "dozer") and
+                    // returned VOID, breaking gSoundControl.adjustVolume.
+                    PropListUtils::datum_equals_for_lookup(player.get_datum(&k), find, &player.allocator)
+                        .unwrap()
                 })
                 .map(|x| x as i32);
             if let Some(position) = position {
@@ -574,7 +581,10 @@ impl PropListDatumHandlers {
                 prop_list
                     .iter()
                     .position(|(k, _)| {
-                        datum_equals(player.get_datum(k), find, &player.allocator).unwrap()
+                        // Lookup-aware equality so a string arg matches a symbol
+                        // key (parity with find_pos above).
+                        PropListUtils::datum_equals_for_lookup(player.get_datum(k), find, &player.allocator)
+                            .unwrap()
                     })
                     .map(|x| x as i32 + 1)
                     .unwrap_or(0)

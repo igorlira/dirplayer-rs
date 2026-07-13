@@ -351,6 +351,23 @@ impl BuiltInHandlerManager {
     fn set_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let list_ref = &args[0];
+            // `setAt` on a PROPERTY list accepts a property KEY (string/symbol),
+            // not only an integer position — Director's Hey-Arnold gObstacles does
+            // both: `setAt(gPersonList, dTargetPerson, "walking")` (int position)
+            // and `setAt(gPersonList, pShape, "free")` (pShape = "gerald", a key).
+            // Route a non-numeric key to the property setter; int_value() would
+            // coerce "gerald" to 0 → "Index 0 out of bounds".
+            let key_is_name = matches!(
+                player.get_datum(&args[1]),
+                Datum::String(_) | Datum::Symbol(_)
+            );
+            let is_prop_list = matches!(player.get_datum(list_ref), Datum::PropList(..));
+            if is_prop_list && key_is_name {
+                crate::player::handlers::datum_handlers::prop_list::PropListUtils::set_at(
+                    player, list_ref, &args[1], &args[2], "",
+                )?;
+                return Ok(());
+            }
             let position = player.get_datum(&args[1]).int_value()?;
             let new_value = args[2].clone();
             let is_zero_based = matches!(player.get_datum(list_ref), Datum::List(crate::director::lingo::datum::DatumType::XmlChildNodes, ..));
@@ -1037,6 +1054,7 @@ impl BuiltInHandlerManager {
             "findempty" => CastHandlers::find_empty(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
+            "netabort" => NetHandlers::net_abort(args),
             "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep"
             // Cast/movie preload + unload commands: dirplayer loads everything
             // synchronously up front, so there is nothing to (un)cache. Accept

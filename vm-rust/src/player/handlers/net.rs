@@ -1,13 +1,48 @@
 use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
-    player::{reserve_player_mut, DatumRef, ScriptError},
+    player::{net_task::NetTaskState, reserve_player_mut, DatumRef, ScriptError},
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 pub struct NetHandlers {}
 
 impl NetHandlers {
+    /// `netAbort(netID)` / `netAbort(URL)` — cancel a network operation without
+    /// waiting for a result (Director 11.5: a Command, returns nothing). We can't
+    /// interrupt an in-flight fetch, but we mark the task terminated with error
+    /// 4242 ("Download stopped by netAbort") so `netDone(id)` returns TRUE and
+    /// `netError(id)` reports it — the movie stops polling. An unknown id/URL is a
+    /// no-op. Returns VOID.
+    pub fn net_abort(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (id_opt, url_opt) = if let Some(dr) = args.first() {
+                let d = player.get_datum(dr);
+                (d.int_value().ok().map(|v| v as u32), d.string_value().ok())
+            } else {
+                (None, None)
+            };
+            let task_id = id_opt.or_else(|| {
+                url_opt.and_then(|u| player.net_manager.find_task_by_url(&u))
+            });
+            if let Some(id) = task_id {
+                if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
+                    // "If the data transmission is complete, this command has no
+                    // effect." — only terminate a task that is still in progress.
+                    let in_progress =
+                        shared.task_states.get(&id).map_or(false, |s| s.result.is_none());
+                    if in_progress {
+                        shared.update_task_state(
+                            id,
+                            NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
+                        );
+                    }
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn net_done(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let task_id = if let Some(task_id_ref) = &args.get(0) {
