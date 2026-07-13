@@ -29,14 +29,17 @@ precision highp float;
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec3 a_normal;
 layout(location=2) in vec2 a_uv;
+layout(location=6) in vec4 a_color;
 uniform mat4 u_mvp;
 uniform mat4 u_model;
 out vec3 v_normal;
 out vec2 v_uv;
+out vec4 v_color;
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 1.0);
     v_normal = mat3(u_model) * a_normal;
     v_uv = a_uv;
+    v_color = a_color;
 }
 "#;
 
@@ -44,22 +47,83 @@ const FS: &str = r#"#version 300 es
 precision highp float;
 in vec3 v_normal;
 in vec2 v_uv;
+in vec4 v_color;
 uniform vec3 u_light_dir;
 uniform vec3 u_light_color;
 uniform float u_ambient;
 uniform vec3 u_color;
 uniform sampler2D u_tex;
 uniform int u_has_tex;
+uniform int u_has_vcolor;
 uniform float u_alpha;
 out vec4 frag;
 void main() {
+    vec3 tex = u_has_tex == 1 ? texture(u_tex, v_uv).rgb : vec3(1.0);
+    // Base lit color (GL fixed-function-style: ambient floor + directional diffuse).
     vec3 n = normalize(v_normal);
     float diff = max(abs(dot(n, normalize(u_light_dir))), 0.0);
     float shade = u_ambient + (1.0 - u_ambient) * diff;
-    vec3 tex = u_has_tex == 1 ? texture(u_tex, v_uv).rgb : vec3(1.0);
-    frag = vec4(tex * u_color * u_light_color * shade, u_alpha);
+    vec3 lit = tex * u_color * u_light_color * shade;
+    // Material emission (self-illumination) is ADDED on top of the lit surface —
+    // it does not replace lighting. Zero for non-emissive / non-material faces.
+    vec3 emis = u_has_vcolor == 1 ? v_color.rgb : vec3(0.0);
+    frag = vec4(lit + emis, u_alpha);
 }
 "#;
+
+/// 2D overlay shader: a unit-quad corner (loc 0) mapped into an NDC rect, textured.
+const OVERLAY_VS: &str = r#"#version 300 es
+precision highp float;
+layout(location=0) in vec2 a_corner;
+uniform vec4 u_rect;   // (x0,y0, x1,y1) in NDC: (left,bottom)→(right,top)
+out vec2 v_uv;
+void main() {
+    vec2 p = mix(u_rect.xy, u_rect.zw, a_corner);
+    gl_Position = vec4(p, 0.0, 1.0);
+    v_uv = vec2(a_corner.x, 1.0 - a_corner.y); // texture origin top-left
+}
+"#;
+
+const OVERLAY_FS: &str = r#"#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_alpha;
+uniform int u_greenkey;
+out vec4 frag;
+void main() {
+    vec4 t = texture(u_tex, v_uv);
+    if (u_greenkey == 1) {
+        // Groove `.g` sprites bake transparency as a green color key (dirplayer
+        // loads them opaque). Key out green-dominant texels; soft edge kills halo.
+        float greenness = t.g - max(t.r, t.b);
+        float key = 1.0 - smoothstep(0.15, 0.35, greenness);
+        frag = vec4(t.rgb, t.a * u_alpha * key);
+    } else if (u_alpha < 0.999) {
+        // Translucent `.c` sprite (leo3d's glas.c lens) — active ONLY when a
+        // `DefineMaterials` translucent material scoped u_alpha below 1 (strict, so
+        // it can't affect movies without one). The lens tint is a vivid (high-chroma)
+        // blue, while the frame (black), the reflection highlight (white) and the dark
+        // rim are all low-chroma — so opacity tracks CHROMA (max-min): vivid blue →
+        // the transparent window (world shows); black vignette, white highlight AND
+        // the dark edge stay opaque, giving a smooth rim instead of a jagged one.
+        float mx = max(t.r, max(t.g, t.b));
+        float mn = min(t.r, min(t.g, t.b));
+        frag = vec4(t.rgb, 1.0 - (mx - mn));
+    } else {
+        frag = vec4(t.rgb, t.a);
+    }
+}
+"#;
+
+struct OverlayShader {
+    program: WebGlProgram,
+    u_rect: Option<WebGlUniformLocation>,
+    u_tex: Option<WebGlUniformLocation>,
+    u_alpha: Option<WebGlUniformLocation>,
+    u_greenkey: Option<WebGlUniformLocation>,
+    vao: web_sys::WebGlVertexArrayObject,
+}
 
 struct ShaderProgram {
     program: WebGlProgram,
@@ -71,6 +135,7 @@ struct ShaderProgram {
     u_color: Option<WebGlUniformLocation>,
     u_tex: Option<WebGlUniformLocation>,
     u_has_tex: Option<WebGlUniformLocation>,
+    u_has_vcolor: Option<WebGlUniformLocation>,
     u_alpha: Option<WebGlUniformLocation>,
 }
 
@@ -87,6 +152,7 @@ const STALE_DRAWS: i32 = 2;
 /// GL-side caches + shader. Lazily initialized.
 pub struct XtraSceneRenderer {
     shader: Option<ShaderProgram>,
+    overlay: Option<OverlayShader>,
     /// Uploaded mesh buffers keyed by (scene_id, mesh_id): (store generation, batches).
     meshes: HashMap<(i32, u32), (u64, Vec<GlBatch>)>,
     /// GL textures keyed by (scene_id, name): (source generation, texture). For a
@@ -100,7 +166,58 @@ const CAST_TEX_GEN: u64 = u64::MAX;
 
 impl XtraSceneRenderer {
     pub fn new() -> Self {
-        XtraSceneRenderer { shader: None, meshes: HashMap::new(), textures: HashMap::new() }
+        XtraSceneRenderer {
+            shader: None,
+            overlay: None,
+            meshes: HashMap::new(),
+            textures: HashMap::new(),
+        }
+    }
+
+    /// Lazily build the 2D overlay shader + its unit-quad VAO.
+    fn ensure_overlay(&mut self, context: &WebGL2Context) -> bool {
+        if self.overlay.is_some() {
+            return true;
+        }
+        let gl = context.gl();
+        let vs = match context.compile_shader(WebGl2RenderingContext::VERTEX_SHADER, OVERLAY_VS) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let fs = match context.compile_shader(WebGl2RenderingContext::FRAGMENT_SHADER, OVERLAY_FS) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let program = match context.link_program(&vs, &fs) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let Some(vao) = gl.create_vertex_array() else { return false };
+        let Some(vbo) = gl.create_buffer() else { return false };
+        gl.bind_vertex_array(Some(&vao));
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&vbo));
+        // Two triangles of the unit quad: corners (0,0)(1,0)(0,1)(1,1).
+        let corners: [f32; 12] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
+        unsafe {
+            let view = js_sys::Float32Array::view(&corners);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &view,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+        }
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, 0, 0);
+        gl.bind_vertex_array(None);
+        self.overlay = Some(OverlayShader {
+            u_rect: gl.get_uniform_location(&program, "u_rect"),
+            u_tex: gl.get_uniform_location(&program, "u_tex"),
+            u_alpha: gl.get_uniform_location(&program, "u_alpha"),
+            u_greenkey: gl.get_uniform_location(&program, "u_greenkey"),
+            vao,
+            program,
+        });
+        true
     }
 
     fn ensure_shader(&mut self, context: &WebGL2Context) -> bool {
@@ -130,6 +247,7 @@ impl XtraSceneRenderer {
             u_color: u("u_color"),
             u_tex: u("u_tex"),
             u_has_tex: u("u_has_tex"),
+            u_has_vcolor: u("u_has_vcolor"),
             u_alpha: u("u_alpha"),
             program,
         });
@@ -244,6 +362,11 @@ impl XtraSceneRenderer {
         }
         gl.enable(WebGl2RenderingContext::BLEND);
         gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        // Per-object depth priority (SetObjectDepth) uses polygon offset so coplanar
+        // surfaces (a TV screen + its scanline overlay) don't z-fight/flicker.
+        gl.enable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+        // Back-face culling is per-draw (bfculling); front faces are CCW.
+        gl.front_face(WebGl2RenderingContext::CCW);
 
         let shader = self.shader.as_ref().unwrap();
         gl.use_program(Some(&shader.program));
@@ -256,6 +379,10 @@ impl XtraSceneRenderer {
         gl.uniform1f(shader.u_ambient.as_ref(), frame.ambient.clamp(0.0, 1.0));
 
         let aspect = if rect_h > 0 { rect_w as f32 / rect_h as f32 } else { 1.0 };
+        // Large far plane: Groove worlds are big and some views (leo3d's fernglas
+        // dolly-zoom) look at very distant features. A tighter far clips them —
+        // the TV-screen moiré that prompted a tighter far was actually back-face
+        // culling, not depth precision, so keep the original generous range.
         let proj = perspective(frame.camera.fov.to_radians().max(0.1), aspect, 1.0, 200_000.0);
         let view = look_at(frame.camera.pos, frame.camera.look_at, [0.0, 0.0, 1.0]);
         let view_proj = mat_mul(&proj, &view);
@@ -276,6 +403,28 @@ impl XtraSceneRenderer {
             gl.uniform1f(shader.u_alpha.as_ref(), alpha);
             gl.depth_mask(alpha >= 0.999);
             gl.uniform1i(shader.u_tex.as_ref(), 0);
+            // Back-face culling per the shape's bfculling flag. Groove models bake
+            // double-sided coplanar faces (screen quads wound both ways); culling
+            // the back-facing copy stops the two from z-fighting into a moiré.
+            if d.cull {
+                gl.enable(WebGl2RenderingContext::CULL_FACE);
+                gl.cull_face(WebGl2RenderingContext::BACK);
+            } else {
+                gl.disable(WebGl2RenderingContext::CULL_FACE);
+            }
+            // SetObjectDepth priority. A fixed value >= 1 is a FRONT LAYER: Groove
+            // composites it on top of the scene, so we skip the depth test (else a
+            // near-coplanar front object — the 3D logo box over the truss — z-fights
+            // into a moiré/hatch). Auto (-1/0) and draw-behind (-2) keep the normal
+            // depth test, with a polygon offset to separate coplanar surfaces.
+            if d.depth >= 1 {
+                gl.depth_func(WebGl2RenderingContext::ALWAYS);
+                gl.polygon_offset(0.0, 0.0);
+            } else {
+                gl.depth_func(WebGl2RenderingContext::LEQUAL);
+                let poff = if d.depth == -2 { 2.0 } else { 0.0 };
+                gl.polygon_offset(poff, poff);
+            }
 
             for (bi, batch) in batches.iter().enumerate() {
                 if d.batch >= 0 && d.batch as usize != bi {
@@ -286,6 +435,22 @@ impl XtraSceneRenderer {
                     .as_deref()
                     .filter(|n| !n.is_empty())
                     .unwrap_or(batch.tex_name.as_str());
+                // Groove `.add` textures are drawn with ADDITIVE blending (engine
+                // blend mode 2 = SRC_ALPHA, ONE): black areas add nothing (read as
+                // transparent), bright areas glow over the scene. Everything else
+                // uses the standard alpha blend.
+                let additive = tex_name.len() >= 4
+                    && tex_name[tex_name.len() - 4..].eq_ignore_ascii_case(".add");
+                if additive {
+                    gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE);
+                    gl.depth_mask(false);
+                } else {
+                    gl.blend_func(
+                        WebGl2RenderingContext::SRC_ALPHA,
+                        WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+                    );
+                    gl.depth_mask(alpha >= 0.999);
+                }
                 let tex = self
                     .textures
                     .get(&(scene_id, tex_name.to_string()))
@@ -297,16 +462,24 @@ impl XtraSceneRenderer {
                 } else {
                     gl.uniform1i(shader.u_has_tex.as_ref(), 0);
                 }
+                // Batches with baked material colors render unlit (self-illuminated).
+                gl.uniform1i(shader.u_has_vcolor.as_ref(), batch.mesh.has_vertex_colors as i32);
                 batch.mesh.bind(gl);
                 batch.mesh.draw(gl);
                 batch.mesh.unbind(gl);
             }
         }
         gl.depth_mask(true);
+        gl.polygon_offset(0.0, 0.0);
+        gl.disable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+        gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.disable(WebGl2RenderingContext::BLEND);
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         gl.viewport(0, 0, fb_w, fb_h);
+
+        // 2D bitmap overlays over the full stage, composited after the 3D scene.
+        self.draw_overlays(context, player, scene_id, &frame.overlays, viewport_w, viewport_h);
     }
 
     /// Build/refresh the GL buffers for one mesh if the store's generation advanced.
@@ -320,7 +493,8 @@ impl XtraSceneRenderer {
         }
         // Rebuild from the store's CPU batches.
         let batches = with_store_mut(|store| {
-            let mut out: Vec<(String, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>)> = Vec::new();
+            let mut out: Vec<(String, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 4]>)> =
+                Vec::new();
             if let Some(m) = store.scenes.get(&scene_id).and_then(|s| s.meshes.get(&mesh_id)) {
                 for b in &m.data.batches {
                     out.push((
@@ -328,20 +502,22 @@ impl XtraSceneRenderer {
                         chunk3(&b.positions),
                         chunk3(&b.normals),
                         chunk2(&b.uvs),
+                        chunk4(&b.colors),
                     ));
                 }
             }
             out
         });
         let mut gl_batches = Vec::new();
-        for (tex_name, positions, normals, uvs) in batches {
+        for (tex_name, positions, normals, uvs, colors) in batches {
             let n_tris = positions.len() / 3;
             let faces: Vec<[u32; 3]> =
                 (0..n_tris).map(|i| [(i * 3) as u32, (i * 3 + 1) as u32, (i * 3 + 2) as u32]).collect();
             let uvs_opt = if uvs.len() == positions.len() { Some(uvs.as_slice()) } else { None };
-            if let Ok(mesh) =
-                Mesh3dBuffers::new(context, &positions, &normals, uvs_opt, None, &faces)
-            {
+            let colors_opt = if colors.len() == positions.len() { Some(colors.as_slice()) } else { None };
+            if let Ok(mesh) = Mesh3dBuffers::new_full(
+                context, &positions, &normals, uvs_opt, None, &faces, None, None, colors_opt,
+            ) {
                 gl_batches.push(GlBatch { tex_name, mesh });
             }
         }
@@ -376,6 +552,108 @@ impl XtraSceneRenderer {
         let tex = upload_named_texture(context, player, name);
         self.textures.insert(key, (CAST_TEX_GEN, tex));
     }
+
+    /// Native pixel size of an overlay's texture — a plugin-uploaded sprite
+    /// (store) or a movie bitmap cast member resolved by name.
+    fn overlay_texture_size(&self, player: &DirPlayer, scene_id: i32, name: &str) -> Option<(i32, i32)> {
+        let store_size = with_store_mut(|store| {
+            store
+                .scenes
+                .get(&scene_id)
+                .and_then(|s| s.textures.get(name))
+                .map(|t| (t.w as i32, t.h as i32))
+        });
+        if let Some((w, h)) = store_size {
+            if w > 0 && h > 0 {
+                return Some((w, h));
+            }
+        }
+        let mref = player.movie.cast_manager.find_member_ref_by_name(name)?;
+        let member = player.movie.cast_manager.find_member_by_ref(&mref)?;
+        let bref = match &member.member_type {
+            CastMemberType::Bitmap(b) => b.image_ref,
+            _ => return None,
+        };
+        let bitmap = player.bitmap_manager.get_bitmap(bref)?;
+        Some((bitmap.width as i32, bitmap.height as i32))
+    }
+
+    /// Composite the frame's 2D bitmap overlays over the full stage (Groove
+    /// `AddOverlay`). Center-anchored at `loc` in stage px; blend → alpha.
+    fn draw_overlays(
+        &mut self,
+        context: &WebGL2Context,
+        player: &DirPlayer,
+        scene_id: i32,
+        overlays: &[xtra_sdk::scene3d::OverlayCmd],
+        viewport_w: i32,
+        viewport_h: i32,
+    ) {
+        if overlays.is_empty() || !self.ensure_overlay(context) {
+            return;
+        }
+        // Resolve every overlay's texture + native size first (mutates self).
+        for ov in overlays {
+            if !ov.tex_name.is_empty() {
+                self.ensure_texture(context, player, scene_id, &ov.tex_name);
+            }
+        }
+        let gl = context.gl();
+        let fb_w = gl.drawing_buffer_width();
+        let fb_h = gl.drawing_buffer_height();
+        gl.viewport(0, 0, fb_w, fb_h);
+        gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+        gl.enable(WebGl2RenderingContext::BLEND);
+        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        let ov_shader = self.overlay.as_ref().unwrap();
+        gl.use_program(Some(&ov_shader.program));
+        gl.bind_vertex_array(Some(&ov_shader.vao));
+        gl.uniform1i(ov_shader.u_tex.as_ref(), 0);
+        for ov in overlays {
+            let tex = self
+                .textures
+                .get(&(scene_id, ov.tex_name.clone()))
+                .and_then(|(_, t)| t.as_ref());
+            let Some(tex) = tex else { continue };
+            let (nw, nh) = self.overlay_texture_size(player, scene_id, &ov.tex_name).unwrap_or((0, 0));
+            let w = if ov.size[0] > 0 { ov.size[0] } else { nw };
+            let h = if ov.size[1] > 0 { ov.size[1] } else { nh };
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            // Center-anchored stage-pixel rect → NDC (y flipped, top-left origin).
+            let (cx, cy) = (ov.loc[0] as f32, ov.loc[1] as f32);
+            let (left, right) = (cx - w as f32 / 2.0, cx + w as f32 / 2.0);
+            let (top, bottom) = (cy - h as f32 / 2.0, cy + h as f32 / 2.0);
+            let vw = viewport_w.max(1) as f32;
+            let vh = viewport_h.max(1) as f32;
+            let ndc_x = |x: f32| x / vw * 2.0 - 1.0;
+            let ndc_y = |y: f32| 1.0 - y / vh * 2.0;
+            // `.c` sprites (leo3d's glas.c lens) draw ADDITIVE — a translucent tint
+            // you see the world through; `.g` sprites (BioBoxing logo) are green-keyed
+            // alpha. Groove picks this per the sprite's texture format; the extension
+            // is our proxy.
+            // `.c` sprites are translucent (alpha blend at the material-defined
+            // opacity carried in `ov.blend`, no color key); `.g` sprites are
+            // green-keyed. Both use normal alpha blending.
+            let translucent = ov.tex_name.len() >= 2
+                && ov.tex_name[ov.tex_name.len() - 2..].eq_ignore_ascii_case(".c");
+            gl.blend_func(
+                WebGl2RenderingContext::SRC_ALPHA,
+                WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+            );
+            gl.uniform1i(ov_shader.u_greenkey.as_ref(), if translucent { 0 } else { 1 });
+            // u_rect = (left,bottom)→(right,top) so corner (0,0)=bottom-left.
+            gl.uniform4f(ov_shader.u_rect.as_ref(), ndc_x(left), ndc_y(bottom), ndc_x(right), ndc_y(top));
+            gl.uniform1f(ov_shader.u_alpha.as_ref(), (ov.blend / 100.0).clamp(0.0, 1.0));
+            gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
+            gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+        }
+        gl.bind_vertex_array(None);
+        gl.disable(WebGl2RenderingContext::BLEND);
+    }
 }
 
 fn chunk3(v: &[f32]) -> Vec<[f32; 3]> {
@@ -384,6 +662,9 @@ fn chunk3(v: &[f32]) -> Vec<[f32; 3]> {
 fn chunk2(v: &[f32]) -> Vec<[f32; 2]> {
     v.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
 }
+fn chunk4(v: &[f32]) -> Vec<[f32; 4]> {
+    v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+}
 
 fn upload_rgba(context: &WebGL2Context, w: u32, h: u32, rgba: &[u8]) -> Option<WebGlTexture> {
     if w == 0 || h == 0 || rgba.len() != (w * h * 4) as usize {
@@ -391,6 +672,44 @@ fn upload_rgba(context: &WebGL2Context, w: u32, h: u32, rgba: &[u8]) -> Option<W
     }
     let tex = context.create_texture().ok()?;
     context.upload_texture_rgba(&tex, w, h, rgba).ok()?;
+    // Groove 3D surfaces tile textures via UVs > 1 (e.g. the stands repeat a
+    // spectator strip 4× across each row). The shared uploader sets CLAMP_TO_EDGE,
+    // which would fill only the first tile — override to REPEAT. WebGL2 allows
+    // REPEAT on NPOT textures; for 0..1 UVs (overlays) it's identical to clamp.
+    let gl = context.gl();
+    gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+    gl.tex_parameteri(
+        WebGl2RenderingContext::TEXTURE_2D,
+        WebGl2RenderingContext::TEXTURE_WRAP_S,
+        WebGl2RenderingContext::REPEAT as i32,
+    );
+    gl.tex_parameteri(
+        WebGl2RenderingContext::TEXTURE_2D,
+        WebGl2RenderingContext::TEXTURE_WRAP_T,
+        WebGl2RenderingContext::REPEAT as i32,
+    );
+    // Trilinear + mipmaps. The shared uploader sets NEAREST, which aliases badly
+    // when high-frequency 3D textures (the stands' net/grid, distant screens) are
+    // minified — producing a shimmering moiré that flickers as the camera orbits.
+    // Mipmapped LINEAR resolves it (WebGL2 allows mipmaps on NPOT textures).
+    gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
+    gl.tex_parameteri(
+        WebGl2RenderingContext::TEXTURE_2D,
+        WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+        WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32,
+    );
+    gl.tex_parameteri(
+        WebGl2RenderingContext::TEXTURE_2D,
+        WebGl2RenderingContext::TEXTURE_MAG_FILTER,
+        WebGl2RenderingContext::LINEAR as i32,
+    );
+    // Anisotropic filtering. The TV screens sit on arena walls viewed at steep
+    // angles, where plain trilinear mipmapping still aliases the fine screen/LED
+    // pattern into a moiré "net". EXT_texture_filter_anisotropic resolves it.
+    // TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE.
+    if matches!(gl.get_extension("EXT_texture_filter_anisotropic"), Ok(Some(_))) {
+        gl.tex_parameterf(WebGl2RenderingContext::TEXTURE_2D, 0x84FE, 16.0);
+    }
     Some(tex)
 }
 

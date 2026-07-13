@@ -37,6 +37,13 @@ pub struct MeshBatch {
     pub positions: Vec<f32>,
     pub normals: Vec<f32>,
     pub uvs: Vec<f32>,
+    /// Optional per-vertex color, `4 * vertex_count` (RGBA, 0..1) or empty. When
+    /// non-empty the host renders this batch **unlit** (the color is the final
+    /// fragment color, mirroring an engine that bakes material emission/diffuse
+    /// into flat vertex colors — e.g. Groove's `glColorPointer`); empty keeps the
+    /// batch on the lit/textured path.
+    #[serde(default)]
+    pub colors: Vec<f32>,
 }
 
 /// A complete uploadable mesh — the batch set for one shape or one deformed
@@ -75,6 +82,30 @@ pub struct DrawCmd {
     pub color: [u8; 3],
     pub alpha: f32,
     pub tex_override: Option<String>,
+    /// Groove `SetObjectDepth` priority: `-1` auto, `-2` draw-behind, `>= 0` fixed
+    /// (higher = closer to camera). The host applies a matching polygon-offset so
+    /// coplanar surfaces (e.g. a screen + its scanline overlay) don't z-fight.
+    #[serde(default)]
+    pub depth: i32,
+    /// Back-face culling (the shape's `Atr2` bfculling flag). Groove models are
+    /// authored with double-sided coplanar faces (e.g. a screen quad wound both
+    /// ways); without culling the two opposite-wound triangles z-fight into a
+    /// moiré. When true the host culls back faces (front = CCW).
+    #[serde(default)]
+    pub cull: bool,
+}
+
+/// A 2D screen-space bitmap overlay composited over (or under) the 3D scene
+/// (Groove `AddOverlay`). Center-anchored at `loc` in stage pixels; `size` `[0,0]`
+/// means use the texture's native size. `blend` is 0..100 (→ alpha). `channel`
+/// is z-order: negative draws below the 3D scene, `>= 0` above it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayCmd {
+    pub tex_name: String,
+    pub loc: [i32; 2],
+    pub size: [i32; 2],
+    pub blend: f32,
+    pub channel: i32,
 }
 
 /// A full frame to composite. `render_rect` (stage pixels, l/t/r/b) bounds the
@@ -90,6 +121,10 @@ pub struct FrameData {
     pub ambient: f32,
     pub light: Option<Light>,
     pub draws: Vec<DrawCmd>,
+    /// 2D bitmap overlays (Groove `AddOverlay`), composited in stage space after
+    /// the 3D scene, ordered by `channel`.
+    #[serde(default)]
+    pub overlays: Vec<OverlayCmd>,
 }
 
 impl MeshData {
