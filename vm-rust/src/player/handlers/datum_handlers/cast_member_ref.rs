@@ -1343,10 +1343,16 @@ impl CastMemberRefHandlers {
     ) -> Result<(), ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
-            return Err(ScriptError::new(format!(
-                "Setting prop {} of invalid castMember reference (member {} of castLib {})",
+            // Silently ignore setting props on an invalid (negative) reference,
+            // e.g. a VOID/unset member ref a script still writes through.
+            // Returning early also keeps the negative indices away from the
+            // `as u32` casts below. debug!, not console::warn_1 — the latter
+            // always floods the browser console.
+            debug!(
+                "Ignoring set prop {} on invalid castMember reference (member {} of castLib {})",
                 prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
-            )));
+            );
+            return Ok(());
         }
         let exists = reserve_player_ref(|player| {
             player
