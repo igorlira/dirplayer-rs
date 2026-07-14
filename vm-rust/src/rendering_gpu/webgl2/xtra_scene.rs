@@ -14,7 +14,7 @@
 //! here keyed by `(scene_id, mesh_id)` / `(scene_id, texture_name)`, rebuilt
 //! only when the store's per-item `generation` counter bumps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlTexture, WebGlUniformLocation};
 
@@ -58,16 +58,23 @@ uniform int u_has_vcolor;
 uniform float u_alpha;
 out vec4 frag;
 void main() {
-    vec3 tex = u_has_tex == 1 ? texture(u_tex, v_uv).rgb : vec3(1.0);
+    vec4 t = u_has_tex == 1 ? texture(u_tex, v_uv) : vec4(1.0);
+    // Groove blit modes (`.t` transparent, `.g` greenscreen, `.s`+`.a` mask) are
+    // decoded CPU-side into the texture's alpha. Drop keyed-out texels entirely
+    // rather than blending them: a discarded fragment writes no depth, so the
+    // scene behind a keyed background stays visible. Sampling only .rgb here (and
+    // emitting u_alpha alone) made every keyed texture render opaque — black skies
+    // and solid blocks where the cut-out should be.
+    if (u_has_tex == 1 && t.a < 0.5) discard;
     // Base lit color (GL fixed-function-style: ambient floor + directional diffuse).
     vec3 n = normalize(v_normal);
     float diff = max(abs(dot(n, normalize(u_light_dir))), 0.0);
     float shade = u_ambient + (1.0 - u_ambient) * diff;
-    vec3 lit = tex * u_color * u_light_color * shade;
+    vec3 lit = t.rgb * u_color * u_light_color * shade;
     // Material emission (self-illumination) is ADDED on top of the lit surface —
     // it does not replace lighting. Zero for non-emissive / non-material faces.
     vec3 emis = u_has_vcolor == 1 ? v_color.rgb : vec3(0.0);
-    frag = vec4(lit + emis, u_alpha);
+    frag = vec4(lit + emis, u_alpha * t.a);
 }
 "#;
 
@@ -325,24 +332,45 @@ impl XtraSceneRenderer {
         }
 
         // (1) Ensure GL meshes for every mesh referenced this frame.
+        //
+        // Both this and the texture pass below key off the UNIQUE mesh ids, not
+        // the draw list. A shape emits one DrawCmd per (part, texture) batch, so
+        // a many-part model has hundreds of draws all naming the same mesh — and
+        // the texture pass walks that mesh's entire batch list. Doing either
+        // per-draw is O(draws × batches): the Hey Arnold level (767 parts, 113
+        // textures, ~800 batches) burned ~640k redundant String clones and
+        // ensure_texture calls *per frame* on that one object.
+        let mut mesh_ids: Vec<u32> = Vec::new();
         for d in &frame.draws {
-            self.ensure_mesh(context, scene_id, d.mesh_id);
-        }
-        // (2) Ensure textures for every name referenced this frame.
-        for d in &frame.draws {
-            if let Some(name) = d.tex_override.as_deref().filter(|n| !n.is_empty()) {
-                self.ensure_texture(context, player, scene_id, name);
+            if !mesh_ids.contains(&d.mesh_id) {
+                mesh_ids.push(d.mesh_id);
             }
-            if let Some((_, batches)) = self.meshes.get(&(scene_id, d.mesh_id)) {
-                let names: Vec<String> = batches
-                    .iter()
-                    .map(|b| b.tex_name.clone())
-                    .filter(|n| !n.is_empty())
-                    .collect();
-                for name in names {
-                    self.ensure_texture(context, player, scene_id, &name);
+        }
+        for &mesh_id in &mesh_ids {
+            self.ensure_mesh(context, scene_id, mesh_id);
+        }
+        // (2) Ensure textures for every name referenced this frame: each unique
+        // mesh's batch names, plus any per-object tex_override. Collected first
+        // (self.meshes is borrowed here, ensure_texture needs &mut self).
+        let mut tex_names: HashSet<String> = HashSet::new();
+        for &mesh_id in &mesh_ids {
+            if let Some((_, batches)) = self.meshes.get(&(scene_id, mesh_id)) {
+                for b in batches {
+                    if !b.tex_name.is_empty() && !tex_names.contains(b.tex_name.as_str()) {
+                        tex_names.insert(b.tex_name.clone());
+                    }
                 }
             }
+        }
+        for d in &frame.draws {
+            if let Some(name) = d.tex_override.as_deref().filter(|n| !n.is_empty()) {
+                if !tex_names.contains(name) {
+                    tex_names.insert(name.to_string());
+                }
+            }
+        }
+        for name in &tex_names {
+            self.ensure_texture(context, player, scene_id, name, false);
         }
 
         let gl = context.gl();
@@ -416,7 +444,11 @@ impl XtraSceneRenderer {
             );
             let alpha = d.alpha.clamp(0.0, 1.0);
             gl.uniform1f(shader.u_alpha.as_ref(), alpha);
-            gl.depth_mask(alpha >= 0.999);
+            // The world background (SetWorldBackground) never occludes and is never
+            // occluded: it writes no depth, so every real surface composites over
+            // it regardless of how near the skydome's own geometry actually is.
+            // The plugin already re-centred it on the camera and submits it first.
+            gl.depth_mask(!d.background && alpha >= 0.999);
             gl.uniform1i(shader.u_tex.as_ref(), 0);
             // Back-face culling per the shape's bfculling flag. Groove models bake
             // double-sided coplanar faces (screen quads wound both ways); culling
@@ -432,7 +464,7 @@ impl XtraSceneRenderer {
             // near-coplanar front object — the 3D logo box over the truss — z-fights
             // into a moiré/hatch). Auto (-1/0) and draw-behind (-2) keep the normal
             // depth test, with a polygon offset to separate coplanar surfaces.
-            if d.depth >= 1 {
+            if d.background || d.depth >= 1 {
                 gl.depth_func(WebGl2RenderingContext::ALWAYS);
                 gl.polygon_offset(0.0, 0.0);
             } else {
@@ -441,10 +473,19 @@ impl XtraSceneRenderer {
                 gl.polygon_offset(poff, poff);
             }
 
-            for (bi, batch) in batches.iter().enumerate() {
-                if d.batch >= 0 && d.batch as usize != bi {
-                    continue;
+            // Select this cmd's batch by index; `batch < 0` means "all batches
+            // of the mesh" (deformed objects submit one cmd for the whole mesh).
+            // Indexing, not scan-and-skip: a shape's per-batch draws each walked
+            // the full batch list, making the pass O(draws × batches) per frame.
+            let selected: &[GlBatch] = if d.batch >= 0 {
+                match batches.get(d.batch as usize) {
+                    Some(b) => std::slice::from_ref(b),
+                    None => &[],
                 }
+            } else {
+                batches.as_slice()
+            };
+            for batch in selected {
                 let tex_name = d
                     .tex_override
                     .as_deref()
@@ -464,7 +505,12 @@ impl XtraSceneRenderer {
                         WebGl2RenderingContext::SRC_ALPHA,
                         WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
                     );
-                    gl.depth_mask(alpha >= 0.999);
+                    // Must repeat the background test the outer draw made: a
+                    // background never writes depth. Setting it from `alpha` alone
+                    // let the skydome — drawn with depth_func(ALWAYS) at the camera
+                    // — stamp near depth over the whole screen, so every farther
+                    // surface (the street; the houses, intermittently) failed LEQUAL.
+                    gl.depth_mask(!d.background && alpha >= 0.999);
                 }
                 let tex = self
                     .textures
@@ -542,7 +588,18 @@ impl XtraSceneRenderer {
     /// Ensure a GL texture for `name` in `scene_id`. Prefers a plugin-uploaded
     /// RGBA texture (tracked by store generation); otherwise resolves `name` to a
     /// movie bitmap cast member and uploads it once.
-    fn ensure_texture(&mut self, context: &WebGL2Context, player: &DirPlayer, scene_id: i32, name: &str) {
+    /// `for_overlay`: a 2D overlay sprite rather than a 3D model texture. An
+    /// untagged sprite (the character glyphs) is still a cut-out and needs its
+    /// key colour removed, whereas an untagged 3D texture is Solid and must be
+    /// left opaque — keying a road or wall would punch holes in it.
+    fn ensure_texture(
+        &mut self,
+        context: &WebGL2Context,
+        player: &DirPlayer,
+        scene_id: i32,
+        name: &str,
+        for_overlay: bool,
+    ) {
         // Plugin-uploaded texture? Check the store's generation.
         let uploaded = with_store_mut(|store| {
             store
@@ -564,7 +621,7 @@ impl XtraSceneRenderer {
         if self.textures.contains_key(&key) {
             return;
         }
-        let tex = upload_named_texture(context, player, name);
+        let tex = upload_named_texture(context, player, name, for_overlay);
         self.textures.insert(key, (CAST_TEX_GEN, tex));
     }
 
@@ -610,7 +667,7 @@ impl XtraSceneRenderer {
         // Resolve every overlay's texture + native size first (mutates self).
         for ov in overlays {
             if !ov.tex_name.is_empty() {
-                self.ensure_texture(context, player, scene_id, &ov.tex_name);
+                self.ensure_texture(context, player, scene_id, &ov.tex_name, true);
             }
         }
         let gl = context.gl();
@@ -747,29 +804,69 @@ fn resolve_bitmap_rgba(player: &DirPlayer, name: &str) -> Option<(usize, usize, 
 /// its luminance as the alpha channel. Only when there is no `.a` companion do we
 /// fall back to the corner-color matte (plain sprites like the character glyphs,
 /// which have no mask).
-fn upload_named_texture(context: &WebGL2Context, player: &DirPlayer, name: &str) -> Option<WebGlTexture> {
+fn upload_named_texture(
+    context: &WebGL2Context,
+    player: &DirPlayer,
+    name: &str,
+    for_overlay: bool,
+) -> Option<WebGlTexture> {
     let (w, h, mut rgba) = resolve_bitmap_rgba(player, name)?;
-    // Companion alpha mask name: `foo.s` -> `foo.a`.
-    let alpha_name = name
-        .strip_suffix(".s")
-        .or_else(|| name.strip_suffix(".S"))
-        .map(|base| format!("{}.a", base));
-    let mut used_mask = false;
-    if let Some(an) = alpha_name {
-        if let Some((aw, ah, amask)) = resolve_bitmap_rgba(player, &an) {
-            if aw == w && ah == h {
-                // Grayscale mask → R == G == B; take R as the alpha value.
-                for i in 0..(w * h) {
-                    rgba[i * 4 + 3] = amask[i * 4];
+    // The asset-name extension IS the Groove BlitMode, and dirplayer loads Groove
+    // bitmaps OPAQUE, so reconstruct the transparency it implies:
+    //
+    //   .s  Solid colour image, paired with a `.a` greyscale alpha mask
+    //   .t  Transparent  → colour-key the background
+    //   .g  Greenscreen  → key out green-dominant texels
+    //   .a  Alpha        → the bitmap already carries its own alpha
+    //   none/other       → Solid: key NOTHING
+    //
+    // Keying unconditionally (the old behaviour) is only invisible while the 3D
+    // shader ignores texel alpha; once it honours it, a matte on an untagged
+    // texture punches its border colour out of solid geometry (roads, walls).
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("s") => {
+            // Companion mask: `foo.s` -> `foo.a`.
+            let base = &name[..name.len() - 2];
+            let mut used_mask = false;
+            if let Some((aw, ah, amask)) = resolve_bitmap_rgba(player, &format!("{}.a", base)) {
+                if aw == w && ah == h {
+                    // Grayscale mask → R == G == B; take R as the alpha value.
+                    for i in 0..(w * h) {
+                        rgba[i * 4 + 3] = amask[i * 4];
+                    }
+                    used_mask = true;
                 }
-                used_mask = true;
+            }
+            // A `.s` with no authored mask is a plain cut-out sprite.
+            if !used_mask {
+                key_corner_transparent(&mut rgba, w, h);
             }
         }
-    }
-    if !used_mask {
-        matte_edge_transparent(&mut rgba, w, h);
+        Some("t") => key_corner_transparent(&mut rgba, w, h),
+        Some("g") => greenscreen_transparent(&mut rgba, w, h),
+        // Untagged: Solid for a 3D texture, but an overlay sprite (the character
+        // glyphs) is still a cut-out keyed on its background colour.
+        _ if for_overlay => key_corner_transparent(&mut rgba, w, h),
+        _ => {}
     }
     upload_rgba(context, w as u32, h as u32, &rgba)
+}
+
+/// Groove Greenscreen blit mode (`.g`): key out green-dominant texels. Mirrors
+/// the overlay shader's rule (`greenness = g - max(r, b)`) so a texture and an
+/// overlay of the same art cut out identically.
+fn greenscreen_transparent(rgba: &mut [u8], w: usize, h: usize) {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    for i in 0..(w * h) {
+        let p = i * 4;
+        let (r, g, b) = (rgba[p] as i32, rgba[p + 1] as i32, rgba[p + 2] as i32);
+        if g - r.max(b) > 40 {
+            rgba[p + 3] = 0;
+        }
+    }
 }
 
 /// Color-key matte for plain Groove overlay sprites that have NO `.a` alpha
@@ -781,31 +878,20 @@ fn upload_named_texture(context: &WebGL2Context, player: &DirPlayer, name: &str)
 /// a flat key background, so keying all key-color pixels is safe. Sprites that
 /// carry a real silhouette (title/buttons) use their `.a` mask and never reach
 /// this path.
-fn matte_edge_transparent(rgba: &mut [u8], w: usize, h: usize) {
+fn key_corner_transparent(rgba: &mut [u8], w: usize, h: usize) {
     if w == 0 || h == 0 || rgba.len() < w * h * 4 {
         return;
     }
-    let px = |x: usize, y: usize| (y * w + x) * 4;
-    // Dominant border color = the background key.
-    let mut counts: std::collections::HashMap<[u8; 3], u32> = std::collections::HashMap::new();
-    let mut tally = |x: usize, y: usize| {
-        let p = px(x, y);
-        if rgba[p + 3] != 0 {
-            *counts.entry([rgba[p], rgba[p + 1], rgba[p + 2]]).or_insert(0) += 1;
-        }
-    };
-    for x in 0..w {
-        tally(x, 0);
-        tally(x, h - 1);
-    }
-    for y in 0..h {
-        tally(0, y);
-        tally(w - 1, y);
-    }
-    let key = match counts.into_iter().max_by_key(|&(_, c)| c) {
-        Some((color, _)) => color,
-        None => return,
-    };
+    // The key is the colour of the TOP-LEFT pixel — Director's transparent-ink
+    // rule (an ink with no explicit bgColor keys on src (0,0)). Every pixel of
+    // that colour is keyed, not just the edge-connected region, so the enclosed
+    // holes of glyphs like O and G become transparent too.
+    //
+    // NOT the dominant border colour: an authored key sits at (0,0) but need not
+    // dominate the border. `busf.t` is keyed green (0,255,0) at (0,0) while its
+    // border is mostly the blue window frame — matting the border cut the frame
+    // and left the windows green.
+    let key = [rgba[0], rgba[1], rgba[2]];
     for i in 0..(w * h) {
         let p = i * 4;
         if rgba[p] == key[0] && rgba[p + 1] == key[1] && rgba[p + 2] == key[2] {
