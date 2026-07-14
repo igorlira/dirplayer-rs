@@ -658,58 +658,39 @@ pub fn multiply_datums(
             let (vals, flags) = inline_binop_2(av, af, *b, *bf, |x, y| x * y);
             Datum::Point(vals, flags)
         }
-        // List (2 elements) as Point multiplication — result stays as List
-        (Datum::List(_, list, _), Datum::Int(right)) if list.len() == 2 => {
-            let mut ref_list = VecDeque::with_capacity(2);
-            for item in list {
-                let d = player.get_datum(item).clone();
-                let result_datum = match &d {
-                    Datum::Int(n) => Datum::Int(n * right),
-                    Datum::Float(n) => Datum::Float(n * *right as f64),
-                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
+        // List * Int, ANY length. Int elements stay Int (Director only widens to
+        // float when a float is involved); nested lists/points/rects/vectors
+        // recurse, mirroring the List * Float arm above.
+        (Datum::List(_, list, _), Datum::Int(right)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let right_val = *right;
+            let mut ref_list = VecDeque::new();
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let result_datum = match &item_datum {
+                    Datum::Int(n) => Datum::Int(n * right_val),
+                    Datum::Float(n) => Datum::Float(*n * right_val as f64),
+                    Datum::List(..) | Datum::Point(..) | Datum::Rect(..) | Datum::Vector(_) => {
+                        multiply_datums(item.clone(), right_ref.clone(), player)?
+                    }
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Mul operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
                 };
                 ref_list.push_back(player.alloc_datum(result_datum));
             }
             Datum::List(DatumType::List, ref_list, false)
         }
-        (Datum::List(_, list, _), Datum::Float(right)) if list.len() == 2 => {
-            let mut ref_list = VecDeque::with_capacity(2);
-            for item in list {
-                let d = player.get_datum(item).clone();
-                let result_datum = match &d {
-                    Datum::Int(n) => Datum::Float(*n as f64 * right),
-                    Datum::Float(n) => Datum::Float(n * right),
-                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
-                };
-                ref_list.push_back(player.alloc_datum(result_datum));
-            }
-            Datum::List(DatumType::List, ref_list, false)
-        }
-        (Datum::Int(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let mut ref_list = VecDeque::with_capacity(2);
-            for item in list {
-                let d = player.get_datum(item).clone();
-                let result_datum = match &d {
-                    Datum::Int(n) => Datum::Int(left * n),
-                    Datum::Float(n) => Datum::Float(*left as f64 * n),
-                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
-                };
-                ref_list.push_back(player.alloc_datum(result_datum));
-            }
-            Datum::List(DatumType::List, ref_list, false)
-        }
-        (Datum::Float(left), Datum::List(_, list, _)) if list.len() == 2 => {
-            let mut ref_list = VecDeque::with_capacity(2);
-            for item in list {
-                let d = player.get_datum(item).clone();
-                let result_datum = match &d {
-                    Datum::Int(n) => Datum::Float(left * *n as f64),
-                    Datum::Float(n) => Datum::Float(left * n),
-                    _ => return Err(ScriptError::new("List element must be numeric".to_string())),
-                };
-                ref_list.push_back(player.alloc_datum(result_datum));
-            }
-            Datum::List(DatumType::List, ref_list, false)
+        // scalar * List — Director's element-wise multiply is commutative, so
+        // reuse the List * scalar arms above rather than keeping a second, subtly
+        // different copy. These were previously limited to 2-element lists, so a
+        // 3-element vector (`-1.9 * [-25.2, -43.2, 0]`, as the physics code in
+        // Hey Arnold! Runaway Bus writes it) fell through to a type error.
+        (Datum::Int(_) | Datum::Float(_), Datum::List(..)) => {
+            multiply_datums(right_ref.clone(), left_ref.clone(), player)?
         }
 
         // Transform3d * Vector = apply transform to point
