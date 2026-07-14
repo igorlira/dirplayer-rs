@@ -128,6 +128,13 @@ enum HostOp {
     /// so scripts can read it (e.g. Groove's `collideX`…`collideTexture`).
     /// Returns void.
     SetLingoGlobal = 18,
+
+    /// Args: `[Datum::String(member_name)]`. Returns `Datum::List[Int(w),
+    /// Int(h)]` — the natural pixel size of the named bitmap cast member — or
+    /// `Datum::Void` if it isn't a bitmap. A plugin that positions art by name
+    /// (Groove's sprites/overlays) needs the authored size to hit-test it; only
+    /// the host can resolve a member.
+    MemberSize = 19,
 }
 
 // ── Low-level glue: call dx_host_call and decode ────────────────────────
@@ -163,7 +170,7 @@ fn invoke_for_datum(op: HostOp, args: &[Datum]) -> Result<Datum, String> {
 
 // ── Ergonomic wrappers ───────────────────────────────────────────────────
 
-/// Write a debug-level log line. Visible in the host's developer console.
+/// Write a log line to the host's developer console.
 #[inline]
 pub fn log(msg: &str) {
     invoke(HostOp::Log, &[Datum::String(String::from(msg))]);
@@ -350,6 +357,17 @@ pub fn stage_info() -> (i32, i32, i32) {
 }
 
 /// Current mouse position in stage pixels: `(mouseH, mouseV)`.
+/// Natural pixel size of a bitmap cast member, or `None` if it isn't one.
+pub fn member_size(name: &str) -> Option<(i32, i32)> {
+    match invoke_for_datum(HostOp::MemberSize, &[Datum::String(String::from(name))]) {
+        Ok(Datum::List(v)) if v.len() >= 2 => match (&v[0], &v[1]) {
+            (Datum::Int(w), Datum::Int(h)) => Some((*w, *h)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn mouse_loc() -> (i32, i32) {
     match invoke_for_datum(HostOp::MouseLoc, &[]) {
         Ok(Datum::Point(x, y)) => (x as i32, y as i32),

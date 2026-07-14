@@ -93,6 +93,14 @@ pub struct DrawCmd {
     /// moiré. When true the host culls back faces (front = CCW).
     #[serde(default)]
     pub cull: bool,
+    /// Groove `SetWorldBackground`: this draw is the world's BACKGROUND (skydome),
+    /// not world geometry. The engine hides the source object and re-draws it from
+    /// a dedicated per-viewport slot with its position zeroed, so it can never be
+    /// left behind however small it is (the engine's own default is a radius-10000
+    /// sphere). The host draws it first, centred on the camera, with the depth test
+    /// and depth writes off so all real geometry composites over it.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// A 2D screen-space bitmap overlay composited over (or under) the 3D scene

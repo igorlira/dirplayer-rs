@@ -62,6 +62,7 @@ enum HostOp {
     MouseLoc = 16,
     KeyDown = 17,
     SetLingoGlobal = 18,
+    MemberSize = 19,
 }
 
 impl HostOp {
@@ -85,6 +86,7 @@ impl HostOp {
             16 => HostOp::MouseLoc,
             17 => HostOp::KeyDown,
             18 => HostOp::SetLingoGlobal,
+            19 => HostOp::MemberSize,
             _ => return None,
         })
     }
@@ -459,7 +461,11 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
     match op {
         HostOp::Log => {
             if let Some(XDatum::String(msg)) = args.first() {
-                log::debug!("[xtra] {}", msg);
+                // console::log_1, NOT log::debug! — the latter is invisible in the
+                // browser, so every plugin `host_env::log` call was silently
+                // dropped, making the SDK's "visible in the host's developer
+                // console" contract a lie.
+                web_sys::console::log_1(&format!("[xtra] {}", msg).into());
             }
             Vec::new() // void sentinel
         }
@@ -634,6 +640,29 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
             });
             match bytes {
                 Some(b) => wire::encode_return(&XDatum::ByteArray(b)),
+                None => wire::encode_return(&XDatum::Void),
+            }
+        }
+        HostOp::MemberSize => {
+            let name = match args.first() {
+                Some(XDatum::String(s)) => s.clone(),
+                _ => return wire::encode_error("member_size: expected String name"),
+            };
+            use crate::player::cast_member::CastMemberType;
+            let size = reserve_player_ref(|player| {
+                let mref = player.movie.cast_manager.find_member_ref_by_name(&name)?;
+                let member = player.movie.cast_manager.find_member_by_ref(&mref)?;
+                let bref = match &member.member_type {
+                    CastMemberType::Bitmap(b) => b.image_ref,
+                    _ => return None,
+                };
+                let bitmap = player.bitmap_manager.get_bitmap(bref)?;
+                Some((bitmap.width as i32, bitmap.height as i32))
+            });
+            match size {
+                Some((w, h)) => {
+                    wire::encode_return(&XDatum::List(vec![XDatum::Int(w), XDatum::Int(h)]))
+                }
                 None => wire::encode_return(&XDatum::Void),
             }
         }
