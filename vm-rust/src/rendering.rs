@@ -3431,10 +3431,15 @@ thread_local! {
 /// True when the document/tab is hidden (backgrounded). Rendering to a hidden
 /// tab's GL context is wasted work and provokes context-loss; skip it.
 fn document_is_hidden() -> bool {
-    web_sys::window()
-        .and_then(|w| w.document())
-        .map(|d| d.hidden())
-        .unwrap_or(false)
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .map(|d| d.hidden())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    { false }
 }
 
 /// Skip the stage draw when the context is lost or the tab is hidden.

@@ -461,11 +461,10 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
     match op {
         HostOp::Log => {
             if let Some(XDatum::String(msg)) = args.first() {
-                // console::log_1, NOT log::debug! — the latter is invisible in the
-                // browser, so every plugin `host_env::log` call was silently
-                // dropped, making the SDK's "visible in the host's developer
-                // console" contract a lie.
+                #[cfg(target_arch = "wasm32")]
                 web_sys::console::log_1(&format!("[xtra] {}", msg).into());
+                #[cfg(not(target_arch = "wasm32"))]
+                log::info!("[xtra] {}", msg);
             }
             Vec::new() // void sentinel
         }
