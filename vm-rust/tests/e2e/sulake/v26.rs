@@ -13,7 +13,9 @@ browser_e2e_test!(test_habbo_v26_login, |player| async move {
     snapshots.max_diff_ratio = 0.075;
      
     shared::assert_entry(&mut player, cfg.suite(), TEST_NAME, &cfg.movie.path, false).await?;
-    shared::assert_login_success(&mut player, cfg.suite(), TEST_NAME).await?;
+
+    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).timeout(150.0).await?;
+    snapshots.verify("login_submitted", player.snapshot_stage())?;
 
     // Close club gift window if it appears
     if let Ok(_) = player.step_until(sprite().member("window_clubgift_drag").visible(1.0)).await {

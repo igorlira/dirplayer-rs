@@ -79,7 +79,11 @@ pub async fn assert_login(
 
     // Click login button
     player.click_sprite(sprite().member("login_b_login_ok")).await?;
-    assert_login_success(player, suite, test_name).await?;
+
+    // Show successful login on habbo clients with login
+    player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).timeout(150.0).await?;
+
+    snapshots.verify("login_submitted", player.snapshot_stage())?;
 
     Ok(())
 }
