@@ -51,7 +51,7 @@ pub async fn assert_login_success(
     let mut snapshots = SnapshotContext::new(suite, &test_name);
     snapshots.max_diff_ratio = 0.075;
 
-    player.step_until(sprite().member_prefix("nav_roomnfo_icon").visible(1.0)).timeout(150.0).await?;
+    player.step_until(sprite().member("Hotel Navigator_nav_roomnfo_icon").visible(1.0)).timeout(150.0).await?;
     snapshots.verify("login_submitted", player.snapshot_stage())?;
     Ok(())
 }
