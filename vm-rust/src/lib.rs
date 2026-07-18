@@ -318,14 +318,115 @@ pub fn movie_required_xtras() -> js_sys::Array {
                     }
                 }
             }
+            // The 3D Groove engine is provided by an external plugin, but Groove
+            // movies call its commands as bare globals (`InitGroove()`), never
+            // `new(xtra "Groove")` — so nothing triggers an on-demand load. When
+            // the movie carries any `.3GM` model (a `Groove3gm` cast member),
+            // surface a synthetic "Groove" dependency so the JS resolver loads
+            // the plugin from the registry before Lingo runs. (The name may also
+            // appear in XTRl above; the JS side de-dupes by normalized key.)
+            if movie_has_groove3gm(player) {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"filename".into(), &"Groove".into());
+                let _ = js_sys::Reflect::set(&obj, &"displayName".into(), &"Groove".into());
+                result.push(&obj);
+            }
         }
     }
     result
 }
 
+/// True if any cast member of the loaded movie is a `.3GM` Groove model.
+fn movie_has_groove3gm(player: &crate::player::DirPlayer) -> bool {
+    use crate::player::cast_member::CastMemberType;
+    player.movie.cast_manager.casts.iter().any(|cast| {
+        cast.members
+            .values()
+            .any(|m| matches!(m.member_type, CastMemberType::Groove3gm(_)))
+    })
+}
+
 #[wasm_bindgen]
 pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
     player_dispatch(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {
+        cast_lib,
+        cast_member,
+    }));
+}
+
+/// Dev UI sound preview: dump a sound member's decoded header fields plus the
+/// first 256 raw bytes (hex + ASCII) to the browser console. Lets a sound that
+/// "doesn't play" be identified by its real format magic (RIFF/WAV, FORM/AIFF,
+/// ID3 or 0xFF Ex = MP3, otherwise raw PCM) versus what the member metadata
+/// claims. Read-only, so it resolves the member synchronously.
+#[wasm_bindgen]
+pub fn player_print_member_sound_hex(cast_lib: i32, cast_member: i32) {
+    use crate::player::{cast_member::CastMemberType, reserve_player_ref};
+    reserve_player_ref(|player| {
+        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            web_sys::console::warn_1(
+                &format!("[sound-preview] member {}:{} not found", cast_lib, cast_member).into(),
+            );
+            return;
+        };
+        let CastMemberType::Sound(snd) = &member.member_type else {
+            web_sys::console::warn_1(
+                &format!(
+                    "[sound-preview] member {}:{} '{}' is not a sound member",
+                    cast_lib, cast_member, member.name
+                )
+                .into(),
+            );
+            return;
+        };
+        let data = snd.sound.data();
+        let info = &snd.info;
+        let codec = snd.sound.codec();
+        let big_endian = snd.sound.big_endian_data();
+        let magic = if data.len() >= 4 && &data[0..4] == b"RIFF" {
+            "RIFF/WAV"
+        } else if data.len() >= 4 && &data[0..4] == b"FORM" {
+            "AIFF (FORM)"
+        } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+            "MP3 (ID3 tag)"
+        } else if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
+            "MP3 frame (FF Ex)"
+        } else {
+            "raw / PCM?"
+        };
+        web_sys::console::log_1(
+            &format!(
+                "🎧 SOUND {}:{} '{}' — {} Hz, {} ch, {}-bit, samples={}, dur={}ms, loop={}, codec='{}', big_endian={} — data={} bytes — magic={}",
+                cast_lib, cast_member, member.name,
+                info.sample_rate, info.channels, info.sample_size, info.sample_count,
+                info.duration, info.loop_enabled, codec, big_endian,
+                data.len(), magic
+            )
+            .into(),
+        );
+        let n = data.len().min(256);
+        let mut hex = String::with_capacity(n * 3 + n / 16);
+        let mut ascii = String::with_capacity(n + n / 16);
+        for (i, &b) in data[..n].iter().enumerate() {
+            hex.push_str(&format!("{:02X} ", b));
+            ascii.push(if (0x20..0x7F).contains(&b) { b as char } else { '.' });
+            if (i + 1) % 16 == 0 {
+                hex.push('\n');
+                ascii.push('\n');
+            }
+        }
+        web_sys::console::log_1(&format!("🎧 first {} bytes (hex):\n{}", n, hex).into());
+        web_sys::console::log_1(&format!("🎧 first {} bytes (ascii):\n{}", n, ascii).into());
+    });
+}
+
+/// Dev UI sound preview: play a sound member on channel 1 via the real
+/// puppetSound path. Routed through the command queue so playback starts at a
+/// safe point; the triggering button click satisfies the audio-gesture gate.
+#[wasm_bindgen]
+pub fn player_play_member_sound(cast_lib: i32, cast_member: i32) {
+    player_dispatch(PlayerVMCommand::PlayMemberSound(CastMemberRef {
         cast_lib,
         cast_member,
     }));
@@ -472,38 +573,152 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
     });
 }
 
+/// Resolve a canvas-space mouse event to movie coordinates — EXCEPT during FPS
+/// mouse-look (pointer lock). While the movie wants pointer lock it drives the
+/// camera from `mouse_move_delta` and recenters `mouse_loc` every frame; the
+/// browser also freezes the cursor at the lock-engage point, so a click's absolute
+/// position is meaningless and would slam `mouse_loc` away from that center — a
+/// one-frame delta spike that jolts the camera on EVERY click (left or right).
+/// In that mode keep the existing delta-managed `mouse_loc` so the click only
+/// registers the button, not a phantom move.
+fn mouse_event_loc(x: f64, y: f64) -> (i32, i32) {
+    reserve_player_ref(|p| {
+        if p.wants_pointer_lock {
+            p.mouse_loc
+        } else {
+            // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
+            // matching where sprites live in Lingo-facing state. No-op when scale=1.
+            let (mx, my) = crate::player::stage::canvas_to_movie_coords(p, x, y);
+            (mx.to_i32().unwrap(), my.to_i32().unwrap())
+        }
+    })
+}
+
 #[wasm_bindgen]
 pub fn mouse_down(x: f64, y: f64) {
-    // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
-    // matching where sprites live in Lingo-facing state. No-op when scale=1.
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.mouse_down = true;
     });
     player_dispatch(PlayerVMCommand::MouseDown((ix, iy)));
+    forward_mouse_to_nested(0, ix, iy);
 }
 
 #[wasm_bindgen]
 pub fn mouse_up(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.mouse_down = false;
     });
     player_dispatch(PlayerVMCommand::MouseUp((ix, iy)));
+    forward_mouse_to_nested(1, ix, iy);
+}
+
+/// Forward a mouse event to a nested `#movie` sub-player when the cursor is over
+/// its sprite: find the on-stage #movie sprite whose rect contains `(ix,iy)`, map
+/// the point into the sub-player's stage rect, set the sub's `mouse_loc`, and
+/// dispatch the event to the sub's own command queue so its behaviours
+/// (`checkMouse` / `on mouseDown`) respond. `kind`: 0=down, 1=up, 2=move.
+fn forward_mouse_to_nested(kind: u8, ix: i32, iy: i32) {
+    use crate::player::{
+        nested_player_id, reserve_player_mut, reserve_player_ref, ACTIVE_PLAYER_ID, NESTED_PLAYERS,
+    };
+    let target = reserve_player_ref(|host| {
+        for channel in &host.movie.score.channels {
+            let Some(member_ref) = channel.sprite.member.as_ref() else {
+                continue;
+            };
+            let Some(id) = nested_player_id(member_ref) else {
+                continue;
+            };
+            if !channel.sprite.visible {
+                continue;
+            }
+            let rect = crate::player::score::get_concrete_sprite_rect(host, &channel.sprite);
+            if ix >= rect.left && ix < rect.right && iy >= rect.top && iy < rect.bottom {
+                let sub_rect = unsafe {
+                    NESTED_PLAYERS
+                        .get(id - 1)
+                        .and_then(|o| o.as_ref())
+                        .map(|s| s.movie.rect.clone())
+                };
+                if let Some(sr) = sub_rect {
+                    let sw = rect.width().max(1);
+                    let sh = rect.height().max(1);
+                    // The sub renders 0-origin (the composite uses ortho at the
+                    // sub's WIDTH/HEIGHT, ignoring movie.rect's left/top — g349's
+                    // rect origin is (20,20) but its sprites live at 0..600). Map
+                    // the click to that same 0-origin space; adding sr.left/top
+                    // shifted every click ~20px and made small buttons (Restart /
+                    // Quit) miss.
+                    let sx = (ix - rect.left) * sr.width() / sw;
+                    let sy = (iy - rect.top) * sr.height() / sh;
+                    return Some((id, sx, sy));
+                }
+            }
+        }
+        None
+    });
+    let Some((id, sx, sy)) = target else {
+        return;
+    };
+    // Update the sub-player's mouse STATE synchronously (so polling handlers like
+    // the DGS `checkMouse` see `the mouseLoc`/`the mouseDown` immediately) AND
+    // dispatch the event into the sub's own command queue so its sprite
+    // behaviours fire — the Restart button is `on mouseDown me` and Quit is
+    // `on mouseUp me`, which only run on an actual event, not state polling.
+    // player_dispatch routes to the ACTIVE player's queue while ACTIVE_PLAYER_ID
+    // = id; the sub's command loop resolves instance ids against the sub's own
+    // allocator (de-globalization is in place, so the earlier cross-boundary
+    // concern no longer applies).
+    let prev = unsafe { ACTIVE_PLAYER_ID };
+    unsafe {
+        ACTIVE_PLAYER_ID = id;
+    }
+    reserve_player_mut(|sub| {
+        sub.mouse_loc = (sx, sy);
+        match kind {
+            0 => sub.movie.mouse_down = true,
+            1 => sub.movie.mouse_down = false,
+            _ => {}
+        }
+    });
+    match kind {
+        0 => player_dispatch(PlayerVMCommand::MouseDown((sx, sy))),
+        1 => player_dispatch(PlayerVMCommand::MouseUp((sx, sy))),
+        // MouseMove drives the sub's rollover events (mouseEnter / mouseWithin /
+        // mouseLeave) — dispatched in the MouseMove command handler by hover
+        // hit-testing. Without this the sub never fires mouseWithin, so
+        // hold-to-scroll behaviours ("scrolldisplay arrow bhv") highlight but
+        // never scroll.
+        2 => player_dispatch(PlayerVMCommand::MouseMove((sx, sy))),
+        _ => {}
+    }
+    unsafe {
+        ACTIVE_PLAYER_ID = prev;
+    }
 }
 
 #[wasm_bindgen]
 pub fn mouse_move(x: f64, y: f64) {
+    // During FPS mouse-look the camera is driven by `mouse_move_delta` and the movie
+    // recenters `mouse_loc` each frame. An absolute move here — e.g. right after
+    // pointer lock exits on Esc, before the movie disables mouse-look, when the cursor
+    // reappears far from center — would inject a large one-frame delta and snap the
+    // view ("camera tilts up on focus loss"). Ignore absolute moves while mouse-look
+    // is active; the delta path owns the camera.
+    if reserve_player_ref(|p| p.wants_pointer_lock) {
+        return;
+    }
     let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
     let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
     });
     player_dispatch(PlayerVMCommand::MouseMove((ix, iy)));
+    forward_mouse_to_nested(2, ix, iy);
 }
 
 /// Right-mouse-button down. Tracked via a separate flag because Director
@@ -511,8 +726,7 @@ pub fn mouse_move(x: f64, y: f64) {
 /// is updated alongside so `the mouseLoc` reflects the click point.
 #[wasm_bindgen]
 pub fn right_mouse_down(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.right_mouse_down = true;
@@ -522,8 +736,7 @@ pub fn right_mouse_down(x: f64, y: f64) {
 
 #[wasm_bindgen]
 pub fn right_mouse_up(x: f64, y: f64) {
-    let (mx, my) = reserve_player_ref(|p| crate::player::stage::canvas_to_movie_coords(p, x, y));
-    let (ix, iy) = (mx.to_i32().unwrap(), my.to_i32().unwrap());
+    let (ix, iy) = mouse_event_loc(x, y);
     reserve_player_mut(|player| {
         player.mouse_loc = (ix, iy);
         player.movie.right_mouse_down = false;
@@ -537,12 +750,16 @@ pub fn wants_pointer_lock() -> bool {
     reserve_player_ref(|player| player.wants_pointer_lock)
 }
 
-/// Mouse move with delta values (for pointer lock mode)
-/// The delta is added to the current mouse_loc (which the game resets to center each frame)
+/// Mouse move with delta values (for pointer lock mode).
+/// The delta is added to the current mouse_loc (which the game resets to center each
+/// frame), so `the mouseH` tracks pointer-lock movementX. X must be ADDED, not
+/// subtracted: `the mouseH` increases to the right (screen coords), so moving the
+/// mouse right (movementX > 0) must increase mouseH → the movie yaws right. The
+/// previous `-= dx` inverted horizontal look (move left → turn right).
 #[wasm_bindgen]
 pub fn mouse_move_delta(dx: f64, dy: f64) {
     reserve_player_mut(|player| {
-        player.mouse_loc.0 -= dx.to_i32().unwrap();
+        player.mouse_loc.0 += dx.to_i32().unwrap();
         player.mouse_loc.1 += dy.to_i32().unwrap();
     });
     let (x, y) = reserve_player_ref(|player| player.mouse_loc);
@@ -556,6 +773,7 @@ pub fn key_down(key: String, code: u16) {
     reserve_player_mut(|player| {
         player.keyboard_manager.key_down(key.clone(), code);
     });
+    forward_key_to_nested(true, &key, code);
     player_dispatch(PlayerVMCommand::KeyDown(key, code));
 }
 
@@ -566,7 +784,48 @@ pub fn key_up(key: String, code: u16) {
     reserve_player_mut(|player| {
         player.keyboard_manager.key_up(&key, code);
     });
+    forward_key_to_nested(false, &key, code);
     player_dispatch(PlayerVMCommand::KeyUp(key, code));
+}
+
+/// Mirror the keyboard state into every on-stage nested `#movie` sub-player so
+/// its polling `keyPressed(code)` (e.g. g349's arrow-key list scrolling) sees
+/// the same keys as the host. State-only, like `forward_mouse_to_nested` — no
+/// event dispatch across the player boundary (that resolves instance ids against
+/// the wrong allocator). Keyboard has no cursor position, so it goes to all
+/// visible nested sub-players (typically one active game).
+fn forward_key_to_nested(is_down: bool, key: &str, code: u16) {
+    use crate::player::{nested_player_id, reserve_player_mut, reserve_player_ref, ACTIVE_PLAYER_ID};
+    let ids = reserve_player_ref(|host| {
+        let mut ids: Vec<usize> = Vec::new();
+        for channel in &host.movie.score.channels {
+            if !channel.sprite.visible {
+                continue;
+            }
+            if let Some(id) = channel.sprite.member.as_ref().and_then(nested_player_id) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    });
+    for id in ids {
+        let prev = unsafe { ACTIVE_PLAYER_ID };
+        unsafe {
+            ACTIVE_PLAYER_ID = id;
+        }
+        reserve_player_mut(|sub| {
+            if is_down {
+                sub.keyboard_manager.key_down(key.to_string(), code);
+            } else {
+                sub.keyboard_manager.key_up(key, code);
+            }
+        });
+        unsafe {
+            ACTIVE_PLAYER_ID = prev;
+        }
+    }
 }
 
 // Picking mode commands bypass the command queue for synchronous access.
@@ -992,8 +1251,8 @@ pub fn trigger_alert_hook() {
 
 #[wasm_bindgen]
 pub fn subscribe_to_channel_names() {
-    spawn_local(async {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
 
         player.is_subscribed_to_channel_names = true;
         for channel in &player.movie.score.channels {
@@ -1004,8 +1263,8 @@ pub fn subscribe_to_channel_names() {
 
 #[wasm_bindgen]
 pub fn unsubscribe_from_channel_names() {
-    spawn_local(async {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
 
         player.is_subscribed_to_channel_names = false;
     });
@@ -1015,7 +1274,7 @@ pub fn unsubscribe_from_channel_names() {
 pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
     // Directly fulfill the task without going through the command queue to avoid deadlock
     // This is safe because we only access the shared state which is behind a mutex
-    async_std::task::spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         let shared_state_arc =
             reserve_player_ref(|player| std::sync::Arc::clone(&player.net_manager.shared_state));
         let result = Ok(data);
@@ -1026,7 +1285,7 @@ pub fn provide_net_task_data(task_id: u32, data: Vec<u8>) {
 
 #[wasm_bindgen]
 pub fn provide_net_task_error(task_id: u32) {
-    async_std::task::spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         let shared_state_arc =
             reserve_player_ref(|player| std::sync::Arc::clone(&player.net_manager.shared_state));
         let result: player::net_task::NetResult = Err(4);
@@ -1066,8 +1325,56 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
     bitmap.use_alpha = true;
 
     unsafe {
+        // Nested `#movie` sub-player Flash: a synthetic key encodes
+        // (player_id, local_channel). Route the captured frame into THAT sub's
+        // flash_frame_buffers so its own draw_frame composites it into the sub
+        // stage — not the host's buffers.
+        if let Some((pid, ch)) = crate::player::decode_nested_flash_key(sprite_num) {
+            if let Some(sub) = crate::player::NESTED_PLAYERS
+                .get_mut(pid.wrapping_sub(1))
+                .and_then(|o| o.as_mut())
+            {
+                if let Some(&existing_ref) = sub.flash_frame_buffers.get(&ch) {
+                    sub.bitmap_manager.replace_bitmap(existing_ref, bitmap);
+                } else {
+                    let bitmap_ref = sub.bitmap_manager.add_bitmap(bitmap);
+                    sub.flash_frame_buffers.insert(ch, bitmap_ref);
+                }
+            }
+            return;
+        }
+
         if let Some(player) = PLAYER_OPT.as_mut() {
             let key = sprite_num as i16;
+
+            // Off-screen Flash-as-3D-texture (synthetic negative sprite number):
+            // route the captured frame into the named W3D texture rather than the
+            // on-stage frame buffer. The incremental texture upload skips re-upload
+            // when the byte length is unchanged, so re-pushing a static SWF frame
+            // every RAF is cheap. See player.flash_texture_targets.
+            if let Some((member_ref, tex_name)) = player.flash_texture_targets.get(&key).cloned() {
+                let mut tex_data = Vec::with_capacity(8 + rgba_data.len());
+                tex_data.extend_from_slice(&width.to_le_bytes());
+                tex_data.extend_from_slice(&height.to_le_bytes());
+                tex_data.extend_from_slice(rgba_data);
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        if let Some(scene) = w3d.scene_mut() {
+                            // Only bump the content version when the pixels actually
+                            // change size (cheap static-SWF guard mirroring the
+                            // renderer's length-based incremental check).
+                            let changed = scene.texture_images.get(&tex_name)
+                                .map_or(true, |old| old.len() != tex_data.len());
+                            scene.texture_images.insert(tex_name.clone(), tex_data);
+                            if changed {
+                                scene.texture_content_version += 1;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
             if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
                 // Replace existing bitmap to reuse the BitmapRef.
                 player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
@@ -1229,6 +1536,55 @@ pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler
     })
 }
 
+/// Flash `LocalConnection.send(connName, method, …args)` forwarded from the
+/// Ruffle fork's AVM1 hook. Routes to the Lingo handler a Director-created
+/// LocalConnection registered via `setCallback` (connName → lc_path →
+/// (handler, target)), dispatched to the exact target instance so `me` is
+/// correct. Returns false for a connection dirplayer doesn't own — the caller
+/// (fork) has already run Ruffle's normal routing, so a real SWF↔SWF
+/// LocalConnection is unaffected. Neopets DGS uses this for the encrypted-score
+/// / protocol channel (`send("gObjLC", "createESCORE", score)`).
+#[wasm_bindgen]
+pub fn local_connection_send(
+    connection_name: String,
+    method_name: String,
+    args_json: String,
+) -> bool {
+    use director::lingo::datum::Datum;
+
+    let params = player::reserve_player_ref(|player| {
+        let lc_path = player.flash_lc_connections.get(&connection_name)?.clone();
+        let cb = player.flash_lc_callbacks.get(&(lc_path, method_name.clone()))?;
+        Some(cb.clone())
+    });
+    let (handler, target) = match params {
+        Some(p) => p,
+        None => return false, // not dirplayer-owned — Ruffle handled it normally
+    };
+
+    let args_js_value = match js_sys::JSON::parse(&args_json) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut arg_refs = Vec::new();
+    // Director LocalConnection callback shape: `on <handler> me, aInfo, aMessage`.
+    // aInfo is a status/info arg Director supplies; pass VOID.
+    arg_refs.push(player::player_alloc_datum(Datum::Void));
+    if js_sys::Array::is_array(&args_js_value) {
+        let array = js_sys::Array::from(&args_js_value);
+        for i in 0..array.length() {
+            let item = array.get(i);
+            arg_refs.push(js_value_to_datum_ref(&item));
+        }
+    }
+
+    player_dispatch_with_result(PlayerVMCommand::TriggerLocalConnectionCallback {
+        target,
+        handler_name: handler,
+        args: arg_refs,
+    })
+}
+
 /// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
 ///
 /// Called from the JS Flash bridge whenever a SWF tries to navigate to a
@@ -1290,6 +1646,42 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
     true
 }
 
+/// Execute a `getURL("lingo: …")` navigation body from a Flash SWF as a
+/// Lingo command, matching Director's Flash Asset Xtra convention.
+///
+/// Director's Flash sprite interprets a `getURL` whose URL begins with the
+/// `lingo:` scheme by evaluating the remainder as a Lingo command in the
+/// movie's global handler context — exactly like `do "…"`. Pengapop's
+/// titleScreen SWF uses this for every button: the Play button navigates to
+/// `lingo:startGameTimed`, the hover/click sounds to
+/// `lingo:bdPlaySound(#generalSound,"tink")`, etc.
+///
+/// The body is everything after the `lingo:` scheme; we run it through the
+/// same `eval_lingo_command` path the debugger console and `do` use, so it
+/// supports bare handler calls (`startGameTimed`) and calls with args
+/// (`bdPlaySound(#generalSound,"tink")`). Returns true so the JS caller can
+/// swallow the navigation (nothing should actually open a URL).
+#[wasm_bindgen]
+pub fn dispatch_flash_lingo(body: String) -> bool {
+    let trimmed = body.trim().to_string();
+    if trimmed.is_empty() {
+        warn!("[dispatch_flash_lingo] empty lingo body");
+        return false;
+    }
+    // Run asynchronously (like eval_command): the caller is inside a
+    // synchronous Flash mouse-event forward, so we must let the current
+    // command unwind before reserving the player to run the handler.
+    crate::player::spawn_player_local(async move {
+        let result = eval_lingo_command(trimmed).await;
+        if let Err(err) = result {
+            reserve_player_ref(|player| {
+                JsApi::dispatch_script_error(player, &err);
+            });
+        }
+    });
+    true
+}
+
 #[wasm_bindgen]
 pub fn set_lingo_script_property(cast_lib: i32, cast_member: i32, prop_name: String, value: JsValue) -> bool {
     use director::lingo::datum::Datum;
@@ -1328,7 +1720,7 @@ fn player_dispatch_with_result(command: PlayerVMCommand) -> bool {
 
 #[wasm_bindgen]
 pub fn eval_command(command: String) {
-    spawn_local(async move {
+    crate::player::spawn_player_local(async move {
         JsApi::dispatch_debug_message(&command);
         let result = eval_lingo_command(command).await;
         if let Err(err) = result {
@@ -1530,12 +1922,17 @@ fn build_zip_with_glb(
         files.push((format!("{}.{}", tex_name, ext), image_data));
     }
 
+    build_zip_files(&files)
+}
+
+/// Build a minimal uncompressed (stored) ZIP from a list of (name, bytes).
+fn build_zip_files(files: &[(String, &[u8])]) -> Vec<u8> {
     let mut zip = Vec::new();
     let mut central_dir = Vec::new();
     let mut offsets: Vec<u32> = Vec::new();
 
     // Write local file headers + data
-    for (name, data) in &files {
+    for (name, data) in files {
         offsets.push(zip.len() as u32);
         let name_bytes = name.as_bytes();
         let crc = crc32(data);

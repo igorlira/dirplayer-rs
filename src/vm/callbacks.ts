@@ -8,7 +8,7 @@ import {
   setXtraRegistry,
   getXtraRegistry,
 } from "dirplayer-js-api";
-import { createFlashInstance, destroyFlashInstance, initFlashBridge } from "../services/flashPlayerManager";
+import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers } from 'vm-rust'
@@ -181,15 +181,18 @@ export function initVmCallbacks() {
     onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => {
       store.dispatch(channelDisplayNameChanged({ channelNumber, displayName }));
     },
-    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean) => {
+    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => {
       // Copy immediately - swfData is a view into WASM memory that may be invalidated
       const swfDataCopy = new Uint8Array(swfData);
-      console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart})`);
-      createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart)
+      console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
+      createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
         .catch(e => console.error('Failed to create Flash instance:', e));
     },
     onFlashMemberUnloaded: (spriteNum: number) => {
       destroyFlashInstance(spriteNum);
+    },
+    onFlashResetAll: () => {
+      destroyAllFlashInstances();
     },
     onStageSizeChanged: (width: number, height: number, center: boolean) => {
       const inner = document.getElementById('stage_canvas_container');

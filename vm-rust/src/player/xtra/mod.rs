@@ -5,5 +5,6 @@ pub mod fileio;
 pub mod manager;
 pub mod multiuser;
 pub mod openurl;
+pub mod scene3d;
 pub mod sysmenu;
 pub mod xmlparser;

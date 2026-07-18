@@ -56,15 +56,20 @@ pub fn build_bone_matrices(
     motion: Option<&W3dMotion>,
     time: f32,
 ) -> Vec<[f32; 16]> {
-    build_bone_matrices_ex(skeleton, motion, time, false)
+    build_bone_matrices_ex(skeleton, motion, time, false, None)
 }
 
-/// Build bone matrices with optional root lock.
+/// Build bone matrices with optional root lock and per-bone manual overrides.
+/// `overrides` maps a 0-based bone index to a LOCAL transform set via
+/// `bonesPlayer.bone[i].transform` — it replaces the motion/rest local for that
+/// bone (its rotation/scale is used and its translation is resolved to the rest
+/// length, so a script that sets only a rotation keeps the bone's length).
 pub fn build_bone_matrices_ex(
     skeleton: &W3dSkeleton,
     motion: Option<&W3dMotion>,
     time: f32,
     root_lock: bool,
+    overrides: Option<&std::collections::HashMap<usize, [f32; 16]>>,
 ) -> Vec<[f32; 16]> {
     let count = skeleton.bones.len();
     let mut local_matrices = Vec::with_capacity(count);
@@ -75,6 +80,24 @@ pub fn build_bone_matrices_ex(
 
     // Build local matrices from motion tracks or rest pose
     for (bone_idx, bone) in skeleton.bones.iter().enumerate() {
+        // Manual per-bone override (bonesPlayer.bone[i].transform = t) takes
+        // precedence over the motion. Use its rotation/scale but resolve the
+        // translation (zero for a preRotate-only script) to the rest length so
+        // the body keeps its shape while the override rotation drives it.
+        if let Some(ov) = overrides.and_then(|o| o.get(&bone_idx)) {
+            let (px, py, pz) = if root_lock && bone.parent_index < 0 {
+                (0.0, 0.0, 0.0)
+            } else {
+                resolve_local_translation(skeleton, bone_idx, ov[12], ov[13], ov[14])
+            };
+            let mut local = *ov;
+            local[12] = px;
+            local[13] = py;
+            local[14] = pz;
+            local_matrices.push(local);
+            has_motion_track[bone_idx] = true;
+            continue;
+        }
         if let Some(mot) = motion {
             if let Some(track) = mot.find_track_by_bone(&bone.name) {
                 let kf = track.evaluate(time);

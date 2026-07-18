@@ -250,8 +250,9 @@ extern "C" {
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object);
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
     pub fn onExternalEvent(event: &str);
-    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool);
+    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32);
     pub fn onFlashMemberUnloaded(sprite_num: i32);
+    pub fn onFlashResetAll();
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
@@ -285,13 +286,28 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {
         onClearTimeouts();
     }
-    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool) {
-        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start);
+    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32) {
+        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame);
     }
     pub fn dispatch_flash_member_unloaded(sprite_num: i32) {
         onFlashMemberUnloaded(sprite_num);
     }
+    /// Tear down every live Flash/Ruffle instance. Called on movie reset so
+    /// a previous movie's Ruffle players (their per-frame capture RAF loops
+    /// and still-playing SWF audio) don't leak across a movie switch — the
+    /// per-sprite unload path only fires for sprites the new frame changed.
+    pub fn dispatch_flash_reset_all() {
+        onFlashResetAll();
+    }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
+        // Only the host player (id 0) owns the frontend stage. A nested `#movie`
+        // sub-player renders headless into a bitmap; if it sets `the stage.rect`
+        // / `drawRect` / `centerStage` it must NOT resize the real frontend stage
+        // (that caused the host stage to snap to the sub's dimensions → "zoomed"
+        // flicker, since the sub re-set its rect during play).
+        if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+            return;
+        }
         onStageSizeChanged(width, height, center);
     }
     pub fn dispatch_movie_loaded(dir_file: &DirectorFile) {
@@ -315,6 +331,22 @@ impl JsApi {
     /// Collects all chunk IDs that are transitive descendants of `root_id` in the KeyTable,
     /// plus root_id itself. This walks the parent→children relationship recursively:
     /// KeyTable entries map section_id (child) → cast_id (parent).
+    /// Movie-wide structural chunks that belong to the movie, not to any cast.
+    ///
+    /// In a RIFX file the movie-root owner id (1024) is *also* the first
+    /// internal cast's id, and these chunks are owned by 1024. Walking a
+    /// cast's KeyTable descendants from `cast.id` therefore sweeps them up,
+    /// which made `get_movie_top_level_chunks` exclude the entire movie (it
+    /// left only the ownerless ILS/KEY* — SpongeBob "JellyFishin'"). Treating
+    /// these fourccs as never-cast-content keeps them in the movie view and
+    /// out of the cast views.
+    fn is_movie_level_fourcc(fourcc: u32) -> bool {
+        matches!(
+            fourcc_to_string(fourcc).trim(),
+            "DRCF" | "VWCF" | "MCsL" | "Sord" | "VWFI" | "VWLB" | "VWSC" | "FXmp" | "XTRl" | "ccl"
+        )
+    }
+
     fn collect_cast_descendants(
         root_id: u32,
         children_map: &HashMap<u32, Vec<u32>>,
@@ -411,6 +443,17 @@ impl JsApi {
             cast_chunk_ids.insert(*section_id);
         }
 
+        // Drop movie-level structural chunks that got swept in via the
+        // owner-id-1024 collision (see is_movie_level_fourcc) so they don't
+        // show up under this cast.
+        cast_chunk_ids.retain(|id| {
+            chunk_container
+                .chunk_info
+                .get(id)
+                .map(|ci| !Self::is_movie_level_fourcc(ci.fourcc))
+                .unwrap_or(true)
+        });
+
         // Emit all chunks that belong to this cast
         for chunk_id in &cast_chunk_ids {
             let chunk_info = match chunk_container.chunk_info.get(chunk_id) {
@@ -481,6 +524,18 @@ impl JsApi {
                 cast_section_ids.insert(*section_id);
             }
         }
+
+        // Don't exclude movie-level structural chunks (config, score, cast
+        // list, etc.). They're owned by the movie-root id 1024 which collides
+        // with the first cast's id, so the descendant walk above wrongly
+        // captured them — leaving the movie view with only ILS/KEY*.
+        cast_section_ids.retain(|id| {
+            chunk_container
+                .chunk_info
+                .get(id)
+                .map(|ci| !Self::is_movie_level_fourcc(ci.fourcc))
+                .unwrap_or(true)
+        });
 
         // Build owner_map from KeyTable
         let owner_map: HashMap<u32, u32> = key_table
@@ -874,16 +929,16 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_name_changed(cast_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
             onCastLibNameChanged(cast_number, &cast.name);
         });
     }
 
     pub fn dispatch_cast_list_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let names = player
                 .movie
                 .cast_manager
@@ -902,8 +957,8 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -921,8 +976,8 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let subscribed_members = &player.subscribed_member_refs;
             if !subscribed_members.contains(&member_ref) {
                 return;
@@ -947,8 +1002,8 @@ impl JsApi {
     }
 
     pub fn on_cast_member_name_changed(slot_number: u32) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
                 for channel in player.movie.score.channels.iter() {
@@ -971,8 +1026,8 @@ impl JsApi {
     }
 
     pub fn dispatch_score_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             onScoreChanged(snapshot.to_js_object());
@@ -995,8 +1050,8 @@ impl JsApi {
         });
 
         if selected_channel == Some(channel) {
-            async_std::task::spawn_local(async move {
-                let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            crate::player::spawn_player_local(async move {
+                let player = unsafe { crate::player::player_ref() };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 onChannelChanged(channel, snapshot.to_js_object());
             });
@@ -1127,6 +1182,16 @@ impl JsApi {
                 member_map.str_set("paletteRef", &bitmap.palette_ref.to_js_value());
                 member_map.str_set("regX", &JsValue::from(bitmap_data.reg_point.0));
                 member_map.str_set("regY", &JsValue::from(bitmap_data.reg_point.1));
+            }
+            CastMemberType::Sound(sound_member) => {
+                member_map.str_set("sampleRate", &JsValue::from(sound_member.info.sample_rate));
+                member_map.str_set("channels", &JsValue::from(sound_member.info.channels));
+                member_map.str_set("bitsPerSample", &JsValue::from(sound_member.info.sample_size));
+                member_map.str_set("sampleCount", &JsValue::from(sound_member.info.sample_count));
+                member_map.str_set("duration", &JsValue::from(sound_member.info.duration));
+                member_map.str_set("loop", &JsValue::from_bool(sound_member.info.loop_enabled));
+                member_map.str_set("codec", &safe_js_string(&sound_member.sound.codec()));
+                member_map.str_set("dataSize", &JsValue::from(sound_member.sound.data().len() as u32));
             }
             CastMemberType::FilmLoop(film_loop_data) => {
                 member_map.str_set("width", &JsValue::from(film_loop_data.info.width));
@@ -1405,8 +1470,8 @@ impl JsApi {
     }
 
     pub fn dispatch_channel_name_changed(channel: i16) {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
                 let display_name =
@@ -1849,8 +1914,8 @@ impl JsApi {
     }
 
     pub fn dispatch_breakpoint_list_changed() {
-        async_std::task::spawn_local(async move {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        crate::player::spawn_player_local(async move {
+            let player = unsafe { crate::player::player_ref() };
             let breakpoints = player
                 .breakpoint_manager
                 .breakpoints
@@ -1888,8 +1953,9 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
-    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool) {}
+    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32) {}
     pub fn dispatch_flash_member_unloaded(_: i32) {}
+    pub fn dispatch_flash_reset_all() {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}

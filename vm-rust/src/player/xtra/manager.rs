@@ -64,6 +64,13 @@ pub fn try_call_xtra_static_handler(
     if CurlXtra::has_static_handler(name) {
         return Some(CurlXtra::call_static_handler(name, args));
     }
+    // External plugins own bare global handlers too — e.g. the Groove plugin's
+    // `InitGroove()`/`MoveObject()`, which games call as bare globals (never
+    // `new(xtra "Groove")`). This is the sole path that serves Groove now that
+    // the built-in engine is gone.
+    if let Some(result) = external::try_any_static_handler(name, args) {
+        return Some(result);
+    }
     None
 }
 

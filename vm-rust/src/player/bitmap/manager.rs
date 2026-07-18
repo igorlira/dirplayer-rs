@@ -28,6 +28,18 @@ impl BitmapManager {
         }
     }
 
+    /// Drop every stored bitmap when switching movies. Cast-member-owned
+    /// (anchored) bitmaps are never removed by the ephemeral refcount path, so
+    /// without this they orphan here forever: loading a new movie replaces the
+    /// cast list but leaks the previous movie's bitmaps (Infestation's ~363
+    /// bitmaps, ~10 MB+ decoded, on every load — memory that never comes back).
+    /// `ref_counter` is NOT reset so freshly-issued refs can't collide with any
+    /// `Datum::BitmapRef` that a persisted global still holds.
+    pub fn clear_movie_bitmaps(&mut self) {
+        self.bitmaps.clear();
+        self.ephemeral_refs.clear();
+    }
+
     /// Register an anchored bitmap (owned by a cast member or other long-lived
     /// holder). Will not be auto-freed when DatumRefs drop.
     pub fn add_bitmap(&mut self, bitmap: Bitmap) -> BitmapRef {

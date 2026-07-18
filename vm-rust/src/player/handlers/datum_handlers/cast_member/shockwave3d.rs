@@ -16,6 +16,15 @@ use crate::{
 
 const W3D_HANDLER_LOG: bool = false;
 
+/// Director's W3D motion collection has an implicit default motion at index 1,
+/// so authored motions start at index 2. dirplayer's scene.motions holds only
+/// authored motions, so the accessors below synthesise this default at index 1
+/// to keep `member.motion[i]` / `.count` aligned with Director (mirrors the way
+/// the camera accessor inserts DefaultView as camera[1]). Without it,
+/// e.g. Rasterwerks' `m.motion[3].name` returned the wrong (3rd authored) motion
+/// and every actor cloned a non-skeletal motion → T-pose.
+const DEFAULT_MOTION_NAME: &str = "Default Motion";
+
 fn log(msg: &str) {
     if W3D_HANDLER_LOG {
         debug!("[W3D-HANDLER] {}", msg);
@@ -114,10 +123,13 @@ impl Shockwave3dMemberHandlers {
 
     fn native_text_supersample(smoothness: u32) -> i32 {
         // The native-font path traces the rasterised glyph at this resolution, so
-        // the extruded silhouette is only as smooth as the supersample. Bias it
-        // higher (Director smoothness 0..10 → 3..6) so text like Pacman's score
-        // popups (smoothness 5 → 5) reads far less stair-stepped.
-        (3 + (smoothness as i32 / 2)).clamp(3, 6)
+        // the extruded silhouette (and especially the per-edge tunnel side walls)
+        // is only as smooth as the supersample: too low and curved glyphs get a
+        // coarse contour whose few large side quads don't cover the wall smoothly,
+        // reading as stair-steps / gaps next to the front face. The mesh is rebuilt
+        // only on change (not per frame), so a high supersample is affordable.
+        // Director smoothness 0..10 → 6..10.
+        (6 + (smoothness as i32 / 2)).clamp(6, 10)
     }
 
     fn render_native_text_bitmap(
@@ -225,14 +237,57 @@ impl Shockwave3dMemberHandlers {
         source: &crate::player::cast_member::Text3dSource,
         state: &crate::player::cast_member::Text3dState,
     ) -> Option<crate::director::chunks::w3d::types::ClodDecodedMesh> {
-        let (bw, bh, rgba) = Self::render_native_text_bitmap(source, state.smoothness)?;
-        // Marching-squares extrusion: smooth (sub-pixel) silhouette vs the
-        // per-pixel voxel mesh, matching Director's vector-outline edges.
-        Some(crate::director::chunks::w3d::primitives::extrude_alpha_mask_smooth(
-            bw, bh, &rgba,
-            source.width as f32, source.height as f32,
-            state.tunnel_depth,
-        ))
+        use crate::director::chunks::w3d::text3d;
+
+        // displayFace bitmask: bit0=#front, bit1=#tunnel, bit2=#back; -1 = all.
+        let df = state.display_face;
+        let params = text3d::ExtrudeParams {
+            depth: state.tunnel_depth.max(1.0),
+            bevel_type: state.bevel_type,
+            bevel_depth: state.bevel_depth.max(0.0),
+            smoothness: state.smoothness,
+            front: df == -1 || (df & 1) != 0,
+            tunnel: df == -1 || (df & 2) != 0,
+            back: df == -1 || (df & 4) != 0,
+        };
+
+        // Render at a high supersample for a smooth re-vectorised outline (the
+        // marching-squares trace is only as smooth as the rasterised source).
+        let (bw, bh, rgba) = Self::render_native_text_bitmap(source, state.smoothness.max(8))?;
+        // No-PFR (system/native font) path: there are no embedded glyph outlines,
+        // so re-vectorise the rasterised text into clean contours, then run the
+        // SAME contour pipeline as the PFR path (caps-with-holes + tunnel + bevel).
+        // This replaces the old drop-shadow alpha mesh, so system-font 3D text
+        // extrudes properly (frog01 title). px→model maps like the alpha-mask path
+        // (Y flipped to Y-up).
+        let ww = (source.width.max(1)) as f32;
+        let wh = (source.height.max(1)) as f32;
+        let pw = ww / bw.max(1) as f32;
+        let ph = wh / bh.max(1) as f32;
+        // Simplify tolerance ≈ 1 model unit (supersample = bw/ww pixels per model unit).
+        // supersample px per model unit; blur ~⅓ of that smooths the AA iso-edge.
+        let ss = (bw as f32 / ww).max(1.0);
+        let blur_radius = (ss / 3.0).round().max(1.0) as usize;
+        let eps_px = ss * 0.3;
+        let contours_px = text3d::vectorize_alpha(bw, bh, &rgba, 128, eps_px, 2, blur_radius);
+        let contours: Vec<Vec<[f32; 2]>> = contours_px
+            .iter()
+            .map(|c| c.iter().map(|p| [p[0] * pw, wh - p[1] * ph]).collect())
+            .collect();
+        if contours.is_empty() {
+            return None;
+        }
+        // Raster-vectorised fallback uses the same extrude params built above.
+        let (positions, normals, faces) = text3d::extrude_glyph(&contours, &params);
+        if positions.is_empty() {
+            return None;
+        }
+        let mut mesh = crate::director::chunks::w3d::types::ClodDecodedMesh::default();
+        mesh.name = "Text".to_string();
+        mesh.positions = positions;
+        mesh.normals = normals;
+        mesh.faces = faces;
+        Some(mesh)
     }
 
     /// Re-extrude an extrude3d resource (keyed by `resname`) into `member`'s
@@ -324,30 +379,14 @@ impl Shockwave3dMemberHandlers {
         runtime_state: &mut crate::player::cast_member::Shockwave3dRuntimeState,
         display_face: i32,
     ) {
-        let front = display_face == -1 || (display_face & 1) != 0;
-        let tunnel = display_face == -1 || (display_face & 2) != 0;
-        let back = display_face == -1 || (display_face & 4) != 0;
-
-        let mode = if !front && !back && !tunnel {
-            Some(0u8)
-        } else if tunnel || (front && back) {
-            // Tunnel faces need culling disabled to read as extruded text.
-            Some(3u8)
-        } else if back && !front {
-            Some(2u8)
-        } else {
-            Some(1u8)
-        };
-
-        match mode {
-            Some(1) => {
-                runtime_state.node_visibility.remove("Text");
-            }
-            Some(mode) => {
-                runtime_state.node_visibility.insert("Text".to_string(), mode);
-            }
-            None => {}
-        }
+        // extrude_glyph now generates exactly the requested faces (front cap /
+        // back cap / tunnel) per displayFace, so this only toggles overall
+        // visibility and keeps backface culling OFF (mode 3) so every generated
+        // face — including the inward tunnel and hole walls — renders.
+        let any = display_face == -1 || (display_face & 7) != 0;
+        runtime_state
+            .node_visibility
+            .insert("Text".to_string(), if any { 3u8 } else { 0u8 });
     }
 
     /// Lazily initialize the embedded 3D world for text members.
@@ -499,8 +538,13 @@ impl Shockwave3dMemberHandlers {
 
                 // Add mesh to the scene
                 if let Some((glyphs, outline_res)) = glyph_data {
+                    let bevel_depth = w3d_member.text3d_state.as_ref().map(|s| s.bevel_depth).unwrap_or(1.0);
+                    let bevel_type = w3d_member.text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(1);
+                    let smoothness = w3d_member.text3d_state.as_ref().map(|s| s.smoothness).unwrap_or(10);
+                    let display_face = w3d_member.text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1);
                     let mesh = crate::director::chunks::w3d::primitives::extrude_text_to_mesh(
                         &text_content, &glyphs, outline_res, font_size as f32, depth,
+                        bevel_type, bevel_depth, smoothness, display_face,
                     );
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
@@ -558,7 +602,10 @@ impl Shockwave3dMemberHandlers {
                         tunnel_depth: depth.max(1.0),
                         smoothness: 10,
                         bevel_depth: 1.0,
-                        bevel_type: 0,
+                        // Director's default bevelType is #miter (1), not #none. A flat
+                        // #none slab has no lit edge so letters/hole-rims read poorly;
+                        // the miter chamfer catches light and makes depth + holes pop.
+                        bevel_type: 1,
                         display_face: -1,
                         display_mode: 1,
                         diffuse_color: (0, 0, 0),
@@ -649,7 +696,12 @@ impl Shockwave3dMemberHandlers {
                             cams
                         }
                         "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
-                        "motion" => scene.motions.iter().map(|m| m.name.clone()).collect(),
+                        "motion" => {
+                            // Default motion at index 1, then authored motions (see DEFAULT_MOTION_NAME).
+                            let mut v = vec![DEFAULT_MOTION_NAME.to_string()];
+                            v.extend(scene.motions.iter().map(|m| m.name.clone()));
+                            v
+                        }
                         _ => vec![],
                     }
                 } else {
@@ -954,6 +1006,23 @@ impl Shockwave3dMemberHandlers {
                 }
                 Ok(())
             }
+            // Cast member property: the default rectangle used to size new
+            // sprites / the rendered 3D image (Director dict: `defaultRect`,
+            // e.g. `member.defaultRect = rect(0, 0, 300, 300)`). Stored as the
+            // member's default_rect, which drives width/height/`.image` size.
+            // `rect` is accepted as an alias since the getter maps it to the
+            // same field. (defaultRectMode→#fixed isn't tracked for 3D members.)
+            "defaultRect" | "defaultrect" | "rect" => {
+                if let Datum::Rect([l, t, r, b], _) = value {
+                    let new_rect = (*l as i32, *t as i32, *r as i32, *b as i32);
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.info.default_rect = new_rect;
+                        }
+                    }
+                }
+                Ok(())
+            }
             _ => {
                 Err(ScriptError::new(format!(
                     "Cannot set Shockwave3D property '{}'", prop
@@ -1215,10 +1284,32 @@ impl Shockwave3dMemberHandlers {
                                         } else {
                                             (String::new(), identity, String::new(), String::new())
                                         };
-                                        let motion_tracks = scene.motions.iter()
-                                            .max_by_key(|m| m.tracks.len())
-                                            .map(|m| m.tracks.clone())
-                                            .unwrap_or_default();
+                                        // cloneMotionFromCastmember(newName, sourceMotionName, member)
+                                        // must clone the SPECIFIC motion named sourceMotionName
+                                        // (= source_model_name, arg1). The old code grabbed the
+                                        // motion with the most tracks instead, so every cloned
+                                        // motion in a member collapsed onto the last/largest one
+                                        // (ties resolve to the last) — On the Run's bonus got the
+                                        // gate's "SbarraChiusura" swing instead of "BonusRotazione",
+                                        // and all train/jeep motions became "JeepCPU02". For model
+                                        // clones (no specific motion requested) keep the
+                                        // most-tracks heuristic (a skeletal model's main motion).
+                                        let motion_tracks = if obj_type == "motion" {
+                                            // Among motions matching the requested name, take the one
+                                            // with the most tracks (the skeletal animation, vs an
+                                            // empty/stub of the same name) — robust to duplicate names;
+                                            // a no-op when the name is unique (On the Run).
+                                            scene.motions.iter()
+                                                .filter(|m| m.name.eq_ignore_ascii_case(&source_model_name))
+                                                .max_by_key(|m| m.tracks.len())
+                                                .map(|m| m.tracks.clone())
+                                                .unwrap_or_default()
+                                        } else {
+                                            scene.motions.iter()
+                                                .max_by_key(|m| m.tracks.len())
+                                                .map(|m| m.tracks.clone())
+                                                .unwrap_or_default()
+                                        };
                                         // Collect all descendant nodes of the source model recursively
                                         // Use case-insensitive matching (Director is case-insensitive)
                                         let child_nodes = {
@@ -1244,6 +1335,14 @@ impl Shockwave3dMemberHandlers {
 
                         // Track shader name remapping for -clone suffix creation
                         let mut shader_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                        // Track texture name remapping for -clone suffix creation. Director
+                        // renames a colliding texture to "<name>-clone<N>": two models can both
+                        // ship a generically-named texture (e.g. the base map AND the Shield item
+                        // both export "Map #19"); the second model's copy becomes "Map #19-clone1"
+                        // and that model's shaders are repointed at the clone, so neither hijacks
+                        // the other. dirplayer previously kept only the first → the map wall showed
+                        // the shield's sunset texture.
+                        let mut texture_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
@@ -1345,6 +1444,30 @@ impl Shockwave3dMemberHandlers {
                                         // (handles cases where shader bindings are empty/unknown)
                                         let filter_shaders = !used_shader_names.is_empty();
 
+                                        // Pre-pass: detect texture-name collisions. A texture whose
+                                        // name already exists in the target scene with DIFFERENT
+                                        // pixels is a real collision (generic exporter names); record
+                                        // a "-clone<N>" rename so the shaders below point at it. Same
+                                        // bytes under the same name are genuinely shared — left as-is.
+                                        for (tex_name, tex_data) in &src_textures {
+                                            if filter_shaders && !used_texture_names.contains(tex_name) { continue; }
+                                            if let Some(existing) = scene.texture_images.get(tex_name) {
+                                                if existing != tex_data {
+                                                    let mut n = 1;
+                                                    loop {
+                                                        let cand = format!("{}-clone{}", tex_name, n);
+                                                        if !scene.texture_images.contains_key(&cand)
+                                                            && !texture_name_map.values().any(|v| v == &cand)
+                                                        {
+                                                            texture_name_map.insert(tex_name.clone(), cand);
+                                                            break;
+                                                        }
+                                                        n += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Shaders: only copy those used by the model.
                                         // If name conflicts, create -clone<N> copy (Director behavior).
                                         // DefaultShader is built-in to every cast member — never copy it.
@@ -1355,6 +1478,16 @@ impl Shockwave3dMemberHandlers {
                                             if filter_shaders && !used_shader_names.contains(&shader.name) {
                                                 continue; // Skip shaders not used by this model
                                             }
+                                            let mut cloned = shader.clone();
+                                            // Repoint any texture layers whose texture was renamed
+                                            // on collision (Director's -clone<N> behavior).
+                                            if !texture_name_map.is_empty() {
+                                                for layer in &mut cloned.texture_layers {
+                                                    if let Some(nt) = texture_name_map.get(&layer.name) {
+                                                        layer.name = nt.clone();
+                                                    }
+                                                }
+                                            }
                                             if scene.shaders.iter().any(|s| s.name == shader.name) {
                                                 // Name conflict — create a -clone<N> copy
                                                 let mut n = 1;
@@ -1362,7 +1495,6 @@ impl Shockwave3dMemberHandlers {
                                                     let clone_name = format!("{}-clone{}", shader.name, n);
                                                     if !scene.shaders.iter().any(|s| s.name == clone_name) {
                                                         shader_name_map.insert(shader.name.clone(), clone_name.clone());
-                                                        let mut cloned = shader.clone();
                                                         cloned.name = clone_name;
                                                         scene.shaders.push(cloned);
                                                         break;
@@ -1370,7 +1502,7 @@ impl Shockwave3dMemberHandlers {
                                                     n += 1;
                                                 }
                                             } else {
-                                                scene.shaders.push(shader.clone());
+                                                scene.shaders.push(cloned);
                                             }
                                         }
                                         // Copy materials referenced by copied shaders.
@@ -1424,13 +1556,16 @@ impl Shockwave3dMemberHandlers {
                                                 scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
                                         }
-                                        // Textures: only copy those used by copied shaders
+                                        // Textures: only copy those used by copied shaders.
+                                        // A collided texture lands under its "-clone<N>" name.
                                         for (tex_name, tex_data) in &src_textures {
                                             if filter_shaders && !used_texture_names.contains(tex_name) {
                                                 continue;
                                             }
-                                            if !scene.texture_images.contains_key(tex_name) {
-                                                scene.texture_images.insert(tex_name.clone(), tex_data.clone());
+                                            let target = texture_name_map.get(tex_name).cloned()
+                                                .unwrap_or_else(|| tex_name.clone());
+                                            if !scene.texture_images.contains_key(&target) {
+                                                scene.texture_images.insert(target, tex_data.clone());
                                                 scene.texture_content_version += 1;
                                             }
                                         }
@@ -1494,11 +1629,33 @@ impl Shockwave3dMemberHandlers {
                                 .unwrap_or(source_shader_name)
                         };
 
+                        // Copy the source member's keyframe MOTIONS so the cloned
+                        // model's keyframePlayer.play(name) can find them — clone
+                        // otherwise copies geometry/shaders/meshes but NOT motions.
+                        // (Splat: pac-man feet footA/footB clones play "footA-Key"/
+                        // "footB-Key"; the motion's track is named after the source
+                        // node "footA"/"footB", which matches the same-named clone.)
+                        let src_motions: Vec<crate::director::chunks::w3d::types::W3dMotion> = if obj_type == "model" {
+                            source_member_ref.as_ref()
+                                .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                                .and_then(|sm| sm.member_type.as_shockwave3d())
+                                .and_then(|sw| sw.parsed_scene.as_ref())
+                                .map(|sc| sc.motions.clone())
+                                .unwrap_or_default()
+                        } else { Vec::new() };
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
                                     if obj_type == "model" {
+                                        // Bring over any source motions not already present (by
+                                        // name) so keyframePlayer.play() resolves them.
+                                        for m in &src_motions {
+                                            if !scene.motions.iter().any(|em| em.name.eq_ignore_ascii_case(&m.name)) {
+                                                scene.motions.push(m.clone());
+                                            }
+                                        }
                                         scene.nodes.push(W3dNode {
                                             name: obj_name.clone(), node_type: W3dNodeType::Model,
                                             parent_name: "World".to_string(),
@@ -1592,7 +1749,32 @@ impl Shockwave3dMemberHandlers {
                                     if let Some(scene) = w3d.scene_mut() {
                                         match obj_type {
                                             "model" | "group" | "camera" => {
-                                                scene.nodes.retain(|n| !n.name.eq_ignore_ascii_case(&obj_name));
+                                                // Director deleteModel removes the model AND its child
+                                                // subtree. Without that, children added via addChild are
+                                                // orphaned (parent gone) and keep rendering at a fixed
+                                                // local position. frog01 builds an invisible "car1"
+                                                // template with the body (acar) + 4 wheels as children,
+                                                // clones it 16×, then deleteModel("car1") — leaving the
+                                                // original acar behind as a static, misplaced car. The
+                                                // clones (children of car2..car17) are NOT in car1's
+                                                // subtree, so they're unaffected.
+                                                let mut doomed: std::collections::HashSet<String> =
+                                                    std::collections::HashSet::new();
+                                                doomed.insert(obj_name.to_ascii_lowercase());
+                                                let mut changed = true;
+                                                while changed {
+                                                    changed = false;
+                                                    for n in scene.nodes.iter() {
+                                                        let nl = n.name.to_ascii_lowercase();
+                                                        if !doomed.contains(&nl)
+                                                            && doomed.contains(&n.parent_name.to_ascii_lowercase())
+                                                        {
+                                                            doomed.insert(nl);
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                }
+                                                scene.nodes.retain(|n| !doomed.contains(&n.name.to_ascii_lowercase()));
                                             }
                                             "light" => {
                                                 // Lights live in two places: the scene
@@ -1957,6 +2139,9 @@ impl Shockwave3dMemberHandlers {
                                                 // the flag explicitly (the ghost body sets topCap=0 AND bottomCap=0).
                                                 primitive_top_cap: true,
                                                 primitive_bottom_cap: true,
+                                                // #back/#both (e.g. skybox cylinder) → render two-sided
+                                                // so the inward-facing surface isn't backface-culled.
+                                                primitive_facing: new_res_facing.clone(),
                                                 ..Default::default()
                                             });
 
@@ -1980,6 +2165,56 @@ impl Shockwave3dMemberHandlers {
                                     _ => None,
                                 };
                                 if let Some(src_ref) = source_member_ref {
+                                    // Off-screen Flash → 3D texture (frog01 environment): capture the
+                                    // SWF bytes + native dims so we can kick off a Ruffle render below.
+                                    // The synchronous bitmap path produces None for Flash members.
+                                    let flash_dispatch: Option<(Vec<u8>, u32, u32)> = {
+                                        let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
+                                        match src_member.map(|m| &m.member_type) {
+                                            Some(CastMemberType::Flash(flash)) => {
+                                                let (l, t, r, b) = flash.effective_rect();
+                                                let mut fw = (r - l).max(1) as u32;
+                                                let mut fh = (b - t).max(1) as u32;
+                                                // Director renders a Flash member into the texture at the SWF's OWN
+                                                // stage size, NOT the cast member's display rect. frog01's
+                                                // `front`/`back` banner have a TALL display rect (640×1320) but a
+                                                // WIDE swf stage (≈1320×640); using the rect letterboxed the wide
+                                                // banner into a tall frame → mostly-black. Parse the frame RECT from
+                                                // the (uncompressed FWS) SWF header for the real stage size.
+                                                //
+                                                // Do NOT round to power-of-2: an earlier POT rounding (to match
+                                                // Director's reported 1024×512) DISTORTED other members — the
+                                                // bark/wood log textures came out the wrong size, so the logs looked
+                                                // gappy / "open caps". NPOT textures are fine in WebGL2; keep the raw
+                                                // stage size.
+                                                if flash.data.len() >= 9 && &flash.data[0..3] == b"FWS" {
+                                                    let bits = &flash.data[8..];
+                                                    let mut bitpos = 0usize;
+                                                    let mut read = |n: usize| -> u32 {
+                                                        let mut v = 0u32;
+                                                        for _ in 0..n {
+                                                            let byte = bits.get(bitpos >> 3).copied().unwrap_or(0);
+                                                            v = (v << 1) | ((byte >> (7 - (bitpos & 7))) & 1) as u32;
+                                                            bitpos += 1;
+                                                        }
+                                                        v
+                                                    };
+                                                    let nbits = read(5) as usize;
+                                                    if nbits > 0 && nbits <= 31 {
+                                                        let _xmin = read(nbits);
+                                                        let xmax = read(nbits);
+                                                        let _ymin = read(nbits);
+                                                        let ymax = read(nbits);
+                                                        let w = (xmax / 20).max(1); // twips → px
+                                                        let h = (ymax / 20).max(1);
+                                                        if w > 1 && h > 1 { fw = w; fh = h; }
+                                                    }
+                                                }
+                                                Some((flash.data.clone(), fw, fh))
+                                            }
+                                            _ => None,
+                                        }
+                                    };
                                     let rgba_data = {
                                         let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         src_member.and_then(|m| {
@@ -1990,6 +2225,7 @@ impl Shockwave3dMemberHandlers {
                                                     let h = bmp.height;
                                                     let palettes = player.movie.cast_manager.palettes();
                                                     let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                                    let mut any_opaque = false;
                                                     for y in 0..h as usize {
                                                         for x in 0..w as usize {
                                                             let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
@@ -1998,14 +2234,30 @@ impl Shockwave3dMemberHandlers {
                                                             rgba[idx + 1] = g;
                                                             rgba[idx + 2] = b;
                                                             rgba[idx + 3] = a;
+                                                            if a != 0 { any_opaque = true; }
+                                                        }
+                                                    }
+                                                    // A 32-bit cast bitmap with no real alpha channel (use_alpha
+                                                    // off) or whose alpha bytes are all 0 must render OPAQUE as a
+                                                    // 3D texture — Director ignores texture alpha for #standard
+                                                    // shaders. Without this, frog01's car-colour textures cc2-cc5
+                                                    // (32-bit, alpha 0) made the car bodies fully transparent
+                                                    // (invisible); cc1 happened to have alpha 255 so it showed.
+                                                    if !bmp.use_alpha || !any_opaque {
+                                                        for px in 0..(w as usize) * (h as usize) {
+                                                            rgba[px * 4 + 3] = 255;
                                                         }
                                                     }
                                                     log(&format!(
-                                                        "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}'",
-                                                        obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name
+                                                        "[W3D] newTexture(\"{}\", #fromCastMember): {}x{} from member {}:{} '{}' (forced_opaque={})",
+                                                        obj_name, w, h, src_ref.cast_lib, src_ref.cast_member, m.name,
+                                                        !bmp.use_alpha || !any_opaque
                                                     ));
                                                     Some((w, h, rgba))
                                                 }
+                                                // Flash members are rendered off-screen via Ruffle
+                                                // (flash_dispatch above), not the synchronous bitmap path.
+                                                CastMemberType::Flash(_) => None,
                                                 _ => {
                                                     console_warn!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): member {}:{} '{}' is {} not Bitmap",
@@ -2035,6 +2287,46 @@ impl Shockwave3dMemberHandlers {
                                                 }
                                             }
                                         }
+                                    }
+                                    // Flash source: start an off-screen Ruffle render and route its
+                                    // captured frames into this texture (update_flash_frame consults
+                                    // player.flash_texture_targets). The synthetic sprite number is
+                                    // NEGATIVE so it never collides with an on-stage channel, and
+                                    // deterministic per source member so a movie restart reuses the
+                                    // same Ruffle instance instead of leaking a new one.
+                                    if let Some((swf, fw, fh)) = flash_dispatch {
+                                        let synthetic = {
+                                            let raw = 2000i32
+                                                + src_ref.cast_lib.max(0) * 1000
+                                                + src_ref.cast_member.max(0);
+                                            -(raw.min(30000)) as i16
+                                        };
+                                        player.flash_texture_targets
+                                            .insert(synthetic, (member_ref.clone(), obj_name.clone()));
+                                        // Transparent 1×1 placeholder so the plane isn't the default
+                                        // checker (primitive fallback) until the first Flash frame lands.
+                                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                                if let Some(scene) = w3d.scene_mut() {
+                                                    if !scene.texture_images.contains_key(&obj_name) {
+                                                        let mut ph = Vec::with_capacity(12);
+                                                        ph.extend_from_slice(&1u32.to_le_bytes());
+                                                        ph.extend_from_slice(&1u32.to_le_bytes());
+                                                        ph.extend_from_slice(&[0u8, 0, 0, 0]);
+                                                        scene.texture_images.insert(obj_name.clone(), ph);
+                                                        scene.texture_content_version += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        crate::js_api::JsApi::dispatch_flash_member_loaded(
+                                            synthetic as i32, src_ref.cast_lib, src_ref.cast_member,
+                                            &swf, fw, fh, true, -1,
+                                        );
+                                        log(&format!(
+                                            "[W3D] newTexture(\"{}\"): Flash member {}:{} -> off-screen Ruffle (sprite {}, {}x{})",
+                                            obj_name, src_ref.cast_lib, src_ref.cast_member, synthetic, fw, fh
+                                        ));
                                     }
                                 }
                             } else if tex_type == "fromImageObject" {
@@ -2153,7 +2445,17 @@ impl Shockwave3dMemberHandlers {
                         };
                         let src_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
                             .map(|m| m.name.clone()).unwrap_or_else(|| "text".to_string());
-                        let resname = format!("{}_extrude3d", src_name);
+                        // Each extrude3d call returns a DISTINCT model resource — Director does
+                        // too, even when the SAME text member is reused (set text → extrude →
+                        // newModel → repeat), which frog01's title screen does. Keying the mesh
+                        // by member name alone made every call overwrite the one "<name>_extrude3d"
+                        // mesh, so every model showed the LAST text ("www.jellygames.com"). Make
+                        // the name unique per call via the target scene's current resource count.
+                        let seq = player.movie.cast_manager.find_member_by_ref(&target_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d())
+                            .map(|w| w.runtime_state.text3d_resources.len())
+                            .unwrap_or(0);
+                        let resname = format!("{}_extrude3d_{}", src_name, seq);
                         let mut mesh = match Self::build_text3d_mesh(&source, &state) {
                             Some(m) => m,
                             None => return Ok(player.alloc_datum(Datum::Void)),
@@ -2331,10 +2633,55 @@ impl Shockwave3dMemberHandlers {
                     }
                     let origin = player.get_datum(&args[0]).to_vector()?;
                     let direction = player.get_datum(&args[1]).to_vector()?;
-                    let max_models = if args.len() > 2 { player.get_datum(&args[2]).int_value().unwrap_or(100) } else { 100 };
-                    let detailed = if args.len() > 3 {
-                        player.get_datum(&args[3]).string_value().unwrap_or_default() == "detailed"
-                    } else { false };
+
+                    // Director's modelsUnderRay accepts EITHER the positional form
+                    //   (loc, dir, maxNumber, #detailed [, modelList])
+                    // OR the documented options-list form (Director 11.5 dictionary)
+                    //   (loc, dir, optionsList)
+                    // where optionsList is a property list with #maxNumberOfModels,
+                    // #levelOfDetail (#simple default / #detailed), #modelList and
+                    // #maxDistance. Rasterwerks' C_MissilePhysics uses the proplist form;
+                    // parsing it as a positional int silently dropped #modelList/#detailed,
+                    // so missiles hit the firer's own proxy/walls -> bots shot themselves.
+                    use crate::player::handlers::datum_handlers::prop_list::PropListUtils;
+                    let mut max_models: i32 = 100;
+                    let mut detailed = false;
+                    let mut max_dist: f32 = 100000.0;
+                    // #modelList: a list of model REFERENCES to restrict the cast to. An
+                    // empty/absent list means "no restriction" (test all), matching the
+                    // dictionary's "if omitted, all models" wording.
+                    let mut model_whitelist: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+                    let is_proplist = args.len() > 2 && matches!(player.get_datum(&args[2]), Datum::PropList(..));
+                    if is_proplist {
+                        let map = player.get_datum(&args[2]).to_map()?.clone();
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxNumberOfModels".to_owned()), &player.allocator)?;
+                        if let Ok(n) = player.get_datum(&v).int_value() { max_models = n; }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("levelOfDetail".to_owned()), &player.allocator)?;
+                        if player.get_datum(&v).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed") { detailed = true; }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxDistance".to_owned()), &player.allocator)?;
+                        match player.get_datum(&v) {
+                            Datum::Int(i) => max_dist = *i as f32,
+                            Datum::Float(f) => max_dist = *f as f32,
+                            _ => {}
+                        }
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("modelList".to_owned()), &player.allocator)?;
+                        let items = match player.get_datum(&v) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                        for item in &items {
+                            if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                        }
+                    } else {
+                        if args.len() > 2 { max_models = player.get_datum(&args[2]).int_value().unwrap_or(100); }
+                        if args.len() > 3 { detailed = player.get_datum(&args[3]).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed"); }
+                        // Optional positional #modelList at args[4].
+                        if args.len() > 4 {
+                            let items = match player.get_datum(&args[4]) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                            for item in &items {
+                                if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                            }
+                        }
+                    }
+                    if max_models <= 0 { max_models = 100; }
 
                     let scene = {
                         let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -2401,11 +2748,27 @@ impl Shockwave3dMemberHandlers {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
                             direction: norm_dir,
                         };
+                        // Director parameterizes the ray as origin + t*direction with
+                        // t in [0, maxDistance], so maxDistance is measured in units of
+                        // the DIRECTION VECTOR's length, not world units. The world reach
+                        // is therefore maxDistance * |direction|. We cast with a unit
+                        // direction, so scale the world cutoff by |direction| to match.
+                        // SweeTarts' snake ground-snap casts vector(0,-15,0) with
+                        // maxDistance 100 → 1500 units of reach; treating it as 100 world
+                        // units fell ~7 units short of the platform 107 below the spawn
+                        // origin, so the snake never seated ("can't move before it jumps").
+                        let world_max_dist = if dir_len > 1e-10 {
+                            max_dist * dir_len as f32
+                        } else {
+                            max_dist
+                        };
                         let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
+                        let included_ref = if model_whitelist.is_empty() { None } else { Some(&model_whitelist) };
                         let hits = raycast_scene_multi(
-                            &ray, &scene, 100000.0, max_models as usize,
+                            &ray, &scene, world_max_dist, max_models as usize,
                             node_transforms.as_ref(),
                             excluded_ref,
+                            included_ref,
                         );
                         for hit in &hits {
                             if detailed {
@@ -2501,7 +2864,8 @@ impl Shockwave3dMemberHandlers {
             "light" => scene.lights.len() as i32,
             "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).count() as i32,
             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count() as i32,
-            "motion" => scene.motions.len() as i32,
+            // +1 for the implicit default motion at index 1 (see DEFAULT_MOTION_NAME).
+            "motion" => scene.motions.len() as i32 + 1,
             _ => 0,
         }
     }
@@ -2532,7 +2896,14 @@ impl Shockwave3dMemberHandlers {
                 cams.get(idx).map(|s| s.to_string())
             }
             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
-            "motion" => scene.motions.get(idx).map(|m| m.name.clone()),
+            // motion[1] = implicit default; authored motions follow at 2.. (see DEFAULT_MOTION_NAME).
+            "motion" => {
+                if idx == 0 {
+                    Some(DEFAULT_MOTION_NAME.to_string())
+                } else {
+                    scene.motions.get(idx - 1).map(|m| m.name.clone())
+                }
+            }
             _ => None,
         }
     }

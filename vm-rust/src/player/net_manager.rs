@@ -107,6 +107,20 @@ impl NetManager {
             .map_or(false, |x| x.result.is_some());
     }
 
+    /// True if any net task is still in flight (not yet fulfilled). Used by the
+    /// frame loop to lengthen its per-frame yield so an async fetch/stream gets
+    /// enough event-loop time to finish — a tight high-tempo Lingo loop that
+    /// polls `netDone`/`getStreamStatus` every frame (e.g. Neopets DGS
+    /// state 34 at puppetTempo(999)) can otherwise starve the fetch, leaving
+    /// `gameLoaded()` false forever.
+    pub fn has_in_progress_tasks(&self) -> bool {
+        match self.shared_state.try_lock() {
+            Some(shared_state) => shared_state.task_states.values().any(|s| s.result.is_none()),
+            // Lock held == a fetch task is actively updating progress.
+            None => true,
+        }
+    }
+
     pub fn get_task_result(&self, task_id: Option<u32>) -> Option<NetResult> {
         return self.get_task_state(task_id).and_then(|x| x.result);
     }
@@ -258,7 +272,7 @@ impl NetManager {
         } else {
             // Execute normal HTTP fetch
             let shared_state_arc = Arc::clone(&self.shared_state);
-            async_std::task::spawn_local(async move {
+            crate::player::spawn_player_local(async move {
                 Self::execute_task(task_id.clone(), net_task, shared_state_arc).await;
             });
         }
@@ -304,7 +318,7 @@ impl NetManager {
         self.tasks.insert(task_id, net_task.clone());
 
         let shared_state_arc = Arc::clone(&self.shared_state);
-        async_std::task::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             Self::execute_task(task_id.clone(), net_task, shared_state_arc).await;
         });
 

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{warn, debug};
+use log::debug;
 
 use super::cast_member::{
     bitmap::BitmapMemberHandlers, button::ButtonMemberHandlers, field::FieldMemberHandlers,
@@ -527,6 +527,24 @@ impl CastMemberRefHandlers {
             };
             new_member.number = dest_ref.cast_member as u32;
 
+            // Deep-copy the backing bitmap so the duplicate is independent.
+            // `BitmapMember.image_ref` is only a SLOT ID into bitmap_manager, so
+            // a plain member clone leaves the duplicate ALIASING the source's
+            // pixels. Director's `member.duplicate()` clones the image — without
+            // this, `member("3dBallTemplate").duplicate(N)` made every generated
+            // ball share one bitmap, and create3DBallOne's copyPixels writes all
+            // landed in that single slot (last color wins → every ball rendered
+            // yellow, the last colour generated).
+            if let CastMemberType::Bitmap(bm) = &new_member.member_type {
+                let cloned = player.bitmap_manager.get_bitmap(bm.image_ref).cloned();
+                if let Some(cloned) = cloned {
+                    let new_ref = player.bitmap_manager.add_bitmap(cloned);
+                    if let CastMemberType::Bitmap(bm) = &mut new_member.member_type {
+                        bm.image_ref = new_ref;
+                    }
+                }
+            }
+
             let dest_cast = player
                 .movie
                 .cast_manager
@@ -564,7 +582,14 @@ impl CastMemberRefHandlers {
                     member_ref.cast_member.min(-1)
                 },
             )),
-            "type" => Ok(Datum::String("empty".to_string())),
+            // A valid member's `.type` returns a Symbol (see get_prop's "type"
+            // arm), so the invalid/empty member must too — Director's `#empty`.
+            // Returning a String made `member("x").type = #empty` FALSE (String
+            // vs Symbol), so the common lazy-create idiom
+            //   `if member(name).type = #empty then member = new(#bitmap) ...`
+            // took the else branch and used the invalid (-1,-1) ref instead of
+            // creating the member (g349 cave-door `drawframes`).
+            "type" => Ok(Datum::Symbol("empty".to_string())),
             "castLibNum" => Ok(Datum::Int(-1)),
             "memberNum" => Ok(Datum::Int(-1)),
             "text" | "comments" => Ok(Datum::String("".to_string())),
@@ -879,6 +904,56 @@ impl CastMemberRefHandlers {
                             let rp = flash.reg_point;
                             Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
                         }
+                        // Flash cast-member frameCount (spec :60880, read-only):
+                        // the SWF root timeline's total frame count. Parse it
+                        // from the SWF header bytes — authoritative and correct
+                        // even while the Ruffle instance is still (re)loading
+                        // (asking Ruffle returns 0 during that window, which
+                        // makes bogey_nights' #hiding `sprite.frame =
+                        // member.frameCount` pin the SWF root at frame 0 and
+                        // stall the grab state machine into a stuck #retreat).
+                        "frameCount" => Ok(Datum::Int(
+                            crate::player::cast_member::CastMember::parse_swf_frame_count(&flash.data)
+                                .map(|n| n as i32)
+                                .unwrap_or(0),
+                        )),
+                        // `member.size` — "size in memory, in bytes, of a cast
+                        // member. Read-only" (Director 11.5 Scripting Dictionary).
+                        // For a Flash member this is its SWF byte count. Neopets'
+                        // DGS `showPreLoader` gates on `member(x).size < 1000` to
+                        // detect a missing/empty preloader after linking it via
+                        // `x.fileName = <url>`, so this must reflect the bytes the
+                        // fileName setter loaded from the preload cache.
+                        "size" => Ok(Datum::Int(flash.data.len() as i32)),
+                        _ => Ok(Datum::Void),
+                    }
+                } else {
+                    Ok(Datum::Void)
+                }
+            }
+            CastMemberTypeId::Movie => {
+                // Linked Movie member props (Director 11.5 Scripting Dictionary).
+                let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
+                if let CastMemberType::Movie(mv) = &cast_member.member_type {
+                    match prop {
+                        "fileName" | "pathName" => Ok(Datum::String(mv.file_name.clone())),
+                        "scriptsEnabled" => Ok(Datum::Int(mv.scripts_enabled as i32)),
+                        "crop" => Ok(Datum::Int(mv.crop as i32)),
+                        "center" => Ok(Datum::Int(mv.center as i32)),
+                        "sound" => Ok(Datum::Int(mv.sound as i32)),
+                        "loop" => Ok(Datum::Int(mv.loops as i32)),
+                        "width" => Ok(Datum::Int(mv.width as i32)),
+                        "height" => Ok(Datum::Int(mv.height as i32)),
+                        "rect" => Ok(Datum::Rect(
+                            [0.0, 0.0, mv.width as f64, mv.height as f64],
+                            0,
+                        )),
+                        "linked" => Ok(Datum::Int(1)),
+                        "regPoint" => Ok(Datum::Point(
+                            [mv.reg_point.0 as f64, mv.reg_point.1 as f64],
+                            0,
+                        )),
                         _ => Ok(Datum::Void),
                     }
                 } else {
@@ -925,11 +1000,15 @@ impl CastMemberRefHandlers {
             match cast_member {
                 Some(cast_member) => Ok(Some(cast_member.member_type.member_type_id())),
                 None => {
-                    // Silently ignore setting props on erased members
-                    web_sys::console::warn_1(&format!(
+                    // Silently ignore setting props on erased members (Director
+                    // does the same). debug!, not console::warn_1 — the latter
+                    // always prints to the browser console and floods it (with
+                    // retained entries) for movies that poke a null member each
+                    // frame.
+                    debug!(
                         "Ignoring set prop {} on erased member {} of castLib {}",
                         prop, member_ref.cast_member, member_ref.cast_lib
-                    ).into());
+                    );
                     Ok(None)
                 }
             }
@@ -1041,9 +1120,103 @@ impl CastMemberRefHandlers {
                 VectorShapeMemberHandlers::set_prop(player, member_ref, prop, value)
             }),
             CastMemberTypeId::Flash => {
-                // Flash members accept various properties silently
-                // (directToStage, quality, scaleMode, etc.)
+                // `member.fileName = <path/url>` — "refers to the name of the file
+                // assigned to a linked cast member. Read/write ... also accepts
+                // URLs ... to minimize download time, use preloadNetThing() ...
+                // then set the fileName property" (Director 11.5 Scripting
+                // Dictionary). Neopets' DGS `showPreLoader` does exactly that:
+                // `preloadNetThing(url)` then `x.fileName = url`, then checks
+                // `member(x).size`. So resolve the URL against the completed net
+                // task the loader already primed and copy its SWF bytes into the
+                // member; `effective_rect()` re-parses dimensions from the SWF
+                // header (flash_info left None). If the URL wasn't preloaded we
+                // leave the member empty (size stays 0) rather than block on a
+                // synchronous fetch — matching Director's "used next time" note.
+                if prop.eq_ignore_ascii_case("filename") || prop.eq_ignore_ascii_case("pathname") {
+                    let url = value.string_value()?;
+                    return reserve_player_mut(|player| {
+                        let bytes = player
+                            .net_manager
+                            .find_task_by_url(&url)
+                            .and_then(|id| player.net_manager.get_task_result(Some(id)))
+                            .and_then(|r| r.ok());
+                        if let Some(bytes) = bytes {
+                            if !bytes.is_empty() {
+                                if let Some(cm) =
+                                    player.movie.cast_manager.find_member_by_ref_mut(member_ref)
+                                {
+                                    if let CastMemberType::Flash(flash) = &mut cm.member_type {
+                                        flash.data = bytes;
+                                        flash.flash_info = None;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                // Other Flash props (directToStage, quality, scaleMode, etc.)
+                // are accepted silently.
                 Ok(())
+            }
+            CastMemberTypeId::Movie => {
+                // Linked Movie member props (Director 11.5 Scripting Dictionary).
+                if prop.eq_ignore_ascii_case("filename") || prop.eq_ignore_ascii_case("pathname") {
+                    // `member.fileName = <url>` links the external .dir/.dcr.
+                    // Like the Flash member, grab the bytes from the net task the
+                    // caller already preloadNetThing'd (Director's preload-then-set
+                    // pattern) and stash them on the member; the live nested Movie
+                    // is parsed/built from them at activation. Left unlinked (bytes
+                    // None) if the URL wasn't preloaded.
+                    let url = value.string_value()?;
+                    return reserve_player_mut(|player| {
+                        let captured: Option<(std::rc::Rc<Vec<u8>>, String)> =
+                            player.net_manager.find_task_by_url(&url).and_then(|id| {
+                                let bytes = player
+                                    .net_manager
+                                    .get_task_result(Some(id))
+                                    .and_then(|r| r.ok())?;
+                                if bytes.is_empty() {
+                                    return None;
+                                }
+                                let base_url = player
+                                    .net_manager
+                                    .get_task(id)
+                                    .map(|task| crate::utils::get_base_url(&task.resolved_url).to_string())
+                                    .unwrap_or_default();
+                                Some((std::rc::Rc::new(bytes), base_url))
+                            });
+                        if let Some(cm) = player.movie.cast_manager.find_member_by_ref_mut(member_ref) {
+                            if let CastMemberType::Movie(mv) = &mut cm.member_type {
+                                mv.file_name = url.clone();
+                                if let Some((bytes, base_url)) = captured {
+                                    mv.bytes = Some(bytes);
+                                    mv.base_url = base_url;
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                }
+                return reserve_player_mut(|player| {
+                    if let Some(cm) = player.movie.cast_manager.find_member_by_ref_mut(member_ref) {
+                        if let CastMemberType::Movie(mv) = &mut cm.member_type {
+                            let truthy = value.to_bool().unwrap_or(false);
+                            match prop.to_lowercase().as_str() {
+                                "scriptsenabled" => mv.scripts_enabled = truthy,
+                                "crop" => mv.crop = truthy,
+                                "center" => mv.center = truthy,
+                                "regpoint" => {
+                                    if let Datum::Point(pt, _) = &value {
+                                        mv.reg_point = (pt[0] as i16, pt[1] as i16);
+                                    }
+                                }
+                                _ => {} // other linked-movie props accepted silently
+                            }
+                        }
+                    }
+                    Ok(())
+                });
             }
             CastMemberTypeId::Shockwave3d => reserve_player_mut(|player| {
                 Shockwave3dMemberHandlers::set_prop(player, member_ref, prop, &value)
@@ -1127,7 +1300,11 @@ impl CastMemberRefHandlers {
                 (name, comments, slot_number, member_type, color, bg_color, member_num)
             }
             None => {
-                warn!(
+                // Ref (0,0) is Director's "no member" sentinel (an empty sprite
+                // channel); querying its props is normal and handled by
+                // get_invalid_member_prop. Keep at debug so a per-frame poll
+                // doesn't flood the browser console (which retains every entry).
+                debug!(
                     "Getting prop {} of non-existent castMember reference {}, {}",
                     prop, cast_member_ref.cast_lib, cast_member_ref.cast_member
                 );
@@ -1166,10 +1343,16 @@ impl CastMemberRefHandlers {
     ) -> Result<(), ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
-            return Err(ScriptError::new(format!(
-                "Setting prop {} of invalid castMember reference (member {} of castLib {})",
+            // Silently ignore setting props on an invalid (negative) reference,
+            // e.g. a VOID/unset member ref a script still writes through.
+            // Returning early also keeps the negative indices away from the
+            // `as u32` casts below. debug!, not console::warn_1 — the latter
+            // always floods the browser console.
+            debug!(
+                "Ignoring set prop {} on invalid castMember reference (member {} of castLib {})",
                 prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
-            )));
+            );
+            return Ok(());
         }
         let exists = reserve_player_ref(|player| {
             player
@@ -1240,13 +1423,14 @@ impl CastMemberRefHandlers {
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {
-            // Silently ignore setting props on non-existent members
-            // This can happen when a script erases a member but still holds a reference
-            // Director silently ignores this case
-            web_sys::console::warn_1(&format!(
+            // Silently ignore setting props on non-existent members.
+            // This can happen when a script erases a member but still holds a
+            // reference; Director silently ignores this case. debug!, not
+            // console::warn_1 — the latter always floods the browser console.
+            debug!(
                 "Ignoring set prop {} on erased member {} of castLib {}",
                 prop, cast_member_ref.cast_member, cast_member_ref.cast_lib
-            ).into());
+            );
             Ok(())
         };
         if result.is_ok() {

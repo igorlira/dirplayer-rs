@@ -3,9 +3,9 @@ import { ICastMemberRef } from "dirplayer-js-api";
 import PreviewCanvas from "../../components/PreviewCanvas";
 import ScriptMemberPreview from "../../components/ScriptMemberPreview";
 import { useAppSelector, useMemberSnapshot } from "../../store/hooks";
-import { ICastMemberIdentifier, memberRefEqualsSafe } from "../../vm";
+import { ICastMemberIdentifier, ISoundMemberSnapshot, memberRefEqualsSafe } from "../../vm";
 import styles from "./styles.module.css";
-import { player_print_member_bitmap_hex } from 'vm-rust'
+import { player_print_member_bitmap_hex, player_play_member_sound, player_print_member_sound_hex } from 'vm-rust'
 import FilmLoopInspector from "../FilmLoopInspector";
 
 interface IMemberInspectorProps {
@@ -21,6 +21,46 @@ const normalizeLineEndings = (str: string, normalized = "\r\n") =>
 
 function TextMemberPreview({ text }: ITextMemberPreviewProps) {
   return <p className={styles.textPreview}>{normalizeLineEndings(text)}</p>;
+}
+
+function SoundMemberPreview({
+  memberId,
+  snapshot,
+}: {
+  memberId: ICastMemberIdentifier;
+  snapshot: ISoundMemberSnapshot;
+}) {
+  const durationSec = snapshot.duration ? (snapshot.duration / 1000).toFixed(2) : "?";
+  return (
+    <div>
+      <p>
+        {snapshot.sampleRate} Hz · {snapshot.channels} ch · {snapshot.bitsPerSample}-bit
+      </p>
+      <p>
+        Samples: {snapshot.sampleCount} · Duration: {durationSec}s · Loop:{" "}
+        {String(snapshot.loop)}
+      </p>
+      <p>
+        Codec: {snapshot.codec || "?"} · Data: {snapshot.dataSize} bytes
+      </p>
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button
+          onClick={() =>
+            player_play_member_sound(memberId.castNumber, memberId.memberNumber)
+          }
+        >
+          ▶ Play
+        </button>
+        <button
+          onClick={() =>
+            player_print_member_sound_hex(memberId.castNumber, memberId.memberNumber)
+          }
+        >
+          Print raw bytes
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function FontPreview() {
@@ -90,6 +130,9 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
         )}
         {memberSnapshot?.type === "font" && (
           <FontPreview />
+        )}
+        {memberSnapshot?.type === "sound" && (
+          <SoundMemberPreview memberId={memberId} snapshot={memberSnapshot} />
         )}
         {memberSnapshot?.type === "flash" && (
           <div>

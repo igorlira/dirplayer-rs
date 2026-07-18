@@ -220,6 +220,37 @@ pub fn extrude_alpha_mask_to_mesh(
         return super::types::ClodDecodedMesh::default();
     }
 
+    // Cap the working resolution. Geometry is emitted PER SOLID PIXEL × per bevel
+    // layer, and the incoming mask is the SUPERSAMPLED native-text render — so a
+    // large text (e.g. 2000×800) would emit millions of quads and spike memory
+    // (~800 MB, observed on dcr_intel/3DText). Downsample the mask so the mesh
+    // stays bounded; pixel-based extrusion is already an approximation, so a
+    // capped grid is visually fine and the world_width/height mapping is
+    // unchanged (pixel_width/height below scale to the reduced grid).
+    const MAX_DIM: u32 = 256;
+    let step = ((width.max(height) + MAX_DIM - 1) / MAX_DIM).max(1);
+    let downsampled: Option<(u32, u32, Vec<u8>)> = if step > 1 {
+        let ew = (width / step).max(1);
+        let eh = (height / step).max(1);
+        let mut ds = vec![0u8; (ew as usize) * (eh as usize) * 4];
+        for y in 0..eh {
+            for x in 0..ew {
+                let sx = (x * step).min(width - 1) as usize;
+                let sy = (y * step).min(height - 1) as usize;
+                let s = (sy * (width as usize) + sx) * 4;
+                let d = ((y as usize) * (ew as usize) + (x as usize)) * 4;
+                ds[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+            }
+        }
+        Some((ew, eh, ds))
+    } else {
+        None
+    };
+    let (width, height, rgba): (u32, u32, &[u8]) = match &downsampled {
+        Some((ew, eh, ds)) => (*ew, *eh, ds.as_slice()),
+        None => (width, height, rgba),
+    };
+
     let world_width = world_width.max(1.0);
     let world_height = world_height.max(1.0);
     let pixel_width = world_width / (width as f32).max(1.0);
@@ -716,9 +747,23 @@ pub fn extrude_text_to_mesh(
     outline_resolution: u16,
     font_size: f32,
     tunnel_depth: f32,
+    bevel_type: u32,
+    bevel_depth: f32,
+    smoothness: u32,
+    display_face: i32,
 ) -> super::types::ClodDecodedMesh {
     let scale = font_size / outline_resolution.max(1) as f32;
     let depth = tunnel_depth.max(1.0);
+    // displayFace bitmask: bit0=#front, bit1=#tunnel, bit2=#back; -1 = all.
+    let params = super::text3d::ExtrudeParams {
+        depth,
+        bevel_type,
+        bevel_depth: bevel_depth.max(0.0),
+        smoothness,
+        front: display_face == -1 || (display_face & 1) != 0,
+        tunnel: display_face == -1 || (display_face & 2) != 0,
+        back: display_face == -1 || (display_face & 4) != 0,
+    };
 
     // First pass: compute total width for centering
     let mut total_width = 0.0_f32;
@@ -746,18 +791,17 @@ pub fn extrude_text_to_mesh(
             continue; // space or blank glyph
         }
 
+        // Extrude the WHOLE glyph at once (all contours together) so the caps are
+        // tessellated with holes subtracted — the per-contour triangle-fan used to
+        // fill the counters of O / A / 8 / e solid. (Faithful to the IFX pipeline:
+        // contours -> earcut-with-holes caps + per-edge tunnel walls.)
         let polylines = flatten_glyph(glyph, scale, x_cursor);
-        for poly in &polylines {
-            let base = all_positions.len() as u32;
-            let (pos, nrm, faces) = extrude_contour(
-                &poly.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(),
-                depth,
-            );
-            all_positions.extend_from_slice(&pos);
-            all_normals.extend_from_slice(&nrm);
-            for f in &faces {
-                all_faces.push([f[0] + base, f[1] + base, f[2] + base]);
-            }
+        let base = all_positions.len() as u32;
+        let (pos, nrm, faces) = super::text3d::extrude_glyph(&polylines, &params);
+        all_positions.extend_from_slice(&pos);
+        all_normals.extend_from_slice(&nrm);
+        for f in &faces {
+            all_faces.push([f[0] + base, f[1] + base, f[2] + base]);
         }
         x_cursor += advance;
     }

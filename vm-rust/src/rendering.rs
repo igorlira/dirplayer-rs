@@ -1211,7 +1211,7 @@ fn render_filmloop_from_channel_data(
 
                 // Filmloop blend: inverted 0-255 scale (0 → 100%, 127 → ~50%)
                 // 255 is treated as default/opaque (same as shape/vector paths)
-                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+                let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
 
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
@@ -1569,7 +1569,7 @@ fn render_filmloop_from_channel_data(
                     }),
                 );
 
-                let blend = crate::player::score::convert_raw_blend(data.blend, player.movie.dir_version);
+                let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
 
                 // Mirror the Bitmap arm's flip handling so nested filmloops
                 // honor the child sprite's flipH/flipV bits.
@@ -2954,7 +2954,19 @@ pub fn render_score_to_bitmap_with_offset(
                     let src_bitmap = player.bitmap_manager.get_bitmap(bitmap_ref);
                     if let Some(src_bitmap) = src_bitmap {
                         let src_rect = IntRect::from(0, 0, src_bitmap.width as i32, src_bitmap.height as i32);
-                        let dst_rect = sprite_rect;
+                        // Apply flipH/flipV by inverting the dst_rect (left↔right,
+                        // top↔bottom) so copy_pixels mirrors the content — the same
+                        // way the bitmap path does it. get_concrete_sprite_rect
+                        // already mirrored the reg point to place the box on the
+                        // correct side; without this inversion the Flash content
+                        // filled the box un-mirrored (bogey_nights' end-game grab
+                        // hands are flipV — they grabbed downward instead of up).
+                        let dst_rect = IntRect::from(
+                            if sprite.flip_h { sprite_rect.right } else { sprite_rect.left },
+                            if sprite.flip_v { sprite_rect.bottom } else { sprite_rect.top },
+                            if sprite.flip_h { sprite_rect.left } else { sprite_rect.right },
+                            if sprite.flip_v { sprite_rect.top } else { sprite_rect.bottom },
+                        );
 
                         let params = CopyPixelsParams {
                             blend: sprite.effective_blend(),
@@ -2967,7 +2979,7 @@ pub fn render_score_to_bitmap_with_offset(
                             skew: sprite.skew,
                             sprite: Some(sprite),
                             mask_offset: (0, 0),
-                            original_dst_rect: Some(dst_rect.clone()),
+                            original_dst_rect: Some(sprite_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
@@ -2985,7 +2997,10 @@ pub fn render_score_to_bitmap_with_offset(
                     // First time this sprite renders a Flash member — ask
                     // JS to spin up a dedicated Ruffle instance for it.
                     let dispatch_key = (channel_num as i16, member_ref.cast_lib, member_ref.cast_member);
-                    if !player.flash_sprite_loaded.contains(&dispatch_key) {
+                    // Host-only: a nested sub-player's Flash lifecycle is owned by
+                    // its own pre_dispatch_flash_members (see webgl2 render_sprite).
+                    let is_host = unsafe { crate::player::ACTIVE_PLAYER_ID } == 0;
+                    if is_host && !player.flash_sprite_loaded.contains(&dispatch_key) {
                         let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                         let w = sprite.width.max(1) as u32;
                         let h = sprite.height.max(1) as u32;
@@ -2998,6 +3013,7 @@ pub fn render_score_to_bitmap_with_offset(
                             .as_ref()
                             .map(|fi| fi.paused_at_start)
                             .unwrap_or(false);
+                        let asserted_frame = sprite.flash_asserted_frame.unwrap_or(-1);
                         JsApi::dispatch_flash_member_loaded(
                             channel_num as i32,
                             member_ref.cast_lib,
@@ -3006,6 +3022,7 @@ pub fn render_score_to_bitmap_with_offset(
                             w,
                             h,
                             paused_at_start,
+                            asserted_frame,
                         );
                         player.flash_sprite_loaded.insert(dispatch_key);
                     }
@@ -3405,6 +3422,24 @@ thread_local! {
     /// each rAF, so we only need one loop across the whole WASM lifetime —
     /// dropping and recreating the renderer between tests must not respawn it.
     pub static DRAW_LOOP_SPAWNED: Cell<bool> = Cell::new(false);
+    /// True while the stage WebGL2 context is lost (browser reclaimed it, e.g.
+    /// the tab was backgrounded). Drawing is skipped until `webglcontextrestored`
+    /// re-initializes the renderer. See `register_webgl_context_handlers`.
+    pub static WEBGL_CONTEXT_LOST: Cell<bool> = Cell::new(false);
+}
+
+/// True when the document/tab is hidden (backgrounded). Rendering to a hidden
+/// tab's GL context is wasted work and provokes context-loss; skip it.
+fn document_is_hidden() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.hidden())
+        .unwrap_or(false)
+}
+
+/// Skip the stage draw when the context is lost or the tab is hidden.
+fn should_skip_stage_draw() -> bool {
+    WEBGL_CONTEXT_LOST.with(|c| c.get()) || document_is_hidden()
 }
 
 pub fn mark_frame_drawn() {
@@ -3435,10 +3470,24 @@ where
 
 pub fn draw_frame_immediate() {
     use crate::rendering_gpu::Renderer;
+    // A nested `#movie` sub-player is headless: its stage is composited by the
+    // HOST once per host frame via render_nested_player_stages into an
+    // off-screen FBO. If the sub calls updateStage()/nothing() (very common
+    // during keyboard movement and busy-wait loops), draw_frame here would run
+    // against the HOST's framebuffer + size, smearing the sub's sprites (wide
+    // scrolling background, off-screen tiles) across the whole host stage
+    // unclipped — flickering on every such call. Never let a sub draw directly
+    // to the host stage; leave stage_dirty so the host recomposites its FBO.
+    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+        return;
+    }
     let (tempo, dirty) = reserve_player_ref(|player| {
         (player.current_frame_tempo as f64, player.stage_dirty)
     });
     if !dirty {
+        return;
+    }
+    if should_skip_stage_draw() {
         return;
     }
     let interval = if tempo > 0.0 {
@@ -3703,6 +3752,12 @@ pub(crate) fn try_create_webgl2_renderer(
     preview_canvas.set_width(1);
     preview_canvas.set_height(1);
 
+    // Mark the stage canvas so the Flash manager's global `getContext`
+    // monkey-patch does NOT force `preserveDrawingBuffer: true` on it (that
+    // patch is only needed for Ruffle's frame-capture readback; on the stage
+    // it just wastes GPU memory and makes background context-loss more likely).
+    let _ = canvas.set_attribute("data-dp-stage", "1");
+
     set_pixelated_canvas_style(&canvas);
     set_pixelated_canvas_style(&preview_canvas);
 
@@ -3710,6 +3765,7 @@ pub(crate) fn try_create_webgl2_renderer(
     match WebGL2Renderer::new(canvas, preview_canvas) {
         Ok(renderer) => {
             debug!("WebGL2 renderer created successfully");
+            register_webgl_context_handlers(renderer.canvas());
             Some(renderer)
         }
         Err(e) => {
@@ -3717,6 +3773,63 @@ pub(crate) fn try_create_webgl2_renderer(
             None
         }
     }
+}
+
+/// Register `webglcontextlost` / `webglcontextrestored` listeners on the stage
+/// canvas. Browsers reclaim a tab's WebGL context when it is backgrounded; the
+/// default is to NOT restore it, so without `preventDefault()` the stage would
+/// stay dead after the tab regains focus. On loss we pause drawing; on restore
+/// we rebuild the renderer on the same canvas (fresh programs/buffers/textures).
+/// The closures are leaked (`forget`) so they live for the canvas's lifetime.
+fn register_webgl_context_handlers(canvas: &web_sys::HtmlCanvasElement) {
+    let lost_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+        // preventDefault tells the browser we will restore -> it will fire
+        // webglcontextrestored once the tab is visible again.
+        e.prevent_default();
+        WEBGL_CONTEXT_LOST.with(|c| c.set(true));
+        warn!("[webgl] stage context lost — pausing draw until restored");
+    });
+    let _ = canvas.add_event_listener_with_callback(
+        "webglcontextlost",
+        lost_cb.as_ref().unchecked_ref(),
+    );
+    lost_cb.forget();
+
+    let restored_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+        on_webgl_context_restored();
+    });
+    let _ = canvas.add_event_listener_with_callback(
+        "webglcontextrestored",
+        restored_cb.as_ref().unchecked_ref(),
+    );
+    restored_cb.forget();
+}
+
+/// Rebuild the WebGL2 renderer on the existing (now-restored) canvas so its GL
+/// objects are recreated, then resume drawing. Caches (textures/text) start
+/// empty and re-populate on the next frame.
+fn on_webgl_context_restored() {
+    use crate::rendering_gpu::webgl2::WebGL2Renderer;
+    with_renderer_mut(|renderer_lock| {
+        if let Some(DynamicRenderer::WebGL2(old)) = renderer_lock.as_ref() {
+            let canvas = old.canvas().clone();
+            let preview = old.preview_canvas().clone();
+            match WebGL2Renderer::new(canvas, preview) {
+                Ok(new_renderer) => {
+                    *renderer_lock = Some(DynamicRenderer::WebGL2(new_renderer));
+                    warn!("[webgl] stage context restored — renderer rebuilt");
+                }
+                Err(e) => {
+                    warn!("[webgl] failed to rebuild renderer after context restore: {:?}", e);
+                }
+            }
+        }
+    });
+    WEBGL_CONTEXT_LOST.with(|c| c.set(false));
+    // Force a full redraw on the next frame.
+    reserve_player_mut(|player| {
+        player.stage_dirty = true;
+    });
 }
 
 fn get_stage_container() -> Result<web_sys::HtmlElement, JsValue> {
@@ -3789,7 +3902,7 @@ pub fn player_create_canvas() -> Result<(), JsValue> {
             // renderer was dropped between movies) reuse the existing loop.
             if !DRAW_LOOP_SPAWNED.with(|f| f.get()) {
                 DRAW_LOOP_SPAWNED.with(|f| f.set(true));
-                spawn_local(async {
+                crate::player::spawn_player_local(async {
                     run_draw_loop().await;
                 });
             }
@@ -3853,13 +3966,14 @@ async fn run_draw_loop() {
         let frame_interval = 1000 / draw_fps as i64;
         if Local::now().timestamp_millis() - last_frame_ms >= frame_interval {
             last_frame_ms = Local::now().timestamp_millis();
+            let skip_stage = should_skip_stage_draw();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
+                    if !skip_stage && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
                         player.stage_dirty = false;
                     }
-                    if player.preview_dirty {
+                    if !skip_stage && player.preview_dirty {
                         renderer.draw_preview_frame(&mut player);
                         player.preview_dirty = false;
                     }

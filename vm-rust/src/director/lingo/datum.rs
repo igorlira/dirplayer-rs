@@ -128,6 +128,14 @@ pub type XtraInstanceId = u32;
 #[derive(Clone, Debug)]
 pub struct FlashObjectRef {
     pub path: String,
+    /// Optional Director sprite binding (1-based sprite number, 0 = unbound).
+    /// When a Flash object handle is obtained via
+    /// `getVariable(sprite(N), path, 0)` we record N here so later calls
+    /// (`gDemoFlash.play()`) dispatch to that exact sprite's Ruffle instance —
+    /// even if the sprite's cast member wasn't resolvable when the handle was
+    /// taken (a beginSprite can run before the member is committed, which used
+    /// to yield a VOID handle and crash on the deferred `.play()`). When 0, the
+    /// sprite is resolved from cast_lib/cast_member via find_sprite_for_flash_member.
     pub instance_id: u32,
     pub cast_lib: i32,
     pub cast_member: i32,
@@ -188,6 +196,26 @@ impl FlashObjectRef {
             instance_id: 0,
             cast_lib: 0,
             cast_member: 0,
+        }
+    }
+
+    /// Build a handle bound to a specific Director sprite (see `instance_id`).
+    /// `sprite_num` should be the 1-based sprite/channel number; 0 means unbound.
+    pub fn from_path_with_sprite(path: &str, cast_lib: i32, cast_member: i32, sprite_num: i32) -> Self {
+        Self {
+            path: path.to_string(),
+            instance_id: if sprite_num > 0 { sprite_num as u32 } else { 0 },
+            cast_lib,
+            cast_member,
+        }
+    }
+
+    /// The bound sprite number, if this handle was taken from a specific sprite.
+    pub fn bound_sprite(&self) -> Option<i32> {
+        if self.instance_id != 0 {
+            Some(self.instance_id as i32)
+        } else {
+            None
         }
     }
 }
@@ -856,6 +884,12 @@ impl Datum {
         match d {
             Datum::Int(n) => Ok((*n as f64, false)),
             Datum::Float(f) => Ok((*f, true)),
+            // Director coerces VOID to 0 in numeric contexts, so
+            // `point(h, V)` with an uninitialized property still builds a
+            // valid point. g349's "show treasure complete item bhv" relies on
+            // this: its `V` property is VOID until the item is activated, yet
+            // every exitFrame ends with `my.loc = point(h, V)`.
+            Datum::Void => Ok((0.0, false)),
             other => Err(ScriptError::new(format!(
                 "Point/Rect component must be numeric, got {}",
                 other.type_str()

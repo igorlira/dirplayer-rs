@@ -106,7 +106,37 @@ impl MovieHandlers {
                     Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
                 }
             } else {
-                Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
+                // `member(N)` with no cast lib and no existing member: Director
+                // returns a valid BY-NUMBER reference to member N of the default
+                // cast even when that slot is empty — `member(19)` IS member 19,
+                // allocated or not (11.5 Scripting Dictionary: a numbered
+                // reference addresses a slot; it does not require the slot to be
+                // filled). Without this the ref was INVALID (-1,-1), so
+                // `new(#bitmap, member(19))` couldn't target slot 19 (it fell
+                // back to the first free slot) and `member(19).image = ...`
+                // errored. Tetris reserves empty slots 10-14 / 19-21 and fills
+                // them at runtime with exactly that pattern. A failed name
+                // lookup or a non-positive number stays invalid.
+                let numeric = match &member_name_or_num {
+                    Datum::Int(n) => Some(*n),
+                    Datum::Float(f) => Some(*f as i32),
+                    _ => None,
+                };
+                match numeric {
+                    Some(n) if n > 0 => {
+                        // High 16 bits may encode the cast lib (slot-number
+                        // form); a bare member number has cast_lib 0 → default
+                        // to the first cast (mirrors member_ref_from_slot_number).
+                        let cast_lib = (n >> 16) as i32;
+                        let cast_member = (n & 0xFFFF) as i32;
+                        let cast_lib = if cast_lib == 0 { 1 } else { cast_lib };
+                        Ok(player.alloc_datum(Datum::CastMember(CastMemberRef {
+                            cast_lib,
+                            cast_member,
+                        })))
+                    }
+                    _ => Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF))),
+                }
             }
         })
     }
@@ -173,28 +203,58 @@ impl MovieHandlers {
             let dest = match datum_type {
                 DatumType::Int => Some(datum.int_value()? as u32),
 
-                DatumType::String => {
-                    let label = datum.string_value()?;
-                    player.movie.score.frame_labels
-                        .iter()
-                        .find(|fl| fl.label.eq_ignore_ascii_case(&label))
-                        .map(|fl| fl.frame_num as u32)
-                }
-
-                DatumType::Symbol => {
-                    let symbol = datum.string_value()?;
-                    match symbol.as_str() {
-                        "next" => {
-                            let next_frame = player.movie.current_frame + 1;
-                            debug!("🎬 go(#next): {} -> {}", player.movie.current_frame, next_frame);
-                            Some(next_frame)
-                        },
-                        "previous" => Some(if player.movie.current_frame > 1 { player.movie.current_frame - 1 } else { 1 }),
-                        "loop" => Some(player.movie.current_frame),
-                        _ => player.movie.score.frame_labels
+                // A frame label / marker keyword can arrive as either a string
+                // (`do("go next")`, `go "label"`) or a symbol (decompiled
+                // `go(#next)`), so handle both the same way.
+                DatumType::String | DatumType::Symbol => {
+                    let s = datum.string_value()?;
+                    let key = s.to_ascii_lowercase();
+                    // Director marker-navigation keywords: `next` == marker(1),
+                    // `previous` == marker(-1), `loop` == marker(0) — i.e. the
+                    // next/previous/current MARKER, not the next/previous frame
+                    // (Director 11.5 Scripting Dictionary: `next` keyword ≡
+                    // `the marker(+1)`). mixmaster's buttons do `do("go next")`.
+                    if key == "next" || key == "previous" || key == "loop" {
+                        let mut frames: Vec<u32> = player
+                            .movie
+                            .score
+                            .frame_labels
                             .iter()
-                            .find(|fl| fl.label.eq_ignore_ascii_case(&symbol))
-                            .map(|fl| fl.frame_num as u32),
+                            .map(|fl| fl.frame_num as u32)
+                            .collect();
+                        frames.sort_unstable();
+                        frames.dedup();
+                        let current = player.movie.current_frame;
+                        let offset: i32 = match key.as_str() {
+                            "next" => 1,
+                            "previous" => -1,
+                            _ => 0, // loop
+                        };
+                        // marker(offset): index of marker(0) (largest marker <=
+                        // current, i.e. current-if-marked else previous) is
+                        // pos-1, where pos = count of markers <= current.
+                        let dest_frame = if frames.is_empty() {
+                            None
+                        } else {
+                            let pos = frames.partition_point(|&f| f <= current) as i32;
+                            let target = (pos - 1) + offset;
+                            if target >= 0 {
+                                frames.get(target as usize).copied()
+                            } else {
+                                None
+                            }
+                        };
+                        // No such marker (e.g. `go next` past the last marker) →
+                        // stay on the current frame rather than erroring.
+                        Some(dest_frame.unwrap_or(current))
+                    } else {
+                        player
+                            .movie
+                            .score
+                            .frame_labels
+                            .iter()
+                            .find(|fl| fl.label.eq_ignore_ascii_case(&s))
+                            .map(|fl| fl.frame_num as u32)
                     }
                 }
 
@@ -479,7 +539,10 @@ impl MovieHandlers {
                         player.is_in_frame_update = false;
                     });
                 } else {
-                    warn!("Failed to run frame update in go function, already updating");
+                    // Benign re-entrancy guard (a `go` fired while a frame update
+                    // was already in progress); debug! to keep it out of the
+                    // browser console.
+                    debug!("Failed to run frame update in go function, already updating");
                 }
             }
         }
@@ -505,28 +568,41 @@ impl MovieHandlers {
             let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
 
             if !is_puppet {
-                // Director: unpuppeting resets the sprite's properties to those
-                // in the Score for the current frame. If the channel has no score
-                // data at this frame, the sprite reverts to empty (no member).
+                // Director defers reverting an unpuppeted sprite to the Score:
+                // the sprite keeps its current member/position/appearance until
+                // the NEXT frame update (begin_sprites / per-frame delta) reloads
+                // the channel from the score. Clearing the visual state here is
+                // wrong — it destroys a sprite the script is still reading in the
+                // same handler.
+                //
+                // BrickOut's newLevel does, per brick channel:
+                //     makeStage()                  -- set the memberNum (scene)
+                //     puppetSprite(i, 0)           -- unpuppet
+                //     puppetSprite(i, 1)           -- re-puppet
+                //     add(vListRect, the rect of sprite i)
+                // With the old clear, puppetSprite(i,0) wiped the member/loc the
+                // score+makeStage had established, so `the rect` read (0,0,0,0)
+                // and brick collision never fired. Preserving the visual state
+                // (and letting the score re-drive it on the next frame if it is
+                // NOT re-puppeted) matches Director's deferred reversion.
+                //
+                // Only the puppet flag and behavior lifecycle are cleared:
+                // `entered = false` lets the next begin_sprites re-enter the span
+                // and reload from the score (the deferred revert) when the sprite
+                // stays unpuppeted; if it is re-puppeted first, it keeps its data.
                 let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
                 sprite.puppet = false;
-                sprite.member = None;
-                sprite.visible = true;
-                sprite.blend = 100;
-                sprite.ink = 0;
-                sprite.loc_h = 0;
-                sprite.loc_v = 0;
-                sprite.width = 0;
-                sprite.height = 0;
-                sprite.has_fore_color = false;
-                sprite.has_back_color = false;
-                sprite.has_visible_mod = false;
-                sprite.has_blend_mod = false;
-                sprite.has_size_changed = false;
-                sprite.moveable = false;
                 sprite.entered = false;
                 sprite.exited = false;
                 sprite.script_instance_list.clear();
+                // Mark for revert on the NEXT frame tick. If the sprite is not
+                // re-puppeted / re-membered before then it reverts to the Score
+                // (a reset to empty for a pure-puppet channel with no span). This
+                // matches Director's deferred revert AND keeps BrickOut working
+                // (it re-puppets in the same handler, clearing the flag), while
+                // fixing Coke Studios' WallItems which unpuppet furniture WITHOUT
+                // setting visible=0 and relied on the old immediate wipe to clear.
+                sprite.pending_unpuppet_revert = true;
                 player.movie.score.invalidate_render_channel_cache();
                 player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
                 player.invalidate_active_stage_filmloop_cache();
@@ -535,6 +611,8 @@ impl MovieHandlers {
 
             let sprite = player.movie.score.get_sprite_mut(sprite_number as i16);
             sprite.puppet = is_puppet;
+            // Re-puppeted before the deferred revert ran → keep its data.
+            sprite.pending_unpuppet_revert = false;
             player.movie.score.invalidate_render_channel_cache();
             player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
             player.invalidate_active_stage_filmloop_cache();
@@ -969,6 +1047,7 @@ impl MovieHandlers {
         crate::player::events::dispatch_w3d_timer_events().await;
         crate::player::events::tick_w3d_animations().await;
         crate::player::events::tick_w3d_particles().await;
+        crate::player::events::tick_w3d_collisions().await;
         crate::player::events::dispatch_physx_collision_callbacks().await;
 
         reserve_player_mut(|player| {
@@ -1017,6 +1096,39 @@ impl MovieHandlers {
                 || player.in_mouse_command
                 || player.movie.mouse_down)
         })?;
+
+        // While a keyDown busy-wait loop is running (command_handler_yielding),
+        // the main frame loop is paused to keep its frame scripts from
+        // interleaving with the handler's bytecodes and corrupting the shared
+        // scope stack. But that also freezes any frame-driven animation (fish's
+        // `on prepareFrame` swimming fish) for as long as the key is held. Run
+        // the frame update HERE instead — on this task, nested in the keyDown
+        // handler, so it's sequential (no concurrent scope-stack corruption) —
+        // throttled to the movie tempo so a tight `repeat while keyPressed`
+        // loop calling updateStage() rapidly doesn't fast-forward the movie.
+        // execute_frame_update()'s is_in_frame_update guard blocks the recursive
+        // updateStage() that fires from inside prepareFrame.
+        let run_frame_anim = reserve_player_mut(|player| {
+            if !player.command_handler_yielding || player.is_in_frame_update {
+                return false;
+            }
+            let now = js_sys::Date::now();
+            let tempo = player.current_frame_tempo.max(1);
+            let interval = 1000.0 / tempo as f64;
+            if now - player.last_kb_loop_frame_ms >= interval {
+                player.last_kb_loop_frame_ms = now;
+                true
+            } else {
+                false
+            }
+        });
+        if run_frame_anim {
+            if let Err(err) = Self::execute_frame_update().await {
+                if err.code != ScriptErrorCode::Abort {
+                    reserve_player_mut(|player| player.on_script_error(&err));
+                }
+            }
+        }
 
         // Director's updateStage() forces an immediate stage redraw even from
         // inside enterFrame/prepareFrame loops. Yielding to the browser event loop
@@ -1102,8 +1214,21 @@ impl MovieHandlers {
             let (channel_num, member_ref) = if args.len() == 1 {
                 (1, args[0].clone())
             } else {
-                let channel = player.get_datum(&args[0]).int_value()?;
-                (channel, args[1].clone())
+                // Director's puppetSound disambiguates its two arguments by type
+                // rather than by strict position: the sound cast member may be
+                // named by a string, and the channel is always an integer. The
+                // documented order is `puppetSound whichChannel, whichCastMember`,
+                // but many movies (e.g. BrickOut) write the member-first idiom
+                // `puppetSound "Intro", 2`. When the first argument is a string
+                // it is the member name and the second is the channel; otherwise
+                // fall back to the documented channel-first order.
+                if matches!(player.get_datum(&args[0]), Datum::String(_)) {
+                    let channel = player.get_datum(&args[1]).int_value()?;
+                    (channel, args[0].clone())
+                } else {
+                    let channel = player.get_datum(&args[0]).int_value()?;
+                    (channel, args[1].clone())
+                }
             };
 
             // `puppetSound channel, 0` (and the single-arg `puppetSound 0`)

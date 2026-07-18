@@ -83,7 +83,7 @@ impl StackBytecodeHandler {
     }
 
     pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let player = unsafe { crate::player::player_mut() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
         let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));
@@ -94,7 +94,7 @@ impl StackBytecodeHandler {
     }
 
     pub fn push_var_ref(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+        let player = unsafe { crate::player::player_mut() };
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = get_name(&player, &ctx, name_id as u16).unwrap();
         let datum_ref = player.alloc_datum(Datum::Symbol(symbol_name.to_owned()));

@@ -3028,7 +3028,7 @@ impl<'a> Pfr1DirectParser<'a> {
 
 /// Parse a bitmap glyph from GPS data
 pub fn parse_bitmap_glyph(data: &[u8], char_code: u32) -> Option<BitmapGlyph> {
-    if data.len() < 2 {
+    if data.is_empty() {
         return None;
     }
 
@@ -3067,25 +3067,48 @@ pub fn parse_bitmap_glyph(data: &[u8], char_code: u32) -> Option<BitmapGlyph> {
         }
     }
 
+    // PFR bitmap glyph header. Per-field widths follow the spec (and match the
+    // verified Fontinator/Director reference): position/size format 0 packs the
+    // two values into one byte's nibbles; format 1 is one byte each (signed for
+    // position); format 2/3 widen to 2/3 bytes.
+    let read_signed_nibbles = |data: &[u8], pos: &mut usize| -> (i32, i32) {
+        if *pos >= data.len() {
+            return (0, 0);
+        }
+        let b = data[*pos];
+        *pos += 1;
+        let mut a = ((b >> 4) & 0x0F) as i32;
+        let mut c = (b & 0x0F) as i32;
+        if a & 0x8 != 0 { a -= 16; }
+        if c & 0x8 != 0 { c -= 16; }
+        (a, c)
+    };
+
     let (x_pos, y_pos) = match position_format {
-        0 => (0i32, 0i32),
+        0 => read_signed_nibbles(data, &mut pos),
         1 => (read_i_n(data, &mut pos, 1), read_i_n(data, &mut pos, 1)),
         2 => (read_i_n(data, &mut pos, 2), read_i_n(data, &mut pos, 2)),
-        _ => (read_i_n(data, &mut pos, 4), read_i_n(data, &mut pos, 4)),
+        _ => (read_i_n(data, &mut pos, 3), read_i_n(data, &mut pos, 3)),
     };
 
     let (x_size, y_size) = match size_format {
-        0 => (read_u_n(data, &mut pos, 1), read_u_n(data, &mut pos, 1)),
-        1 => (read_u_n(data, &mut pos, 2), read_u_n(data, &mut pos, 2)),
-        2 => (read_u_n(data, &mut pos, 3), read_u_n(data, &mut pos, 3)),
-        _ => (read_u_n(data, &mut pos, 4), read_u_n(data, &mut pos, 4)),
+        0 => (0u32, 0u32),
+        1 => {
+            if pos >= data.len() { (0, 0) } else {
+                let b = data[pos];
+                pos += 1;
+                (((b >> 4) & 0x0F) as u32, (b & 0x0F) as u32)
+            }
+        }
+        2 => (read_u_n(data, &mut pos, 1), read_u_n(data, &mut pos, 1)),
+        _ => (read_u_n(data, &mut pos, 2), read_u_n(data, &mut pos, 2)),
     };
 
     let set_width = match escapement_format {
-        0 => x_size,
-        1 => read_u_n(data, &mut pos, 1),
-        2 => read_u_n(data, &mut pos, 2),
-        _ => read_u_n(data, &mut pos, 4),
+        0 => 0u32,
+        1 => read_i_n(data, &mut pos, 1).max(0) as u32,
+        2 => read_i_n(data, &mut pos, 2).max(0) as u32,
+        _ => read_i_n(data, &mut pos, 3).max(0) as u32,
     };
 
     let x_size = x_size.min(u16::MAX as u32) as u16;
@@ -3144,25 +3167,36 @@ pub fn parse_bitmap_glyph(data: &[u8], char_code: u32) -> Option<BitmapGlyph> {
 
 /// Decode 4-bit RLE bitmap
 fn decode_rle_bitmap(data: &[u8], width: u16, height: u16) -> Vec<u8> {
+    // PFR1 bitmap image_format 1: each NIBBLE (high then low per byte) is a run
+    // length, and runs ALTERNATE background (unset) / foreground (set), starting
+    // with background. e.g. the bold Volter `l` is `[0x0E]` → run 0 unset, run 14
+    // set → a solid 2×7 bar. The earlier decoder treated `byte>>4` as a count and
+    // `byte&0xF` as a color, reading `0x0E` as "0 cells of color 14" → an empty
+    // glyph (the `caLLed` bug). Output is contiguous packed bits (row-major),
+    // matching the rasterizer's `bit_index = row*width + col` read.
     let total_bits = width as usize * height as usize;
     let total_bytes = (total_bits + 7) / 8;
     let mut result = vec![0u8; total_bytes];
-    let mut out_pos = 0;
-    let mut pos = 0;
+    let mut out_pos = 0usize;
+    let mut set = false; // first run is background
 
-    while pos < data.len() && out_pos < total_bits {
-        let byte = data[pos];
-        pos += 1;
-
-        let count = (byte >> 4) as usize;
-        let value = byte & 0x0F;
-
-        for _ in 0..count {
-            if out_pos >= total_bits { break; }
-            if value != 0 {
-                result[out_pos / 8] |= 1 << (7 - (out_pos % 8));
+    'outer: for &byte in data {
+        for nib in [((byte >> 4) & 0x0F) as usize, (byte & 0x0F) as usize] {
+            if set {
+                for _ in 0..nib {
+                    if out_pos >= total_bits {
+                        break 'outer;
+                    }
+                    result[out_pos / 8] |= 1 << (7 - (out_pos % 8));
+                    out_pos += 1;
+                }
+            } else {
+                out_pos += nib;
+                if out_pos >= total_bits {
+                    break 'outer;
+                }
             }
-            out_pos += 1;
+            set = !set;
         }
     }
 

@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use super::{allocator::{DatumAllocatorTrait, ALLOCATOR_RESETTING}, PLAYER_OPT};
+use super::{allocator::{DatumAllocatorTrait, ALLOCATOR_RESETTING}, ACTIVE_PLAYER_ID, NESTED_PLAYERS, PLAYER_OPT};
 
 pub type DatumId = usize;
 
@@ -80,7 +80,23 @@ impl Drop for DatumRef {
                 }
                 *rc -= 1;
                 if *rc == 0 {
-                    if let Some(player) = PLAYER_OPT.as_mut() {
+                    // Route the dealloc to the ACTIVE player's allocator, not
+                    // always the host. A nested `#movie` sub-player allocates and
+                    // drops its datums under its own active id; freeing them from
+                    // PLAYER_OPT (the host) left every sub datum unreclaimed —
+                    // g349's `beginSprite` alone leaked ~8000 datums/frame,
+                    // ballooning WASM memory and eventually OOM-crashing the datum
+                    // arena. (The ref_count above is decremented through the
+                    // DatumRef's own raw pointer into the owner arena, so it stays
+                    // correct regardless of which player is active.)
+                    let player_opt = if ACTIVE_PLAYER_ID == 0 {
+                        PLAYER_OPT.as_mut()
+                    } else {
+                        NESTED_PLAYERS
+                            .get_mut(ACTIVE_PLAYER_ID - 1)
+                            .and_then(|o| o.as_mut())
+                    };
+                    if let Some(player) = player_opt {
                         let bitmap_to_decref = player.allocator.on_datum_ref_dropped(*id);
                         // If the freed entry held an ephemeral Datum::BitmapRef
                         // we now own a decref. Apply it AFTER the allocator hop

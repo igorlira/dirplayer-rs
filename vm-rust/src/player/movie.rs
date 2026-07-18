@@ -48,6 +48,14 @@ pub struct Movie {
     /// so this is stored for round-trip read/write but has no side effect.
     /// Default TRUE for movies authored in Director 8+ (Scripting Dict p.890).
     pub edit_shortcuts_enabled: bool,
+    /// `the enableFlashLingo` — Director movie property (Scripting Dict p.897).
+    /// Gates whether a Flash sprite may run Lingo via Flash's `getURL()` (the
+    /// `lingo:` / `event:` schemes); default FALSE for movies of unknown origin.
+    /// We store it for round-trip read/write ONLY and DO NOT gate the actual
+    /// callback dispatch on it: real movies fire `event:`/`lingo:` without ever
+    /// setting this property, so honoring it as a hard gate would break them
+    /// (see [[flash-lingo-geturl-scheme]]). dirplayer always allows the callback.
+    pub enable_flash_lingo: bool,
     pub mouse_down: bool,
     /// Tracks the right mouse button independently of `mouse_down` — set by
     /// `right_mouse_down(x, y)` / `right_mouse_up(x, y)` from the JS host.
@@ -56,10 +64,62 @@ pub struct Movie {
     pub click_loc: (i32, i32),
     pub frame_script_instance: Option<ScriptInstanceRef>,
     pub frame_script_member: Option<CastMemberRef>,
+    /// Start frame of the channel-0 (frame-script) SPAN the cached instance was
+    /// created for. The same behavior member can appear in several consecutive
+    /// spans with DIFFERENT parameters (e.g. the Game Loop dropped on the intro
+    /// frames as `#Nonlooping` and on the gameplay frames as `#CostumeChange`);
+    /// the instance must be recreated (and its params re-applied) when the span
+    /// changes, not only when the member changes — otherwise the gameplay span
+    /// inherits the intro span's stale `pType`.
+    pub frame_script_span_start: Option<u32>,
     pub sound_device: String,
 }
 
 impl Movie {
+    /// Construct an empty movie with default state (no cast/score loaded).
+    /// Used for the player's primary movie and for nested linked-movie
+    /// (`#movie`) playback, which builds a second Movie from the linked .dcr
+    /// and drives it through the same engine.
+    pub fn empty() -> Self {
+        Movie {
+            rect: IntRect::from(0, 0, 0, 0),
+            cast_manager: CastManager::empty(),
+            score: Score::empty(),
+            current_frame: 1,
+            puppet_tempo: 0,
+            random_seed: None,
+            exit_lock: false,
+            dir_version: 0,
+            item_delimiter: ',',
+            alert_hook: None,
+            base_path: "".to_string(),
+            file_name: "".to_string(),
+            stage_color: (255, 255, 255),
+            stage_color_ref: ColorRef::PaletteIndex(255),
+            frame_rate: 30,
+            file: None,
+            update_lock: false,
+            mouse_down_script: None,
+            mouse_up_script: None,
+            key_down_script: None,
+            key_up_script: None,
+            timeout_script: None,
+            allow_custom_caching: false,
+            trace_script: false,
+            trace_log_file: String::new(),
+            debug_playback_enabled: false,
+            edit_shortcuts_enabled: true,
+            enable_flash_lingo: false,
+            mouse_down: false,
+            right_mouse_down: false,
+            click_loc: (0, 0),
+            frame_script_instance: None,
+            frame_script_member: None,
+            frame_script_span_start: None,
+            sound_device: String::new(),
+        }
+    }
+
     pub async fn load_from_file(
         &mut self,
         file: DirectorFile,
@@ -305,9 +365,18 @@ impl Movie {
             },
             "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
             "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
+            "enableFlashLingo" => Ok(datum_bool(self.enable_flash_lingo)),
             // No-op system prop: nothing to preload-abort in dirplayer.
             // Return the Director default (FALSE) so read-backs don't error.
             "preLoadEventAbort" => Ok(datum_bool(false)),
+            // soundMixMedia (Sound property, read/write) — Flash sound mixing is a
+            // Windows-only nuance we don't model. Return the Director 7+ default (TRUE).
+            "soundMixMedia" => Ok(datum_bool(true)),
+            // machineType (classic Director system property, absent from the 11.5
+            // dictionary): a Macintosh model code, or 256 on Windows/Intel. dirplayer
+            // emulates Windows Shockwave playback, so report 256 — movies branch their
+            // path separators and platform paths on this.
+            "machineType" => Ok(Datum::Int(256)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
         })
     }
@@ -333,6 +402,12 @@ impl Movie {
             },
             "editShortCutsEnabled" => {
                 self.edit_shortcuts_enabled = value.int_value()? != 0;
+                Ok(())
+            },
+            "enableFlashLingo" => {
+                // Store the flag for read-back; does NOT restrict Flash->Lingo
+                // callbacks (see field comment). Round-trip only.
+                self.enable_flash_lingo = value.int_value()? != 0;
                 Ok(())
             },
             "alertHook" => {
@@ -439,7 +514,12 @@ impl Movie {
             },
             "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
             | "timeoutLapsed" | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize" => {
+            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize"
+            // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
+            // read/write) toggles whether Flash cast members mix their audio into the
+            // Score sound channels — a Windows-only playback nuance. dirplayer uses
+            // WebAudio, so we accept the set without acting on it.
+            | "soundMixMedia" => {
                 // Anim props that are set via property_type 0x07 - accept silently
                 Ok(())
             },

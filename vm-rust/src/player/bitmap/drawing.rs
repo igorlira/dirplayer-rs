@@ -458,6 +458,53 @@ impl Bitmap {
         }
     }
 
+    /// Write a raw palette index at (x, y) for indexed (<=8-bit) bitmaps, with
+    /// NO RGB round-trip. The copyPixels fast path uses this for same-depth,
+    /// same-palette indexed copies so index i stays index i — the general
+    /// per-pixel path resolves each index to RGB and re-quantizes on write,
+    /// which collapses distinct indices that fall in the same brightness bucket
+    /// (Tetris' 1-bit `game_plane` row-shift otherwise turned every occupied
+    /// cell empty, desyncing collision from the visual board).
+    pub fn set_pixel_index(&mut self, x: i32, y: i32, idx: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        let w = self.width as usize;
+        match self.bit_depth {
+            1 => {
+                let bit_index = y * w + x;
+                let byte_index = bit_index / 8;
+                let mask = 1u8 << (7 - (bit_index % 8));
+                if idx & 1 != 0 {
+                    self.data[byte_index] |= mask;
+                } else {
+                    self.data[byte_index] &= !mask;
+                }
+            }
+            2 => {
+                let pix = y * w + x;
+                let byte_index = pix / 4;
+                let shift = 6 - (pix % 4) * 2; // MSB-first: 6,4,2,0
+                self.data[byte_index] =
+                    (self.data[byte_index] & !(0b11 << shift)) | ((idx & 0b11) << shift);
+            }
+            4 => {
+                let byte_index = (y * w + x) / 2;
+                if x % 2 == 0 {
+                    self.data[byte_index] = (self.data[byte_index] & 0x0F) | ((idx & 0x0F) << 4);
+                } else {
+                    self.data[byte_index] = (self.data[byte_index] & 0xF0) | (idx & 0x0F);
+                }
+            }
+            8 => {
+                self.data[y * w + x] = idx;
+            }
+            _ => {}
+        }
+    }
+
     /// Like `set_pixel`, but uses a pre-resolved palette table for indexed formats.
     /// For 4-bit/8-bit bitmaps, this avoids calling `resolve_color_ref` 16/256 times per pixel.
     pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &[(u8, u8, u8)]) {
@@ -545,6 +592,21 @@ impl Bitmap {
         }
 
         match self.bit_depth {
+            1 => {
+                // 1-bit images pack 8 pixels per byte, MSB first — the same bit
+                // order set_pixel writes (`mask = 1 << (7 - bit_offset)`). Return
+                // the stored bit as the palette index so a 1-bit image used as an
+                // index bitmask round-trips: fill(paletteIndex(N)) / setPixel(N)
+                // -> getPixel().paletteIndex == N. Without this arm every 1-bit
+                // pixel fell through to `get_bg_color_ref()` (PaletteIndex 0), so
+                // Tetris' game board read as fully occupied and every piece
+                // reported game-over immediately.
+                let bit_index = y * self.width as usize + x;
+                let byte_index = bit_index / 8;
+                let bit_offset = bit_index % 8;
+                let bit = (self.data[byte_index] >> (7 - bit_offset)) & 1;
+                ColorRef::PaletteIndex(bit)
+            }
             4 => {
                 let bit_index = (y * self.width as usize + x) * 4;
                 let byte_index = bit_index / 8;
@@ -2265,6 +2327,159 @@ impl Bitmap {
             matte_mask = Some(mask);
         }
 
+        // ---------------- Fast path: unscaled, unrotated, same-palette 8-bit blit ----------------
+        // The dominant per-frame cost in tile/map compositing (drawmap terrain
+        // tiling, water copyPixels) is the O(256) nearest-color search inside
+        // set_pixel_fast, run once per destination pixel. When the source and
+        // destination are both 8-bit indexed sharing the same palette, index i
+        // maps to index i, so we can copy raw index bytes row-by-row and skip
+        // both the palette resolve AND the nearest-color search entirely.
+        {
+            let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
+            let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+            let no_colorize = !(sprite_bg
+                || sprite_fg
+                || params.bg_color_explicit
+                || params.fore_color_explicit);
+            let dst_span_w = max_dst_x - min_dst_x;
+            let dst_span_h = max_dst_y - min_dst_y;
+            let unscaled =
+                dst_span_w == src_rect.width() && dst_span_h == src_rect.height();
+            if self.bit_depth == 8
+                && src.bit_depth == 8
+                && src.palette_ref == self.palette_ref
+                && !has_sprite_rotation
+                && !has_skew_flip
+                && !flip_x
+                && !flip_y
+                && unscaled
+                && alpha >= 0.999
+                && mask_image.is_none()
+                && matte_mask.is_none()
+                && no_colorize
+                && (ink == 0 || ink == 2 || ink == 36)
+            {
+                // For color-key inks, precompute which source indices resolve to
+                // the transparent background color (mirrors the per-pixel
+                // `(r,g,b) == bg_color_resolved` skip).
+                let transparent: Option<[bool; 256]> = if ink == 2 || ink == 36 {
+                    let mut t = [false; 256];
+                    if let Some(cache) = &src_palette_cache {
+                        for (i, slot) in t.iter_mut().enumerate() {
+                            if let Some(&rgb) = cache.get(i) {
+                                *slot = rgb == bg_color_resolved;
+                            }
+                        }
+                    }
+                    Some(t)
+                } else {
+                    None
+                };
+
+                let dst_w = self.width as i32;
+                let dst_h = self.height as i32;
+                let sw = src.width as i32;
+                let sh = src.height as i32;
+
+                // Horizontal clip is constant across rows (no rotation/flip).
+                let dx0 = min_dst_x.max(0);
+                let dx1 = max_dst_x.min(dst_w);
+                let src_x_start = src_rect.left + (dx0 - min_dst_x);
+                let row_len = (dx1 - dx0).max(0) as usize;
+                if row_len > 0
+                    && src_x_start >= 0
+                    && src_x_start + row_len as i32 <= sw
+                {
+                    self.matte = None;
+                    let width = self.width as usize;
+                    let s_width = src.width as usize;
+                    for dst_y in min_dst_y.max(0)..max_dst_y.min(dst_h) {
+                        let src_y = src_rect.top + (dst_y - min_dst_y);
+                        if src_y < 0 || src_y >= sh {
+                            continue;
+                        }
+                        let d_row = dst_y as usize * width + dx0 as usize;
+                        let s_row = src_y as usize * s_width + src_x_start as usize;
+                        match &transparent {
+                            None => {
+                                // Ink 0 (Copy): fully opaque raw byte copy.
+                                self.data[d_row..d_row + row_len]
+                                    .copy_from_slice(&src.data[s_row..s_row + row_len]);
+                            }
+                            Some(t) => {
+                                // Ink 2/36: copy non-transparent indices only.
+                                for i in 0..row_len {
+                                    let idx = src.data[s_row + i];
+                                    if !t[idx as usize] {
+                                        self.data[d_row + i] = idx;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        // -------- Index-preserving fast path: same-depth same-palette 1/4-bit --------
+        // A copyPixels between two indexed bitmaps of the SAME low bit depth and
+        // palette maps index i -> index i. The general per-pixel path below
+        // resolves each index to RGB and re-quantizes on write, collapsing
+        // distinct indices that share a brightness bucket (Tetris' 1-bit
+        // game_plane row-shift on a line clear turned every occupied cell empty,
+        // wiping the collision board). Copy the raw index straight across.
+        // (8-bit already handled by the byte-copy path above; 1/4-bit have a real
+        // get_pixel_color_ref index arm, 2-bit does not, so it's excluded.)
+        {
+            let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
+            let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
+            let no_colorize = !(sprite_bg
+                || sprite_fg
+                || params.bg_color_explicit
+                || params.fore_color_explicit);
+            let unscaled = (max_dst_x - min_dst_x) == src_rect.width()
+                && (max_dst_y - min_dst_y) == src_rect.height();
+            if self.bit_depth == src.bit_depth
+                && (self.bit_depth == 1 || self.bit_depth == 4)
+                && src.palette_ref == self.palette_ref
+                && !has_sprite_rotation
+                && !has_skew_flip
+                && !flip_x
+                && !flip_y
+                && unscaled
+                && alpha >= 0.999
+                && mask_image.is_none()
+                && matte_mask.is_none()
+                && no_colorize
+                && ink == 0
+            {
+                self.matte = None;
+                let dst_w = self.width as i32;
+                let dst_h = self.height as i32;
+                let sw = src.width as i32;
+                let sh = src.height as i32;
+                for dst_y in min_dst_y.max(0)..max_dst_y.min(dst_h) {
+                    let src_y = src_rect.top + (dst_y - min_dst_y);
+                    if src_y < 0 || src_y >= sh {
+                        continue;
+                    }
+                    for dst_x in min_dst_x.max(0)..max_dst_x.min(dst_w) {
+                        let src_x = src_rect.left + (dst_x - min_dst_x);
+                        if src_x < 0 || src_x >= sw {
+                            continue;
+                        }
+                        if let ColorRef::PaletteIndex(idx) =
+                            src.get_pixel_color_ref(src_x as u16, src_y as u16)
+                        {
+                            self.set_pixel_index(dst_x, dst_y, idx);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
         // ---------------- Pixel loop ----------------
         for dst_y in draw_min_y..draw_max_y {
             for dst_x in draw_min_x..draw_max_x {
@@ -3233,13 +3448,37 @@ impl Bitmap {
         top_spacing: i16,
     ) {
         let mut x = loc_h;
-        let mut y = loc_v + top_spacing as i32;
-        let line_height = font.char_height;
+        // Paige draws the baseline at lineTop + ascent. For PFR strikes, anchor
+        // the scanned cap-top at the sprite top so the baseline lands at the
+        // strike's real ascent instead of ~2px low (see pfr_strike_vertical_metrics).
+        let (cap_top, _desc_bottom) =
+            crate::player::font::pfr_strike_vertical_metrics(font, font_bitmap);
+        let mut y = match cap_top {
+            Some(t) => loc_v - t,
+            None => loc_v + top_spacing as i32,
+        };
+        // `line_spacing` is the member's fixedLineSpace. Director 11.5 defines
+        // it as the ABSOLUTE height of each line ("height in absolute pixels of
+        // each line"), NOT extra leading added on top of the glyph cell. This
+        // must agree with `measure_text()` — which sizes this very bitmap plus
+        // member.rect / member.height / charPosToLoc and uses `line_spacing` as
+        // the per-line stride when set. Adding `char_height` on top of it (the
+        // old behaviour) spaced lines ~1 glyph-cell too far apart, so text
+        // rasterized via `member.image` (e.g. Habbo's window Text Wrapper, which
+        // authors fixedLineSpace ≈ fontSize+1 and copyPixels the result into a
+        // bitmap) overflowed its measured box and rendered with huge gaps.
+        // Honour it as the absolute stride when set; fall back to the natural
+        // glyph cell only when unset (0).
+        let line_step = if line_spacing > 0 {
+            line_spacing as i32
+        } else {
+            font.char_height as i32
+        };
 
         for char_num in text.chars() {
             if char_num == '\r' || char_num == '\n' {
                 x = loc_h;
-                y += line_height as i32 + line_spacing as i32;
+                y += line_step;
                 continue;
             }
 
@@ -3274,12 +3513,25 @@ impl Bitmap {
         line_spacing: u16,
         top_spacing: i16,
     ) -> i32 {
-        let line_height = font.char_height as i32 + line_spacing as i32;
+        // fixedLineSpace is the absolute per-line height when set (see the note
+        // in `draw_text`); fall back to the natural glyph cell when unset.
+        let line_height = if line_spacing > 0 {
+            line_spacing as i32
+        } else {
+            font.char_height as i32
+        };
 
         // Break text into wrapped lines
         let lines = Self::wrap_text_lines(text, font, max_width);
 
-        let mut y = loc_v + top_spacing as i32;
+        // Paige baseline = lineTop + ascent; anchor the strike cap-top at the
+        // sprite top (see pfr_strike_vertical_metrics) so PFR text isn't ~2px low.
+        let (cap_top, _desc_bottom) =
+            crate::player::font::pfr_strike_vertical_metrics(font, font_bitmap);
+        let mut y = match cap_top {
+            Some(t) => loc_v - t,
+            None => loc_v + top_spacing as i32,
+        };
         for line in &lines {
             // Calculate x based on alignment
             let line_w: i32 = line.chars()

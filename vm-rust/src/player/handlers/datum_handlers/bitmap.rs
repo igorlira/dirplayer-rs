@@ -489,7 +489,7 @@ impl BitmapDatumHandlers {
 
             // Handle optional color argument before the prop list
             // draw(x1, y1, x2, y2, [color,] propList)
-            let explicit_color = if arg_pos + 1 < args.len() {
+            let mut explicit_color = if arg_pos + 1 < args.len() {
                 let maybe_color = player.get_datum(&args[arg_pos]);
                 if matches!(maybe_color, Datum::ColorRef(_)) {
                     let c = maybe_color.to_color_ref().ok();
@@ -502,7 +502,31 @@ impl BitmapDatumHandlers {
                 None
             };
 
-            let draw_map = player.get_datum(&args[arg_pos]).to_map()?;
+            // The final `colorObjOrParamList` argument is EITHER a plain color
+            // object OR a parameter list ([#shapeType, #lineSize, #color, ...]).
+            // (11.5 Scripting Dictionary: draw(rect, colorObjOrParamList) — "A
+            // color object or parameter list"; the default #shapeType is #line.)
+            // When it is a bare color there is no list, so draw a 1-pixel #line
+            // in that color and let every prop lookup below fall through to its
+            // default via an empty map. Tetris' make_table draws grid lines with
+            // `the_image.draw(rect, rgb(255,255,255))`, which previously errored
+            // ("Cannot convert datum to map") trying to to_map() the color.
+            let empty_map: std::collections::VecDeque<(DatumRef, DatumRef)> =
+                std::collections::VecDeque::new();
+            let draw_map: &std::collections::VecDeque<(DatumRef, DatumRef)> =
+                if arg_pos >= args.len() {
+                    &empty_map
+                } else {
+                    let last_arg = player.get_datum(&args[arg_pos]);
+                    if matches!(last_arg, Datum::ColorRef(_)) {
+                        if explicit_color.is_none() {
+                            explicit_color = last_arg.to_color_ref().ok();
+                        }
+                        &empty_map
+                    } else {
+                        last_arg.to_map()?
+                    }
+                };
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
 
             let color_ref = if let Some(c) = explicit_color {
@@ -523,12 +547,22 @@ impl BitmapDatumHandlers {
                 bitmap.original_bit_depth,
             );
 
-            let shape_type = PropListUtils::get_by_concrete_key(
+            // Director 11.5 Scripting Dictionary, draw() image method: the
+            // `#shapeType` property "is a symbol value of #oval, #rect,
+            // #roundRect, or #line. The default is #line." When the param list
+            // omits #shapeType, fall back to #line rather than treating the
+            // VOID lookup result as a literal "VOID" shape name.
+            let shape_type_d = PropListUtils::get_by_concrete_key(
                 &draw_map,
                 &Datum::Symbol("shapeType".to_owned()),
                 &player.allocator,
             )?;
-            let shape_type = player.get_datum(&shape_type).string_value()?;
+            let shape_type_d = player.get_datum(&shape_type_d);
+            let shape_type = if shape_type_d.is_void() {
+                "line".to_string()
+            } else {
+                shape_type_d.string_value()?
+            };
 
             let blend = PropListUtils::get_by_concrete_key(
                 &draw_map,
@@ -590,30 +624,6 @@ impl BitmapDatumHandlers {
                     // For #line, (x1,y1) and (x2,y2) are the line endpoints
                     // (rather than a bounding rect like the other shapes).
                     bitmap.draw_line_thick(x1, y1, x2, y2, color, &palettes, alpha, thickness);
-                }
-                "oval" => {
-                    bitmap.stroke_ellipse(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                        &palettes,
-                        blend as f32 / 100.0,
-                        thickness,
-                    );
-                }
-                "line" => {
-                    bitmap.draw_line_thick(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                        &palettes,
-                        blend as f32 / 100.0,
-                        thickness,
-                    );
                 }
                 _ => {
                     return Err(ScriptError::new(format!(
@@ -694,77 +704,115 @@ impl BitmapDatumHandlers {
     pub fn fill(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let bitmap = player.get_datum(datum);
-            let (rect_i32, color_ref, shape) = if args.len() == 2 {
-                let (rect_vals, _flags) = player.get_datum(&args[0]).to_rect_inline()?;
-                let params = player.get_datum(&args[1]);
-                let (color, shape) = match params {
-                    Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
-                    Datum::PropList(prop_list, ..) => {
-                        let color_ref = PropListUtils::get_by_concrete_key(
-                            &prop_list,
-                            &Datum::Symbol("color".to_string()),
-                            &player.allocator,
-                        )?;
-                        let shape_ref = PropListUtils::get_by_concrete_key(
-                            &prop_list,
-                            &Datum::Symbol("shapeType".to_string()),
-                            &player.allocator,
-                        )?;
-                        let shape_datum = player.get_datum(&shape_ref);
-                        let shape = match shape_datum {
-                            Datum::Symbol(s) => s.clone(),
-                            Datum::Void => "rect".to_string(),
-                            _ => {
-                                return Err(ScriptError::new(
-                                    "Invalid shapeType in fill prop list".to_string(),
-                                ))
-                            }
-                        };
-                        let color_ref = player.get_datum(&color_ref).to_color_ref()?;
-                        (color_ref.clone(), shape)
-                    }
-                    _ => {
-                        return Err(ScriptError::new(
-                            "Invalid parameter for fill".to_string(),
-                        ))
-                    }
-                };
-                
-                let x1 = rect_vals[0] as i32;
-                let y1 = rect_vals[1] as i32;
-                let x2 = rect_vals[2] as i32;
-                let y2 = rect_vals[3] as i32;
+            if args.is_empty() {
+                return Err(ScriptError::new("fill requires arguments".to_string()));
+            }
 
-                ((x1, y1, x2, y2), color, shape)
-            } else if args.len() == 5 {
-                let x = player.get_datum(&args[0]).int_value()?;
-                let y = player.get_datum(&args[1]).int_value()?;
-                let width = player.get_datum(&args[2]).int_value()?;
-                let height = player.get_datum(&args[3]).int_value()?;
-                let params = player.get_datum(&args[4]);
-                let color = match params {
-                    Datum::ColorRef(color_ref) => color_ref.clone(),
-                    Datum::PropList(prop_list, ..) => {
-                        let color_ref = PropListUtils::get_by_concrete_key(
-                            &prop_list,
-                            &Datum::Symbol("color".to_string()),
-                            &player.allocator,
-                        )?;
-                        player.get_datum(&color_ref).to_color_ref()?.clone()
-                    }
-                    Datum::Int(i) => ColorRef::PaletteIndex(*i as u8),
-                    _ => {
+            // Parse the region, mirroring draw(): coordinates (left,top,right,
+            // bottom), two points, or a rect. (11.5 Scripting Dictionary:
+            // fill(left,top,right,bottom, ...) / fill(point,point, ...) /
+            // fill(rect, ...).)
+            let first = player.get_datum(&args[0]);
+            let mut arg_pos = 1;
+            let (x1, y1, x2, y2) = match first {
+                Datum::Int(x1) => {
+                    if args.len() < 5 {
                         return Err(ScriptError::new(
-                            "Invalid color parameter for fill".to_string(),
-                        ))
+                            "fill(left, top, right, bottom, ...) requires at least 5 arguments"
+                                .to_string(),
+                        ));
                     }
-                };
-                ((x, y, width, height), color, "rect".to_string())
-            } else {
+                    let y1 = player.get_datum(&args[1]).int_value()?;
+                    let x2 = player.get_datum(&args[2]).int_value()?;
+                    let y2 = player.get_datum(&args[3]).int_value()?;
+                    arg_pos = 4;
+                    (*x1, y1, x2, y2)
+                }
+                Datum::Point(p1, _flags) => {
+                    let x1 = p1[0] as i32;
+                    let y1 = p1[1] as i32;
+                    let (p2, _flags) = player.get_datum(&args[1]).to_point_inline()?;
+                    arg_pos = 2;
+                    (x1, y1, p2[0] as i32, p2[1] as i32)
+                }
+                Datum::Rect(r, _flags) => {
+                    (r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32)
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "First argument to fill must be coordinates, a point, or a rect"
+                            .to_string(),
+                    ))
+                }
+            };
+
+            // The final `colorObjOrParamList` argument is EITHER a plain color
+            // OR a parameter list. Director also accepts an explicit color
+            // BEFORE the list (`fill(region, color, [#shapeType: ...])`, as
+            // Tetris' name-input table does) — peel it off first when something
+            // follows it.
+            let mut explicit_color: Option<ColorRef> = None;
+            if arg_pos + 1 < args.len() {
+                let maybe_color = player.get_datum(&args[arg_pos]);
+                match maybe_color {
+                    Datum::ColorRef(_) => {
+                        explicit_color = maybe_color.to_color_ref().ok().cloned();
+                        arg_pos += 1;
+                    }
+                    Datum::Int(i) => {
+                        explicit_color = Some(ColorRef::PaletteIndex(*i as u8));
+                        arg_pos += 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            if arg_pos >= args.len() {
                 return Err(ScriptError::new(
                     "Invalid number of arguments for fill".to_string(),
                 ));
+            }
+
+            let params = player.get_datum(&args[arg_pos]);
+            let (color_ref, shape) = match params {
+                Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
+                Datum::Int(i) => (ColorRef::PaletteIndex(*i as u8), "rect".to_string()),
+                Datum::PropList(prop_list, ..) => {
+                    let shape_ref = PropListUtils::get_by_concrete_key(
+                        &prop_list,
+                        &Datum::Symbol("shapeType".to_string()),
+                        &player.allocator,
+                    )?;
+                    let shape = match player.get_datum(&shape_ref) {
+                        Datum::Symbol(s) => s.clone(),
+                        Datum::Void => "rect".to_string(),
+                        _ => {
+                            return Err(ScriptError::new(
+                                "Invalid shapeType in fill prop list".to_string(),
+                            ))
+                        }
+                    };
+                    // Color comes from the explicit leading arg if present,
+                    // otherwise from the list's #color entry.
+                    let color_ref = if let Some(c) = explicit_color.clone() {
+                        c
+                    } else {
+                        let cr = PropListUtils::get_by_concrete_key(
+                            &prop_list,
+                            &Datum::Symbol("color".to_string()),
+                            &player.allocator,
+                        )?;
+                        player.get_datum(&cr).to_color_ref()?.clone()
+                    };
+                    (color_ref, shape)
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "Invalid parameter for fill".to_string(),
+                    ))
+                }
             };
+            let rect_i32 = (x1, y1, x2, y2);
             let bitmap_ref = match bitmap {
                 Datum::BitmapRef(bitmap) => Ok(bitmap),
                 _ => Err(ScriptError::new("Cannot fill non-bitmap".to_string())),

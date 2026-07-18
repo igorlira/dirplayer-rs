@@ -24,7 +24,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::get_concrete_sprite_rect, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::{get_concrete_sprite_rect, get_sprite_rect_in_context}, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -73,8 +73,10 @@ extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
     fn ruffle_call_frame(sprite_num: i32, frame: i32);
 
+    /// Classify what's under a sprite-local point: 0 = #background,
+    /// 1 = #normal, 2 = #button, 3 = #editText (Director Flash hitTest values).
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
@@ -349,6 +351,23 @@ impl BuiltInHandlerManager {
     fn set_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let list_ref = &args[0];
+            // `setAt` on a PROPERTY list accepts a property KEY (string/symbol),
+            // not only an integer position — Director's Hey-Arnold gObstacles does
+            // both: `setAt(gPersonList, dTargetPerson, "walking")` (int position)
+            // and `setAt(gPersonList, pShape, "free")` (pShape = "gerald", a key).
+            // Route a non-numeric key to the property setter; int_value() would
+            // coerce "gerald" to 0 → "Index 0 out of bounds".
+            let key_is_name = matches!(
+                player.get_datum(&args[1]),
+                Datum::String(_) | Datum::Symbol(_)
+            );
+            let is_prop_list = matches!(player.get_datum(list_ref), Datum::PropList(..));
+            if is_prop_list && key_is_name {
+                crate::player::handlers::datum_handlers::prop_list::PropListUtils::set_at(
+                    player, list_ref, &args[1], &args[2], "",
+                )?;
+                return Ok(());
+            }
             let position = player.get_datum(&args[1]).int_value()?;
             let new_value = args[2].clone();
             let is_zero_based = matches!(player.get_datum(list_ref), Datum::List(crate::director::lingo::datum::DatumType::XmlChildNodes, ..));
@@ -364,7 +383,22 @@ impl BuiltInHandlerManager {
             
             // Validate the new_value type BEFORE taking mutable borrow
             let new_value_datum = player.get_datum(&new_value).clone();
-            
+
+            // Director 11.5 Scripting Dictionary (setAt): when the position is
+            // past the end of a LINEAR list, Director grows the list, filling
+            // the intervening "blank" entries with 0. Pre-allocate that fill
+            // here — before the &mut borrow below, since alloc needs its own
+            // borrow — but only when growth is actually required. (Property
+            // lists intentionally error instead; see the PropList arm.)
+            let list_grow_fill = match player.get_datum(list_ref) {
+                Datum::List(_, list, ..)
+                    if (is_zero_based || position >= 1) && index >= list.len() =>
+                {
+                    Some(player.alloc_datum(Datum::Int(0)))
+                }
+                _ => None,
+            };
+
             // Now take the mutable borrow
             let list_datum = player.get_datum_mut(list_ref);
             match list_datum {
@@ -397,20 +431,23 @@ impl BuiltInHandlerManager {
                     Ok(())
                 }
                 Datum::List(_, list, ..) => {
-                    if index < list.len() {
+                    if !is_zero_based && position < 1 {
+                        // Director tolerates setAt at position <= 0 on a linear
+                        // list as a no-op (mirrors ListDatumHandlers::set_at);
+                        // guarding here also avoids the usize underflow of
+                        // `index` below turning a grow into a huge allocation.
+                        Ok(())
+                    } else if index < list.len() {
                         list[index] = new_value;
-                        
-                        debug!(
-                            "setAt complete: list is now {}", 
-                            format_concrete_datum(
-                                &Datum::List(DatumType::List, list.clone(), false),
-                                player
-                            )
-                        );
-                        
                         Ok(())
                     } else {
-                        Err(ScriptError::new(format!("Index {} out of bounds", position)))
+                        // Grow to `position`, padding the blank entries with 0.
+                        let fill = list_grow_fill.clone().unwrap_or(DatumRef::Void);
+                        while list.len() < index {
+                            list.push_back(fill.clone());
+                        }
+                        list.push_back(new_value);
+                        Ok(())
                     }
                 }
                 Datum::PropList(prop_list, ..) => {
@@ -542,11 +579,34 @@ impl BuiltInHandlerManager {
 
     fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            // The Director 11.5 Scripting Dictionary documents only the
+            // single-arg form random(n) → a random integer in 1..n. Many
+            // shipped Shockwave games also rely on an undocumented two-arg
+            // form random(min, max) → a random integer in [min, max] inclusive
+            // (bogey_nights uses e.g. `random(-6, -3)` for a splash's launch
+            // velocity and `random(40, 120)` for spawn ranges — with no custom
+            // `on random` handler). The spec is silent on the two-arg form
+            // rather than forbidding it, so we support both. Inferred from the
+            // calling movie, not the 11.5 dictionary.
+            if args.len() >= 2 {
+                let a = player.get_datum(&args[0]).int_value()?;
+                let b = player.get_datum(&args[1]).int_value()?;
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let span = hi - lo + 1; // inclusive range size, always >= 1
+                // next_random_int(n) returns 1..n from the seeded sequence;
+                // rebase it into [lo, hi] so deterministic replay still holds.
+                let value = match player.movie.next_random_int(span) {
+                    Some(v) => lo + (v - 1),
+                    None => player.rng.random_range(lo..=hi),
+                };
+                return Ok(player.alloc_datum(Datum::Int(value)));
+            }
+
             let max = player.get_datum(&args[0]).int_value()?;
             if max <= 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
-            
+
             // Director's random(n) returns a value from 1 to n (inclusive)
             let random_int = match player.movie.next_random_int(max) {
                 Some(value) => value,
@@ -554,8 +614,21 @@ impl BuiltInHandlerManager {
                     player.rng.random_range(1..=max)
                 }
             };
-            
+
             Ok(player.alloc_datum(Datum::Int(random_int)))
+        })
+    }
+
+    /// `randomVector()` (Director 11.5 dictionary): top-level function returning a
+    /// unit vector — a uniformly random point on the surface of the unit sphere,
+    /// guaranteed length 1. No parameters. Uses the cylinder/Archimedes method
+    /// (z uniform in [-1,1], azimuth uniform in [0, 2pi)) which is exactly uniform.
+    fn random_vector(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let z: f64 = player.rng.random_range(-1.0..1.0);
+            let phi: f64 = player.rng.random_range(0.0..std::f64::consts::TAU);
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            Ok(player.alloc_datum(Datum::Vector([r * phi.cos(), r * phi.sin(), z])))
         })
     }
 
@@ -743,7 +816,7 @@ impl BuiltInHandlerManager {
             player.net_manager.preload_net_thing(file_or_url.clone())
         });
         {
-            let player = unsafe { crate::player::PLAYER_OPT.as_mut().unwrap() };
+            let player = unsafe { crate::player::player_mut() };
             if !player.net_manager.is_task_done(Some(task_id)) {
                 player.net_manager.await_task(task_id).await;
             }
@@ -836,7 +909,16 @@ impl BuiltInHandlerManager {
                     b.info.bit_depth = 32;
                     b.info.pitch = w.saturating_mul(4);
                     b.info.trim_white_space = trim_white_space;
+                    // Director centers a bitmap member's regPoint on its image
+                    // when content is (re)imported — the same rule the
+                    // `member.image = ...` setter applies. Without this, a
+                    // `new(#bitmap)` member filled via importFileInto keeps its
+                    // (0,0) regPoint, so its sprite renders offset by half the
+                    // image. (Tetris imports bgpicture.jpg into member 18 and its
+                    // full-stage sprite drew shifted down-right by ~180x200.)
+                    b.reg_point = ((w as i32 / 2) as i16, (h as i32 / 2) as i16);
                 }
+                member.reg_point = (w as i32 / 2, h as i32 / 2);
             }
             player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
             JsApi::dispatch_cast_member_changed(member_ref.clone());
@@ -870,6 +952,10 @@ impl BuiltInHandlerManager {
             "do" => true,
             "updateStage" => true,
             "go" => true,
+            // `play movie X` / `play frame X of movie Y` compile to play(frame, movie)
+            // and must load a movie like `go` (async). The 1-arg Flash form is handled
+            // synchronously inside the async arm.
+            "play" => true,
             "nothing" => true,
             // Old-style Lingo lets `importFileInto member, url, props` be
             // called as a global verb; route it to the same async impl as
@@ -894,6 +980,65 @@ impl BuiltInHandlerManager {
             "do" => Self::do_command(args).await,
             "updateStage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
+            // The global `play` command. `play movie X` / `play frame X of movie Y`
+            // compile to play(frame, movie) — the SAME arg shape as `go`, so route the
+            // 2-arg form to the movie-load path. `play movie the movieName` (the current
+            // movie) reloads it = restart (frog01's game-over "hit enter to restart").
+            // The 1-arg form is the Ruffle/Flash sprite play (sprite.play() global form).
+            "play" => {
+                if args.len() >= 2 {
+                    // `play movie X`. If X is the CURRENT movie → in-place restart
+                    // (the net loader often can't re-fetch the movie by name once
+                    // it's loaded; frog01's "hit enter to restart" does exactly this).
+                    // Otherwise load X like `go frame N of movie X`.
+                    let restart = reserve_player_mut(|player| {
+                        let name = player.get_datum(&args[1]).string_value().unwrap_or_default();
+                        fn base(s: &str) -> String {
+                            s.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(s)
+                                .split('.').next().unwrap_or(s).to_ascii_lowercase()
+                        }
+                        let cur = player.movie.file_name.clone();
+                        let has_bytes = player.movie_reload_data.is_some();
+                        // Restart when the target IS the current movie. `the movieName` /
+                        // file_name are frequently EMPTY here (the loader didn't set a
+                        // usable filename), so treat an empty name or empty current file as
+                        // "the current movie" and restart from the retained bytes. Only a
+                        // clearly-different *named* movie (both names present, not matching)
+                        // falls through to `go`.
+                        let m = has_bytes
+                            && (name.is_empty() || cur.is_empty() || base(&name) == base(&cur));
+                        if m { player.pending_restart = true; }
+                        m
+                    });
+                    if restart {
+                        Ok(DatumRef::Void)
+                    } else {
+                        MovieHandlers::go(args).await
+                    }
+                } else {
+                    if !args.is_empty() {
+                        if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                            // play(sprite) overrides a prior `sprite.frame = N`
+                            // hold — clear the asserted frame so a freshly
+                            // (re)created instance PLAYS from the current frame
+                            // instead of pinning+stopping at the held one. This
+                            // mirrors the `sprite(x).play()` method arm
+                            // (datum_handlers/sprite.rs). bogey_nights' #pickit
+                            // does `frame = 1; member = "straw"; play(sprite)`,
+                            // and the member swap recreates the instance on the
+                            // next frame — without clearing here, straw loads
+                            // pinned+stopped at frame 1 (assertedFrame=1) and
+                            // never animates or advances (the grab machine then
+                            // reads a frozen frame and stalls into #retreat).
+                            reserve_player_mut(|player| {
+                                player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                            });
+                            ruffle_play(sn);
+                        }
+                    }
+                    Ok(DatumRef::Void)
+                }
+            }
             "nothing" => MovieHandlers::nothing_async(args).await,
             "importFileInto" => Self::import_file_into(args).await,
             _ => {
@@ -909,6 +1054,7 @@ impl BuiltInHandlerManager {
             "findempty" => CastHandlers::find_empty(args),
             "preloadnetthing" => NetHandlers::preload_net_thing(args),
             "netdone" => NetHandlers::net_done(args),
+            "netabort" => NetHandlers::net_abort(args),
             "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep"
             // Cast/movie preload + unload commands: dirplayer loads everything
             // synchronously up front, so there is nothing to (un)cache. Accept
@@ -949,6 +1095,7 @@ impl BuiltInHandlerManager {
             "put" => Self::put(args),
             "inspect" => Self::inspect(args),
             "random" => Self::random(args),
+            "randomvector" => Self::random_vector(args),
             "bitand" => Self::bit_and(args),
             "bitor" => Self::bit_or(args),
             "bitnot" => Self::bit_not(args),
@@ -1012,6 +1159,14 @@ impl BuiltInHandlerManager {
             "play" => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        // play() is resume-semantic: it OVERRIDES a prior
+                        // `sprite.frame = N` hold, so clear the sprite's asserted
+                        // frame — otherwise a fresh instance would be pinned
+                        // (stopped) at N instead of playing (StoryScramble's
+                        // grow-bubble does `frame = N; play()` and must animate).
+                        reserve_player_mut(|player| {
+                            player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                        });
                         ruffle_play(sn);
                     }
                 }
@@ -1021,6 +1176,18 @@ impl BuiltInHandlerManager {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
                         ruffle_rewind(sn);
+                    }
+                }
+                Ok(DatumRef::Void)
+            }
+            // Director 11.5 `hold()` — global form `hold(sprite N)`. Maps to the
+            // same root-timeline stop as `stop()` (spec: stops the Flash sprite,
+            // audio would continue — we don't split audio). See the sprite-method
+            // `hold` arm in datum_handlers/sprite.rs.
+            "hold" => {
+                if args.len() >= 1 {
+                    if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
+                        ruffle_stop(sn);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1035,6 +1202,7 @@ impl BuiltInHandlerManager {
             "rect" => TypeHandlers::rect(args),
             "getstreamstatus" => NetHandlers::get_stream_status(args),
             "neterror" => NetHandlers::net_error(args),
+            "netstatus" => NetHandlers::net_status(args),
             "nettextresult" => NetHandlers::net_text_result(args),
             "postnettext" => NetHandlers::post_net_text(args),
             "rgb" => TypeHandlers::rgb(args),
@@ -1084,13 +1252,18 @@ impl BuiltInHandlerManager {
             "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
             "mousedown" => {
                 reserve_player_mut(|player| {
+                    player.input_polled = true;
                     Ok(player.alloc_datum(datum_bool(player.movie.mouse_down)))
                 })
             }
             "rightmousedown" => {
-                // We don't track right mouse state separately yet — return FALSE
+                // Right button IS tracked (right_mouse_down/right_mouse_up JS exports set
+                // movie.right_mouse_down; the `the rightMouseDown` property reads it too).
+                // The function form was stubbed to FALSE, so polling movies (Rasterwerks
+                // C_Input.ReadMouse → KEY_ALTFIRE) never saw right-click → the sniper scope
+                // never engaged. Mirror the `mousedown` function above.
                 reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(datum_bool(false)))
+                    Ok(player.alloc_datum(datum_bool(player.movie.right_mouse_down)))
                 })
             }
             "getrendererservices" => {
@@ -1142,14 +1315,71 @@ impl BuiltInHandlerManager {
                 })
             }
             "getvariable" => {
-                // Flash (SWF) member interop — getVariable(sprite, path)
+                // Flash (SWF) member interop — getVariable(sprite, path [, asObjectFlag]).
+                //
+                // The optional 3rd arg == 0 is Director's "return the value as a
+                // Flash object handle" flag (e.g. getVariable(sprite N, "_level0", 0)
+                // grabs the SWF's _level0 timeline object). Otherwise a scalar
+                // string is returned.
+                //
+                // Resolve the sprite NUMBER directly (not via resolve_flash_member,
+                // which returns None when sprite.member isn't committed to the
+                // channel yet — a beginSprite can run before the Flash member is
+                // assigned). For the object form we then ALWAYS return a
+                // sprite-bound FlashObjectRef, never VOID: a VOID handle stored in
+                // a global (gDemoFlash) crashes the later gDemoFlash.play(). The
+                // binding also makes that deferred call dispatch to the right
+                // sprite even though the member wasn't resolvable at capture time.
                 if args.len() >= 2 {
-                    let member_ref = Self::resolve_flash_member(&args[0])?;
+                    let sn_opt: Option<i16> = reserve_player_ref(|player| {
+                        Ok(match player.get_datum(&args[0]) {
+                            Datum::SpriteRef(n) => Some(*n),
+                            Datum::Int(n) => Some(*n as i16),
+                            _ => None,
+                        })
+                    })?;
                     let path = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Some((sn, _cl, _cm)) = member_ref {
-                        match ruffle_get_variable(sn, &path) {
+                    let return_as_object: bool = if args.len() >= 3 {
+                        reserve_player_ref(|player| {
+                            Ok(player.get_datum(&args[2]).int_value().unwrap_or(1) == 0)
+                        })?
+                    } else {
+                        false
+                    };
+                    if let Some(sn) = sn_opt {
+                        let (cl, cm): (i32, i32) = reserve_player_ref(|player| {
+                            Ok(player
+                                .movie
+                                .score
+                                .get_sprite(sn)
+                                .and_then(|s| s.member.as_ref())
+                                .map(|m| (m.cast_lib as i32, m.cast_member as i32))
+                                .unwrap_or((0, 0)))
+                        })?;
+                        // Member-swap guard: when the score just swapped this
+                        // sprite to a NEW Flash member, the PREVIOUS member's
+                        // Ruffle instance can still be resident until the new one
+                        // loads. Reading the old member's variables is wrong —
+                        // BioBoxing's menu frame swaps sprite 1 loading.swf ->
+                        // start.swf, and reading loading.swf's stale `/:cont="1"`
+                        // (instead of start.swf's "00") skips the menu. If the
+                        // sprite's CURRENT (cl,cm) isn't in `flash_sprite_loaded`,
+                        // treat the VALUE read as not-ready (VOID) so the frame's
+                        // `if cont = 1 ... else go(the frame)` loop holds until the
+                        // new member loads. (Object form below still returns a
+                        // sprite-bound handle.) Safe for Storyscramble in-place
+                        // same-number reloads: its `invalidate_flash_for_cast_lib`
+                        // already pulls the entry from this set.
+                        let member_ready = (cl == 0 && cm == 0)
+                            || reserve_player_ref(|player| {
+                                Ok(player.flash_sprite_loaded.contains(&(sn, cl, cm)))
+                            })?;
+                        if !return_as_object && !member_ready {
+                            return Ok(DatumRef::Void);
+                        }
+                        match ruffle_get_variable(sn as i32, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
                                     return reserve_player_mut(|player| {
@@ -1158,6 +1388,14 @@ impl BuiltInHandlerManager {
                                 }
                             }
                             Err(e) => warn!("getVariable error: {:?}", e),
+                        }
+                        if return_as_object {
+                            return reserve_player_mut(|player| {
+                                use crate::director::lingo::datum::FlashObjectRef;
+                                Ok(player.alloc_datum(Datum::FlashObjectRef(
+                                    FlashObjectRef::from_path_with_sprite(&path, cl, cm, sn as i32),
+                                )))
+                            });
                         }
                     }
                 }
@@ -1251,6 +1489,8 @@ impl BuiltInHandlerManager {
             "hittest" => {
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
+                    // Director stage coords; rebase to sprite-local for the
+                    // classifier by subtracting the sprite's top-left.
                     let x = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).int_value()
                     })?;
@@ -1258,9 +1498,20 @@ impl BuiltInHandlerManager {
                         player.get_datum(&args[2]).int_value()
                     })?;
                     if let Some((sn, _cl, _cm)) = member_ref {
-                        let result = ruffle_hit_test(sn, x as f64, y as f64);
+                        let rect = reserve_player_ref(|player| {
+                            get_sprite_rect_in_context(player, sn as i16)
+                        });
+                        let lx = (x - rect.0 as i32) as f64;
+                        let ly = (y - rect.1 as i32) as f64;
+                        // 0 = #background, 1 = #normal, 2 = #button, 3 = #editText.
+                        let symbol = match ruffle_hit_test(sn, lx, ly) {
+                            2 => "button",
+                            3 => "editText",
+                            1 => "normal",
+                            _ => "background",
+                        };
                         return reserve_player_mut(|player| {
-                            Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+                            Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
                         });
                     }
                 }
@@ -1331,6 +1582,15 @@ impl BuiltInHandlerManager {
                     Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
                     Datum::PropList(..) => PropListDatumHandlers::find_pos(list, &args),
                     _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
+                }
+            }),
+            "findposnear" => reserve_player_mut(|player| {
+                let list = &args[0];
+                let args = &args[1..].to_vec();
+                match player.get_datum(list) {
+                    Datum::List(..) => ListDatumHandlers::find_pos_near(list, &args),
+                    Datum::PropList(..) => PropListDatumHandlers::find_pos_near(list, &args),
+                    _ => Err(ScriptError::new("Cannot findPosNear on non-list".to_string())),
                 }
             }),
             "setprop" => {
@@ -1437,6 +1697,21 @@ impl BuiltInHandlerManager {
             "color" => TypeHandlers::color(args),
             "date" => TypeHandlers::date(args),
             "keypressed" => Self::key_pressed(args),
+            // Legacy function-call forms of the modifier-key state properties (Director
+            // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /
+            // `optionDown` / `commandDown`, read-only). Movies call e.g. `shiftDown()`.
+            "shiftdown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_shift_down())))
+            }),
+            "controldown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_control_down())))
+            }),
+            "optiondown" | "altdown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_alt_down())))
+            }),
+            "commanddown" => reserve_player_mut(|player| {
+                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_command_down())))
+            }),
             "showglobals" => Self::show_globals(),
             "tellstreamstatus" => Self::tell_stream_status(args),
             "frame" => {
@@ -1517,8 +1792,38 @@ impl BuiltInHandlerManager {
                 Ok(DatumRef::Void)
             }
             "preload" => {
-                log::warn!("preload is not implemented");
-                Ok(DatumRef::Void)
+                // All cast data is resident in memory (WASM) — there's nothing to
+                // stream in, so preload completes instantly. Per the 11.5 Scripting
+                // Dictionary, preLoad returns the number of the last frame it loaded:
+                //   0 args -> current frame .. last frame of movie -> last frame
+                //   1 arg  -> current frame .. frameN              -> frameN
+                //   2 args -> frameA .. frameB                     -> frameB
+                // A frame arg may be a number or a marker label.
+                fn resolve_frame(player: &crate::player::DirPlayer, dref: &DatumRef) -> i32 {
+                    let d = player.get_datum(dref);
+                    if let Datum::String(s) = d {
+                        if let Some(fl) = player
+                            .movie
+                            .score
+                            .frame_labels
+                            .iter()
+                            .find(|fl| fl.label.eq_ignore_ascii_case(s.as_str()))
+                        {
+                            return fl.frame_num;
+                        }
+                    }
+                    d.int_value().unwrap_or(0)
+                }
+                reserve_player_mut(|player| {
+                    let last = if args.len() >= 2 {
+                        resolve_frame(player, &args[1])
+                    } else if args.len() == 1 {
+                        resolve_frame(player, &args[0])
+                    } else {
+                        player.movie.score.frame_count.unwrap_or(1) as i32
+                    };
+                    Ok(player.alloc_datum(Datum::Int(last)))
+                })
             }
             "charpostoloc" => {
                 reserve_player_mut(|player| {
@@ -2005,6 +2310,18 @@ impl BuiltInHandlerManager {
                     }
                 })
             }
+            "locvtolinepos" | "linepostolocv" | "loctocharpos" | "charpostoloc"
+                if !args.is_empty() =>
+            {
+                // Global form `locVToLinePos(member, loc)` etc. Director exposes
+                // these text/field position helpers both as member methods and as
+                // globals whose first arg is the member. Delegate to the member's
+                // own handler (implemented in cast_member/text.rs & field.rs).
+                let rest = args[1..].to_vec();
+                crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
+                    &args[0], name, &rest,
+                )
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {
@@ -2091,6 +2408,9 @@ impl BuiltInHandlerManager {
 
     pub fn key_pressed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            // Mark this iteration as input-polling so the bytecode busy-wait
+            // yield only kicks in for `repeat while keyPressed(...)` spins.
+            player.input_polled = true;
             let arg_datum = player.get_datum(&args[0]);
 
             // An INTEGER argument is a direct key code (this is how games store

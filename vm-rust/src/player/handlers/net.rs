@@ -1,13 +1,48 @@
 use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
-    player::{reserve_player_mut, DatumRef, ScriptError},
+    player::{net_task::NetTaskState, reserve_player_mut, DatumRef, ScriptError},
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 pub struct NetHandlers {}
 
 impl NetHandlers {
+    /// `netAbort(netID)` / `netAbort(URL)` — cancel a network operation without
+    /// waiting for a result (Director 11.5: a Command, returns nothing). We can't
+    /// interrupt an in-flight fetch, but we mark the task terminated with error
+    /// 4242 ("Download stopped by netAbort") so `netDone(id)` returns TRUE and
+    /// `netError(id)` reports it — the movie stops polling. An unknown id/URL is a
+    /// no-op. Returns VOID.
+    pub fn net_abort(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (id_opt, url_opt) = if let Some(dr) = args.first() {
+                let d = player.get_datum(dr);
+                (d.int_value().ok().map(|v| v as u32), d.string_value().ok())
+            } else {
+                (None, None)
+            };
+            let task_id = id_opt.or_else(|| {
+                url_opt.and_then(|u| player.net_manager.find_task_by_url(&u))
+            });
+            if let Some(id) = task_id {
+                if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
+                    // "If the data transmission is complete, this command has no
+                    // effect." — only terminate a task that is still in progress.
+                    let in_progress =
+                        shared.task_states.get(&id).map_or(false, |s| s.result.is_none());
+                    if in_progress {
+                        shared.update_task_state(
+                            id,
+                            NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
+                        );
+                    }
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn net_done(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let task_id = if let Some(task_id_ref) = &args.get(0) {
@@ -16,8 +51,16 @@ impl NetHandlers {
             } else {
                 None
             };
-            let task_state = player.net_manager.get_task_state(task_id);
-            let is_done = task_state.is_some_and(|state| state.is_done());
+            // Director 11.5: netDone returns TRUE (the default) when the
+            // operation is finished OR was terminated by a browser error, and
+            // FALSE only while genuinely in progress. An unknown / never-started
+            // id (e.g. mixmaster's Billboard polls netDone(-1) when there is no
+            // billboard URL) is therefore "done", not "in progress" — returning
+            // FALSE there made the movie spin on the download state.
+            let is_done = match player.net_manager.get_task_state(task_id) {
+                Some(state) => state.is_done(),
+                None => true,
+            };
             Ok(player.alloc_datum(datum_bool(is_done)))
         })
     }
@@ -43,21 +86,68 @@ impl NetHandlers {
 
     pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            // Support: no args (last task), int task ID, or URL string
-            let task_id = if args.is_empty() {
-                player.net_manager.get_last_task_id()
-                    .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?
+            // Support: no args (last task), int task ID, or URL string.
+            // Resolve to Option<task_id> first so the datum borrow is released
+            // before we (mutably) alloc the result — and so an unknown URL can
+            // return a status instead of raising (Director's getStreamStatus
+            // never throws on a bad URL).
+            let mut req_url: Option<String> = None;
+            let resolved: Option<u32> = if args.is_empty() {
+                Some(
+                    player
+                        .net_manager
+                        .get_last_task_id()
+                        .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?,
+                )
             } else {
                 let arg = player.get_datum(&args[0]);
                 match arg {
-                    Datum::Int(id) => *id as u32,
+                    Datum::Int(id) => Some(*id as u32),
                     Datum::String(url) => {
+                        req_url = Some(url.clone());
                         player.net_manager.find_task_by_url(url)
-                            .ok_or_else(|| ScriptError::new(format!("Network task not found for URL: {}", url)))?
-                    },
-                    _ => return Err(ScriptError::new(
-                        "getStreamStatus requires an integer task ID or URL string".to_string()
-                    ))
+                    }
+                    _ => {
+                        return Err(ScriptError::new(
+                            "getStreamStatus requires an integer task ID or URL string".to_string(),
+                        ))
+                    }
+                }
+            };
+            let task_id = match resolved {
+                Some(id) => id,
+                None => {
+                    // Unknown URL. A `#movie`'s linked file is loaded into a
+                    // nested DirPlayer (its net task consumed), so a status poll
+                    // of its URL has no task here — report Complete so load-status
+                    // pollers proceed rather than the debugger pausing on an error.
+                    let url = req_url.unwrap_or_default();
+                    let result_map = Datum::PropList(
+                        VecDeque::from(vec![
+                            (
+                                player.alloc_datum(Datum::String("URL".to_owned())),
+                                player.alloc_datum(Datum::String(url)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("state".to_owned())),
+                                player.alloc_datum(Datum::String("Complete".to_owned())),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
+                                player.alloc_datum(Datum::Int(0)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("bytesTotal".to_owned())),
+                                player.alloc_datum(Datum::Int(0)),
+                            ),
+                            (
+                                player.alloc_datum(Datum::String("error".to_owned())),
+                                player.alloc_datum(Datum::String("OK".to_owned())),
+                            ),
+                        ]),
+                        false,
+                    );
+                    return Ok(player.alloc_datum(result_map));
                 }
             };
 
@@ -78,7 +168,16 @@ impl NetHandlers {
                 }
                 None => {
                     if task_state.bytes_loaded > 0 {
-                        ("InProgress", "", task_state.bytes_loaded as i32, task_state.bytes_total as i32)
+                        // If the server (or a CORS proxy) didn't advertise a
+                        // total, `bytes_total` is 0. Report the bytes loaded so
+                        // far as the total so callers that divide by it don't hit
+                        // a divide-by-zero and pin progress at 0% forever — DGS's
+                        // showGameLoadStats computes
+                        // `percentloaded = bytesloaded / bytestotal * 100`.
+                        // Accurate mid-load % still needs Content-Length (which
+                        // the proxy now preserves); this is the graceful floor.
+                        let total = task_state.bytes_total.max(task_state.bytes_loaded);
+                        ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
                     } else {
                         ("Connecting", "", 0i32, 0i32)
                     }
@@ -114,19 +213,48 @@ impl NetHandlers {
         })
     }
 
+    /// `netStatus msgString` — Director 11.5 Scripting Dictionary: a Command
+    /// that displays `msgString` in the status area of the browser window, and
+    /// "doesn't work in projectors". Modern browsers ignore `window.status`, so
+    /// there is no real status area to write to; we honor the documented VOID
+    /// return and treat it as a no-op (logged at debug for diagnostics — movies
+    /// like SpongeBob "JellyFishin'" call it once per download-progress tick to
+    /// surface "Download N% Complete").
+    pub fn net_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if let Some(msg_ref) = args.get(0) {
+                if let Ok(msg) = player.get_datum(msg_ref).string_value() {
+                    log::debug!("netStatus: {}", msg);
+                }
+            }
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn net_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let task_id = args
                 .get(0)
                 .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            let task_state = player.net_manager.get_task_state(task_id).ok_or_else(|| ScriptError::new("Network task not found".to_string()))?;
-            let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
-            let error = if is_ok {
-                Datum::String("OK".to_owned())
-            } else if let Some(Err(error)) = task_state.result.as_ref() {
-                Datum::Int(*error)
-            } else {
-                Datum::Int(0)
+            // Director 11.5: netError returns an empty string when no background
+            // loading operation has started for this id (or it is still in
+            // progress), "OK" on success, else an error code. An unknown id must
+            // NOT raise — mixmaster's Billboard calls netError(-1) with no
+            // billboard URL, and raising aborts the exitFrame handler, leaving
+            // the stage's black bgColor stuck (blank screen).
+            let error = match player.net_manager.get_task_state(task_id) {
+                None => Datum::String("".to_owned()),
+                Some(task_state) => {
+                    let is_ok = task_state.is_done()
+                        && task_state.result.as_ref().is_some_and(|r| r.is_ok());
+                    if is_ok {
+                        Datum::String("OK".to_owned())
+                    } else if let Some(Err(error)) = task_state.result.as_ref() {
+                        Datum::Int(*error)
+                    } else {
+                        Datum::Int(0)
+                    }
+                }
             };
             Ok(player.alloc_datum(error))
         })
@@ -137,17 +265,22 @@ impl NetHandlers {
             let task_id = args
                 .get(0)
                 .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            let task_state = player.net_manager.get_task_state(task_id).ok_or_else(|| ScriptError::new("Network task not found".to_string()))?;
-            let is_ok = task_state.is_done() && task_state.result.as_ref().unwrap().is_ok();
-            let text = if is_ok {
-                let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
-                // UTF-8 strict first (modern editors), Win-1252 fallback
-                // (legacy Director-authored external_texts_*.txt etc.).
-                // Strips a UTF-8 BOM if present. See io::encoding for why
-                // strict-then-fallback is unambiguous in practice.
-                Datum::String(crate::io::encoding::decode_text_auto(bytes))
-            } else {
-                Datum::String("".to_owned())
+            // netTextResult returns the downloaded text, or an empty string if
+            // the operation failed, is in progress, or the id is unknown (Director
+            // does not raise on a bad id).
+            let text = match player.net_manager.get_task_state(task_id) {
+                Some(task_state)
+                    if task_state.is_done()
+                        && task_state.result.as_ref().is_some_and(|r| r.is_ok()) =>
+                {
+                    let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
+                    // UTF-8 strict first (modern editors), Win-1252 fallback
+                    // (legacy Director-authored external_texts_*.txt etc.).
+                    // Strips a UTF-8 BOM if present. See io::encoding for why
+                    // strict-then-fallback is unambiguous in practice.
+                    Datum::String(crate::io::encoding::decode_text_auto(bytes))
+                }
+                _ => Datum::String("".to_owned()),
             };
             Ok(player.alloc_datum(text))
         })

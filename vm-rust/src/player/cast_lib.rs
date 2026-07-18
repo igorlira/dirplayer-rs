@@ -21,8 +21,8 @@ use super::{
         manager::BitmapManager,
     },
     cast_member::{
-        BitmapMember, CastMember, CastMemberType, FieldMember, PaletteMember, SoundMember,
-        TextMember, VectorShapeMember,
+        BitmapMember, CastMember, CastMemberType, FieldMember, FlashMember, MovieMember,
+        PaletteMember, SoundMember, TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
@@ -333,7 +333,7 @@ impl CastLib {
         }
         JsApi::dispatch_cast_member_list_changed(self.number);
         unsafe {
-            let player_mut = &mut PLAYER_OPT.as_mut().unwrap();
+            let player_mut = &mut crate::player::player_mut();
 
             player_mut.movie.cast_manager.clear_movie_script_cache();
             player_mut.movie.cast_manager.invalidate_member_name_cache();
@@ -342,11 +342,25 @@ impl CastLib {
     }
 
     pub fn insert_member(&mut self, number: u32, member: CastMember) {
-        if let CastMemberType::Script(script_member) = &member.member_type {
+        // Which lctx script should we register under this member's slot, and as
+        // what type? A `Script` cast member registers its own script. A non-Script
+        // member (Field, Text, Bitmap, Button, Shape) may carry an ATTACHED script
+        // via `member_info.header.script_id` — Director lets `script("name")` and
+        // `new(script(...))` resolve to that attached script, and a movie can store
+        // a parent script AS a Field cast member (SpongeBob "JellyFishin'" stores
+        // its "hero parent" parent script as a Field). Register it at the member
+        // slot so `get_script_for_member(number)` finds it. (Member BEHAVIOR scripts
+        // for mouse events are dispatched separately via get_behavior_script_from_lctx.)
+        let registration: Option<(u32, ScriptType)> = match &member.member_type {
+            CastMemberType::Script(s) => Some((s.script_id, s.script_type)),
+            _ => member.get_script_id().map(|sid| (sid, ScriptType::Parent)),
+        };
+
+        if let Some((reg_script_id, reg_script_type)) = registration {
             let script_def = self
                 .lctx
                 .as_ref()
-                .and_then(|lctx| lctx.scripts.get(&script_member.script_id));
+                .and_then(|lctx| lctx.scripts.get(&reg_script_id));
 
             if let Some(script_def) = script_def {
                 let mut handler_names = Vec::new();
@@ -382,7 +396,7 @@ impl CastLib {
                     member_ref: cast_member_ref(self.number as i32, number as i32),
                     name: (&member.name).to_owned(),
                     chunk: script_def.clone(),
-                    script_type: script_member.script_type,
+                    script_type: reg_script_type,
                     handlers: handler_name_map,
                     handler_names,
                     properties: RefCell::new(properties),
@@ -471,6 +485,29 @@ impl CastLib {
                     script_type: ScriptType::Movie,
                     name: String::new(),
                 }),
+            )),
+            // `new(#flash)` creates an empty Flash cast member; the script then
+            // points it at a SWF, typically by setting `.linked = TRUE` and
+            // `.pathName = "http://…/foo.swf"`, or by assigning preloaded bytes
+            // (Director 11.5 Scripting Dictionary — `new()`, `#flash` member).
+            // Neopets' DGS loader (`mainClass.showPreLoader`) uses this to host
+            // the downloaded preloader SWF. Empty until its source is assigned.
+            "flash" => Ok(CastMember::new(
+                number,
+                CastMemberType::Flash(FlashMember {
+                    data: Vec::new(),
+                    reg_point: (0, 0),
+                    flash_info: None,
+                }),
+            )),
+            // `new(#movie)` creates an empty Linked Movie member; the script
+            // links it to an external .dir/.dcr via `member.fileName = <url>`
+            // and plays it by assigning the member to a sprite (Director 11.5
+            // Scripting Dictionary "Linked Movie"). Neopets' DGS loader
+            // (`showAndStartShockwaveGame`) uses this to run the downloaded game.
+            "movie" => Ok(CastMember::new(
+                number,
+                CastMemberType::Movie(MovieMember::new()),
             )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",
@@ -597,7 +634,7 @@ pub async fn player_cast_lib_set_prop(
     prop_name: &str,
     value: Datum,
 ) -> Result<(), ScriptError> {
-    let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+    let player = unsafe { crate::player::player_mut() };
 
     let cast_manager = &mut player.movie.cast_manager;
     let cast_lib_obj = cast_manager.get_cast_mut(cast_lib as u32);
@@ -624,6 +661,13 @@ pub async fn player_cast_lib_set_prop(
                 &mut player.dir_cache,
             )
             .await;
+        // The external cast was reloaded in place — any Flash member it holds
+        // now has new SWF bytes behind the same member ref. Tear down the stale
+        // Ruffle instances so the renderer re-creates them from the new bytes
+        // (Storyscramble swaps `castLib("story").fileName` to load the next
+        // story; member 2:1's SWF changes but the tile sprites keep pointing at
+        // it). `cast_lib_obj`'s borrow ends here (NLL), freeing `player`.
+        player.invalidate_flash_for_cast_lib(cast_lib as i32);
     }
     // TODO handle preload error
     Ok(())

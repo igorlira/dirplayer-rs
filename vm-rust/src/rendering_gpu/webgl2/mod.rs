@@ -10,6 +10,7 @@ pub mod context;
 mod geometry;
 pub mod mesh3d;
 pub mod scene3d;
+pub mod xtra_scene;
 mod shaders;
 mod texture_cache;
 
@@ -106,7 +107,21 @@ pub struct WebGL2Renderer {
     stage_image_texture: Option<web_sys::WebGlTexture>,
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
+    /// Engine-agnostic external-Xtra 3D scene renderer (scene3d host API — used
+    /// by the Groove plugin and any future 3D xtra)
+    xtra_scenes: xtra_scene::XtraSceneRenderer,
     native_cursor_cache: crate::cursor::NativeCursorCache,
+    /// Off-screen framebuffer for rendering nested `#movie` sub-players via the
+    /// full WebGL2 pipeline (so they match the host's fidelity instead of the
+    /// lower-quality CPU rasterizer).
+    nested_fbo: Option<web_sys::WebGlFramebuffer>,
+    nested_fbo_texture: Option<web_sys::WebGlTexture>,
+    nested_fbo_size: (u32, u32),
+    /// Per-nested-player caches, swapped in around the sub's off-screen draw so
+    /// the host's texture/text caches (keyed by castLib:member, which collides
+    /// across players) and palette-version tracking are not corrupted or
+    /// thrashed. Keyed by nested player id.
+    nested_caches: HashMap<usize, (TextureCache, RenderedTextCache, u32)>,
 }
 
 impl WebGL2Renderer {
@@ -184,8 +199,144 @@ impl WebGL2Renderer {
             trails_size: (0, 0),
             stage_image_texture: None,
             scene3d: scene3d::Scene3dRenderer::new(),
+            xtra_scenes: xtra_scene::XtraSceneRenderer::new(),
             native_cursor_cache: None,
+            nested_fbo: None,
+            nested_fbo_texture: None,
+            nested_fbo_size: (0, 0),
+            nested_caches: HashMap::new(),
         })
+    }
+
+    /// Ensure the nested off-screen FBO exists at `(width, height)` with an RGBA
+    /// color texture attachment. Recreated when the size changes.
+    fn ensure_nested_fbo(&mut self, width: u32, height: u32) {
+        if self.nested_fbo.is_some() && self.nested_fbo_size == (width, height) {
+            return;
+        }
+        let gl = self.context.gl();
+        if let Some(fbo) = self.nested_fbo.take() {
+            gl.delete_framebuffer(Some(&fbo));
+        }
+        if let Some(tex) = self.nested_fbo_texture.take() {
+            gl.delete_texture(Some(&tex));
+        }
+        let texture = gl.create_texture();
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, texture.as_ref());
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            WebGl2RenderingContext::TEXTURE_2D,
+            0,
+            WebGl2RenderingContext::RGBA as i32,
+            width as i32,
+            height as i32,
+            0,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            None,
+        );
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        let fbo = gl.create_framebuffer();
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, fbo.as_ref());
+        gl.framebuffer_texture_2d(
+            WebGl2RenderingContext::FRAMEBUFFER,
+            WebGl2RenderingContext::COLOR_ATTACHMENT0,
+            WebGl2RenderingContext::TEXTURE_2D,
+            texture.as_ref(),
+            0,
+        );
+        gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        self.nested_fbo = fbo;
+        self.nested_fbo_texture = texture;
+        self.nested_fbo_size = (width, height);
+    }
+
+    /// Render a nested `#movie` sub-player's stage through the full WebGL2
+    /// pipeline into the off-screen FBO, then read it back into a `Bitmap` for
+    /// compositing (same path the CPU rasterizer produced, but at WebGL2
+    /// fidelity). `owner_id` scopes the sub's texture/text caches so they don't
+    /// collide with the host's (both use castLib:member keys).
+    pub fn render_player_to_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        owner_id: usize,
+        width: u32,
+        height: u32,
+    ) -> Bitmap {
+        self.ensure_nested_fbo(width, height);
+
+        // Swap in this sub-player's own caches + palette-version tracking so the
+        // shared host state (keyed by castLib:member, which overlaps) is neither
+        // returned in error nor cleared/thrashed by the alternating draws.
+        let (mut sub_tex, mut sub_text, sub_palette) = self
+            .nested_caches
+            .remove(&owner_id)
+            .unwrap_or_else(|| (TextureCache::new(), RenderedTextCache::new(), u32::MAX));
+        std::mem::swap(&mut self.texture_cache, &mut sub_tex);
+        std::mem::swap(&mut self.rendered_text_cache, &mut sub_text);
+        let saved_palette = self.last_palette_version;
+        self.last_palette_version = sub_palette;
+        let saved_size = self.size;
+        let saved_proj = self.projection_matrix;
+
+        // Point the pipeline at the off-screen FBO at the sub's stage size.
+        {
+            let gl = self.context.gl();
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, self.nested_fbo.as_ref());
+            gl.viewport(0, 0, width as i32, height as i32);
+        }
+        self.size = (width, height);
+        self.projection_matrix = Self::create_ortho_matrix(width as f32, height as f32);
+
+        self.draw_frame(player);
+
+        // Read the rendered pixels back (RGBA, bottom-up → flip to top-down).
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        {
+            let gl = self.context.gl();
+            gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, self.nested_fbo.as_ref());
+            let _ = gl.read_pixels_with_opt_u8_array(
+                0, 0, width as i32, height as i32,
+                WebGl2RenderingContext::RGBA, WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut pixels),
+            );
+        }
+        let row = (width * 4) as usize;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..height as usize {
+            let src = (height as usize - 1 - y) * row;
+            let dst = y * row;
+            flipped[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+        }
+
+        // Restore host framebuffer / viewport / projection / caches.
+        {
+            let gl = self.context.gl();
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            gl.viewport(0, 0, saved_size.0 as i32, saved_size.1 as i32);
+        }
+        self.size = saved_size;
+        self.projection_matrix = saved_proj;
+        let sub_palette = self.last_palette_version;
+        self.last_palette_version = saved_palette;
+        std::mem::swap(&mut self.texture_cache, &mut sub_tex);
+        std::mem::swap(&mut self.rendered_text_cache, &mut sub_text);
+        self.nested_caches.insert(owner_id, (sub_tex, sub_text, sub_palette));
+
+        let mut bitmap = Bitmap::new(
+            width as u16,
+            height as u16,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+        bitmap.data = flipped;
+        bitmap.use_alpha = true;
+        bitmap
     }
 
     /// Create an orthographic projection matrix (column-major for WebGL)
@@ -430,6 +581,24 @@ impl WebGL2Renderer {
     }
 
     /// Draw the current frame
+    /// True if the sprite in `channel_num` is a Shockwave3D member with
+    /// directToStage enabled. Such sprites are composited directly to the screen
+    /// on top of the 2D layer, so they are deferred past the `(the stage).image`
+    /// overlay in draw_frame to keep the live 3D visible under a HUD blit.
+    fn is_direct_to_stage_3d(&self, player: &DirPlayer, channel_num: i16) -> bool {
+        let sprite = match player.movie.score.get_sprite(channel_num) {
+            Some(s) => s,
+            None => return false,
+        };
+        let member_ref = match &sprite.member {
+            Some(m) => m.clone(),
+            None => return false,
+        };
+        player.movie.cast_manager.find_member_by_ref(&member_ref)
+            .map(|m| matches!(&m.member_type, CastMemberType::Shockwave3d(w3d) if w3d.info.direct_to_stage))
+            .unwrap_or(false)
+    }
+
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
         // Increment sprite debug frame counter
@@ -495,8 +664,24 @@ impl WebGL2Renderer {
             self.draw_trails_texture();
         }
 
-        // Render each sprite
+        // Render each sprite.
+        //
+        // directToStage Shockwave3D sprites are drawn DIRECTLY to the screen, on
+        // top of the 2D layer (Director: directToStage ignores ink/blend and
+        // composites last). When a script has drawn into `(the stage).image`
+        // (`stage_image_dirty`), draw_stage_image_overlay blits that OPAQUE
+        // full-stage bitmap over the sprite output below — which would paste a
+        // frozen snapshot over the live, animating 3D (Splat draws a lives/score
+        // HUD into the stage image, freezing the maze view). Defer such sprites
+        // until after the overlay so the live 3D shows through; the HUD (drawn
+        // into a non-overlapping region) still composites underneath.
+        let overlay_active = player.stage_image_dirty && player.stage_image.is_some();
+        let mut deferred_dts_3d: Vec<i16> = Vec::new();
         for (channel_num, _) in &sorted_channels {
+            if overlay_active && self.is_direct_to_stage_3d(player, *channel_num) {
+                deferred_dts_3d.push(*channel_num);
+                continue;
+            }
             self.render_sprite(player, *channel_num);
         }
 
@@ -554,6 +739,23 @@ impl WebGL2Renderer {
         // (see stage.rs `image` getter). Only once a script has drawn into it.
         self.draw_stage_image_overlay(player);
 
+        // Now draw the deferred directToStage 3D sprites ON TOP of the stage-image
+        // overlay (see the render loop above) so the live, animating 3D is visible
+        // even when a HUD has been blitted into `(the stage).image`.
+        for ch in &deferred_dts_3d {
+            self.render_sprite(player, *ch);
+        }
+
+        // Draw external-Xtra 3D scenes (scene3d host API) onto the stage
+        // (RenderToStage), on top of the 2D layer — like the directToStage 3D
+        // above. The Groove plugin drives these.
+        {
+            let w = player.movie.rect.width() as i32;
+            let h = player.movie.rect.height() as i32;
+            self.xtra_scenes.draw(&self.context, player, w, h);
+            self.shader_manager.clear_active();
+        }
+
         // Update native CSS cursor (no per-frame draw needed)
         self.update_native_cursor(player);
 
@@ -600,6 +802,23 @@ impl WebGL2Renderer {
     }
 
     pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+        // A nested `#movie` sub-player reads `(the stage).image` while running
+        // in the HOST GL context: framebuffer = host canvas, `self.size` = the
+        // host stage (e.g. 1190x575). Drawing `draw_frame(sub)` here would
+        // render the sub's sprites at host size onto the host framebuffer —
+        // the sub's wide scrolling background and its off-screen (x>stage-width)
+        // sprites smear across the whole host stage, unclipped. Render through
+        // the off-screen FBO at the sub's own stage size instead (same headless
+        // path as render_nested_player_stages).
+        let active = unsafe { crate::player::ACTIVE_PLAYER_ID };
+        if active != 0 {
+            let w = player.movie.rect.width().max(1) as u32;
+            let h = player.movie.rect.height().max(1) as u32;
+            let mut bmp = self.render_player_to_bitmap(player, active, w, h);
+            bmp.use_alpha = true;
+            return bmp;
+        }
+
         self.draw_frame(player);
 
         let (width, height) = self.size;
@@ -1087,6 +1306,16 @@ impl WebGL2Renderer {
         if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
             if matches!(member.member_type, CastMemberType::Flash(_)) {
                 blend = 100;
+            } else if matches!(member.member_type, CastMemberType::Shockwave3d(_)) && blend == 0 {
+                // A Shockwave3D member's sprite-level `blend` comes through as 0 when the
+                // score's D6+ "blend enabled" flag (sprite_flags & 0x10) is set over a
+                // junk-default raw byte (255 → convert_raw_blend → 0). blend=0 (fully
+                // transparent) is never intended for the main composited 3D view —
+                // Director renders these opaque (the FinalDrive / HavokCarDemo car movies
+                // came through black). Treat 0 as opaque so the scene shows. Mirrors the
+                // Flash force above (Shockwave's 2D compositor ignores sprite blend on
+                // these special composited members).
+                blend = 100;
             }
         }
 
@@ -1114,6 +1343,13 @@ impl WebGL2Renderer {
                 font_id: Option<u16>,
                 line_spacing: u16,
                 top_spacing: i16,
+                /// The member's authored top_spacing (leading), BEFORE the
+                /// scroll fold-in that produces `top_spacing` above. Director
+                /// adds top_spacing as inter-line leading, NOT before the first
+                /// line, so the PFR anchor subtracts this to land the first
+                /// baseline at the strike ascent while keeping scroll
+                /// (`top_spacing - member_top_spacing == -scroll_top`).
+                member_top_spacing: i16,
                 bottom_spacing: i16,
                 width: u32,
                 height: u32,
@@ -1216,7 +1452,17 @@ impl WebGL2Renderer {
         // to different poster frames of the same SWF simultaneously.
         {
             let dispatch_key = (channel_num, member_ref.cast_lib, member_ref.cast_member);
-            if !player.flash_sprite_loaded.contains(&dispatch_key) {
+            // Only the HOST dispatches Flash from the render path. A nested
+            // `#movie` sub-player's Flash lifecycle is owned SOLELY by its own
+            // `pre_dispatch_flash_members` (load + unload + reconcile, all in the
+            // sub's frame loop). Letting this render-path (which runs in the HOST
+            // loop during `render_nested_player_stages -> draw_frame(sub)`) also
+            // dispatch created TWO sources reading the sub's score at different
+            // playhead moments — they raced over flash_sprite_loaded and the
+            // Ruffle instance was create/destroy-thrashed, so its capture loop
+            // died before pushing a frame (sub Flash never showed).
+            let is_host = unsafe { crate::player::ACTIVE_PLAYER_ID } == 0;
+            if is_host && !player.flash_sprite_loaded.contains(&dispatch_key) {
                 if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
                         debug!(
@@ -1227,13 +1473,25 @@ impl WebGL2Renderer {
                         );
                         if crate::rendering::has_swf_signature(&flash_member.data) {
                             let data = flash_member.data.clone();
-                            let w = sprite_width.max(1) as u32;
-                            let h = sprite_height.max(1) as u32;
+                            // Size the Ruffle capture from the resolved sprite rect
+                            // (which is the member's natural size when the sprite
+                            // isn't stretched — 626x100 for leo3d's "menue"), NOT
+                            // the raw score cell (100x320). Using the cell captured
+                            // the 626x100 SWF into a wrong-aspect canvas that
+                            // resampled to a thin strip in the corrected quad.
+                            let w = sprite_rect.width().max(1) as u32;
+                            let h = sprite_rect.height().max(1) as u32;
                             let paused_at_start = flash_member
                                 .flash_info
                                 .as_ref()
                                 .map(|fi| fi.paused_at_start)
                                 .unwrap_or(false);
+                            let asserted_frame = player
+                                .movie
+                                .score
+                                .get_sprite(channel_num)
+                                .and_then(|s| s.flash_asserted_frame)
+                                .unwrap_or(-1);
                             JsApi::dispatch_flash_member_loaded(
                                 channel_num as i32,
                                 member_ref.cast_lib,
@@ -1242,6 +1500,7 @@ impl WebGL2Renderer {
                                 w,
                                 h,
                                 paused_at_start,
+                                asserted_frame,
                             );
                             player.flash_sprite_loaded.insert(dispatch_key);
                         }
@@ -1372,23 +1631,46 @@ impl WebGL2Renderer {
         // This triggers when the sprite first appears on stage during playback.
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if w3d.info.animation_enabled
-                    && !w3d.runtime_state.animation_playing
-                    && w3d.runtime_state.current_motion.is_none()
-                {
-                    if let Some(scene) = w3d.parsed_scene.as_ref() {
-                        if let Some(first_motion) = scene.motions.first() {
-                            // Detect animation type: bones (skeleton) vs keyframe (node transforms)
-                            let has_skeleton = !scene.skeletons.is_empty()
-                                && scene.skeletons.iter().any(|s| s.bones.len() > 1);
-                            let anim_type = if has_skeleton { "bones" } else { "keyframe" };
-                            debug!(
-                                "[3D] animationEnabled: auto-starting {} motion '{}' (loop={})",
-                                anim_type, first_motion.name, w3d.info.loops
-                            );
-                            w3d.runtime_state.current_motion = Some(first_motion.name.clone());
+                if w3d.info.animation_enabled {
+                    let first_motion = w3d.parsed_scene.as_ref()
+                        .and_then(|s| s.motions.first()).map(|m| m.name.clone());
+                    let loops = w3d.info.loops;
+                    if let Some(motion_name) = first_motion {
+                        // Per-MODEL auto-play: seed the first motion into EACH skinned
+                        // model's own bonesPlayer entry. The dino animates only via
+                        // auto-play (its behavior never calls play()/rootLock), so its
+                        // pause()/resume() buttons must act on the SAME per-model state
+                        // the renderer reads — otherwise they hit a bare stub whose sync
+                        // clobbered the legacy clock (pause restarted, play froze).
+                        let skinned: Vec<String> = w3d.parsed_scene.as_ref().map(|s| {
+                            s.nodes.iter()
+                                .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Model)
+                                .filter(|n| {
+                                    let key = if !n.model_resource_name.is_empty() {
+                                        n.model_resource_name.as_str()
+                                    } else { n.resource_name.as_str() };
+                                    s.skeletons.iter().any(|sk| sk.name.eq_ignore_ascii_case(key) && sk.bones.len() > 1)
+                                })
+                                .map(|n| n.name.clone())
+                                .collect()
+                        }).unwrap_or_default();
+                        let any_skinned = !skinned.is_empty();
+                        for model in &skinned {
+                            let bp = w3d.runtime_state.bones_player_mut(model);
+                            if bp.current_motion.is_none() && !bp.animation_playing {
+                                bp.current_motion = Some(motion_name.clone());
+                                bp.animation_playing = true;
+                                bp.animation_loop = loops;
+                            }
+                        }
+                        // Legacy member-level auto-play for non-skinned (keyframe) content.
+                        if !any_skinned
+                            && !w3d.runtime_state.animation_playing
+                            && w3d.runtime_state.current_motion.is_none()
+                        {
+                            w3d.runtime_state.current_motion = Some(motion_name);
                             w3d.runtime_state.animation_playing = true;
-                            w3d.runtime_state.animation_loop = w3d.info.loops;
+                            w3d.runtime_state.animation_loop = loops;
                         }
                     }
                 }
@@ -1560,6 +1842,7 @@ impl WebGL2Renderer {
                         font_id: Some(font_member.font_info.font_id),
                         line_spacing: font_member.fixed_line_space,
                         top_spacing: font_member.top_spacing,
+                        member_top_spacing: font_member.top_spacing,
                         bottom_spacing: 0,
                         width,
                         height,
@@ -2193,6 +2476,7 @@ impl WebGL2Renderer {
                         font_id: None,
                         line_spacing: text_member.fixed_line_space,
                         top_spacing: effective_top_spacing,
+                        member_top_spacing: text_member.top_spacing,
                         bottom_spacing: text_member.bottom_spacing,
                         width,
                         height,
@@ -2393,12 +2677,31 @@ impl WebGL2Renderer {
                                         Some(field_member.font.clone())
                                     }
                                 });
+                            // Per-run foreground color from the STXT run
+                            // (QuickDraw u16 channels → 8-bit). A pure-black
+                            // run (0,0,0) is Director's "unset/default" — leave
+                            // it None so it inherits the field's effective color
+                            // (sprite/member override, often navy). An explicit
+                            // non-black run color (e.g. the red "- 50 POINTS -
+                            // Get Stung!" line in SpongeBob's Scoring field)
+                            // overrides per-span. Packed 0xRRGGBB to match
+                            // HtmlStyle::color elsewhere.
+                            let run_color: Option<u32> = {
+                                let r = (run.color_r >> 8) as u32;
+                                let g = (run.color_g >> 8) as u32;
+                                let b = (run.color_b >> 8) as u32;
+                                if r == 0 && g == 0 && b == 0 {
+                                    None
+                                } else {
+                                    Some((r << 16) | (g << 8) | b)
+                                }
+                            };
                             spans.push(StyledSpan {
                                 text: span_text,
                                 style: HtmlStyle {
                                     font_face: span_font_face,
                                     font_size: span_font_size,
-                                    color: None,
+                                    color: run_color,
                                     bg_color: None,
                                     bold,
                                     italic,
@@ -2536,6 +2839,7 @@ impl WebGL2Renderer {
                         font_id: field_member.font_id,
                         line_spacing: field_member.fixed_line_space,
                         top_spacing: effective_top_spacing,
+                        member_top_spacing: field_member.top_spacing,
                         bottom_spacing: 0,
                         width,
                         height,
@@ -2582,6 +2886,18 @@ impl WebGL2Renderer {
                             TextureSource::Bitmap { image_ref: bitmap_ref, is_flash: true }
                         }
                         _ => return, // Instance not ready yet; first frame hasn't arrived.
+                    }
+                }
+                CastMemberType::Movie(_) => {
+                    // Linked Movie (`#movie`): the sub-player's stage was rendered
+                    // into the host's bitmap_manager by `render_nested_player_stages`,
+                    // keyed by this member. Composite it like a Flash frame buffer
+                    // (a plain Director bitmap).
+                    match player.nested_movie_images.get(&member_ref).copied() {
+                        Some(image_ref) if image_ref != 0 => {
+                            TextureSource::Bitmap { image_ref, is_flash: false }
+                        }
+                        _ => return, // Sub-player stage not rendered yet.
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
@@ -2848,6 +3164,21 @@ impl WebGL2Renderer {
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
         let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
+        // These sources rasterize a FRESH texture here every frame and, unlike
+        // Bitmap / FilmLoop / RenderedText, do NOT put it in any cache. Dropping a
+        // `WebGlTexture` handle does not call `gl.deleteTexture`, so without an
+        // explicit delete after drawing, each frame leaks one GL texture per such
+        // sprite — GPU/JS memory climbs and never comes back (the cause of the
+        // spike on vector-shape-heavy movies like Infestation and lore). Deleted
+        // after the draw below; cached sources must NOT be deleted (their texture
+        // is shared with the cache).
+        let owns_dynamic_texture = matches!(
+            texture_source,
+            TextureSource::VectorShapeBitmap { .. }
+                | TextureSource::ShapeBitmap { .. }
+                | TextureSource::ButtonBitmap { .. }
+        );
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -2882,6 +3213,7 @@ impl WebGL2Renderer {
                 font_id,
                 line_spacing,
                 top_spacing,
+                member_top_spacing,
                 bottom_spacing,
                 width,
                 height,
@@ -2943,6 +3275,7 @@ impl WebGL2Renderer {
                         font_id,
                         line_spacing,
                         top_spacing,
+                        member_top_spacing,
                         bottom_spacing,
                         width,
                         height,
@@ -3043,7 +3376,8 @@ impl WebGL2Renderer {
                     if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
                         return;
                     }
-                    self.texture_cache.insert(cache_key, texture.clone(), width, height, filmloop_frame);
+                    let gl = self.context.gl().clone();
+                    self.texture_cache.insert(&gl, cache_key, texture.clone(), width, height, filmloop_frame);
                     texture
                 }
             }
@@ -3710,6 +4044,7 @@ impl WebGL2Renderer {
             || effective_ink == InkMode::AddPin
             || effective_ink == InkMode::SubPin
             || effective_ink == InkMode::Lighten
+            || effective_ink == InkMode::Reverse
         {
             if let Some(ref loc) = u_bg_color {
                 gl.uniform4f(
@@ -3759,6 +4094,13 @@ impl WebGL2Renderer {
         // Unbind texture
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
 
+        // Free the per-frame dynamic texture now that the quad is drawn — it is
+        // not held by any cache (see `owns_dynamic_texture`). Without this, each
+        // frame leaks one GL texture per vector-shape/shape/button sprite.
+        if owns_dynamic_texture {
+            gl.delete_texture(Some(&tex));
+        }
+
         // Reset blend equation if we used an ink that changes it from the default FUNC_ADD
         if effective_ink == InkMode::SubPin || effective_ink == InkMode::Light || effective_ink == InkMode::Dark {
             self.context.reset_blend_equation();
@@ -3787,7 +4129,7 @@ impl WebGL2Renderer {
     /// destructively strip artwork whose fill happens to equal the bg.
     /// Plain authored 32-bit bitmaps with embedded alpha (PNG imports) still
     /// need the color-key to make ink 36 actually do its job.
-    fn bitmap_to_rgba(
+    pub(crate) fn bitmap_to_rgba(
         bitmap: &Bitmap,
         palettes: &crate::player::bitmap::palette_map::PaletteMap,
         ink: i32,
@@ -4039,6 +4381,73 @@ impl WebGL2Renderer {
         } else {
             None
         };
+
+        // FAST PATH — a plain Copy (ink 0) bitmap with no colorize / matte /
+        // mask / flash processing maps 1:1 to its pixels; ink-0 alpha is either
+        // the embedded byte (32-bit use_alpha) or a constant 255 (line ~4441).
+        // The general loop calls `get_pixel_color` + runs the ink branch-soup
+        // PER PIXEL — ~15ms for a 1000×1000 map / water viewport re-uploaded
+        // every frame (g349 scrolling). Convert in a tight loop instead;
+        // bit-identical output.
+        let colorize_active = matches!(colorize, Some((f, b, ..)) if f || b);
+        // Ink 36 (BgTransparent) on an indexed bitmap bakes its alpha as a plain
+        // per-pixel color-key: `(rgb == sprite_bg) ? 0 : 255` (line ~4529). Ink 0
+        // is fully opaque. Both are just a palette lookup + a trivial alpha rule
+        // — no matte/mask/colorize/flash — so a tight loop replaces the per-pixel
+        // `get_pixel_color` + branch soup that cost ~15ms for the map and ~4ms
+        // for each ink-36 tile every frame.
+        // ink 36's alpha handling differs for Flash captures (`is_flash_bitmap`
+        // skips the bgColor color-key, line ~4516), so only fast-path ink 36 for
+        // non-flash. ink 0 is identical either way (embedded alpha / 255), so it
+        // fast-paths regardless — this is what covers the game's large Flash
+        // captures (member 1:1 1000x1000, 1:13 1190x575) that cost ~21/10ms each.
+        let ink36_indexed_key = ink == 36 && !is_flash_bitmap
+            && bitmap.original_bit_depth >= 2 && bitmap.original_bit_depth <= 8;
+        if (ink == 0 || ink36_indexed_key)
+            && !colorize_active
+            && mask_bitmap.is_none()
+            && !should_use_matte
+            && computed_matte.is_none()
+        {
+            // 32-bit ink 0: RGBA bytes are already the output.
+            if ink == 0 && bitmap.bit_depth == 32 && bitmap.data.len() == width * height * 4 {
+                if bitmap.use_alpha {
+                    return bitmap.data.clone();
+                }
+                let mut out = bitmap.data.clone();
+                let mut i = 3;
+                while i < out.len() {
+                    out[i] = 255;
+                    i += 4;
+                }
+                return out;
+            }
+            // 8-bit indexed (ink 0 opaque, or ink 36 bg-color-keyed): pre-resolve
+            // the 256-entry palette once, then a tight index→RGBA loop.
+            if bitmap.bit_depth == 8 && bitmap.data.len() == width * height {
+                let mut pal = [(0u8, 0u8, 0u8); 256];
+                for (i, slot) in pal.iter_mut().enumerate() {
+                    *slot = resolve_color_ref(
+                        palettes,
+                        &ColorRef::PaletteIndex(i as u8),
+                        &bitmap.palette_ref,
+                        bitmap.original_bit_depth,
+                    );
+                }
+                let bg = sprite_bg_color.unwrap_or((255, 255, 255));
+                let mut out = vec![0u8; width * height * 4];
+                for (p, &idx) in bitmap.data.iter().enumerate() {
+                    let (r, g, b) = pal[idx as usize];
+                    let a = if ink36_indexed_key && (r, g, b) == bg { 0 } else { 255 };
+                    let o = p * 4;
+                    out[o] = r;
+                    out[o + 1] = g;
+                    out[o + 2] = b;
+                    out[o + 3] = a;
+                }
+                return out;
+            }
+        }
 
         let mut opaque_count = 0usize;
         let mut transparent_count = 0usize;
@@ -4526,7 +4935,11 @@ impl WebGL2Renderer {
     /// Check if ink mode requires matte computation
     /// Matches Canvas2D's should_matte_sprite function
     fn should_matte_sprite(ink: i32) -> bool {
-        ink == 3 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7  || ink == 32
+        // Only the flood-fill MATTE inks. Inks 3/33/35/36/37/39/40 use a shader
+        // (or baked) COLOR-KEY in bitmap_to_rgba, not the matte, so pre-computing
+        // a flood-fill matte for them was ~2.3ms/sprite of pure waste (g349's
+        // ink-36 tiles). See `should_use_matte` in bitmap_to_rgba.
+        ink == 41 || ink == 8 || ink == 7 || ink == 32
     }
 
     /// Get or create a texture for a bitmap member
@@ -4710,7 +5123,9 @@ impl WebGL2Renderer {
             .ok()?;
 
         // Cache the texture with current bitmap version
+        let gl = self.context.gl().clone();
         self.texture_cache.insert(
+            &gl,
             cache_key,
             texture.clone(),
             width,
@@ -4791,6 +5206,7 @@ impl WebGL2Renderer {
         font_id: Option<u16>,
         line_spacing: u16,
         top_spacing: i16,
+        member_top_spacing: i16,
         bottom_spacing: i16,
         width: u32,
         height: u32,
@@ -4845,6 +5261,7 @@ impl WebGL2Renderer {
         let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
         let line_spacing = ((line_spacing as f64) * scale).round() as u16;
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
+        let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
         let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
         let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
             spans.iter().map(|s| {
@@ -5317,7 +5734,29 @@ impl WebGL2Renderer {
             // equal so behavior is unchanged.
             let max_width = width as i32;
             let wrap_max_width = wrap_width as i32;
-            let mut y = top_spacing as i32;
+            // PFR strikes: anchor the first line so its baseline lands at the
+            // strike's true ascent (Paige: baseline = lineTop + ascent), not at
+            // top_spacing + round(outlineAscender) which sits ~2px low. The atlas
+            // scan gives cap_top (empty rows above caps within a cell); the cell's
+            // baseline_row_px overstates ascent by exactly cap_top. Director also
+            // applies top_spacing as inter-line leading, NOT before the first
+            // line, so subtract member_top_spacing too — while `top_spacing`
+            // (effective = member_top_spacing - scroll) keeps any scroll offset:
+            //   y = top_spacing - member_top_spacing - cap_top = -scroll - cap_top.
+            let (pfr_cap_top, _pfr_desc_bottom) =
+                crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
+            // Anchor the atlas cell top at the line top (keeping the natural
+            // ascender-to-cap gap), matching the `.image` getter's PFR anchor
+            // (`Some(_) => 0`) so on-stage field/text sprites align with baked
+            // member.image text. Previously this subtracted `cap_top` (pulling
+            // the caps onto row 0), which renders ~cap_top px too HIGH — visible
+            // once Volter login fields render from the (gap-bearing) outline atlas
+            // at 18px: the text sat 2px high. `top_spacing - member_top_spacing`
+            // equals `-scroll` (0 when unscrolled), preserving any scroll offset.
+            let mut y = match pfr_cap_top {
+                Some(_) => top_spacing as i32 - member_top_spacing as i32,
+                None => top_spacing as i32,
+            };
             // Track max y of any glyph extent (including descender) across
             // both styled-multi and PFR-simple paths. Used to extend
             // `content_height_actual` so the texture trim doesn't clip
@@ -6658,7 +7097,9 @@ impl WebGL2Renderer {
             .upload_texture_rgba(&texture, render_width as u32, upload_height, &text_bitmap.data)
             .ok()?;
         // Cache the texture
+        let gl = self.context.gl().clone();
         self.rendered_text_cache.insert(
+            &gl,
             cache_key.clone(),
             texture.clone(),
             render_width as u32,
@@ -6756,6 +7197,11 @@ impl WebGL2Renderer {
     /// Get the canvas
     pub fn canvas(&self) -> &HtmlCanvasElement {
         &self.canvas
+    }
+
+    /// Get the preview canvas (used to rebuild the renderer on context restore)
+    pub fn preview_canvas(&self) -> &HtmlCanvasElement {
+        &self.preview_canvas
     }
 
     /// Get the size

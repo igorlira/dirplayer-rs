@@ -12,6 +12,27 @@ pub type Quat = [f64; 4];
 /// 3x3 matrix, row-major: [M00,M01,M02, M10,M11,M12, M20,M21,M22]
 pub type Mat3 = [f64; 9];
 
+/// True if body `body_idx`, placed at (`pos`, `orient`), overlaps any static mesh or other
+/// body beyond `tolerance`. Used by `attemptMoveTo` to reject a blocked move. Temporarily
+/// moves the body to test the pose, then restores it.
+pub fn body_blocked_at(state: &mut HavokPhysicsState, body_idx: usize, pos: V3, orient: Quat) -> bool {
+    if body_idx >= state.rigid_bodies.len() { return false; }
+    let saved_pos = state.rigid_bodies[body_idx].position;
+    let saved_orient = state.rigid_bodies[body_idx].orientation;
+    state.rigid_bodies[body_idx].position = pos;
+    state.rigid_bodies[body_idx].orientation = orient;
+    let tol = state.tolerance;
+    let involves = |c: &CollisionContact| c.body_a == body_idx || c.body_b == Some(body_idx);
+    let blocked = {
+        let s: &HavokPhysicsState = state;
+        detect_all_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
+            || detect_body_body_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
+    };
+    state.rigid_bodies[body_idx].position = saved_pos;
+    state.rigid_bodies[body_idx].orientation = saved_orient;
+    blocked
+}
+
 pub const QUAT_IDENTITY: Quat = [1.0, 0.0, 0.0, 0.0];
 pub const MAT3_IDENTITY: Mat3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 pub const MAT3_ZERO: Mat3 = [0.0; 9];
@@ -453,6 +474,16 @@ pub struct CollisionContact {
     pub normal: V3,
     /// Penetration depth (positive = interpenetrating).
     pub depth: f64,
+    /// Index into `state.collision_meshes` of the static mesh this contact hit
+    /// (None for body-vs-body contacts). Lets the collision callback report the
+    /// real surface model name (e.g. "GraficaStradaZona01") instead of a generic
+    /// fallback when `body_b` is None.
+    pub mesh_index: Option<usize>,
+    /// Closing speed (|normal relative velocity|) captured PRE-resolution. The
+    /// Havok Xtra passes this to collision callbacks as the 5th argument (the
+    /// impact speed used for damage/sound) and gates the callback on the
+    /// registerInterest threshold.
+    pub normal_rel_vel: f64,
 }
 
 // ============================================================
@@ -477,6 +508,20 @@ pub fn find_ground_z(meshes: &[CollisionMesh], x: f64, y: f64, max_z: f64) -> Op
     best
 }
 
+/// World-space velocity of a point rigidly attached to `rb`:
+/// `v = v_linear + omega × (point - position)`. Used to capture the true impact
+/// (closing) speed at a contact point for the collision callback's 5th argument.
+#[inline]
+pub fn body_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, point: V3) -> V3 {
+    let r = [point[0] - rb.position[0], point[1] - rb.position[1], point[2] - rb.position[2]];
+    let w = rb.angular_velocity;
+    [
+        rb.linear_velocity[0] + w[1] * r[2] - w[2] * r[1],
+        rb.linear_velocity[1] + w[2] * r[0] - w[0] * r[2],
+        rb.linear_velocity[2] + w[0] * r[1] - w[1] * r[0],
+    ]
+}
+
 /// Detect contacts for a body (sphere approximation) against static meshes.
 /// Returns contacts with normals pointing AWAY from the triangle surface.
 /// `tolerance` expands the effective collision distance so Havok detects
@@ -493,7 +538,7 @@ pub fn detect_body_contacts(
     let max_r = half_extents[0].max(half_extents[1]).max(half_extents[2]) + tolerance;
     let margin = if passive { CONTACT_MARGIN } else { 0.0 };
     let mut contacts = Vec::new();
-    for mesh in meshes {
+    for (mesh_idx, mesh) in meshes.iter().enumerate() {
         // Skip meshes owned by a MOVABLE body: those are baked at the body's
         // initial position and go stale once it moves (bogus deep collisions;
         // dynamic bodies interact via box-vs-box instead). A FIXED body's mesh
@@ -529,13 +574,58 @@ pub fn detect_body_contacts(
             if pt_in_tri_3d(proj, v0, v1, v2) {
                 let depth = eff_radius - dist;
                 if depth > -margin {
+                    // Impact speed at the contact point, captured before the
+                    // resolver cancels the normal velocity. The mesh's owner (if
+                    // any) is pinned here, so body_b's velocity is zero.
+                    let va = body_point_velocity(&bodies[body_idx], proj);
+                    let nrv = (va[0]*normal[0] + va[1]*normal[1] + va[2]*normal[2]).abs();
                     contacts.push(CollisionContact {
                         body_a: body_idx,
                         body_b: mesh.body_index,
                         point: proj,
                         normal,
                         depth,
+                        mesh_index: Some(mesh_idx),
+                        normal_rel_vel: nrv,
                     });
+                }
+            } else if passive && normal[2].abs() > 0.85 {
+                // Edge/vertex contact on a near-horizontal FLOOR triangle: the body's
+                // footprint still overlaps the triangle near an edge even though its
+                // CENTRE projects outside the face. This is the seam between adjacent
+                // road box colliders — On the Run paves the road with separate boxes,
+                // and a car whose centre sits over the gap/edge between two of them
+                // finds no face underneath and falls through. The face-only
+                // `pt_in_tri_3d` test (a simplification of the C# reference's full
+                // triangle-triangle closest-point) misses it.
+                //
+                // Restricted to up-facing floor triangles (|n.z|>0.85, Havok is
+                // Z-up): applying it to ramp/wall faces turned their base edges into a
+                // back-stop that blocked the car from climbing small 45° ramps and
+                // whipped it out of the world. Sloped/vertical faces keep the
+                // face-only test. Passive-only so SuperSonic's tuned narrow phase is
+                // unchanged.
+                let closest = closest_pt_on_tri(pos, v0, v1, v2);
+                let to_pos = v3_sub(pos, closest);
+                let d = v3_len(to_pos);
+                if d > 1e-6 && d <= eff_radius {
+                    let depth = eff_radius - d;
+                    // Keep the surface normal (oriented toward the body) so a flat
+                    // seam pushes the car straight up, not sideways toward the edge.
+                    let n = if v3_dot(to_pos, normal) >= 0.0 { normal } else { v3_scale(normal, -1.0) };
+                    if depth > -margin && n[2] > 0.85 {
+                        let va = body_point_velocity(&bodies[body_idx], closest);
+                        let nrv = (va[0]*n[0] + va[1]*n[1] + va[2]*n[2]).abs();
+                        contacts.push(CollisionContact {
+                            body_a: body_idx,
+                            body_b: mesh.body_index,
+                            point: closest,
+                            normal: n,
+                            depth,
+                            mesh_index: Some(mesh_idx),
+                            normal_rel_vel: nrv,
+                        });
+                    }
                 }
             }
         }
@@ -653,6 +743,47 @@ fn pt_in_tri_3d(p: V3, v0: V3, v1: V3, v2: V3) -> bool {
     u >= -0.01 && v >= -0.01 && (u + v) <= 1.01
 }
 
+/// Closest point on triangle (a,b,c) to point p — Ericson, Real-Time Collision
+/// Detection (handles the face, the three edges, and the three vertex regions).
+/// Used by the box-support narrow phase to rest a body on a triangle edge when
+/// its centre projects just outside the face (road box seams in On the Run).
+fn closest_pt_on_tri(p: V3, a: V3, b: V3, c: V3) -> V3 {
+    let ab = v3_sub(b, a);
+    let ac = v3_sub(c, a);
+    let ap = v3_sub(p, a);
+    let d1 = v3_dot(ab, ap);
+    let d2 = v3_dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 { return a; }            // vertex region A
+    let bp = v3_sub(p, b);
+    let d3 = v3_dot(ab, bp);
+    let d4 = v3_dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 { return b; }             // vertex region B
+    let vc = d1*d4 - d3*d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {           // edge region AB
+        let v = d1 / (d1 - d3);
+        return v3_add(a, v3_scale(ab, v));
+    }
+    let cp = v3_sub(p, c);
+    let d5 = v3_dot(ab, cp);
+    let d6 = v3_dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 { return c; }             // vertex region C
+    let vb = d5*d2 - d1*d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {           // edge region AC
+        let w = d2 / (d2 - d6);
+        return v3_add(a, v3_scale(ac, w));
+    }
+    let va = d3*d6 - d5*d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {   // edge region BC
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return v3_add(b, v3_scale(v3_sub(c, b), w));
+    }
+    // Inside face region — barycentric combination.
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    v3_add(a, v3_add(v3_scale(ab, v), v3_scale(ac, w)))
+}
+
 fn interp_z(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> f64 {
     let d00 = (v1[0]-v0[0])*(v1[0]-v0[0]) + (v1[1]-v0[1])*(v1[1]-v0[1]);
     let d01 = (v1[0]-v0[0])*(v2[0]-v0[0]) + (v1[1]-v0[1])*(v2[1]-v0[1]);
@@ -681,6 +812,10 @@ const CONTACT_MARGIN: f64 = 2.0;
 /// Default ground material: friction=0.5, restitution=0.3
 const GROUND_FRICTION: f64 = 0.5;
 const GROUND_RESTITUTION: f64 = 0.3;
+/// Below this closing speed (Director units/s) a contact is treated as "resting":
+/// restitution is suppressed and the penetration-correction *driving impulse* is
+/// skipped, so a body sitting on a surface doesn't get pumped into a bounce.
+const REST_VEL_THRESHOLD: f64 = 10.0;
 
 /// Resolve collision contacts using iterative impulses.
 /// From PPC: resolveWithImpulses (0x5AAB0)
@@ -704,7 +839,14 @@ fn resolve_contacts(state: &mut HavokPhysicsState, contacts: &[CollisionContact]
             // position correction after the resolver handles depenetration;
             // applying driving impulse here injects energy into low-velocity
             // bounces and causes runaway velocity growth.
-            if contact.body_b.is_none() {
+            //
+            // Also skip it for low-velocity (resting) terrain contacts: the
+            // post-resolver position correction already depenetrates them, and
+            // the driving impulse — which is strongest for the shallow contacts a
+            // resting body produces every substep — otherwise pumps energy in and
+            // makes a body sitting on the ground bounce (On the Run's car on the
+            // road). Genuine high-speed penetrations still get it.
+            if contact.body_b.is_none() && contact.normal_rel_vel >= REST_VEL_THRESHOLD {
                 apply_driving_impulse(state, contact, tolerance);
             }
 
@@ -742,7 +884,6 @@ fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact)
     let restitution = restitution * COLLISION_ENERGY_LOSS;
 
     // Suppress restitution for low-speed contacts to prevent jitter at rest.
-    const REST_VEL_THRESHOLD: f64 = 10.0;
     let is_resting = vn.abs() < REST_VEL_THRESHOLD;
     let eff_restitution = if is_resting { 0.0 } else { restitution };
     let target_vn = -eff_restitution * vn;
@@ -1319,6 +1460,43 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         update_axis_angle_from_orientation(rb);
     }
 
+    // --- Auto-sleep (deactivation) ---
+    // A non-driven body that stays still — low linear+angular speed AND no Lingo
+    // disturbance this step — for SLEEP_DELAY seconds deactivates, so resting
+    // stacks stop jittering and stop loading the solver. Driven/forced bodies
+    // (the SuperSonic car, On the Run's impulse-driven cars) are disturbed every
+    // frame and never reach the countdown, so they never sleep mid-play. Waking
+    // is unchanged (collision at resolve time; Lingo apply*/setters set
+    // `active=true`). The reference RigidBody.ShouldDeactivate exists but is
+    // unwired; this is a velocity-based equivalent of its settle test.
+    {
+        const SLEEP_DELAY: f64 = 0.5;
+        let inv_s = if state.scale.abs() > 1e-10 { 1.0 / state.scale } else { 1.0 };
+        let lin_thr2 = (0.1 * inv_s) * (0.1 * inv_s); // ~0.1 m/s, in display units
+        let ang_thr2 = 0.05 * 0.05;                   // ~0.05 rad/s
+        for rb in &mut state.rigid_bodies {
+            if !rb.active || rb.pinned || rb.driven || rb.inverse_mass <= 0.0 {
+                rb.lingo_disturbed = false;
+                continue;
+            }
+            let lv = rb.linear_velocity;
+            let av = rb.angular_velocity;
+            let lin2 = lv[0]*lv[0] + lv[1]*lv[1] + lv[2]*lv[2];
+            let ang2 = av[0]*av[0] + av[1]*av[1] + av[2]*av[2];
+            if rb.lingo_disturbed || lin2 > lin_thr2 || ang2 > ang_thr2 {
+                rb.sleep_countdown = SLEEP_DELAY;
+            } else {
+                rb.sleep_countdown -= time_increment;
+                if rb.sleep_countdown <= 0.0 {
+                    rb.active = false;
+                    rb.linear_velocity = [0.0; 3];
+                    rb.angular_velocity = [0.0; 3];
+                }
+            }
+            rb.lingo_disturbed = false;
+        }
+    }
+
     state.sim_time += time_increment;
 }
 
@@ -1475,13 +1653,24 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                 state.collision_list_cache.clear();
                 for c in &contacts {
                     let body_a_name = state.rigid_bodies[c.body_a].name.clone();
-                    let body_b_name = c.body_b.map(|i| state.rigid_bodies[i].name.clone())
+                    // Name the contact partner. For a body-vs-body contact use the
+                    // other rigid body's name; for a static-mesh contact fall back
+                    // to the collision mesh's own name (the real surface model,
+                    // e.g. "GraficaStradaZona01") so Lingo callbacks that classify
+                    // the ground by name (cd[2] contains "strada"/"marciapiede"/…)
+                    // work. Only when neither is known do we emit "ground".
+                    let body_b_name = c.body_b
+                        .map(|i| state.rigid_bodies[i].name.clone())
+                        .or_else(|| c.mesh_index
+                            .and_then(|mi| state.collision_meshes.get(mi))
+                            .map(|m| m.name.clone()))
                         .unwrap_or_else(|| "ground".to_string());
                     state.collision_list_cache.push(crate::player::cast_member::HavokCollisionInfo {
                         body_a: body_a_name,
                         body_b: body_b_name,
                         point: c.point,
                         normal: c.normal,
+                        normal_rel_vel: c.normal_rel_vel,
                     });
                 }
             }
@@ -1689,12 +1878,19 @@ fn detect_body_body_collisions(state: &HavokPhysicsState) -> Vec<CollisionContac
             let mut normal = [0.0; 3];
             normal[axis] = if ca[axis] - cb[axis] >= 0.0 { 1.0 } else { -1.0 };
             let point = v3_scale(v3_add(ca, cb), 0.5);
+            // Closing speed between the two bodies at the contact point, captured
+            // before resolution (impact speed for the collision callback).
+            let va = body_point_velocity(a, point);
+            let vb = body_point_velocity(b, point);
+            let nrv = ((va[0]-vb[0])*normal[0] + (va[1]-vb[1])*normal[1] + (va[2]-vb[2])*normal[2]).abs();
             out.push(CollisionContact {
                 body_a: i,
                 body_b: Some(j),
                 point,
                 normal,
                 depth: min_overlap,
+                mesh_index: None,
+                normal_rel_vel: nrv,
             });
         }
     }

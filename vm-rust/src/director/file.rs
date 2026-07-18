@@ -1259,7 +1259,10 @@ fn get_chunk_data(
                         .cached_chunk_views
                         .insert(id, uncomp_buf.to_vec());
                 } else if info.compression_id == FONTMAP_COMPRESSION_GUID {
-                    warn!(
+                    // Non-fatal: the chunk is stored raw and load continues.
+                    // debug!, not warn! — fires per FONTMAP chunk on load and
+                    // floods the browser console (which retains every entry).
+                    debug!(
                         "FONTMAP compression not implemented — skipping chunk {}",
                         id
                     );
@@ -1273,7 +1276,15 @@ fn get_chunk_data(
                     chunk_container.cached_chunk_views.insert(id, raw.clone());
                     return Ok(raw);
                 } else {
-                    if info.compression_id != NULL_COMPRESSION_GUID {
+                    // NULL = uncompressed; SWA = Shockwave Audio (MP3) members,
+                    // whose compressed bytes are correctly stored raw for the
+                    // sound decoder. Both are expected here — only warn for a
+                    // genuinely-unknown codec (and even then load continues with
+                    // the raw bytes, so it's non-fatal).
+                    if info.compression_id != NULL_COMPRESSION_GUID
+                        && info.compression_id != SWA_COMPRESSION_GUID
+                        && info.compression_id != SWA_COMPRESSION_GUID2
+                    {
                         warn!("Unhandled compression type {}", info.compression_id)
                     }
                     chunk_container

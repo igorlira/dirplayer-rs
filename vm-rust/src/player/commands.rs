@@ -45,6 +45,10 @@ pub enum PlayerVMCommand {
     SetStageSize(u32, u32),
     TimeoutTriggered(TimeoutRef),
     PrintMemberBitmapHex(CastMemberRef),
+    /// Dev UI sound preview: play a sound member through channel 1 (the real
+    /// puppetSound path) so it exercises the same decode/playback code a movie
+    /// would. Triggered by a user gesture so the AudioContext can resume.
+    PlayMemberSound(CastMemberRef),
     MouseDown((i32, i32)),
     MouseUp((i32, i32)),
     MouseMove((i32, i32)),
@@ -62,6 +66,14 @@ pub enum PlayerVMCommand {
     TriggerLingoCallbackOnScript {
         cast_lib: i32,
         cast_member: i32,
+        handler_name: String,
+        args: Vec<DatumRef>,
+    },
+    /// Flash `LocalConnection.send` → the Lingo handler registered via
+    /// `setCallback` on a Director-created LocalConnection, dispatched to the
+    /// EXACT target instance (so `me` in `on myOnStatus me, ...` is correct).
+    TriggerLocalConnectionCallback {
+        target: ScriptInstanceRef,
         handler_name: String,
         args: Vec<DatumRef>,
     },
@@ -100,6 +112,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
             format!("TimeoutTriggered({})", timeout_ref)
         }
         PlayerVMCommand::PrintMemberBitmapHex(..) => "PrintMemberBitmapHex(..)".to_string(),
+        PlayerVMCommand::PlayMemberSound(..) => "PlayMemberSound(..)".to_string(),
         PlayerVMCommand::MouseDown((x, y)) => format!("MouseDown({}, {})", x, y),
         PlayerVMCommand::MouseUp((x, y)) => format!("MouseUp({}, {})", x, y),
         PlayerVMCommand::MouseMove((x, y)) => format!("MouseMove({}, {})", x, y),
@@ -113,6 +126,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         }
         PlayerVMCommand::TriggerLingoCallbackOnScript { cast_lib, cast_member, handler_name, .. } => {
             format!("TriggerLingoCallbackOnScript(cast_lib: {}, cast_member: {}, handler: {})", cast_lib, cast_member, handler_name)
+        }
+        PlayerVMCommand::TriggerLocalConnectionCallback { handler_name, .. } => {
+            format!("TriggerLocalConnectionCallback(handler: {})", handler_name)
         }
         PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, .. } => {
             format!("SetLingoScriptProperty(cast_lib: {}, cast_member: {}, prop: {})", cast_lib, cast_member, prop_name)
@@ -186,16 +202,18 @@ pub async fn run_command_loop(rx: Receiver<PlayerVMExecutionItem>) {
 }
 
 pub fn player_dispatch(command: PlayerVMCommand) {
-    if let Some(tx) = unsafe { PLAYER_TX.clone() } {
-        if let Err(e) = tx.try_send(PlayerVMExecutionItem {
-            command,
-            completer: None,
-        }) {
-            // The channel is closed or full
-            eprintln!("Failed to send command to player: {:?}", e);
-        }
-    } else {
-        eprintln!("PLAYER_TX not initialized");
+    // Route to the ACTIVE player's own command channel (not the global
+    // PLAYER_TX) so a nested `#movie` sub-player's commands land in its own
+    // queue, processed by its own command loop with its own active-player id.
+    // For the main player this is identical (main.queue_tx == the PLAYER_TX
+    // channel). Fall back to PLAYER_TX before any player exists (early boot).
+    let tx = reserve_player_ref(|p| p.queue_tx.clone());
+    if let Err(e) = tx.try_send(PlayerVMExecutionItem {
+        command,
+        completer: None,
+    }) {
+        // The channel is closed or full
+        eprintln!("Failed to send command to player: {:?}", e);
     }
 }
 
@@ -256,7 +274,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             player_load_system_font(&path).await;
         }
         PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
-            let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+            let player = unsafe { crate::player::player_mut() };
             match player.load_movie_from_file(&file_path).await {
                 Ok(()) => {
                     if autoplay {
@@ -329,6 +347,38 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 let bitmap = player.bitmap_manager.get_bitmap(bitmap.image_ref).unwrap();
                 let bitmap = &bitmap.data;
                 warn!("Bitmap hex: {}", bitmap.to_hex_string());
+            });
+        }
+        PlayerVMCommand::PlayMemberSound(member_ref) => {
+            use crate::player::handlers::datum_handlers::sound_channel::SoundChannelDatumHandlers;
+            let (cl, cm) = (member_ref.cast_lib, member_ref.cast_member);
+            reserve_player_mut(|player| {
+                let is_sound = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .map(|m| matches!(m.member_type, CastMemberType::Sound(_)))
+                    .unwrap_or(false);
+                if !is_sound {
+                    console_warn!("[sound-preview] member {}:{} is not a sound member", cl, cm);
+                    return;
+                }
+                let member_datum = player.alloc_datum(Datum::CastMember(member_ref));
+                // Preview on channel 1 (Director's default puppetSound channel).
+                // Always play ONCE here, ignoring the member's loop flag, so a
+                // looping member doesn't run forever from the dev-UI preview.
+                let channel = match player.get_sound_channel(1) {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        console_warn!("[sound-preview] no channel for {}:{}: {}", cl, cm, e.message);
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    SoundChannelDatumHandlers::handle_play_file(player, &channel, &member_datum, 1)
+                {
+                    console_warn!("[sound-preview] play failed for {}:{}: {}", cl, cm, e.message);
+                }
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {
@@ -504,7 +554,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
                 let rect = super::score::get_concrete_sprite_rect(player, sprite);
                 (
-                    Some((any_sprite as i32, x - rect.left, y - rect.top)),
+                    Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top)),
                     format!("Flash sprite#{} member={}:{} rect=({},{})-({},{})",
                         any_sprite, member_ref.cast_lib, member_ref.cast_member,
                         rect.left, rect.top, rect.right, rect.bottom),
@@ -554,7 +604,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
             });
             debug!("[click sprite scripts] {}", sprite_scripts_dump);
-            if let Some((sn, lx, ly)) = flash_forward {
+            if let Some((sn, lx, ly, sw, sh)) = flash_forward {
                 // AVM1 button hit-testing reads the stage-mouse position
                 // that's last updated by MouseMove. A real browser always
                 // emits pointermove before pointerdown, so the position is
@@ -563,10 +613,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 // input ever reached the SWF), and Ruffle's button test
                 // misses the click. Send a MouseMove first to seed it.
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly,
+                    sn, "move", lx, ly, sw, sh,
                 );
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "down", lx, ly,
+                    sn, "down", lx, ly, sw, sh,
                 );
             }
 
@@ -808,15 +858,15 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     return None;
                 }
                 let rect = super::score::get_concrete_sprite_rect(player, sprite);
-                Some((any_sprite as i32, x - rect.left, y - rect.top))
+                Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top))
             });
-            if let Some((sn, lx, ly)) = flash_forward_up {
+            if let Some((sn, lx, ly, sw, sh)) = flash_forward_up {
                 // Same MouseMove-before-MouseUp seeding as the down handler.
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly,
+                    sn, "move", lx, ly, sw, sh,
                 );
                 let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "up", lx, ly,
+                    sn, "up", lx, ly, sw, sh,
                 );
             }
 
@@ -1224,6 +1274,23 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     &receiver_datum,
                     &handler.1,
                     &args
+                ).await;
+            }
+        }
+        PlayerVMCommand::TriggerLocalConnectionCallback { target, handler_name, args } => {
+            use super::handlers::datum_handlers::script_instance::ScriptInstanceDatumHandlers;
+            // Dispatch to the EXACT registered instance so `me` is right.
+            let handler_ref = reserve_player_ref(|player| {
+                let si = player.allocator.get_script_instance_opt(&target)?;
+                let script = player.movie.cast_manager.get_script_by_ref(&si.script)?;
+                script.get_own_handler_ref(&handler_name)
+            });
+            if let Some(handler) = handler_ref {
+                let receiver_datum = player_alloc_datum(Datum::ScriptInstanceRef(target));
+                let _ = ScriptInstanceDatumHandlers::call_async(
+                    &receiver_datum,
+                    &handler.1,
+                    &args,
                 ).await;
             }
         }

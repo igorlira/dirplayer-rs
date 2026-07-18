@@ -18,6 +18,8 @@ impl ScriptDatumHandlers {
     pub fn has_async_handler(obj_ref: &DatumRef, name: &str) -> bool {
         match name {
             "new" => true,
+            // `birth` on a ScriptRef is the Director 6 constructor (see `birth`).
+            "birth" => true,
             "rawNew" => false,
             "handler" => false,
             _ => {
@@ -47,6 +49,7 @@ impl ScriptDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "new" => Self::new(obj_ref, args).await,
+            "birth" => Self::birth(obj_ref, args).await,
             "rawNew" => Self::raw_new(obj_ref),
             _ => {
                 // Try to call a handler defined in the script itself
@@ -107,6 +110,52 @@ impl ScriptDatumHandlers {
             "rawNew" => Self::raw_new(datum),
             "handler" => Self::handler(datum, args),
             "handlers" => Self::handlers(datum, args),
+            // A movie script's static properties are addressable through the
+            // script reference (Neopets DGS uses `script("globals")` as a global
+            // data store: `g.levellist = []`, `g.levellist.add(...)`, etc.).
+            // getPropRef returns the property's shared DatumRef so in-place list
+            // mutation persists, mirroring the ScriptInstance handler.
+            "getProp" | "getPropRef" | "getaProp" => reserve_player_mut(|player| {
+                let script_ref = match player.get_datum(datum) {
+                    Datum::ScriptRef(s) => s.clone(),
+                    _ => return Err(ScriptError::new("Expected script reference".to_string())),
+                };
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let prop_ref =
+                    crate::player::script::script_get_static_prop(player, &script_ref, &prop_name)?;
+                if args.len() >= 2 {
+                    // `g.prop[index]` — the bytecode passes (script, #prop, index),
+                    // so index into the property value (e.g. list element). Without
+                    // this the whole property was returned, ignoring the index.
+                    crate::player::handlers::types::TypeUtils::get_sub_prop(
+                        &prop_ref, &args[1], player,
+                    )
+                } else {
+                    Ok(prop_ref)
+                }
+            }),
+            "setProp" | "setaProp" => reserve_player_mut(|player| {
+                let script_ref = match player.get_datum(datum) {
+                    Datum::ScriptRef(s) => s.clone(),
+                    _ => return Err(ScriptError::new("Expected script reference".to_string())),
+                };
+                let prop_name = player.get_datum(&args[0]).string_value()?;
+                if args.len() >= 3 {
+                    // `g.prop[index] = value`
+                    let prop_ref = crate::player::script::script_get_static_prop(
+                        player, &script_ref, &prop_name,
+                    )?;
+                    crate::player::handlers::types::TypeUtils::set_sub_prop(
+                        &prop_ref, &args[1], &args[2], player,
+                    )?;
+                    Ok(args[2].clone())
+                } else {
+                    crate::player::script::script_set_static_prop(
+                        player, &script_ref, &prop_name, &args[1], false,
+                    )?;
+                    Ok(args[1].clone())
+                }
+            }),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for script datum"
             ))),
@@ -216,6 +265,24 @@ impl ScriptDatumHandlers {
     }
 
     pub async fn new(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::construct(datum, args, "new").await
+    }
+
+    /// Director 6 `birth(script, args)` — the pre-`new` constructor idiom. It is
+    /// exactly `new` except it runs the instance's `on birth me, args` handler
+    /// instead of `on new`. The 11.5 Scripting Dictionary dropped `birth`, so we
+    /// mirror the documented `new` / parent-script contract: a FRESH instance
+    /// with its OWN property storage per call. (100s-Marios births 200 marios
+    /// via `birth(script "MarioScript", 3+i)`; without a fresh instance each
+    /// call, all same-script marios shared one `sn`/`timr`/`pipe` and only ~4
+    /// sprites were ever driven.)
+    pub async fn birth(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::construct(datum, args, "birth").await
+    }
+
+    /// Shared constructor for `new`/`birth`: allocate a fresh instance, then run
+    /// its `ctor` handler (`on new` / `on birth`) with the instance as `me`.
+    async fn construct(datum: &DatumRef, args: &Vec<DatumRef>, ctor: &str) -> Result<DatumRef, ScriptError> {
         let (script_ref, script_instance_ref, datum_ref) = Self::create_uninit_instance(datum)?;
 
         let (new_handler_ref, expected_param_count, script_name) =
@@ -225,10 +292,10 @@ impl ScriptDatumHandlers {
                     .cast_manager
                     .get_script_by_ref(&script_ref)
                     .unwrap();
-                let new_handler_ref = script.get_own_handler_ref(&"new".to_string());
+                let new_handler_ref = script.get_own_handler_ref(&ctor.to_string());
 
                 let param_count = if let Some(_) = &new_handler_ref {
-                    let handler_def = script.get_own_handler(&"new".to_string()).unwrap();
+                    let handler_def = script.get_own_handler(&ctor.to_string()).unwrap();
                     handler_def.argument_name_ids.len()
                 } else {
                     0
@@ -242,7 +309,7 @@ impl ScriptDatumHandlers {
             })?;
 
         let virtual_new_result = reserve_player_mut(|player| {
-            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), "new", args)
+            crate::player::virtual_scripts::VirtualScriptRegistry::try_call_handler(player, &script_ref, Some(&script_instance_ref), ctor, args)
         });
         match virtual_new_result {
             Ok(Some(_)) => return Ok(datum_ref),
@@ -262,12 +329,22 @@ impl ScriptDatumHandlers {
                 {
                     Ok(scope) => scope,
                     Err(err) => {
-                        error!("❌ Error in {}.new(): {}", script_name, err.message);
+                        error!("❌ Error in {}.{}(): {}", script_name, ctor, err.message);
                         return Err(err);
                     }
                 };
 
             player_handle_scope_return(&result_scope);
+            // Director's `new()` returns the new child instance. The `on new`
+            // handler conventionally ends with `return me`, but if it falls off
+            // the end without returning a value (VOID), Director still returns the
+            // instance — NOT VOID. Only an explicit non-void return overrides.
+            // (SpongeBob "JellyFishin'" nav object: `on new me, targetMovie`
+            // has no `return me`, so navMovieObj was VOID and gotoExitPage /
+            // gotoMainMovieAgain dispatched on Void.)
+            if matches!(result_scope.return_value, DatumRef::Void) {
+                return Ok(datum_ref);
+            }
             return Ok(result_scope.return_value);
         } else {
             return Ok(datum_ref);

@@ -57,9 +57,17 @@ impl VoidDatumHandlers {
             // built, real Director silently no-ops these and the surrounding
             // voidp(...) guards skip the body — we have to mirror that.
             "getAvatar" | "getItemByPossessionId" | "display" => Ok(DatumRef::Void),
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for void"
-            ))),
+            // Director silently no-ops ANY handler call on a VOID value and
+            // returns VOID — it never raises. g349's `on particle` does
+            // `g.particles[g.cparticle].spawn(Args)`; between levels
+            // `g.particles` is cleared to VOID, so the subscript is VOID and
+            // `.spawn(Args)` must be a no-op. Returning VOID here (rather than
+            // maintaining a whitelist of handler names) mirrors Director and
+            // subsumes the specific cases above.
+            _ => {
+                log::debug!("Calling handler '{}' on VOID → VOID (Director-lenient no-op)", handler_name);
+                Ok(DatumRef::Void)
+            },
         })
     }
 
@@ -113,19 +121,20 @@ impl VoidDatumHandlers {
                 // Director tolerates .count and .number on void, returning 0
                 Ok(player.alloc_datum(Datum::Int(0)))
             }
-            // CS-specific scene-graph properties read without a voidp() guard
-            // on the parent (e.g. Studio.receiveCdStop chains
-            // `oIsoScene.oAvatars.getAvatar(...)` and
-            // `oIsoScene.oInfoStand.display(...)`). Real Director silently
-            // returns void for these so the surrounding voidp(...) checks
-            // skip the body.
-            "oAvatars" | "oInfoStand" | "oSelectedItem" => {
+            // Director returns VOID for ANY property read on a VOID value —
+            // it never raises. Scripts rely on this: e.g. g349's
+            // "horizontal-only background scroll bhv" reads
+            // `g.map.we_are_playing` every exitFrame, and once the level ends
+            // and `g.map` is cleared to VOID the `> 0` test simply reads VOID
+            // (false) and the sprite hides. The typed special-cases above
+            // (count/x/string/...) stay because their callers expect a number
+            // or string rather than VOID; every other property falls through
+            // to VOID, matching Director instead of maintaining a whitelist of
+            // custom property names (previously oAvatars/oInfoStand/etc.).
+            _ => {
+                log::debug!("Reading property '{}' on VOID → VOID (Director-lenient)", prop);
                 Ok(player.alloc_datum(Datum::Void))
             }
-            _ => Err(ScriptError::new(format!(
-                "Cannot get property '{}' on VOID - a variable or property that should contain an object is uninitialized",
-                prop
-            ))),
         }
     }
 }

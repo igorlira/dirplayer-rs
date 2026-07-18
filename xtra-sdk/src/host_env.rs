@@ -76,6 +76,65 @@ enum HostOp {
     /// Args: `[Datum::String(xtra_name), Datum::Int(instance_id)]`.
     /// Returns void.
     DestroyXtraInstance = 7,
+
+    // ── 3D scene rendering (see `crate::scene3d`) ─────────────────────────
+
+    /// Args: `[Datum::String(tag)]`. Returns `Datum::Int(scene_id)`.
+    /// Idempotent per tag — the same tag always maps to the same scene.
+    Scene3dCreate = 8,
+
+    /// Args: `[Datum::Int(scene_id), Datum::Int(mesh_id),
+    /// Datum::ByteArray(postcard MeshData)]`. Returns void. Re-uploading the
+    /// same `mesh_id` replaces its geometry (the deform path).
+    Scene3dUploadMesh = 9,
+
+    /// Args: `[Datum::Int(scene_id), Datum::Int(mesh_id)]`. Returns void.
+    Scene3dDropMesh = 10,
+
+    /// Args: `[Datum::Int(scene_id), Datum::String(name), Datum::Int(w),
+    /// Datum::Int(h), Datum::ByteArray(rgba)]`. Returns void. For
+    /// CPU-composed textures; cast-member textures resolve host-side by name.
+    Scene3dUploadTexture = 11,
+
+    /// Args: `[Datum::Int(scene_id), Datum::ByteArray(postcard FrameData)]`.
+    /// Returns void. The host stores the frame and composites it in its next
+    /// draw pass.
+    Scene3dSubmitFrame = 12,
+
+    /// Args: `[Datum::Int(scene_id)]`. Returns void. Frees the scene's meshes
+    /// and textures.
+    Scene3dDestroy = 13,
+
+    // ── Host state a compute-only plugin reads ────────────────────────────
+
+    /// Args: `[Datum::String(member_name), Datum::String(kind)]`. Returns the
+    /// raw bytes of the named cast member as `Datum::ByteArray`, or
+    /// `Datum::Void` if there's no such member of that `kind`. `kind` gates the
+    /// member type (e.g. `"groove3gm"`), so a plugin can't read arbitrary
+    /// member data.
+    CastMemberBytes = 14,
+
+    /// Args: `[]`. Returns `Datum::List[Int(stage_w), Int(stage_h),
+    /// Int(current_frame)]`.
+    StageInfo = 15,
+
+    /// Args: `[]`. Returns `Datum::Point(mouseH, mouseV)`.
+    MouseLoc = 16,
+
+    /// Args: `[Datum::String(key_name)]`. Returns `Datum::Bool(is_down)`.
+    KeyDown = 17,
+
+    /// Args: `[Datum::String(name), Datum::<any>(value)]`. Sets a Lingo global
+    /// so scripts can read it (e.g. Groove's `collideX`…`collideTexture`).
+    /// Returns void.
+    SetLingoGlobal = 18,
+
+    /// Args: `[Datum::String(member_name)]`. Returns `Datum::List[Int(w),
+    /// Int(h)]` — the natural pixel size of the named bitmap cast member — or
+    /// `Datum::Void` if it isn't a bitmap. A plugin that positions art by name
+    /// (Groove's sprites/overlays) needs the authored size to hit-test it; only
+    /// the host can resolve a member.
+    MemberSize = 19,
 }
 
 // ── Low-level glue: call dx_host_call and decode ────────────────────────
@@ -111,7 +170,7 @@ fn invoke_for_datum(op: HostOp, args: &[Datum]) -> Result<Datum, String> {
 
 // ── Ergonomic wrappers ───────────────────────────────────────────────────
 
-/// Write a debug-level log line. Visible in the host's developer console.
+/// Write a log line to the host's developer console.
 #[inline]
 pub fn log(msg: &str) {
     invoke(HostOp::Log, &[Datum::String(String::from(msg))]);
@@ -204,6 +263,131 @@ pub fn destroy_xtra_instance(xtra_name: &str, instance_id: InstanceId) {
             Datum::String(String::from(xtra_name)),
             Datum::Int(instance_id as i32),
         ],
+    );
+}
+
+// ── 3D scene rendering wrappers ──────────────────────────────────────────
+
+use crate::scene3d::{FrameData, MeshData};
+
+/// Create (or look up) a host-side 3D scene keyed by `tag`. Idempotent — the
+/// same tag returns the same scene id for the plugin's whole lifetime. The
+/// returned id addresses the scene in every other `scene3d_*` call.
+pub fn scene3d_create(tag: &str) -> Result<i32, String> {
+    match invoke_for_datum(HostOp::Scene3dCreate, &[Datum::String(String::from(tag))])? {
+        Datum::Int(id) => Ok(id),
+        other => Err(alloc::format!("scene3d_create: expected Int, got {:?}", other)),
+    }
+}
+
+/// Upload (or replace) the geometry of mesh `mesh_id` in `scene_id`. Cheap to
+/// call once per shape; re-call with the same id to replace after a deform.
+pub fn scene3d_upload_mesh(scene_id: i32, mesh_id: u32, mesh: &MeshData) {
+    invoke(
+        HostOp::Scene3dUploadMesh,
+        &[
+            Datum::Int(scene_id),
+            Datum::Int(mesh_id as i32),
+            Datum::ByteArray(mesh.to_bytes()),
+        ],
+    );
+}
+
+/// Drop mesh `mesh_id` from `scene_id` (releases its host GL buffers lazily).
+pub fn scene3d_drop_mesh(scene_id: i32, mesh_id: u32) {
+    invoke(
+        HostOp::Scene3dDropMesh,
+        &[Datum::Int(scene_id), Datum::Int(mesh_id as i32)],
+    );
+}
+
+/// Upload a CPU-composed RGBA texture under `name`. `rgba` must be
+/// `w * h * 4` bytes. Only needed for textures the plugin composes itself;
+/// textures that live as movie bitmap cast members resolve host-side by name.
+pub fn scene3d_upload_texture(scene_id: i32, name: &str, w: i32, h: i32, rgba: Vec<u8>) {
+    invoke(
+        HostOp::Scene3dUploadTexture,
+        &[
+            Datum::Int(scene_id),
+            Datum::String(String::from(name)),
+            Datum::Int(w),
+            Datum::Int(h),
+            Datum::ByteArray(rgba),
+        ],
+    );
+}
+
+/// Submit the frame to composite for `scene_id`. Call once per engine step;
+/// the host stores it and draws it on its next paint.
+pub fn scene3d_submit_frame(scene_id: i32, frame: &FrameData) {
+    invoke(
+        HostOp::Scene3dSubmitFrame,
+        &[Datum::Int(scene_id), Datum::ByteArray(frame.to_bytes())],
+    );
+}
+
+/// Destroy `scene_id`, freeing its meshes and textures.
+pub fn scene3d_destroy(scene_id: i32) {
+    invoke(HostOp::Scene3dDestroy, &[Datum::Int(scene_id)]);
+}
+
+// ── Host-state wrappers ──────────────────────────────────────────────────
+
+/// Fetch the raw bytes of the cast member named `name`, gated to `kind` (e.g.
+/// `"groove3gm"`). Returns `None` if there's no such member of that kind.
+pub fn cast_member_bytes(name: &str, kind: &str) -> Option<Vec<u8>> {
+    match invoke_for_datum(
+        HostOp::CastMemberBytes,
+        &[Datum::String(String::from(name)), Datum::String(String::from(kind))],
+    ) {
+        Ok(Datum::ByteArray(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// Stage size and current movie frame: `(width, height, current_frame)`.
+pub fn stage_info() -> (i32, i32, i32) {
+    match invoke_for_datum(HostOp::StageInfo, &[]) {
+        Ok(Datum::List(items)) => {
+            let g = |i: usize| items.get(i).and_then(|d| d.as_int()).unwrap_or(0);
+            (g(0), g(1), g(2))
+        }
+        _ => (0, 0, 0),
+    }
+}
+
+/// Current mouse position in stage pixels: `(mouseH, mouseV)`.
+/// Natural pixel size of a bitmap cast member, or `None` if it isn't one.
+pub fn member_size(name: &str) -> Option<(i32, i32)> {
+    match invoke_for_datum(HostOp::MemberSize, &[Datum::String(String::from(name))]) {
+        Ok(Datum::List(v)) if v.len() >= 2 => match (&v[0], &v[1]) {
+            (Datum::Int(w), Datum::Int(h)) => Some((*w, *h)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub fn mouse_loc() -> (i32, i32) {
+    match invoke_for_datum(HostOp::MouseLoc, &[]) {
+        Ok(Datum::Point(x, y)) => (x as i32, y as i32),
+        _ => (0, 0),
+    }
+}
+
+/// Whether the named key is currently held (Director key names / chars).
+pub fn key_down(key: &str) -> bool {
+    invoke_for_datum(HostOp::KeyDown, &[Datum::String(String::from(key))])
+        .ok()
+        .and_then(|d| d.as_bool())
+        .unwrap_or(false)
+}
+
+/// Set a Lingo global `name` to `value` so movie scripts can read it.
+pub fn set_lingo_global(name: &str, value: Datum) {
+    invoke(
+        HostOp::SetLingoGlobal,
+        &[Datum::String(String::from(name)), value],
     );
 }
 

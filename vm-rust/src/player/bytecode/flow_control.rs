@@ -26,7 +26,7 @@ impl FlowControlBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         // let script = get_current_script(player.to_owned(), ctx.to_owned());
         let (name, arg_ref_list, is_no_ret) = {
-            let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+            let player = unsafe { crate::player::player_mut() };
             let player_cell = &player;
 
             let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
@@ -67,6 +67,146 @@ impl FlowControlBytecodeHandler {
             });
         }
         return Ok(result_ctx);
+    }
+
+    /// `tell <target>` — pop the target and record which context the enclosed
+    /// `tellcall`s dispatch to. `tell sprite(#movieSprite)` targets that nested
+    /// sub-player (the loader→game command bridge); other targets run on THIS
+    /// player. Stack is a Vec so `tell` blocks can nest.
+    pub fn start_tell(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        reserve_player_mut(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let target_ref = scope.stack.pop().ok_or_else(|| {
+                ScriptError::new("starttell: operand stack is empty".to_string())
+            })?;
+            let target = player.get_datum(&target_ref).clone();
+            let nested = match target {
+                Datum::SpriteRef(n) => player
+                    .movie
+                    .score
+                    .get_sprite(n as i16)
+                    .and_then(|s| s.member.clone())
+                    .and_then(|m| crate::player::nested_player_id(&m)),
+                Datum::CastMember(ref m) => crate::player::nested_player_id(m),
+                _ => None,
+            };
+            player.tell_target_stack.push(nested);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    /// `end tell` — pop the current tell target.
+    pub fn end_tell(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        let _ = ctx;
+        reserve_player_mut(|player| {
+            player.tell_target_stack.pop();
+        });
+        Ok(HandlerExecutionResult::Advance)
+    }
+
+    /// `tellcall` — like `ext_call` but dispatches the command into the current
+    /// `tell` target. For a nested `#movie` target the args are marshaled into
+    /// the sub-player, the command runs there (with the active id pinned across
+    /// awaits), and the result is marshaled back. No nested target → runs here.
+    pub async fn tell_call(
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
+        let (name, arg_ref_list, is_no_ret, target) = {
+            let player = unsafe { crate::player::player_mut() };
+            let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
+            let name = get_name(&player, &ctx, name_id).unwrap().to_owned();
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let arg_list_ref = scope.stack.pop().ok_or_else(|| {
+                ScriptError::new(format!("tell_call '{}': operand stack is empty", name))
+            })?;
+            let arg_list_datum = player.get_datum(&arg_list_ref);
+            let (args, is_no_ret) = if let Datum::List(list_type, list, _) = arg_list_datum {
+                (
+                    Vec::from(list.to_owned()),
+                    matches!(list_type, DatumType::ArgListNoRet),
+                )
+            } else {
+                return Err(ScriptError::new(format!(
+                    "tell_call '{}': expected arg list on stack",
+                    name
+                )));
+            };
+            let target = player.tell_target_stack.last().copied().flatten();
+            (name, args, is_no_ret, target)
+        };
+
+        let nested_id = match target {
+            Some(id) => id,
+            None => {
+                // No nested target — behave like ext_call on this player.
+                let (result_ctx, return_value) =
+                    player_ext_call(name.clone(), &arg_ref_list, ctx.scope_ref).await;
+                if !is_no_ret {
+                    reserve_player_mut(|player| {
+                        player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(return_value);
+                    });
+                }
+                return Ok(result_ctx);
+            }
+        };
+
+        // Marshal args from the host into the nested sub-player's allocator, and
+        // PAUSE the sub's own frame loop for the duration of the tell dispatch.
+        // Otherwise the sub's frame loop (a separate async task) runs its scripts
+        // concurrently with the tell's `sendAllSprites` — both push/pop scopes on
+        // the same player between awaits, corrupting its scope stack (observed as
+        // a hang). `command_handler_yielding` is the engine's existing "a command
+        // handler is running, don't advance the frame loop" gate.
+        let nested_args: Vec<DatumRef> = unsafe {
+            let host = crate::player::player_mut();
+            match crate::player::NESTED_PLAYERS
+                .get_mut(nested_id - 1)
+                .and_then(|o| o.as_mut())
+            {
+                Some(sub) => {
+                    sub.command_handler_yielding = true;
+                    arg_ref_list
+                        .iter()
+                        .map(|r| crate::player::marshal_datum(host, sub, r))
+                        .collect()
+                }
+                None => return Ok(HandlerExecutionResult::Advance),
+            }
+        };
+
+        // Run the command inside the nested player, active id pinned across awaits.
+        let (_result_ctx, nested_return) = crate::player::with_active_player(
+            nested_id,
+            player_ext_call(name.clone(), &nested_args, ctx.scope_ref),
+        )
+        .await;
+
+        // Resume the sub's frame loop.
+        unsafe {
+            if let Some(sub) = crate::player::NESTED_PLAYERS
+                .get_mut(nested_id - 1)
+                .and_then(|o| o.as_mut())
+            {
+                sub.command_handler_yielding = false;
+            }
+        }
+
+        if !is_no_ret {
+            let host_ret = unsafe {
+                let host = crate::player::player_mut();
+                match crate::player::NESTED_PLAYERS
+                    .get(nested_id - 1)
+                    .and_then(|o| o.as_ref())
+                {
+                    Some(sub) => crate::player::marshal_datum(sub, host, &nested_return),
+                    None => DatumRef::Void,
+                }
+            };
+            reserve_player_mut(|player| {
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(host_ret);
+            });
+        }
+        Ok(HandlerExecutionResult::Advance)
     }
 
     pub async fn local_call(

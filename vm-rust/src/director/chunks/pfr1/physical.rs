@@ -85,30 +85,30 @@ pub fn parse_physical_font(
                     let three_byte_bct_size = reader.read_bit();
                     let two_byte_yppm = reader.read_bit();
                     let two_byte_xppm = reader.read_bit();
-                    let n_bitmap_sizes = reader.read_bit() as usize;
+                    // nBitmapSizes is a full BYTE, not a single bit. Reading 1 bit gave 0
+                    // (MSB of the count byte) and silently dropped every strike, so pixel
+                    // fonts (Habbo Volter) fell back to oversized outline rendering.
+                    let n_bitmap_sizes = reader.read_bits(8) as usize;
 
                     for _ in 0..n_bitmap_sizes {
-                        // Use bit-stream reads (not byte-aligned)
-                        // ReadBitsN behavior. After nBitmapSizes (1 bit), we're
-                        // mid-byte; byte-aligned reads would discard remaining bits.
-                        let _xppm = if two_byte_xppm {
+                        let xppm = if two_byte_xppm {
                             reader.read_bits(16)
                         } else {
                             reader.read_bits(8)
                         };
 
-                        let _yppm = if two_byte_yppm {
+                        let yppm = if two_byte_yppm {
                             reader.read_bits(16)
                         } else {
                             reader.read_bits(8)
                         };
 
                         let _zeros2 = reader.read_bits(5);
-                        let _three_byte_gps_offset = reader.read_bit();
-                        let _two_byte_gps_size = reader.read_bit();
-                        let _two_byte_char_code = reader.read_bit();
+                        let three_byte_gps_offset = reader.read_bit();
+                        let two_byte_gps_size = reader.read_bit();
+                        let two_byte_char_code = reader.read_bit();
 
-                        let _bct_size = if three_byte_bct_size {
+                        let bct_size = if three_byte_bct_size {
                             reader.read_bits(24)
                         } else {
                             reader.read_bits(16)
@@ -120,13 +120,23 @@ pub fn parse_physical_font(
                             reader.read_bits(16)
                         };
 
-                        let _n_bmap_chars = if two_byte_n_bmap_chars {
+                        let n_bmap_chars = if two_byte_n_bmap_chars {
                             reader.read_bits(16)
                         } else {
                             reader.read_bits(8)
                         };
 
                         record.bitmap_size_table_offset = bct_offset;
+                        // Store the (single) strike spec so the GPS parser can load the BCT.
+                        record.has_bitmap_strike = true;
+                        record.bct_offset = bct_offset;
+                        record.bct_size = bct_size;
+                        record.n_bmap_chars = n_bmap_chars;
+                        record.bmap_xppm = xppm as u16;
+                        record.bmap_yppm = yppm as u16;
+                        record.bct_three_byte_gps_offset = three_byte_gps_offset;
+                        record.bct_two_byte_gps_size = two_byte_gps_size;
+                        record.bct_two_byte_char_code = two_byte_char_code;
                     }
 
                     record.has_bitmap_section = true;

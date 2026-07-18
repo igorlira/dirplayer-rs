@@ -127,6 +127,16 @@ fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
     });
 }
 
+/// Drop every registered JS-Lingo runtime. Called on movie reset so the
+/// previous movie's runtimes (and everything their global scope holds) don't
+/// leak across a movie switch — this map is a `thread_local`, so unlike the
+/// player's own caches it is NOT freed when the `DirPlayer` is dropped.
+/// Runtimes are re-registered lazily by `diagnose_js_script` as the new
+/// movie's scripts load.
+pub fn clear_all_runtimes() {
+    JS_RUNTIMES.with(|m| m.borrow_mut().clear());
+}
+
 /// Hook called from `player_call_script_handler_raw_args` before the
 /// existing Lingo handler lookup. `receiver` is the Script instance that
 /// owns the handler (Director's `me`): when set, it's prepended to the

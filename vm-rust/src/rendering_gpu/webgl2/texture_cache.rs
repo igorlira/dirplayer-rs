@@ -4,7 +4,7 @@
 //! unchanged bitmaps every frame.
 
 use std::collections::HashMap;
-use web_sys::WebGlTexture;
+use web_sys::{WebGl2RenderingContext, WebGlTexture};
 
 use crate::player::cast_lib::CastMemberRef;
 use crate::player::sprite::ColorRef;
@@ -55,6 +55,17 @@ pub struct CachedTexture {
     pub version: u32,
     /// Last frame this texture was used
     pub last_used_frame: u64,
+    /// GL context, kept so `Drop` can free the GPU texture. Dropping a
+    /// `WebGlTexture` handle does NOT call `gl.deleteTexture`, so without this
+    /// every evicted / replaced / invalidated cache entry would leak its GPU
+    /// texture (memory climbs on animation- or text-heavy movies).
+    gl: WebGl2RenderingContext,
+}
+
+impl Drop for CachedTexture {
+    fn drop(&mut self) {
+        self.gl.delete_texture(Some(&self.texture));
+    }
 }
 
 /// LRU texture cache for bitmap textures
@@ -92,9 +103,11 @@ impl TextureCache {
         }
     }
 
-    /// Insert or update a texture in the cache
+    /// Insert or update a texture in the cache. `gl` is stored so the entry can
+    /// free its GPU texture on eviction/replacement via `Drop`.
     pub fn insert(
         &mut self,
+        gl: &WebGl2RenderingContext,
         key: TextureCacheKey,
         texture: WebGlTexture,
         width: u32,
@@ -106,6 +119,7 @@ impl TextureCache {
             self.evict_lru();
         }
 
+        // A same-key insert replaces (and drops → deletes) the previous entry.
         self.textures.insert(
             key,
             CachedTexture {
@@ -114,6 +128,7 @@ impl TextureCache {
                 height,
                 version,
                 last_used_frame: self.current_frame,
+                gl: gl.clone(),
             },
         );
     }
@@ -414,6 +429,14 @@ pub struct CachedRenderedText {
     pub height: u32,
     /// Last frame this texture was used
     pub last_used_frame: u64,
+    /// GL context, kept so `Drop` frees the GPU texture (see `CachedTexture`).
+    gl: WebGl2RenderingContext,
+}
+
+impl Drop for CachedRenderedText {
+    fn drop(&mut self) {
+        self.gl.delete_texture(Some(&self.texture));
+    }
 }
 
 /// LRU texture cache for rendered text textures
@@ -451,9 +474,11 @@ impl RenderedTextCache {
         }
     }
 
-    /// Insert a texture into the cache
+    /// Insert a texture into the cache. `gl` is stored so the entry frees its
+    /// GPU texture on eviction/replacement via `Drop`.
     pub fn insert(
         &mut self,
+        gl: &WebGl2RenderingContext,
         key: RenderedTextCacheKey,
         texture: WebGlTexture,
         width: u32,
@@ -471,6 +496,7 @@ impl RenderedTextCache {
                 width,
                 height,
                 last_used_frame: self.current_frame,
+                gl: gl.clone(),
             },
         );
     }

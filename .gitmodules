@@ -8,3 +8,6 @@
 [submodule "xtras/bobba-xtra"]
 	path = xtras/bobba-xtra
 	url = https://github.com/chameleonxxl/bobba-xtra.git
+[submodule "xtras/groove-xtra"]
+	path = xtras/groove-xtra
+	url = https://github.com/chameleonxxl/groove-xtra.git

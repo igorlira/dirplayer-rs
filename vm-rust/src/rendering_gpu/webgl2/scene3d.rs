@@ -66,6 +66,7 @@ struct Shader3d {
     u_emissive_color: Option<WebGlUniformLocation>,
     u_shininess: Option<WebGlUniformLocation>,
     u_opacity: Option<WebGlUniformLocation>,
+    u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
@@ -196,6 +197,11 @@ pub struct Scene3dRenderer {
     logged_members: std::collections::HashSet<(i32, i32)>,
     animation_time: f32,
     motion_transforms: HashMap<String, [f32; 16]>,
+    /// Single-track keyframe (object) motions that REPLACE a node's local
+    /// transform — Director keyframePlayer semantics: the keyframe stores the
+    /// node's full local transform, so it overrides the base rather than
+    /// multiplying onto it (motion_transforms). Used by the multi-player path.
+    motion_replace_transforms: HashMap<String, [f32; 16]>,
     pub active_camera: Option<String>,
     /// Set when a non-looping motion reaches its end — caller should advance the queue
     pub motion_ended: bool,
@@ -262,6 +268,7 @@ impl Scene3dRenderer {
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
+            motion_replace_transforms: HashMap::new(),
             active_camera: None,
             motion_ended: false,
             last_motion_name: None,
@@ -379,6 +386,12 @@ void main() {
 
         let fs_source = r#"#version 300 es
 precision mediump float;
+// Fragment shaders default `int` to mediump, but vertex shaders default it to
+// highp. A uniform shared across both stages must match precision or GLSL ES
+// linking fails ("Uniform `u_texcoord2_direct` is not linkable between attached
+// shaders" — Firefox enforces this; Chrome/ANGLE silently tolerates it). Force
+// highp int here so every shared int uniform matches the VS default.
+precision highp int;
 
 in vec3 v_position;
 in vec3 v_normal;
@@ -397,6 +410,10 @@ uniform vec4 u_specular_color;
 uniform vec4 u_emissive_color;
 uniform float u_shininess;
 uniform float u_opacity;
+// Alpha-test threshold for cutout (opaque-but-alpha-textured) models drawn in the
+// opaque pass: discard texels below this so they write neither colour nor depth.
+// 0 disables the test (default / blended-transparent paths).
+uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
 uniform sampler2D u_lightmap_tex;
@@ -505,10 +522,24 @@ vec3 apply_fog(vec3 color) {
 }
 
 void main() {
+    // A fully-transparent material (frog01's `clearS`, blend 0 → opacity 0) is
+    // invisible, but in the opaque/cutout pass (depth_mask ON) it would still write
+    // DEPTH — an invisible depth wall that culls everything behind it. The game-over
+    // `back` wall's clearS face sits ~2.5u in front of the camera and covers the
+    // upper view, so it was depth-hiding the banner / side walls / far logs behind it
+    // (they showed in play because the camera wasn't behind that face). Discard it so
+    // it writes neither colour nor depth. (Genuine translucency like water2 blend=50 →
+    // opacity 0.5 is untouched.)
+    if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
     vec3 V = normalize(u_camera_pos - v_position);
 
     vec4 tex_sample = texture(u_diffuse_tex, v_texcoord);
+
+    // Alpha-test cutout: opaque models whose texture carries alpha (e.g. frog01's
+    // Flash bark/leaf textures) are drawn in the opaque pass; discard transparent
+    // texels so they don't write depth and aren't sorted as translucent.
+    if (u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
 
     // When textured: GL_MODULATE mode = texture * vertex_lighting
     // IFX default: UseDiffuse=OFF → material diffuse forced to white (1,1,1)
@@ -532,10 +563,13 @@ void main() {
                     float dist = length(light_dir);
                     L = light_dir / dist;
                     atten = 1.0 / (u_light_atten[i].x + u_light_atten[i].y * dist + u_light_atten[i].z * dist * dist);
-                    // Spot light cone attenuation
+                    // Spot light cone attenuation. Director's spotAngle is the
+                    // HALF-cone angle (dict: "corresponds to half the angle; for a
+                    // 90° angle pass 45.0"), so the cone edge is cos(spotAngle) — do
+                    // NOT halve it again.
                     if (u_light_spot_angle[i] > 0.0) {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
-                        float cone_cos = cos(u_light_spot_angle[i] * 0.5);
+                        float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
                         else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
                     }
@@ -623,7 +657,14 @@ void main() {
                     vec3 light_dir = u_light_pos[i] - v_position;
                     float dist = length(light_dir);
                     L = light_dir / dist;
-                    atten = 1.0 / (1.0 + 0.01 * dist + 0.0001 * dist * dist);
+                    atten = 1.0 / (u_light_atten[i].x + u_light_atten[i].y * dist + u_light_atten[i].z * dist * dist);
+                    // Spot cone (spotAngle = half-cone angle, per Director dict).
+                    if (u_light_spot_angle[i] > 0.0) {
+                        float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
+                        float cone_cos = cos(u_light_spot_angle[i]);
+                        if (spot_cos < cone_cos) atten = 0.0;
+                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                    }
                 }
 
                 // Two-sided lighting: use abs(N·L) so back faces also receive light
@@ -689,6 +730,7 @@ void main() {
             u_emissive_color: u("u_emissive_color"),
             u_shininess: u("u_shininess"),
             u_opacity: u("u_opacity"),
+            u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
             u_lightmap_tex: u("u_lightmap_tex"),
@@ -1125,7 +1167,7 @@ void main() {
                 continue; // Skip light cone/sphere meshes
             }
             let mut group = Vec::new();
-            for (mi, mesh) in decoded_meshes.iter().enumerate() {
+            for mesh in decoded_meshes.iter() {
                 if mesh.positions.is_empty() || mesh.faces.is_empty() {
                     continue;
                 }
@@ -1155,6 +1197,7 @@ void main() {
                 } else {
                     None
                 };
+
                 // Pack bone data (variable-length per-vertex → fixed vec4)
                 let (bone_idx_packed, bone_wgt_packed);
                 let (bi_opt, bw_opt) = if !mesh.bone_indices.is_empty() && !mesh.bone_weights.is_empty()
@@ -1195,7 +1238,7 @@ void main() {
                 } else {
                     None
                 };
-                let buffers = Mesh3dBuffers::new_full(
+                let mut buffers = Mesh3dBuffers::new_full(
                     context,
                     &mesh.positions,
                     &mesh.normals,
@@ -1206,6 +1249,13 @@ void main() {
                     bw_opt,
                     vc_opt,
                 )?;
+                // A file-provided 2nd UV set is a lightmap/shadowmap atlas coord in
+                // [0,1], NOT pre-centered like the base set, so it must bypass the CLOD
+                // (u+0.5, 0.5-v) remap. Without this it shifts to ~[0.5,1.5] and the
+                // forced CLAMP smears the lightmap's edge across the whole surface.
+                if tc2.is_some() {
+                    buffers.texcoord2_direct = true;
+                }
                 group.push(buffers);
             }
             mesh_groups.insert(name.clone(), group);
@@ -1254,8 +1304,14 @@ void main() {
         let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
         let mut alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
-            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data) {
-                let lower = tex_name.to_lowercase();
+            let lower = tex_name.to_lowercase();
+            // The SkyLine* textures in this game are authored vertically inverted in
+            // the W3D (the JPEGs are stored upside-down, while houses/buildings/icons
+            // are stored right-side-up). The skyline mesh UVs use the same convention
+            // as everything else, and the texture declarations carry no orientation
+            // flag, so flip these on upload to render the horizon the right way up.
+            let flip_v = lower.contains("skyline");
+            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
                 texture_sizes.insert(lower.clone(), (w, h));
                 if has_alpha {
                     alpha_textures.insert(lower.clone());
@@ -1290,8 +1346,8 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
-        decode_and_upload_texture_impl(context, data)
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
+        decode_and_upload_texture_impl(context, data, flip_v)
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
@@ -1306,7 +1362,8 @@ void main() {
                 Some(&old_len) => old_len != data_len,
             };
             if needs_upload {
-                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data) {
+                let flip_v = lower.contains("skyline");
+                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
                     gpu_data.texture_sizes.insert(lower.clone(), (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(lower.clone());
@@ -1774,7 +1831,54 @@ void main() {
 
             // Evaluate motion animations each frame
             self.motion_transforms.clear();
-            if !scene.motions.is_empty() {
+            self.motion_replace_transforms.clear();
+            let multi_player = runtime_state.map(|rs| rs.bones_players.len() > 1).unwrap_or(false);
+            if !scene.motions.is_empty() && multi_player {
+                // Multiple per-model keyframe/bones players animating at once
+                // (Splat pac-man: footA plays "footA-Key", footB plays "footB-Key").
+                // The single member-level current_motion can only carry one, so apply
+                // EACH model's own motion at its own clock. A single-track object
+                // keyframe motion is applied to the model the player is on (so
+                // identically-sourced clones with different names still animate);
+                // a multi-track skeletal motion applies each track to its named bone.
+                if let Some(rs) = runtime_state {
+                    for (model_name, bp) in &rs.bones_players {
+                        if !bp.animation_playing { continue; }
+                        let motion_name = match &bp.current_motion { Some(m) => m, None => continue };
+                        let motion = match scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name)) {
+                            Some(m) => m, None => continue,
+                        };
+                        let duration = motion.duration();
+                        let eff_end = if bp.animation_end_time >= 0.0 { bp.animation_end_time.min(duration) } else { duration };
+                        let eff_start = bp.animation_start_time.min(eff_end);
+                        let range = eff_end - eff_start;
+                        if range <= 0.0 { continue; }
+                        let t = if bp.animation_loop {
+                            eff_start + ((bp.animation_time - eff_start) % range + range) % range
+                        } else {
+                            bp.animation_time.clamp(eff_start, eff_end)
+                        };
+                        let apply_to_model = motion.tracks.len() == 1;
+                        for track in &motion.tracks {
+                            let mut kf = track.evaluate(t);
+                            if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
+                            if kf.scale_y.abs() < 1e-6 { kf.scale_y = 1.0; }
+                            if kf.scale_z.abs() < 1e-6 { kf.scale_z = 1.0; }
+                            let m = keyframe_to_column_major_matrix(&kf);
+                            if apply_to_model {
+                                // Single-track object keyframe → replace the model's local transform.
+                                // Key by lowercase: bones_players keys are lowercased but scene node
+                                // names keep their original case (e.g. "footA"), so the node-draw
+                                // lookup must match case-insensitively or the feet never animate.
+                                self.motion_replace_transforms.insert(model_name.to_ascii_lowercase(), m);
+                            } else {
+                                // Multi-track skeletal → multiply each track onto its bone.
+                                self.motion_transforms.insert(track.bone_name.clone(), m);
+                            }
+                        }
+                    }
+                }
+            } else if !scene.motions.is_empty() {
                 // Determine which motion to play: use runtime current_motion, or fallback to first
                 let is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
                 let play_rate = runtime_state.map(|rs| rs.play_rate).unwrap_or(1.0);
@@ -1854,8 +1958,15 @@ void main() {
                 // No model nodes — fallback: draw all meshes with identity transform
                 self.draw_all_meshes_fallback(gl, shader, scene, &member_key);
             } else {
-                // Classify nodes into opaque and transparent for proper rendering order
+                // Classify nodes into opaque, cutout, and transparent for proper order.
+                // - opaque (material opacity ≥ 1, no alpha texture): pass 1, depth write.
+                // - cutout (opacity ≥ 1 but the texture carries alpha, e.g. frog01's
+                //   Flash bark/leaf textures): pass 1b, alpha-tested, depth write — so it
+                //   occludes the translucent water planes instead of being sorted behind
+                //   them (the logs were turning blue when they drifted off-centre).
+                // - transparent (opacity < 1, e.g. water2 blend=50): pass 2, back-to-front.
                 let mut transparent_nodes: Vec<(&W3dNode, f32)> = Vec::new(); // (node, distance_to_camera)
+                let mut cutout_nodes: Vec<&W3dNode> = Vec::new();
 
                 // Sort: skybox nodes first so they render before scene geometry
                 let mut sorted_model_nodes: Vec<&W3dNode> = model_nodes.iter().copied().collect();
@@ -1864,6 +1975,7 @@ void main() {
                 });
 
                 // PASS 1: Render opaque geometry (skybox first, then scene)
+                gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 for model_node in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
                         if let Some(&vis_mode) = rs.node_visibility.get(&model_node.name) {
@@ -1889,9 +2001,9 @@ void main() {
                             }
                         }
                     }
-                    let has_alpha_tex = self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state);
-                    if opacity < 0.999 || has_alpha_tex {
-                        // Defer to transparent pass — compute distance for sorting
+                    if opacity < 0.999 {
+                        // Genuinely translucent → defer to the transparent pass, sorted
+                        // by camera distance.
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
@@ -1899,8 +2011,26 @@ void main() {
                         transparent_nodes.push((model_node, dx*dx + dy*dy + dz*dz));
                         continue;
                     }
+                    if self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state) {
+                        // Opaque material but alpha-keyed texture → cutout (alpha-tested
+                        // opaque draw); keep depth writes so it occludes translucent water.
+                        cutout_nodes.push(model_node);
+                        continue;
+                    }
 
-                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, false);
+                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
+                }
+
+                // PASS 1b: Cutout geometry — opaque pass with alpha-test discard so
+                // transparent texels write neither colour nor depth (hard edges, but
+                // correct occlusion vs. the translucent water planes).
+                if !cutout_nodes.is_empty() {
+                    gl.depth_mask(true);
+                    gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.5);
+                    for model_node in &cutout_nodes {
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
+                    }
+                    gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 }
 
                 // PASS 2: Render transparent geometry (back-to-front, no depth writes)
@@ -1911,7 +2041,7 @@ void main() {
                     gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
 
                     for (model_node, _dist) in &transparent_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, true);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, true);
                     }
 
                     gl.depth_mask(true);
@@ -2080,15 +2210,23 @@ void main() {
             let cos_r = rot_rad.cos();
             let sin_r = rot_rad.sin();
 
-            // 2D transform: Scale → Rotate → Translate (with regPoint offset)
+            // 2D transform: Scale → Rotate → Translate (with regPoint offset).
+            // Director's camera.overlay[n].regPoint is in SCALED/destination pixels,
+            // NOT source-texture pixels: e.g. Rasterwerks' rifle scope reticle sets
+            // reg = GetScale(#center) = texCenter × scale (= 256×128 × 3.06 = 783×392)
+            // so the screen rect is `loc - regPoint .. loc - regPoint + texSize×scale`,
+            // centred on loc. The reg term must therefore NOT be multiplied by the
+            // scale again — doing so pushed the scaled reticle far off-screen while
+            // every scale=1 HUD layer (rx*sx == rx) was unaffected, so only the scope
+            // tube vanished. translate = loc − R·regPoint.
             let sw = sx * tex_w;
             let sh = sy * tex_h;
             let model: [f32; 16] = [
                 cos_r * sw, sin_r * sw, 0.0, 0.0,
                -sin_r * sh, cos_r * sh, 0.0, 0.0,
                 0.0,        0.0,        1.0, 0.0,
-                x - rx * sx * cos_r + ry * sy * sin_r,
-                y - rx * sx * sin_r - ry * sy * cos_r,
+                x - rx * cos_r + ry * sin_r,
+                y - rx * sin_r - ry * cos_r,
                 0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
@@ -2308,33 +2446,61 @@ void main() {
             true
         };
 
+        // A model explicitly placed via Lingo `transform.position` (e.g. a cloned
+        // On the Run bonus, repositioned after cloning) has a runtime transform
+        // override. When such a model ALSO runs a keyframePlayer motion, place it
+        // with the runtime transform and apply the keyframe LOCALLY (runtime *
+        // motion) — otherwise the spin would be applied to the stale parsed base
+        // (the template's position) and the model renders nowhere near where
+        // `worldPosition` reports it. Models WITHOUT a runtime override (Splat's
+        // per-part keyframes) keep `motion * base`, relative to the rest pose.
+        let runtime_override: Option<[f32; 16]> =
+            runtime_state.and_then(|rs| get_runtime_transform(rs, &node.name));
         // Get this node's transform: motion (combined with base), runtime override, or parsed
         let node_transform = if allow_motion_override {
-            if let Some(motion_t) = self.motion_transforms.get(&node.name) {
-                // Motion applied to base: motion * base (motion rotates the base orientation)
-                mat4_multiply_col_major(motion_t, &node.transform)
+            if let Some(km) = (!self.motion_replace_transforms.is_empty())
+                .then(|| self.motion_replace_transforms.get(&node.name.to_ascii_lowercase()))
+                .flatten()
+            {
+                // Lookup is case-insensitive (bones_players keys are lowercased;
+                // node names aren't).
+                match runtime_override {
+                    Some(rt) => mat4_multiply_col_major(&rt, km),
+                    None => mat4_multiply_col_major(km, &node.transform),
+                }
+            } else if let Some(motion_t) = self.motion_transforms.get(&node.name) {
+                match runtime_override {
+                    Some(rt) => mat4_multiply_col_major(&rt, motion_t),
+                    None => mat4_multiply_col_major(motion_t, &node.transform),
+                }
             } else {
-                runtime_state
-                    .and_then(|rs| get_runtime_transform(rs, &node.name))
-                    .unwrap_or(node.transform)
+                runtime_override.unwrap_or(node.transform)
             }
         } else {
-            runtime_state
-                .and_then(|rs| get_runtime_transform(rs, &node.name))
-                .unwrap_or(node.transform)
+            runtime_override.unwrap_or(node.transform)
         };
 
         let mut chain = vec![node_transform];
-        let mut current_parent = &node.parent_name;
+        let mut current_parent = node.parent_name.as_str();
 
-        // Walk up parent chain
-        while !current_parent.is_empty() && current_parent != "<world>" {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+        // Walk up parent chain. Director node names are case-insensitive, and
+        // get_runtime_transform already looks them up that way — but the parent
+        // NODE lookup must match it. A case-sensitive `==` here fails to find a
+        // parent whose stored name differs in case from the child's parent_name
+        // (cloneModelFromCastmember preserves the SOURCE member's casing for
+        // re-parented sub-nodes), which silently breaks the chain and renders the
+        // node at its raw local transform — e.g. the frog's deep limb hierarchy
+        // (frog→axe→body→lhip→ll→…→lf) collapsing toward the origin.
+        while !current_parent.is_empty()
+            && !current_parent.eq_ignore_ascii_case("world")
+            && current_parent != "<world>"
+        {
+            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
                 let parent_t = runtime_state
                     .and_then(|rs| get_runtime_transform(rs, &parent_node.name))
                     .unwrap_or(parent_node.transform);
                 chain.push(parent_t);
-                current_parent = &parent_node.parent_name;
+                current_parent = parent_node.parent_name.as_str();
             } else {
                 break;
             }
@@ -2357,6 +2523,8 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        view_matrix: &[f32; 16],
+        projection_matrix: &[f32; 16],
         force_blend: bool,
     ) {
         let resource = if !model_node.model_resource_name.is_empty() {
@@ -2371,7 +2539,7 @@ void main() {
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
             let has_skeleton_data = self.setup_skinning_for_resource(
-                gl, shader, scene, resource, gpu_data, runtime_state,
+                gl, shader, scene, resource, &model_node.name, gpu_data, runtime_state,
             );
 
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
@@ -2409,6 +2577,24 @@ void main() {
             vis_mode = if is_skybox {
                 gl.disable(WebGl2RenderingContext::CULL_FACE);
                 gl.depth_mask(false);
+                // Rasterwerks draws its skybox through a dedicated sky camera
+                // (rootNode = detached "NodeSkyBox") so it's parallax-free and never
+                // clipped. Approximate that inline: strip the view translation so the
+                // cube is camera-centered (no parallax), and extend the far plane —
+                // the cube is scaled to 32000 (faces at ±16000), far beyond the main
+                // camera's far plane, so it was being clipped to nothing.
+                let mut sky_view = *view_matrix;
+                sky_view[12] = 0.0;
+                sky_view[13] = 0.0;
+                sky_view[14] = 0.0;
+                gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &sky_view);
+                let near = projection_matrix[14] / (projection_matrix[10] - 1.0);
+                let far = 200000.0f32;
+                let nf = 1.0 / (near - far);
+                let mut sky_proj = *projection_matrix;
+                sky_proj[10] = (far + near) * nf;
+                sky_proj[14] = 2.0 * far * near * nf;
+                gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &sky_proj);
                 3u8
             } else {
                 let mode = runtime_state
@@ -2482,6 +2668,9 @@ void main() {
             gl.enable(WebGl2RenderingContext::CULL_FACE);
             gl.cull_face(WebGl2RenderingContext::FRONT); // restore default
             gl.depth_mask(true);
+            // Restore the world view/projection for subsequent (non-skybox) models.
+            gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, view_matrix);
+            gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, projection_matrix);
         } else if vis_mode >= 2 {
             // Restore default culling after #back or #both
             gl.enable(WebGl2RenderingContext::CULL_FACE);
@@ -2491,7 +2680,17 @@ void main() {
 
     /// Get the opacity of a model node's material (for transparency sorting).
     /// Look up a per-model shader override.  Returns the first available:
-    /// mesh-specific index → index 0 fallback → None.
+    /// mesh-specific index → index 0 fallback → lowest set index → None.
+    ///
+    /// The lowest-set-index fallback handles Director's 2-sided #plane idiom:
+    /// a plane has a front (mesh 0) and back (mesh 1) face, and movies texture
+    /// only the face that points at the camera after the model's rotation —
+    /// e.g. frog01's water does `model("water").shaderList[2] = waterS` (1-based
+    /// → index 1) and leaves shaderList[1] unset. Because the water is rotated
+    /// -90° about X, the VISIBLE face is mesh 0, which would otherwise resolve to
+    /// no override and render the default checker. Falling back to any set shader
+    /// puts the intended texture on the visible face. Models that set index 0
+    /// (whole-list assignment) or every index are unaffected.
     fn node_shader_override<'a>(
         rs: &'a crate::player::cast_member::Shockwave3dRuntimeState,
         node_name: &str,
@@ -2500,6 +2699,7 @@ void main() {
         rs.node_shaders.get(node_name).and_then(|m| {
             mesh_idx.and_then(|idx| m.get(&idx))
                 .or_else(|| m.get(&0))
+                .or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v))
         })
     }
 
@@ -3690,6 +3890,24 @@ void main() {
             }
         }
 
+        // If this mesh slot has no explicit shader, inherit the lowest-indexed
+        // mesh's shader BEFORE falling back to the resource's auto-generated
+        // "<res>_Shader" default. Director's #plane is 2 meshes; a resource that
+        // carries a single shader (e.g. frog01's cloned wheel: shaderList[1]=wheelS)
+        // puts it on mesh 0 only, leaving mesh 1's binding empty. Director shows the
+        // same shader on both faces ([wheelS, wheelS]); without this, dirplayer's
+        // mesh 1 fell back to the default shader (checker/untextured), so the
+        // camera-facing wheel face rendered with no wheel texture → "no wheels".
+        // Mirrors node_shader_override's lowest-index fallback for the resource path.
+        if candidate_names.is_empty() {
+            for binding in &res_info.shader_bindings {
+                if let Some(first) = binding.mesh_bindings.iter().find(|b| !b.is_empty()) {
+                    candidate_names.push(first.clone());
+                    break;
+                }
+            }
+        }
+
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
             .cloned()
@@ -3831,12 +4049,15 @@ void main() {
     }
 
     /// Compute and upload bone matrices for skinning. Returns true if skinning data was uploaded.
+    /// `model_name` selects the per-model bonesPlayer state — each skinned model in a member
+    /// animates independently (multiple cloned bots in one G3D scene must not share a clock).
     fn setup_skinning_for_resource(
         &self,
         gl: &WebGl2RenderingContext,
         shader: &Shader3d,
         scene: &W3dScene,
         resource_name: &str,
+        model_name: &str,
         gpu_data: &MemberGpuData,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
@@ -3867,23 +4088,55 @@ void main() {
         };
         let inv_bind = &inv_bind_fresh;
 
-        let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.as_deref());
-        let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
-        let root_lock = runtime_state.map(|rs| rs.root_lock).unwrap_or(false);
+        // Per-MODEL bonesPlayer state is the source of truth ONCE a motion has been
+        // play()'d on that model. A bare entry created only by a setter (rootLock /
+        // playRate, e.g. the dino) has no motion and a frozen clock — treat it as
+        // absent so we fall back ENTIRELY to the legacy member fields (auto-play +
+        // the advancing legacy clock). Otherwise its frozen time=0 shadowed the
+        // legacy clock and the model rendered stuck on frame 0.
+        let bp = runtime_state.and_then(|rs| rs.bones_player(model_name))
+            .filter(|b| b.current_motion.is_some());
+        let current_motion_name = bp.and_then(|b| b.current_motion.as_deref())
+            .or_else(|| runtime_state.and_then(|rs| rs.current_motion.as_deref()));
+        let is_loop = bp.map(|b| b.animation_loop)
+            .or_else(|| runtime_state.map(|rs| rs.animation_loop)).unwrap_or(true);
+        let root_lock = bp.map(|b| b.root_lock)
+            .or_else(|| runtime_state.map(|rs| rs.root_lock)).unwrap_or(false);
         let motion = if let Some(name) = current_motion_name {
             scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name))
         } else {
             None // Don't apply a motion until the game explicitly calls play()
         };
-        // Skip skinning if motion has too few tracks for the skeleton
+        // Manual per-bone overrides (bonesPlayer.bone[i].transform = t), keyed by
+        // "modelname:boneindex". updateBoneRotation re-sets these each frame to
+        // animate procedurally (the SweeTarts snake's S-wiggle), so we must skin
+        // even when the played motion is sparse or absent.
+        let bone_overrides: std::collections::HashMap<usize, [f32; 16]> = runtime_state
+            .map(|rs| {
+                let prefix = format!("{}:", model_name.to_ascii_lowercase());
+                rs.bone_transform_overrides.iter()
+                    .filter_map(|(k, v)| {
+                        k.strip_prefix(&prefix)
+                            .and_then(|i| i.parse::<usize>().ok())
+                            .map(|i| (i, *v))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Skip skinning if motion has too few tracks for the skeleton — unless
+        // manual bone overrides are driving the pose.
         let min_tracks = (skeleton.bones.len() / 2).max(2);
-        if motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true) {
+        if bone_overrides.is_empty()
+            && motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true)
+        {
             return false;
         }
-        let time = self.animation_time;
+        let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
-        let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
-        let start_time = runtime_state.map(|rs| rs.animation_start_time).unwrap_or(0.0);
+        let end_time = bp.map(|b| b.animation_end_time)
+            .or_else(|| runtime_state.map(|rs| rs.animation_end_time)).unwrap_or(-1.0);
+        let start_time = bp.map(|b| b.animation_start_time)
+            .or_else(|| runtime_state.map(|rs| rs.animation_start_time)).unwrap_or(0.0);
         let eff_end = if end_time >= 0.0 { (end_time).min(duration) } else { duration };
         let eff_start = start_time.min(eff_end);
         let range = eff_end - eff_start;
@@ -3896,11 +4149,51 @@ void main() {
         } else { 0.0 };
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
             skeleton, motion, t, root_lock,
+            if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
         );
 
-        // Check for motion blending (crossfade) — use renderer's local blend state
-        let blend_weight = self.blend_weight;
-        let prev_motion_name = runtime_state.and_then(|rs| rs.previous_motion.as_deref());
+        // [root-relativize] Director keeps a 3ds-Max biped's ROOT at identity IN THE SKIN
+        // (the root COM drives the model node, not the deformation). dirplayer's posed
+        // skeleton is instead pre-rotated by the root COM — verified against Director:
+        // dirplayer's bone[i] world == Rz(-122°) × Director's, the SAME factor for every
+        // bone (the root's COM). Strip it by relativizing each posed bone to the posed
+        // ROOT: skin[b] = inverse(root) × world[b] × inv_bind[b]. Algebra cancels to
+        // (b-relative-to-root) × inv_bind[b], so the inv_bind (mesh-consistent dir/quat
+        // T-pose) is untouched — no distortion (changing the bind DOES distort). This is
+        // the bot "aims right, faces ~NW" fix; rigid bodies/non-skinned models are
+        // unaffected (only skinned models reach here).
+        let affine_inv = |m: &[f32; 16]| -> [f32; 16] {
+            let (r00, r01, r02) = (m[0], m[4], m[8]);
+            let (r10, r11, r12) = (m[1], m[5], m[9]);
+            let (r20, r21, r22) = (m[2], m[6], m[10]);
+            let (tx, ty, tz) = (m[12], m[13], m[14]);
+            let itx = -(r00 * tx + r10 * ty + r20 * tz);
+            let ity = -(r01 * tx + r11 * ty + r21 * tz);
+            let itz = -(r02 * tx + r12 * ty + r22 * tz);
+            [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0, itx, ity, itz, 1.0]
+        };
+        // Relativize by a FIXED idle-pose root, NOT the per-frame posed root. The idle
+        // root strips the biped COM convention while KEEPING each frame's run deviation
+        // (the per-frame posed root removed the run's small turn too → bots looked
+        // "slightly off while moving"). The bot mesh is authored at "Idle_Rest", so use
+        // that motion's frame-0 root as the fixed reference; models with no idle motion
+        // (dino/frog) fall back to the per-frame posed root (idle-dominant → no residual).
+        let idle_root_mats = scene.motions.iter()
+            .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
+            .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
+            .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
+        // Only models with an idle-rest motion (the biped actors/bots) are relativized;
+        // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
+        // relativization — so this can't regress them.
+        let root_relinv = match &idle_root_mats {
+            Some(m) if !m.is_empty() => affine_inv(&m[0]),
+            _ => IDENTITY_4X4,
+        };
+
+        // Check for motion blending (crossfade) — per-model blend state.
+        let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);
+        let prev_motion_name = bp.and_then(|b| b.previous_motion.as_deref())
+            .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.as_deref()));
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
         let bone_count = skeleton.bones.len().min(48);
@@ -3919,17 +4212,21 @@ void main() {
             let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(n)));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
                 skeleton, prev_motion, t, root_lock,
+                if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
             );
             for i in 0..bone_count {
-                let cur = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
-                let prev = mat4_multiply_col_major(&prev_matrices[i], &inv_bind[i]);
+                let cur_rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
+                let prev_rel = mat4_multiply_col_major(&root_relinv, &prev_matrices[i]);
+                let cur = mat4_multiply_col_major(&cur_rel, &inv_bind[i]);
+                let prev = mat4_multiply_col_major(&prev_rel, &inv_bind[i]);
                 for j in 0..16 {
                     skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
                 }
             }
         } else {
             for i in 0..bone_count {
-                let final_mat = mat4_multiply_col_major(&world_matrices[i], &inv_bind[i]);
+                let rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
+                let final_mat = mat4_multiply_col_major(&rel, &inv_bind[i]);
                 skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
             }
         }
@@ -4123,20 +4420,16 @@ void main() {
         let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
-        // One-time light diagnostic
-        {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                let light_info: Vec<String> = scene.lights.iter().map(|l| {
-                    format!("{}({:?}, color=[{:.2},{:.2},{:.2}])", l.name, l.light_type, l.color[0], l.color[1], l.color[2])
-                }).collect();
-                log(&format!(
-                    "[W3D-LIGHTS] {} lights: {:?}",
-                    scene.lights.len(), light_info
-                ));
-            }
-        }
+        // dirplayer injects fallback default lights (Default*/UI*) so an unlit scene
+        // is still visible. When the movie supplies its OWN directional/spot lighting
+        // (e.g. frog01's spot/spot2), those synthetic fallbacks flood the scene and
+        // wash out the intended mood — so suppress them in that case. Baked content
+        // lights (e.g. AmbientLightResource from the .w3d) are kept.
+        let is_fallback_light = |name: &str| matches!(name,
+            "DefaultAmbient" | "DefaultDirectional" | "UIAmbient" | "UIDirectional");
+        let has_movie_light = scene.lights.iter().any(|l|
+            l.enabled && !is_fallback_light(&l.name)
+            && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
 
         if scene.lights.is_empty() {
             // Default: one directional light from above-right
@@ -4167,6 +4460,10 @@ void main() {
 
             for light in &sorted_lights {
                 if !light.enabled {
+                    continue;
+                }
+                // Suppress dirplayer's synthetic fallback lights when the movie lights itself.
+                if has_movie_light && is_fallback_light(&light.name) {
                     continue;
                 }
                 // Skip lights that have been removed from world
@@ -4284,7 +4581,7 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Option<(WebGlTexture, u32, u32, bool)> {
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -4308,7 +4605,35 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
         };
         let w = img.width();
         let h = img.height();
-        (w, h, img.into_raw())
+        let mut rgba = img.into_raw();
+        // Director W3D stores rgba4444 / 4444 textures as an RGB JPEG followed by a
+        // separate alpha continuation block: [width u32][height u32][zlibLen u32]
+        // [zlib-compressed 8-bit grayscale alpha]. image::load_from_memory only
+        // decodes the leading JPEG (alpha defaults to 255), so the icon's
+        // transparent background renders black. Recover the alpha here: locate the
+        // JPEG's EOI, parse the trailing block, inflate it, and write it into the
+        // alpha channel (0 = transparent, 255 = opaque).
+        if data[0] == 0xFF && data[1] == 0xD8 {
+            if let Some(eoi) = data.windows(2).position(|b| b[0] == 0xFF && b[1] == 0xD9) {
+                let tail = &data[eoi + 2..];
+                if tail.len() >= 14 {
+                    let aw = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
+                    let ah = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
+                    let alen = u32::from_le_bytes([tail[8], tail[9], tail[10], tail[11]]) as usize;
+                    if aw == w && ah == h && tail[12] == 0x78 && tail.len() >= 12 + alen {
+                        use std::io::Read;
+                        let mut alpha = Vec::new();
+                        let mut dec = flate2::read::ZlibDecoder::new(&tail[12..12 + alen]);
+                        if dec.read_to_end(&mut alpha).is_ok() && alpha.len() >= (w * h) as usize {
+                            for i in 0..(w * h) as usize {
+                                rgba[i * 4 + 3] = alpha[i];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (w, h, rgba)
     } else if is_dxt_texture(data) {
         // DXT compressed texture — decode to RGBA
         match decode_dxt_to_rgba(data) {
@@ -4342,6 +4667,23 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8]) -> Optio
         }
     } else {
         return None;
+    };
+
+    // Vertically flip the decoded image when requested (the caller sets this for
+    // the SkyLine* textures, which are authored upside-down in the W3D asset).
+    let rgba_data = if flip_v && height > 0 {
+        let row = (width as usize) * 4;
+        let mut out = vec![0u8; rgba_data.len()];
+        for y in 0..(height as usize) {
+            let src = y * row;
+            let dst = (height as usize - 1 - y) * row;
+            if src + row <= rgba_data.len() && dst + row <= out.len() {
+                out[dst..dst + row].copy_from_slice(&rgba_data[src..src + row]);
+            }
+        }
+        out
+    } else {
+        rgba_data
     };
 
     let gl = context.gl();

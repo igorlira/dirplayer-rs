@@ -583,7 +583,7 @@ impl ScoreFrameData {
         while !reader.eof() {
             match reader.read_u16() {
                 Ok(length) => {
-                    if length == 0 { break; }
+                    if length < 2 { break; } // 0 = terminator, 1 = trailing pad
                     let skip = (length as usize).saturating_sub(2);
                     if reader.pos + skip > reader.length { break; }
                     reader.jmp(reader.pos + skip);
@@ -602,42 +602,51 @@ impl ScoreFrameData {
             header.frame_count = actual_frame_count;
         }
 
-        debug!(
-            "ScoreFrameData {} {} {}",
-            header.frame_count, header.num_channels, header.sprite_record_size
-        );
-
-        let mut channel_data = vec![
-            0u8;
-            (header.frame_count as usize)
-                * (header.num_channels as usize)
-                * (header.sprite_record_size as usize)
-        ];
-
         let frame_size = (header.num_channels as usize) * (header.sprite_record_size as usize);
+
+        // The score frame layout is selected by the MOVIE version, not by
+        // frames_version — D4 and D5 both have frames_version<=7 but use
+        // incompatible layouts (ScummVM dispatches on movie version in frame.cpp):
+        //   D4 (400-499): 40-byte main channels + 20-byte sprite records
+        //   D5 (500-599): 48-byte main channels + 24-byte sprite records
+        //   D6+ (600+):   no packed main channels; all channels uniform.
+        let is_d4 = dir_version >= 400 && dir_version < 500;
+        let is_d5 = dir_version >= 500 && dir_version < 600;
+        // Fall back on frames_version when dir_version is unset (pre-D6 movies
+        // always have frames_version<=7); treat as D5, the historical default.
+        let is_d5 = is_d5 || (!is_d4 && dir_version < 400 && header.frames_version <= 7);
+        let main_channels_size: usize = if is_d4 { 40 } else if is_d5 { 48 } else { 0 };
+
+        // Expand + parse the delta-encoded frame stream ONE frame at a time using a
+        // single rolling buffer (num_channels × sprite_record_size, ~48 KB) that
+        // carries forward between frames. The previous code materialised a dense
+        // frame_count × frame_size grid AND retained it in `decompressed_data`
+        // (a field that is never read): a max-channel movie like Infestation
+        // (frame_count 2075 × num_channels 1006 × 48) allocated ~100 MB per score
+        // chunk, permanently inflating the un-shrinkable WASM heap. Carry-forward is
+        // now implicit — `frame_buf` keeps the previous frame's bytes and each delta
+        // overwrites only what changed; the frame is parsed immediately, then reused.
+        let mut frame_buf = vec![0u8; frame_size];
+        let mut frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)> = vec![];
+        let mut sound_channel_data: Vec<(u32, u16, SoundChannelData)> = vec![];
+        let mut tempo_channel_data: Vec<(u32, TempoChannelData)> = vec![];
+        let mut palette_channel_data: Vec<(u32, i16, i16)> = vec![];
 
         let mut frame_index: u32 = 0;
         while !reader.eof() && frame_index < header.frame_count {
             let length = reader
                 .read_u16()
                 .map_err(|e| format!("Failed to read frame length: {:?}", e))?;
-
-            if length == 0 {
+            // `length` includes its own 2-byte field, so <2 is the terminator /
+            // trailing pad (0x0001), NOT a real frame — and avoids a length-2
+            // u16 underflow that used to abort the whole score parse.
+            if length < 2 {
                 break;
             }
 
-            // Copy entire previous frame first (carry-forward).
-            // Deltas will overwrite only the bytes that changed.
-            // This is correct for both D5 (48-byte main channels) and D6+ (uniform channels).
-            if frame_index > 0 {
-                let prev_frame_offset = ((frame_index - 1) as usize) * frame_size;
-                let curr_frame_offset = (frame_index as usize) * frame_size;
-                channel_data.copy_within(
-                    prev_frame_offset..prev_frame_offset + frame_size,
-                    curr_frame_offset,
-                );
-            }
-
+            // Apply this frame's deltas on top of the carried-forward buffer.
+            // Delta stream: (channel_size: u16, channel_offset: u16, data[channel_size]);
+            // channel_offset is a byte offset within the frame.
             let frame_length = length - 2;
             if frame_length > 0 {
                 let chunk_data = reader
@@ -645,10 +654,6 @@ impl ScoreFrameData {
                     .map_err(|e| format!("Failed to read chunk data: {:?}", e))?;
                 let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
                 frame_chunk_reader.set_endian(Endian::Big);
-
-                // Apply deltas on top of carried-forward data.
-                // Delta stream: (channel_size: u16, channel_offset: u16, data: [u8; channel_size])
-                // channel_offset is a raw byte offset within the frame buffer.
                 while !frame_chunk_reader.eof() {
                     let channel_size = frame_chunk_reader
                         .read_u16()
@@ -661,48 +666,22 @@ impl ScoreFrameData {
                     let channel_delta = frame_chunk_reader
                         .read_bytes(channel_size)
                         .map_err(|e| format!("Failed to read channel delta: {:?}", e))?;
-
-                    let frame_offset = (frame_index as usize) * frame_size;
-                    let end_offset = frame_offset + channel_offset + channel_size;
-                    if end_offset > channel_data.len() {
-                        error!("Channel data copy out of bounds. Frame offset: {}, Channel offset: {}, Channel size: {}, Total len: {}",
-                            frame_offset, channel_offset, channel_size, channel_data.len());
+                    let end_offset = channel_offset + channel_size;
+                    if end_offset > frame_buf.len() {
+                        error!("Channel data copy out of bounds. Channel offset: {}, Channel size: {}, Frame len: {}",
+                            channel_offset, channel_size, frame_buf.len());
                         return Err("Channel data copy out of bounds".to_string());
                     }
-                    channel_data[frame_offset + channel_offset..end_offset]
-                        .copy_from_slice(&channel_delta);
+                    frame_buf[channel_offset..end_offset].copy_from_slice(&channel_delta);
                 }
             }
-            frame_index = frame_index + 1;
-        }
 
-        // The score frame layout is selected by the MOVIE version, not by
-        // frames_version — Director 4 and Director 5 BOTH have frames_version<=7
-        // but use incompatible sprite/main-channel layouts (ScummVM dispatches
-        // on movie version in frame.cpp). D4 and D5 differ in both the main
-        // channel block size and the per-sprite field order:
-        //   D4 (400-499): 40-byte main channels + 20-byte D4 sprite records
-        //   D5 (500-599): 48-byte main channels + 24-byte D5 sprite records
-        //   D6+ (600+):   no packed main channels; all channels uniform.
-        let is_d4 = dir_version >= 400 && dir_version < 500;
-        let is_d5 = dir_version >= 500 && dir_version < 600;
-        // Fall back on frames_version for the (rare) case where dir_version is
-        // unset: pre-D6 movies always have frames_version<=7. Treat such a
-        // movie as D5 (the historical default) rather than misreading it as D6+.
-        let is_d5 = is_d5 || (!is_d4 && dir_version < 400 && header.frames_version <= 7);
-        let main_channels_size: usize = if is_d4 { 40 } else if is_d5 { 48 } else { 0 };
-
-        let (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data) = {
-            let mut frame_channel_data = vec![];
-            let mut sound_channel_data = vec![];
-            let mut tempo_channel_data = vec![];
-            let mut palette_channel_data: Vec<(u32, i16, i16)> = vec![];
-            let decompressed_data = channel_data;
-            let mut channel_reader = BinaryReader::from_vec(&decompressed_data);
-            channel_reader.set_endian(Endian::Big);
-
-            for frame_index in 0..header.frame_count {
-                let frame_start = (frame_index as usize) * frame_size;
+            // Parse the just-expanded frame directly out of the rolling buffer
+            // (frame_start is 0 — the buffer holds exactly this one frame).
+            {
+                let frame_start = 0usize;
+                let mut channel_reader = BinaryReader::from_u8(frame_buf.as_slice());
+                channel_reader.set_endian(Endian::Big);
 
                 if is_d4 {
                     // D4: Main channels packed in first 40 bytes.
@@ -998,18 +977,17 @@ impl ScoreFrameData {
                     }
                 }
             }
+            frame_index += 1;
+        }
 
-            log::debug!(
-                "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {}",
-                header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len()
-            );
-
-            (decompressed_data, frame_channel_data, sound_channel_data, tempo_channel_data, palette_channel_data)
-        };
+        log::debug!(
+            "🏁 Finished processing {} frames. Sprites: {}, Sounds: {}, Tempo changes: {}, Palette changes: {}",
+            header.frame_count, frame_channel_data.len(), sound_channel_data.len(), tempo_channel_data.len(), palette_channel_data.len()
+        );
 
         Ok(ScoreFrameData {
             header,
-            decompressed_data,
+            decompressed_data: Vec::new(),
             frame_channel_data,
             sound_channel_data,
             tempo_channel_data,
@@ -1802,7 +1780,7 @@ impl ScoreChunk {
     /// Analyze score entries beyond Entry[0] for behavior attachment data
     fn analyze_behavior_attachment_entries(
         entries: &Vec<Vec<u8>>,
-        dir_version: u16,
+        _dir_version: u16,
     ) -> Result<Vec<(FrameIntervalPrimary, Option<FrameIntervalSecondary>)>, String> {
         let mut results = vec![];
         let mut i = 2; // Start at 2, skip entries 0 and 1
@@ -1835,35 +1813,31 @@ impl ScoreChunk {
                 continue;
             }
 
-            // Primary entries: 40 bytes base (5 x u32 fields + 20-byte
-            // TweenInfo) plus zero or more trailing u32s of authored
-            // keyframe indices. v8.0 movies only ever produce 40/44/48
-            // byte primaries (0-2 trailing keyframes); v8.5+ extends to
-            // 52 (3 trailing keyframes) and beyond — Fugue No.4 / i04.dir
-            // has primary entries of 72, 116, 188, 232, 336+ bytes for
-            // sprites with many authored keyframes along an animated
-            // path. Accepting 52+ unconditionally previously
-            // over-matched non-primary chunks in Junkbot (v8.0), so we
-            // still gate the wider sizes by movie version AND validate
-            // the first 8 bytes look like (start_frame, end_frame) of
-            // a real primary (small, ascending) to avoid false matches.
-            let accept_extended = dir_version >= 850;
-            let size_accepted_basic = matches!(entry_bytes.len(), 40 | 44 | 48)
-                || (accept_extended && entry_bytes.len() == 52);
-            // Allow any 4-byte-aligned entry >= 40 bytes on D8.5+ if the
-            // header looks plausible — that's the path-keyframe-bearing
-            // case that was getting rejected.
-            let size_accepted_extended = accept_extended
-                && entry_bytes.len() > 52
-                && entry_bytes.len() % 4 == 0
-                && entry_bytes.len() >= 8
-                && {
+            // Primary span entries: a 40-byte base (5 x u32 fields + 20-byte
+            // TweenInfo) plus zero or more trailing u32s of authored keyframe
+            // indices, so any size 40 + 4*N (40, 44, 48, 52, 56, ...) is
+            // structurally valid for a tweened sprite.
+            //
+            // 40/44/48 are accepted unconditionally. For 52+ we DON'T gate on
+            // movie version — a previous `dir_version >= 850` gate dropped real
+            // 52/56-byte spans in D6/D7 movies (SpongeBob "JellyFishin'" v600:
+            // the bikini backdrop ch10 36-39 span is 56 bytes; nomiss v700 has
+            // them too), which made whole sprites vanish. The version gate was
+            // also unnecessary for its original purpose: Junkbot (v800), the
+            // movie it was protecting, has NO 52+ entries at all. Instead we
+            // validate the header looks like a real primary — plausible
+            // ascending (start_frame, end_frame) and an in-range channel_index
+            // — which reliably rejects the behavior/initializer chunks (their
+            // first u32s are cast ids or ASCII, far outside these ranges).
+            let n = entry_bytes.len();
+            let size_accepted = matches!(n, 40 | 44 | 48)
+                || (n >= 52 && n % 4 == 0 && {
                     let b = entry_bytes;
                     let sf = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
                     let ef = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
-                    sf >= 1 && sf <= 10000 && ef >= sf && ef <= 100000
-                };
-            let size_accepted = size_accepted_basic || size_accepted_extended;
+                    let ch = u32::from_be_bytes([b[16], b[17], b[18], b[19]]);
+                    sf >= 1 && sf <= 10000 && ef >= sf && ef <= 100000 && ch < 512
+                });
             match entry_bytes.len() {
                 _ if size_accepted => {
                     // Primary entry
@@ -1918,10 +1892,8 @@ impl ScoreChunk {
                             // cast_lib/cast_member.  If the first u32 looks like a valid
                             // start_frame (1–10000) and the second u32 >= first, treat it as a
                             // primary rather than a behavior list.
-                            let primary_size_match = next_size == 40
-                                || next_size == 44
-                                || next_size == 48
-                                || (accept_extended && next_size == 52);
+                            let primary_size_match = matches!(next_size, 40 | 44 | 48)
+                                || (next_size >= 52 && next_size % 4 == 0);
                             let looks_like_primary = if primary_size_match && next_size >= 8 {
                                 let b = &entries[j];
                                 let first_u32 = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
@@ -2057,9 +2029,12 @@ impl ScoreChunk {
                     }
                 }
                 _ => {
-                    // Skip other entry types
+                    // Skip other entry types. debug!, not warn! — this fires per
+                    // skipped entry during score parse and floods the browser
+                    // console (which retains every entry); skipping is expected
+                    // and non-fatal.
                     if entry_bytes.len() > 0 {
-                        warn!(
+                        debug!(
                             "⚠️ Skipping entry {} with unexpected size {} bytes (expected 40/44/48 for primary). First bytes: {}",
                             i,
                             entry_bytes.len(),

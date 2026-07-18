@@ -94,6 +94,14 @@ pub struct Sprite {
     pub trails: bool,
     pub entered: bool,
     pub exited: bool,
+    /// Set by `puppetSprite(N, FALSE)`: the sprite keeps its member/visual state
+    /// for the rest of the CURRENT handler (Director defers the revert), but if
+    /// it is still unpuppeted at the next frame tick it reverts to the Score.
+    /// For a pure-puppet channel (no Score span — Coke Studios' furniture pool)
+    /// that revert is a reset to empty. Cleared the moment the sprite is
+    /// re-puppeted or given a new member (BrickOut re-puppets in the same
+    /// handler, so it never reverts and keeps its makeStage member).
+    pub pending_unpuppet_revert: bool,
     pub quad: Option<[(i32, i32); 4]>, // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
     pub fore_color: i32,
     pub has_fore_color: bool,
@@ -124,6 +132,28 @@ pub struct Sprite {
     pub w3d_camera: Option<String>,
     /// Additional cameras for multi-camera rendering (index 2+)
     pub w3d_cameras: Vec<String>,
+    /// Last on-screen rect captured when this sprite left its span. Director
+    /// keeps a score channel's `the rect of sprite` at its last value even
+    /// after the member clears to 0 (empty channel between two spans), so init
+    /// scripts that read `sprite(1).rect` on a transition frame still see the
+    /// real viewport size. Set only on span exit (begin_sprites); reset() clears
+    /// it, so a genuinely cleared channel still reports a zero rect.
+    pub retained_rect: Option<(i32, i32, i32, i32)>,
+    /// Last frame Lingo asserted on this Flash sprite via `sprite.frame = N`
+    /// (numeric). Sprite-owned so it SURVIVES a member swap (Director contract:
+    /// the sprite `frame` property persists across `sprite.member =`) and is
+    /// re-projected onto a freshly (re)created Ruffle instance at load time —
+    /// which is how shared-member sprites show DIFFERENT frames (StoryScramble's
+    /// 3 story tiles show unique posters even though they share cast 2:1) and how
+    /// the bogeyman's `frame = 1` before a straw/longarm swap carries over.
+    /// `None` = Lingo never set a numeric frame (free-run / pausedAtStart).
+    /// Cleared by `reset()` (channel clear / endSprite / member=0).
+    pub flash_asserted_frame: Option<i32>,
+    /// Last sampled Flash root frame, used to detect a wrap (end-of-timeline)
+    /// so a `loop = false` Flash member is halted at its final frame instead of
+    /// looping forever (Director plays it once; `the playing of sprite`
+    /// becomes FALSE). 0 = not yet sampled.
+    pub flash_prev_frame: i32,
 }
 
 /// Threshold for detecting skew flip (in degrees)
@@ -189,6 +219,7 @@ impl Sprite {
             trails: false,
             entered: false,
             exited: false,
+            pending_unpuppet_revert: false,
             quad: None,
             fore_color: 255,
             has_fore_color: false,
@@ -210,6 +241,9 @@ impl Sprite {
             base_bg_color: ColorRef::PaletteIndex(0),
             w3d_camera: None,
             w3d_cameras: Vec::new(),
+            retained_rect: None,
+            flash_asserted_frame: None,
+            flash_prev_frame: 0,
         }
     }
 
@@ -262,6 +296,7 @@ impl Sprite {
         self.constraint = 0;
         self.entered = false;
         self.exited = false;
+        self.pending_unpuppet_revert = false;
         self.quad = None;
         self.fore_color = 255;
         self.has_fore_color = false;
@@ -271,5 +306,8 @@ impl Sprite {
         self.has_size_changed = false;
         self.bitmap_size_owned_by_sprite = false;
         self.explicit_lingo_size = false;
+        self.retained_rect = None;
+        self.flash_asserted_frame = None;
+        self.flash_prev_frame = 0;
     }
 }

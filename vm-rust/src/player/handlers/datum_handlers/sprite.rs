@@ -10,7 +10,7 @@ use crate::player::{
     reserve_player_mut, reserve_player_ref,
     script::{script_get_prop, script_set_prop},
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
-    score::get_concrete_sprite_rect,
+    score::{get_concrete_sprite_rect, get_sprite_rect_in_context},
 };
 
 use super::script_instance::ScriptInstanceUtils;
@@ -47,12 +47,63 @@ extern "C" {
     fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
     fn ruffle_call_function(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
+    /// Classify what's under a sprite-local point: 0 = #background,
+    /// 1 = #normal, 2 = #button, 3 = #editText (Director Flash hitTest values).
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
-    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> bool;
+    fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetFlashProperty", catch)]
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
     fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
+    /// True once the sprite's Ruffle instance has loaded AND finished AS init.
+    /// Used to BLOCK a Flash interop call until the SWF is ready (see call_async).
+    #[wasm_bindgen(js_name = "dirplayer_isFlashInstanceReady", catch)]
+    fn is_flash_instance_ready(sprite_num: i32) -> Result<JsValue, JsValue>;
+}
+
+/// Yield the frame loop until the sprite's Ruffle instance is ready (loaded +
+/// AS-initialized), so a Flash interop call reads/writes a live instance rather
+/// than returning null. Bounded (~10s) so a sprite that never gets a ready
+/// instance falls back to the caller's existing lazy-handle / VOID behaviour.
+async fn wait_for_flash_ready(sprite_num: i16) {
+    for _ in 0..100u32 {
+        let ready = is_flash_instance_ready(sprite_num as i32)
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if ready {
+            return;
+        }
+        let _ = async_std::future::timeout(
+            std::time::Duration::from_millis(100),
+            std::future::pending::<()>(),
+        )
+        .await;
+    }
+}
+
+/// Root a bare Flash variable/function path.
+///
+/// The Ruffle fork's GetVariable/SetVariable/CallFunction run on a
+/// `from_nothing` AVM1 activation where an unqualified timeline name does NOT
+/// resolve — only explicit `_root`/`_level0`/`_global`/`this`/slash paths do
+/// (confirmed empirically: `objMain` → undefined, `_root.objMain` → the
+/// object). Director's own Flash Asset resolves such names relative to
+/// `_level0`, so prefix a bare name with `_level0.` (JS translateLevel0 maps
+/// `_level0` → `_root` before it reaches Ruffle). Already-qualified paths are
+/// left untouched.
+fn root_flash_path(path: &str) -> String {
+    if path.is_empty()
+        || path.starts_with("_level0")
+        || path.starts_with("_root")
+        || path.starts_with("_global")
+        || path.starts_with("this")
+        || path.starts_with('/')
+    {
+        path.to_string()
+    } else {
+        format!("_level0.{}", path)
+    }
 }
 
 pub struct SpriteDatumHandlers {}
@@ -158,10 +209,30 @@ impl SpriteDatumHandlers {
     pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> Result<bool, ScriptError> {
         // First check if it's a built-in sync handler (case-insensitive)
         let name_lower = handler_name.to_lowercase();
+
+        // Flash interop: async ONLY on the first access to a sprite whose Ruffle
+        // instance isn't confirmed ready yet — call_async waits for readiness,
+        // then whitelists the sprite (flash_ready_sprites). Every later call
+        // finds it whitelisted and takes the SYNC fast path below, so the
+        // hundreds of per-frame interop calls (Coke Studios) don't pay
+        // async-dispatch overhead. Cleared on member unload/swap so it re-waits.
+        if matches!(
+            name_lower.as_str(),
+            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+        ) {
+            let ready = reserve_player_ref(|player| {
+                match player.get_datum(datum).to_sprite_ref() {
+                    Ok(sn) => player.flash_ready_sprites.contains(&sn),
+                    Err(_) => false,
+                }
+            });
+            return Ok(!ready);
+        }
+
         let is_sync_handler = matches!(name_lower.as_str(),
             "intersects" | "getprop" | "getat" | "setat" | "getaprop" | "setaprop" | "pointtoword" | "pointtoline" |
             "gotoframe" | "callframe" | "stop" | "play" | "rewind" | "hold" |
-            "getvariable" | "setvariable" | "callfunction" | "setcallback" |
+            "newobject" |
             "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
             "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
             "addcamera" | "removecamera" | "cameracount"
@@ -430,12 +501,25 @@ impl SpriteDatumHandlers {
                             let result = player.last_sprite_prop_ref.take()
                                 .unwrap_or_else(|| player.alloc_datum(prop_datum));
 
-                            // If there's a second argument, it's an index into the property
+                            // If there's a second argument, it's an index into
+                            // the property value. A property list is indexed by
+                            // KEY (symbol/string), not a positional int — e.g.
+                            // Summer Resort's `sprite(i).pData[#item]`, where
+                            // pData is a #-keyed prop list. The old code coerced
+                            // the key via int_value() (a symbol → 0) and only
+                            // handled positional Lists, so it errored "cannot
+                            // index into prop_list with 0". Mirror the PropList
+                            // handler's key lookup here.
                             if args.len() > 1 {
-                                let index = player.get_datum(&args[1]).int_value()?;
                                 let list_datum = player.get_datum(&result).clone();
                                 match list_datum {
+                                    Datum::PropList(pairs, _) => {
+                                        return crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_by_key(
+                                            &pairs, &args[1], &player.allocator,
+                                        );
+                                    }
                                     Datum::List(_, item_refs, _) => {
+                                        let index = player.get_datum(&args[1]).int_value()?;
                                         if index < 1 || index as usize > item_refs.len() {
                                             return Err(ScriptError::new(format!(
                                                 "getPropRef: index {} out of range for list of length {}",
@@ -445,6 +529,7 @@ impl SpriteDatumHandlers {
                                         return Ok(item_refs[(index - 1) as usize].clone());
                                     }
                                     _ => {
+                                        let index = player.get_datum(&args[1]).int_value().unwrap_or(0);
                                         return Err(ScriptError::new(format!(
                                             "getPropRef: cannot index into {} with {}",
                                             player.get_datum(&result).type_str(), index
@@ -619,67 +704,157 @@ impl SpriteDatumHandlers {
             }
             "play" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    // play() overrides a prior `sprite.frame = N` hold — clear
+                    // the asserted frame so a fresh instance plays, not pins.
+                    reserve_player_mut(|player| {
+                        player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
+                    });
                     ruffle_play(sn);
                 }
                 Ok(DatumRef::Void)
             }
-            "rewind" | "hold" => {
+            "rewind" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     ruffle_rewind(sn);
                 }
                 Ok(DatumRef::Void)
             }
+            // Director 11.5 `hold()` (spec: "stops a Flash movie sprite that is
+            // playing in the current frame, but any audio continues to play").
+            // We map it to the same root-timeline stop as `stop()` — stopFlash
+            // halts the root MovieClip while leaving the player alive to render
+            // (we don't split audio in the Ruffle bridge, an acceptable
+            // divergence). bogey_nights' bogeyman #hiding relies on hold to
+            // actually halt the idle SWF.
+            "hold" => {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                    ruffle_stop(sn);
+                }
+                Ok(DatumRef::Void)
+            }
             "getvariable" => {
-                if let Some((sn, cl, cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let (path, return_as_object) = reserve_player_ref(|player| {
-                        if args.is_empty() { return Ok((String::new(), false)); }
-                        let p = player.get_datum(&args[0]).string_value()?;
-                        // Second arg: 0 = return as Flash object reference, otherwise string
-                        let as_obj = if args.len() >= 2 {
-                            player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
-                        } else {
-                            false
-                        };
-                        Ok((p, as_obj))
-                    })?;
+                // Resolve the target sprite number FIRST, even if its cast
+                // member isn't resolvable at this instant. Director's
+                // getVariable(sprite(N), path, 0) yields a Flash object handle
+                // BOUND TO THAT SPRITE; it must not degrade to VOID just because
+                // the member/Ruffle instance isn't ready yet — a beginSprite can
+                // run before the Flash member is committed to the channel, and a
+                // VOID handle stored in a global (e.g. gDemoFlash) crashes the
+                // deferred `gDemoFlash.play()`. We capture the sprite's cast
+                // member when available (so cast-based lookups still work) but
+                // always bind the handle to the sprite number as the primary key.
+                let sn = reserve_player_ref(|player| player.get_datum(datum).to_sprite_ref())?;
+                let (cl, cm) = reserve_player_ref(|player| {
+                    player
+                        .movie
+                        .score
+                        .get_sprite(sn)
+                        .and_then(|s| s.member.as_ref())
+                        .map(|m| (m.cast_lib, m.cast_member))
+                        .unwrap_or((0, 0))
+                });
+                let (path, return_as_object) = reserve_player_ref(|player| {
+                    if args.is_empty() { return Ok((String::new(), false)); }
+                    let p = player.get_datum(&args[0]).string_value()?;
+                    // Second arg: 0 = return as Flash object reference, otherwise string
+                    let as_obj = if args.len() >= 2 {
+                        player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
+                    } else {
+                        false
+                    };
+                    Ok((p, as_obj))
+                })?;
 
-                    if return_as_object {
-                        // In Director, getVariable(path, 0) returns an object reference.
-                        // But if the Flash variable is a simple string/number, Director
-                        // returns the value directly. We check via GetVariable first:
-                        // if it returns a JS string, return as Datum::String so that
-                        // stringp() works. If it returns an object or undefined, return
-                        // a FlashObjectRef for setCallback/call usage.
-                        match ruffle_get_variable(sn, &path) {
-                            Ok(val) => {
-                                if val.is_string() {
-                                    // Simple string variable - return as string
-                                    let s = val.as_string().unwrap();
-                                    return reserve_player_mut(|player| {
-                                        Ok(player.alloc_datum(Datum::String(s)))
-                                    });
-                                }
-                                // Object or other type - fall through to FlashObjectRef
-                            }
-                            Err(_) => {} // Fall through to FlashObjectRef
-                        }
-                        // Return a FlashObjectRef for use with setCallback etc.
-                        return reserve_player_mut(|player| {
-                            use crate::director::lingo::datum::FlashObjectRef;
-                            Ok(player.alloc_datum(Datum::FlashObjectRef(FlashObjectRef::from_path_with_member(&path, cl, cm))))
-                        });
-                    }
+                if return_as_object {
+                    // Root a bare variable name so it addresses the real
+                    // timeline object — DGS `getVariable("objMain", 0)` returns a
+                    // handle used for `objMain.includeIsLoaded()` etc. See
+                    // root_flash_path for why bare names don't resolve.
+                    let rooted = root_flash_path(&path);
 
-                    match ruffle_get_variable(sn, &path) {
-                        Ok(val) => {
-                            if let Some(s) = val.as_string() {
+                    // In Director, getVariable(path, 0) returns an object reference.
+                    // But if the Flash variable is a simple string/number, Director
+                    // returns the value directly. We check via GetVariable first:
+                    // if it returns a JS string, return as Datum::String so that
+                    // stringp() works. If it returns an object or undefined, return
+                    // a FlashObjectRef for setCallback/call usage.
+                    if let Ok(val) = ruffle_get_variable(sn as i32, &rooted) {
+                        if val.is_string() {
+                            let s = val.as_string().unwrap();
+                            // Ruffle's GetVariable ALWAYS returns a string, coercing
+                            // an AS OBJECT to "[object Object]" / "[type Object]" /
+                            // "[object MovieClip]". The object form
+                            // (getVariable(path, 0)) must return a FlashObjectRef for
+                            // those, NOT the coercion text — DGS does
+                            // `objMain = getVariable("objMain", 0)` then
+                            // `objMain.setBaseUrls(...)` (a method call). Only a
+                            // genuine primitive string returns as Datum::String.
+                            let is_object_coercion =
+                                s.starts_with("[object ") || s.starts_with("[type ");
+                            if !is_object_coercion {
                                 return reserve_player_mut(|player| {
                                     Ok(player.alloc_datum(Datum::String(s)))
                                 });
                             }
                         }
-                        Err(e) => warn!("sprite.getVariable error: {:?}", e),
+                        // Object / object-coercion / undefined → FlashObjectRef.
                     }
+                    // Return a sprite-bound FlashObjectRef for use with
+                    // setCallback / call / play etc. Never VOID for the object form.
+                    return reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::FlashObjectRef;
+                        Ok(player.alloc_datum(Datum::FlashObjectRef(
+                            FlashObjectRef::from_path_with_sprite(&rooted, cl, cm, sn as i32),
+                        )))
+                    });
+                }
+
+                // Member-swap guard: when the score has just swapped this
+                // sprite to a NEW Flash member, the PREVIOUS member's Ruffle
+                // instance can still be resident until the new one loads.
+                // Reading the old member's variables is wrong — e.g. BioBoxing's
+                // menu frame swaps sprite 1 loading.swf -> start.swf, and reading
+                // loading.swf's stale `/:cont="1"` (instead of start.swf's "00")
+                // skips the whole menu. If the sprite's CURRENT (cl,cm) isn't in
+                // `flash_sprite_loaded`, treat the value read as not-ready (VOID)
+                // so the frame's `if cont = 1 ... else go(the frame)` loop holds
+                // until the new member loads and its real value can be read.
+                let member_ready = reserve_player_ref(|player| {
+                    (cl == 0 && cm == 0)
+                        || player.flash_sprite_loaded.contains(&(sn, cl, cm))
+                });
+                if !member_ready {
+                    return Ok(DatumRef::Void);
+                }
+
+                match ruffle_get_variable(sn as i32, &root_flash_path(&path)) {
+                    Ok(val) => {
+                        // Convert the AS value to a Lingo datum. GetVariable's
+                        // value form (2nd arg non-zero) isn't string-only — an AS
+                        // number or boolean must come back as a comparable value,
+                        // not VOID. Neopets DGS state 81 polls
+                        // `getVariable("preloaderTranslationSuccess", 1) = 1`,
+                        // where the AS var is a Number/Boolean; returning VOID for
+                        // those (`as_string()` is None) made the comparison never
+                        // true and stalled the loader. Bools → Int(0/1), integral
+                        // Numbers → Int, else Float, matching the callFunction
+                        // converter that already let `includeIsLoaded() = 1` work.
+                        let datum = if let Some(s) = val.as_string() {
+                            Datum::String(s)
+                        } else if let Some(b) = val.as_bool() {
+                            Datum::Int(if b { 1 } else { 0 })
+                        } else if let Some(n) = val.as_f64() {
+                            if n.fract() == 0.0 && n.abs() < i32::MAX as f64 {
+                                Datum::Int(n as i32)
+                            } else {
+                                Datum::Float(n)
+                            }
+                        } else {
+                            Datum::Void
+                        };
+                        return reserve_player_mut(|player| Ok(player.alloc_datum(datum)));
+                    }
+                    Err(e) => warn!("sprite.getVariable error: {:?}", e),
                 }
                 Ok(DatumRef::Void)
             }
@@ -691,7 +866,7 @@ impl SpriteDatumHandlers {
                     let value = reserve_player_ref(|player| {
                         player.get_datum(&args[1]).string_value()
                     })?;
-                    if let Err(e) = ruffle_set_variable(sn, &path, &value) {
+                    if let Err(e) = ruffle_set_variable(sn, &root_flash_path(&path), &value) {
                         warn!("sprite.setVariable error: {:?}", e);
                     }
                 }
@@ -700,7 +875,7 @@ impl SpriteDatumHandlers {
             "callfunction" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
                     let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).string_value()
+                        player.get_datum(&args[0]).string_value().map(|p| root_flash_path(&p))
                     })?;
                     let args_xml = if args.len() > 1 {
                         reserve_player_ref(|player| {
@@ -724,11 +899,39 @@ impl SpriteDatumHandlers {
             }
             "hittest" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let x = reserve_player_ref(|player| player.get_datum(&args[0]).int_value())?;
-                    let y = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
-                    let result = ruffle_hit_test(sn, x as f64, y as f64);
+                    // Director's `sprite.hitTest(point)` takes a *stage* point
+                    // (e.g. `sprite(5).hitTest(_mouse.mouseLoc)`). Accept a
+                    // Point datum, or a legacy two-int (x, y) form. Rebase to
+                    // sprite-local pixels (the classifier's coordinate space)
+                    // by subtracting the sprite's top-left.
+                    let (sx, sy) = reserve_player_ref(|player| -> Result<(i32, i32), ScriptError> {
+                        match player.get_datum(&args[0]) {
+                            Datum::Point([px, py], _) => Ok((*px as i32, *py as i32)),
+                            other => {
+                                let x = other.int_value()?;
+                                let y = if let Some(a) = args.get(1) {
+                                    player.get_datum(a).int_value()?
+                                } else {
+                                    0
+                                };
+                                Ok((x, y))
+                            }
+                        }
+                    })?;
+                    let rect = reserve_player_ref(|player| {
+                        get_sprite_rect_in_context(player, sn as i16)
+                    });
+                    let lx = (sx - rect.0 as i32) as f64;
+                    let ly = (sy - rect.1 as i32) as f64;
+                    // 0 = #background, 1 = #normal, 2 = #button, 3 = #editText.
+                    let symbol = match ruffle_hit_test(sn, lx, ly) {
+                        2 => "button",
+                        3 => "editText",
+                        1 => "normal",
+                        _ => "background",
+                    };
                     return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+                        Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
                     });
                 }
                 Ok(DatumRef::Void)
@@ -834,6 +1037,28 @@ impl SpriteDatumHandlers {
                             }
                         };
 
+                        // dirplayer LocalConnection: also record
+                        // (lc_path, method) -> (handler, target instance) so a
+                        // forwarded AS `LocalConnection.send` can dispatch the
+                        // Lingo handler on the ORIGINAL instance (keeps `me`
+                        // correct in `on myOnStatus me, aInfo, aMessage`). Harmless
+                        // for non-LC setCallbacks — never looked up unless a
+                        // matching connect()+send() arrives for that path/method.
+                        let lc_target = if args.len() >= 4 {
+                            match player.get_datum(&args[3]) {
+                                Datum::ScriptInstanceRef(r) => Some(r.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(target_ref) = lc_target {
+                            player.flash_lc_callbacks.insert(
+                                (translated_path.clone(), flash_method.clone()),
+                                (lingo_handler.clone(), target_ref),
+                            );
+                        }
+
                         // Call the JS bridge to register the callback in Ruffle.
                         // The export is exposed under the dirplayer_ prefix
                         // (see ruffle/web/src/lib.rs and the matching JS in
@@ -912,6 +1137,55 @@ impl SpriteDatumHandlers {
             "telltarget" | "findlabel" | "flashtostage" | "stagetoflash" => {
                 warn!("Flash sprite method '{}' called but not yet implemented", handler_name);
                 Ok(DatumRef::Void)
+            }
+            "newobject" => {
+                // Flash sprite command: sprite(N).newObject(objectType {, args...})
+                // Per the Director 11.5 Scripting Dictionary this "creates an
+                // ActionScript object of the specified type" in the Flash movie and
+                // returns a *reference* to it, for use with setCallback() / call() /
+                // connect() etc (e.g. `sprite(3).newObject("LocalConnection")`).
+                //
+                // We return a sprite-bound FlashObjectRef with a unique synthetic
+                // path — never VOID — mirroring getVariable()'s object form so the
+                // chained setCallback()/connect() calls resolve. The callback bridge
+                // (dirplayer_ruffleRegisterLingoCallback) and method dispatch
+                // (dirplayer_ruffleCallFunction) key off this path. NOTE: extra
+                // constructor args are not yet forwarded to a real AS constructor —
+                // that needs a Ruffle-side newObject bridge to physically host the
+                // object (e.g. so a LocalConnection can actually receive messages).
+                let object_type = reserve_player_ref(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "newObject requires at least one argument".to_string(),
+                        ));
+                    }
+                    player.get_datum(&args[0]).string_value()
+                })?;
+                reserve_player_mut(|player| {
+                    use crate::director::lingo::datum::FlashObjectRef;
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let (cl, cm) = player
+                        .movie
+                        .score
+                        .get_sprite(sprite_num)
+                        .and_then(|s| s.member.as_ref())
+                        .map(|m| (m.cast_lib, m.cast_member))
+                        .unwrap_or((0, 0));
+                    let id = super::flash_object::FLASH_OBJECT_COUNTER.with(|c| {
+                        let v = c.get() + 1;
+                        c.set(v);
+                        v
+                    });
+                    // Sanitise the class name into a readable, valid AS path segment.
+                    let safe: String = object_type
+                        .chars()
+                        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                        .collect();
+                    let path = format!("_root.__dpObj_{}_{}", safe, id);
+                    Ok(player.alloc_datum(Datum::FlashObjectRef(
+                        FlashObjectRef::from_path_with_sprite(&path, cl, cm, sprite_num as i32),
+                    )))
+                })
             }
             "setscriptlist" => {
                 // sprite.setScriptList(list)
@@ -1022,6 +1296,47 @@ impl SpriteDatumHandlers {
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        // Flash (SWF) interop: block until the sprite's Ruffle instance has
+        // loaded + finished AS init, THEN run the (sync) op against a live
+        // instance. A one-shot Lingo init that reads Flash objects (Coke
+        // Studios' SF gateway: oLoginServlet / oStatusServlet / ...) runs before
+        // the async createFlashInstance completes, so without this wait every
+        // read comes back null and the gateway never connects. The wait is
+        // per-sprite (see wait_for_flash_ready), so it can't stall unrelated
+        // display-only Flash sprites.
+        let name_lower = handler_name.to_lowercase();
+        if matches!(
+            name_lower.as_str(),
+            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+        ) {
+            // Reached only for a sprite NOT yet whitelisted (has_async_handler
+            // routes whitelisted sprites straight to the sync path). If its
+            // instance is ALREADY ready, don't pay for pre_dispatch/the wait —
+            // just whitelist and fall through to the sync arm. Only a genuinely
+            // not-ready sprite kicks off the dispatch + waits: a script can call
+            // into a Flash sprite before the render loop has dispatched its
+            // Ruffle instance (Coke Studios' one-shot `SESSION_createSession`
+            // runs before sprite#1's SWF is dispatched), and without triggering
+            // the dispatch here the wait would block the frame before render ever
+            // dispatches it (deadlock). Whitelist so all later calls are sync.
+            if let Ok(sn) =
+                reserve_player_ref(|player| player.get_datum(&datum).to_sprite_ref())
+            {
+                let ready = is_flash_instance_ready(sn as i32)
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if !ready {
+                    reserve_player_mut(|player| player.pre_dispatch_flash_members());
+                    wait_for_flash_ready(sn).await;
+                }
+                reserve_player_mut(|player| {
+                    player.flash_ready_sprites.insert(sn);
+                });
+            }
+            return Self::call(&datum, handler_name, args);
+        }
+
         // First, try the sprite's attached script instances
         let instance_refs =
             reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;

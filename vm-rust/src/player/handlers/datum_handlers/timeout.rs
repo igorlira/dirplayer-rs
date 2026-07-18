@@ -296,6 +296,10 @@ impl TimeoutDatumHandlers {
                 match prop {
                     "name" => Ok(player.alloc_datum(Datum::String(timeout_name.to_owned()))),
                     "target" => Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone())),
+                    "period" => {
+                        let p = timeout.map_or(0, |t| t.period as i32);
+                        Ok(player.alloc_datum(Datum::Int(p)))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Cannot get timeout property {}",
                         prop
@@ -306,6 +310,13 @@ impl TimeoutDatumHandlers {
                 match prop {
                     "name" => Ok(player.alloc_datum(Datum::String(name.to_owned()))),
                     "target" => Ok(target.clone()),
+                    "period" => {
+                        let p = player
+                            .timeout_manager
+                            .get_timeout(name)
+                            .map_or(0, |t| t.period as i32);
+                        Ok(player.alloc_datum(Datum::Int(p)))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Cannot get timeout property {}",
                         prop
@@ -333,18 +344,43 @@ impl TimeoutDatumHandlers {
             )),
         };
         
-        let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
         match prop {
             "target" => {
-                let new_target = value;
+                let new_target = value.clone();
+                let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
                 if let Some(timeout) = timeout {
-                    timeout.target_ref = new_target.clone();
+                    timeout.target_ref = new_target;
+                    Ok(())
                 } else {
-                    return Err(ScriptError::new(
+                    Err(ScriptError::new(
                         "Cannot set target of unscheduled timeout".to_string(),
-                    ));
+                    ))
                 }
-                Ok(())
+            }
+            // `the period of timeoutObject` is read/write (Director Scripting
+            // Dictionary): it is the number of ms between timeout events, and
+            // setting it changes the interval. We update the period and
+            // reschedule the underlying timer (a period of 0 makes it dormant).
+            // Habbo's DM_CurlDetacher sets `period = 1` to start a dormant
+            // timeout — that drives the cURL-download completion callback. Before
+            // this arm existed, the assignment errored ("Cannot set timeout
+            // property period") and, because it runs inside the cURL Xtra
+            // callback (which fails silently), the download never completed and
+            // ES Origins never showed its login (figuredata/external_texts
+            // never loaded).
+            "period" => {
+                let new_period = player.get_datum(value).int_value()?;
+                let new_period = if new_period < 0 { 0 } else { new_period as u32 };
+                let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
+                if let Some(timeout) = timeout {
+                    timeout.period = new_period;
+                    timeout.schedule();
+                    Ok(())
+                } else {
+                    Err(ScriptError::new(
+                        "Cannot set period of unscheduled timeout".to_string(),
+                    ))
+                }
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set timeout property {}",

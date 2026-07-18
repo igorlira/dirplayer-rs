@@ -94,11 +94,31 @@ impl KeyboardManager {
         key.code
     }
 
+    /// Translate a stored browser key name (e.g. `e.key` = "ArrowLeft") to the
+    /// single character Director's `the key` / `the keyPressed` report. Director
+    /// returns its arrow-key char constants — numToChar(28..31) — so movies that
+    /// test `charToNum(the keyPressed) = 28` (left), 29 (right), 30 (up),
+    /// 31 (down) work. bogey_nights' dog-movement `case` falls to exactly these
+    /// tests for single-arrow (non-diagonal) presses. Returns None for keys with
+    /// no Director char equivalent (function keys, "Shift", etc.).
+    fn director_char_for(key: &str) -> Option<char> {
+        match key {
+            "ArrowLeft" => Some('\u{1C}'),  // 28
+            "ArrowRight" => Some('\u{1D}'), // 29
+            "ArrowUp" => Some('\u{1E}'),    // 30
+            "ArrowDown" => Some('\u{1F}'),  // 31
+            _ => None,
+        }
+    }
+
     pub fn key(&self) -> String {
         if self.down_keys.is_empty() {
             return "".to_string();
         }
         let key = &self.down_keys.last().unwrap().key;
+        if let Some(ch) = Self::director_char_for(key) {
+            return ch.to_string();
+        }
         if key.len() == 1 && key.as_bytes()[0] < 0x80 {
             key.clone()
         } else {
@@ -110,6 +130,10 @@ impl KeyboardManager {
         if self.down_keys.is_empty() {
             return "".to_string();
         }
-        self.down_keys.last().unwrap().key.clone()
+        let key = &self.down_keys.last().unwrap().key;
+        if let Some(ch) = Self::director_char_for(key) {
+            return ch.to_string();
+        }
+        key.clone()
     }
 }

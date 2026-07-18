@@ -894,7 +894,17 @@ pub fn parse_lingo_rule_runtime(
             let mut args = vec![];
             for child in pair.into_inner() {
                 if let Rule::term_arg = child.as_rule() {
-                    args.push(parse_lingo_rule_runtime(child, pratt)?);
+                    // Director marker-navigation keywords: `go next` / `go
+                    // previous` / `go loop`. As a bareword these parse as an
+                    // undefined variable (→ VOID) and the go handler rejects
+                    // it (mixmaster does `do("go next")`), so pass the keyword
+                    // as a string literal for go() to resolve to the marker.
+                    let low = child.as_str().trim().to_ascii_lowercase();
+                    if low == "next" || low == "previous" || low == "loop" {
+                        args.push(LingoExpr::StringLiteral(low));
+                    } else {
+                        args.push(parse_lingo_rule_runtime(child, pratt)?);
+                    }
                 }
             }
             Ok(LingoExpr::HandlerCall("go".to_owned(), args))
@@ -973,6 +983,48 @@ pub fn parse_lingo_rule_runtime(
             }
 
             Ok(LingoExpr::HandlerCall(handler_name.to_owned(), args))
+        }
+        Rule::sound_statement => {
+            // `sound fadeIn 2, 60` → HandlerCall("sound", [#fadeIn, 2, 60]).
+            // The verb word is a literal keyword (a #symbol), NOT a variable —
+            // TypeHandlers::sound reads args[0] as the #verb and dispatches to the
+            // sound-channel op (same backend as `sound(2).fadeIn(60)`).
+            // Skip the `sound_kw` keyword node (carries no data), like if_inline.
+            let mut inner = pair
+                .into_inner()
+                .filter(|p| !matches!(p.as_rule(), Rule::sound_kw));
+            let verb = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected sound verb".to_string()))?
+                .as_str();
+            let mut args = vec![LingoExpr::SymbolLiteral(verb.to_owned())];
+            if let Some(args_container) = inner.next() {
+                match args_container.as_rule() {
+                    Rule::command_inline_args_comma => {
+                        for arg_pair in args_container.into_inner() {
+                            args.push(parse_lingo_expr_runtime(arg_pair.into_inner(), pratt)?);
+                        }
+                    }
+                    Rule::command_inline_args_space => {
+                        for arg_pair in args_container.into_inner() {
+                            args.push(parse_lingo_rule_runtime(arg_pair, pratt)?);
+                        }
+                    }
+                    Rule::command_inline_args_single => {
+                        let expr_pair = args_container.into_inner().next().ok_or_else(|| {
+                            ScriptError::new("Expected expr in single arg".to_string())
+                        })?;
+                        args.push(parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?);
+                    }
+                    other => {
+                        return Err(ScriptError::new(format!(
+                            "Unexpected sound args rule: {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
+            Ok(LingoExpr::HandlerCall("sound".to_owned(), args))
         }
         Rule::lang_ident | Rule::ident => {
             Ok(LingoExpr::Identifier(pair.as_str().to_owned()))

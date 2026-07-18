@@ -117,7 +117,7 @@ pub fn raycast_scene(
     scene: &W3dScene,
     max_dist: f32,
 ) -> Option<RayHit> {
-    raycast_scene_multi(ray, scene, max_dist, 1, None, None).into_iter().next()
+    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None).into_iter().next()
 }
 
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
@@ -130,6 +130,7 @@ pub fn raycast_scene_multi(
     max_hits: usize,
     node_transforms: Option<&std::collections::HashMap<String, [f32; 16]>>,
     excluded_nodes: Option<&std::collections::HashSet<String>>,
+    included_nodes: Option<&std::collections::HashSet<String>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
@@ -138,6 +139,17 @@ pub fn raycast_scene_multi(
         // Skip excluded nodes (invisible or detached models)
         if let Some(excluded) = excluded_nodes {
             if excluded.contains(&node.name) { continue; }
+        }
+        // #modelList whitelist (modelsUnderRay/Loc optionsList): when provided and
+        // non-empty, only models whose name is in the list are tested; all others are
+        // ignored even if under the ray. Empty / None => no restriction (test all),
+        // matching the dictionary's "if omitted, all models" wording.
+        if let Some(included) = included_nodes {
+            if !included.is_empty()
+                && !included.iter().any(|n| n.eq_ignore_ascii_case(&node.name))
+            {
+                continue;
+            }
         }
         let resource = if !node.model_resource_name.is_empty() {
             &node.model_resource_name
@@ -358,10 +370,22 @@ fn raycast_mesh(
         let i2 = face[2] as usize;
         if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() { continue; }
         if let Some((t, u, v)) = ray_triangle_intersect(ray, &positions[i0], &positions[i1], &positions[i2]) {
-            // No backface culling - Director's modelsUnderRay tests both sides
             let edge1 = sub(positions[i1], positions[i0]);
             let edge2 = sub(positions[i2], positions[i0]);
             let normal = normalize(cross(edge1, edge2));
+
+            // Front-face culling. Director's modelsUnderRay returns ONLY front-face entries
+            // (where the ray enters a surface), never back-faces/exits — confirmed against
+            // Director 11.5: a ray cast from INSIDE a box returns no hit for that box, even
+            // with visibility #both. dirplayer previously tested both sides, so a Rasterwerks
+            // bot's collision/LOS rays hit the exit faces of its own body/proxy and of any
+            // geometry it stood inside → phantom near-hits → stuck navigation (constant
+            // re-path/mismatch), no line-of-sight to the player (never fires), and rockets
+            // detonating on adjacent geometry (self-splash). Skip a face the ray is exiting
+            // (its normal points along the ray direction).
+            if dot(normal, ray.direction) >= 0.0 {
+                continue;
+            }
 
             if t > 0.0 && t < max_dist {
                 if closest.as_ref().map_or(true, |c| t < c.distance) {

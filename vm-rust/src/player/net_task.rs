@@ -165,6 +165,15 @@ pub async fn fetch_net_task(
                 .unwrap_or(true);
 
             if done {
+                // Final progress. If the server didn't advertise Content-Length
+                // (e.g. a CORS proxy stripped it), report the actual byte count
+                // as the total so getStreamStatus(netID)[#bytestotal] is non-zero
+                // and Director's `percentloaded` reaches 100 on completion
+                // (DGS's showGameLoadStats divides by #bytestotal — 0 leaves the
+                // loading bar stuck and `percentloaded` at 0 forever).
+                let mut state = shared_state.lock().await;
+                let total = content_length.max(bytes.len() as u64);
+                state.update_task_progress(task.id, bytes.len() as u64, total);
                 break;
             }
 
@@ -179,6 +188,7 @@ pub async fn fetch_net_task(
             }
         }
 
+        maybe_hold_dcr_for_preloader(&task.url).await;
         Ok(bytes)
     } else {
         // Fallback: no body stream, read all at once
@@ -188,9 +198,37 @@ pub async fn fetch_net_task(
 
         {
             let mut state = shared_state.lock().await;
-            state.update_task_progress(task.id, bytes.len() as u64, content_length);
+            let total = content_length.max(bytes.len() as u64);
+            state.update_task_progress(task.id, bytes.len() as u64, total);
         }
 
+        maybe_hold_dcr_for_preloader(&task.url).await;
         Ok(bytes)
     }
+}
+
+/// Neopets DGS shows a Flash preloader whose guest-login prompt is only
+/// (re)painted while the nested game `.dcr` is still streaming — the Director
+/// loader sits at load-state 34 calling the SWF's `showLoadingProcess` each
+/// frame, which refills the `pre_main` field *after* the translation's `onLoad`
+/// blanks it. If the `.dcr` completes too soon after that blank, the prompt
+/// never repaints and there are no links to click (the movie only advanced when
+/// a debugger pause stretched that window). Hold a *playing* movie's `.dcr` task
+/// "in progress" for a few seconds so those extra frames happen. The task stays
+/// unresolved, so `netDone` stays false AND the frame loop's net-yield keeps the
+/// offscreen Ruffle instance ticking meanwhile. Only applies once the movie is
+/// playing, so it never delays the initial movie load.
+async fn maybe_hold_dcr_for_preloader(url: &str) {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    if !path.ends_with(".dcr") {
+        return;
+    }
+    if !crate::player::reserve_player_ref(|p| p.is_playing) {
+        return;
+    }
+    let _ = async_std::future::timeout(
+        std::time::Duration::from_millis(3000),
+        std::future::pending::<()>(),
+    )
+    .await;
 }

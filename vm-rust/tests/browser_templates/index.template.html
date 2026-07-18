@@ -81,6 +81,8 @@
     window.__testResults = null;
     window.__testEnv = $TEST_ENV_JSON;
     window.__testDebug = $DEBUG_MODE;
+    // Optional substring filter (E2E_FILTER env var) — run only matching test_* fns.
+    window.__testFilter = "$TEST_FILTER";
 
     // Ruffle + DirPlayer Flash bridge — mirrors public/index.html setup.
     // dirplayer-rs ships a fork of Ruffle namespaced under
@@ -89,7 +91,10 @@
     // Ruffle if both are loaded on the same page.
     window.dirplayer_RufflePlayer = window.dirplayer_RufflePlayer || {};
     window.dirplayer_RufflePlayer.config = { allowNetworking: "all" };
-    window.__dirplayerFlashConfig = { renderer: "canvas", logLevel: "warn" };
+    // logLevel 'error': Ruffle logs to console, and the browser retains every
+    // console entry — at 'info'/'warn' a busy SWF floods it every frame and RAM
+    // climbs over a long test run. Keep only hard errors.
+    window.__dirplayerFlashConfig = { renderer: "canvas", logLevel: "error" };
   </script>
   <script src="./ruffle/dirplayer_ruffle.js"></script>
   <script type="importmap">
@@ -205,8 +210,11 @@
       api.setVmModule(wasm);
       statusLine('Module loaded. Running tests...');
 
+      const testFilter = (window.__testFilter || '').trim().toLowerCase();
+      const filterParts = testFilter ? testFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
       const testFns = Object.keys(wasm)
-        .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function');
+        .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function')
+        .filter(k => filterParts.length === 0 || filterParts.some(f => k.toLowerCase().includes(f)));
 
       for (const name of testFns) {
         const group = startTest(name);

@@ -42,6 +42,11 @@ extern "C" {
         event_type: &str,
         local_x: i32,
         local_y: i32,
+        // Sprite display size, so JS can rebase sprite-local coords into the SWF's
+        // internal (native) coordinate space — the sprite often shows the SWF scaled
+        // (e.g. a 626x468 SWF displayed in a 600x320 sprite).
+        sprite_w: i32,
+        sprite_h: i32,
     ) -> Result<JsValue, JsValue>;
 }
 
@@ -52,6 +57,19 @@ extern "C" {
 /// Most movies have at most one sprite per Flash member; storyscramble's
 /// 3-tile case shares a member but those tiles don't use FlashObjectRef
 /// (they only set frame), so this lookup is fine for the existing surface.
+/// Resolve the Director sprite that backs a Flash object handle. A handle
+/// taken from `getVariable(sprite(N), path, 0)` carries its origin sprite (see
+/// FlashObjectRef::instance_id) and dispatches straight to it; older handles
+/// only know their cast member and fall back to scanning the score. Preferring
+/// the bound sprite keeps `gDemoFlash.play()` working even when the member
+/// wasn't resolvable at the time the handle was captured.
+pub fn resolve_flash_sprite(flash_ref: &FlashObjectRef) -> Option<i32> {
+    if let Some(sn) = flash_ref.bound_sprite() {
+        return Some(sn);
+    }
+    find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member)
+}
+
 pub fn find_sprite_for_flash_member(cast_lib: i32, cast_member: i32) -> Option<i32> {
     crate::player::reserve_player_ref(|player| {
         for channel in &player.movie.score.channels {
@@ -79,7 +97,7 @@ impl FlashObjectDatumHandlers {
 
             if let Datum::FlashObjectRef(flash_ref) = obj_datum {
                 let full_path = format!("{}.{}", flash_ref.path, prop_name);
-                let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+                let sprite_num = match resolve_flash_sprite(flash_ref) {
                     Some(n) => n,
                     None => return Ok(player.alloc_datum(Datum::Void)),
                 };
@@ -99,7 +117,10 @@ impl FlashObjectDatumHandlers {
                         } else if let Some(b) = result.as_bool() {
                             Ok(player.alloc_datum(Datum::Int(if b { 1 } else { 0 })))
                         } else {
-                            let new_flash_ref = FlashObjectRef::from_path_with_member(&full_path, flash_ref.cast_lib, flash_ref.cast_member);
+                            // Carry the sprite binding onto the derived handle so
+                            // chained access (gDemoFlash.foo.bar) stays bound to
+                            // the same sprite.
+                            let new_flash_ref = FlashObjectRef::from_path_with_sprite(&full_path, flash_ref.cast_lib, flash_ref.cast_member, flash_ref.instance_id as i32);
                             Ok(player.alloc_datum(Datum::FlashObjectRef(new_flash_ref)))
                         }
                     }
@@ -129,6 +150,35 @@ impl FlashObjectDatumHandlers {
                 }
             };
 
+            // dirplayer LocalConnection: intercept connect()/close() on a
+            // Director-created LocalConnection. The synthetic
+            // `__dpObj_LocalConnection_*` ref has no real AS object, so a Ruffle
+            // call would just return null. Instead register the connection name
+            // → this LC's path, so the Ruffle fork's forwarded AS
+            // `LocalConnection.send(name, method, ...)` (local_connection_send)
+            // can route to the setCallback handler bound to this LC.
+            if flash_ref.path.contains("__dpObj_LocalConnection") {
+                if handler_name == "connect" {
+                    let name = args
+                        .get(0)
+                        .map(|a| player.get_datum(a).string_value().unwrap_or_default())
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        player
+                            .flash_lc_connections
+                            .insert(name, flash_ref.path.clone());
+                    }
+                    // AS LocalConnection.connect() returns true on success.
+                    return Ok(player.alloc_datum(Datum::Int(1)));
+                }
+                if handler_name == "close" {
+                    player
+                        .flash_lc_connections
+                        .retain(|_, v| v != &flash_ref.path);
+                    return Ok(player.alloc_datum(Datum::Void));
+                }
+            }
+
             let method_path = format!("{}.{}", flash_ref.path, handler_name);
 
             // Convert Lingo arguments to a JSON array string for the bridge
@@ -139,7 +189,7 @@ impl FlashObjectDatumHandlers {
             }
             let args_str = format!("[{}]", js_args_parts.join(","));
 
-            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+            let sprite_num = match resolve_flash_sprite(&flash_ref) {
                 Some(n) => n,
                 None => return Ok(player.alloc_datum(Datum::Void)),
             };
@@ -187,7 +237,7 @@ impl FlashObjectDatumHandlers {
                 _ => "null".to_string(),
             };
 
-            let sprite_num = match find_sprite_for_flash_member(flash_ref.cast_lib, flash_ref.cast_member) {
+            let sprite_num = match resolve_flash_sprite(&flash_ref) {
                 Some(n) => n,
                 None => return Err(ScriptError::new(format!("No sprite for Flash member {}:{}", flash_ref.cast_lib, flash_ref.cast_member))),
             };

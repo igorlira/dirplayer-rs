@@ -197,7 +197,15 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
             let glyph_data = &gps_data[start..start + size];
             let zeros_field = (glyph_data[0] >> 4) & 0x07;
 
-            if zeros_field != 0 && font.physical_font.has_bitmap_section {
+            // Inline bitmap detection is a heuristic that misfires on outline
+            // glyphs whose first byte happens to have these bits set. When the
+            // font has a real bitmap strike, its glyphs come from the BCT
+            // (parsed below), so skip the inline path entirely to avoid
+            // misparsing outlines as bitmaps.
+            if zeros_field != 0
+                && font.physical_font.has_bitmap_section
+                && !font.physical_font.has_bitmap_strike
+            {
                 // Bitmap glyph
                 if debug_this {
                     let ch = if char_code >= 32 && char_code < 127 { char_code as u8 as char } else { '?' };
@@ -402,6 +410,64 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
                     let mut fallback = uc_glyph;
                     fallback.char_code = lc as u32;
                     font.glyphs.insert(lc, fallback);
+                }
+            }
+        }
+    }
+
+    // Parse the bitmap character table (BCT) if the physical font declares a
+    // strike. Director renders pixel fonts (Habbo Volter) from these embedded
+    // strikes — small, crisp, hand-tuned — rather than from the outlines (which
+    // are designed larger and render ~30% too big). The BCT sits immediately
+    // before the GPS section; entries are fixed-width
+    // `charCode + gpsSize + gpsOffset` (widths per the strike flags), and each
+    // entry's gpsOffset (relative to the GPS section) points at a bitmap glyph.
+    // The bitmap's advance comes from the matching outline char record's
+    // set-width (the strike stores no escapement), which the rasterizer already
+    // keeps when both an outline and a bitmap exist for a char.
+    let has_strike = font.physical_font.has_bitmap_strike;
+    let n_bmap = font.physical_font.n_bmap_chars as usize;
+    let bct_size = font.physical_font.bct_size as i64;
+    let bct_off = font.physical_font.bct_offset as i64;
+    let bct_two_byte_cc = font.physical_font.bct_two_byte_char_code;
+    let bct_two_byte_sz = font.physical_font.bct_two_byte_gps_size;
+    let bct_three_byte_off = font.physical_font.bct_three_byte_gps_offset;
+    if has_strike && n_bmap > 0 && bct_size > 0 {
+        let bct_base = gps_offset as i64 - bct_size + bct_off;
+        let char_bytes = if bct_two_byte_cc { 2 } else { 1 };
+        let size_bytes = if bct_two_byte_sz { 2 } else { 1 };
+        let off_bytes = if bct_three_byte_off { 3 } else { 2 };
+        let entry_bytes = char_bytes + size_bytes + off_bytes;
+        let n = n_bmap;
+        if bct_base >= 0 {
+            let mut p = bct_base as usize;
+            for _ in 0..n {
+                if p + entry_bytes > data.len() {
+                    break;
+                }
+                let mut cc = 0u32;
+                for _ in 0..char_bytes { cc = (cc << 8) | data[p] as u32; p += 1; }
+                let mut gsz = 0usize;
+                for _ in 0..size_bytes { gsz = (gsz << 8) | data[p] as usize; p += 1; }
+                let mut goff = 0usize;
+                for _ in 0..off_bytes { goff = (goff << 8) | data[p] as usize; p += 1; }
+                let gabs = gps_offset + goff;
+                // Drop degenerate bitmap strikes so they fall back to the vector
+                // outline (rendered crisp via the pixel-font threshold). In
+                // Volter-Bold (Volter_700) the widest glyphs — W (87), w (119),
+                // M (77), m (109) — decode to garbage / blocky strikes that don't
+                // match Director's rendering; Shockwave uses the outline for them.
+                // (Originally only W + m were dropped, so the lowercase 'w' in
+                // Origins' "Create Your Own Habbo" registration heading kept its
+                // garbage strike.) The other 700 strikes (and all regular 400
+                // strikes) are correct and kept, so the baseline anchor still
+                // reads good strike caps.
+                let drop_degenerate_strike = matches!(cc, 87 | 119 | 77 | 109)
+                    && font.font_name.to_ascii_lowercase().contains("700");
+                if !drop_degenerate_strike && cc <= 0xFF && gsz > 0 && gabs + gsz <= data.len() {
+                    if let Some(bmp) = glyph::parse_bitmap_glyph(&data[gabs..gabs + gsz], cc) {
+                        font.bitmap_glyphs.insert(cc as u8, bmp);
+                    }
                 }
             }
         }

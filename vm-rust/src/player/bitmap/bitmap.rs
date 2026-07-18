@@ -202,6 +202,20 @@ impl Bitmap {
             _ => 0,
         };
 
+        // Backstop against absurd allocations: a bad/oversized width×height (e.g.
+        // a nested sub-movie's mis-measured field height of ~15000 px, or a
+        // transient huge stage rect) makes the `vec![…]` below abort the whole
+        // WASM module with `handle_alloc_error` — an unrecoverable crash. Movie
+        // bitmaps are never larger than a few thousand px per side; clamp to 1×1
+        // (and log) rather than take down the player.
+        if (width as usize).saturating_mul(height as usize) > 8192 * 8192 {
+            warn!(
+                "[bitmap] refusing absurd Bitmap::new({}x{} depth={}) — clamped to 1x1",
+                width, height, bit_depth
+            );
+            return Self::new(1, 1, bit_depth, original_bit_depth, alpha_depth, palette_ref);
+        }
+
         // `bit_depth as usize / 8` truncates to 0 for sub-byte depths
         // (1, 2, 4), leaving `data` empty even though set_pixel does packed
         // bit/nibble arithmetic on it. Compute bytes from total bits so

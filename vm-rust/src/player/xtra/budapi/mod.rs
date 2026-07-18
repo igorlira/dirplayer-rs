@@ -341,7 +341,7 @@ fn ba_copy_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     if let Some(window) = web_sys::window() {
         let clipboard = window.navigator().clipboard();
         let promise = clipboard.write_text(&text);
-        wasm_bindgen_futures::spawn_local(async move {
+        crate::player::spawn_player_local(async move {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         });
     }

@@ -266,6 +266,17 @@ impl FontManager {
                         // coords_scaled branch. Fontinator's 9px atlas output
                         // for fugue_arial / fugue_arial_italic verifies this
                         // produces complete, thin glyphs.
+                        // Match FontinatorFINAL's working approach: parse with
+                        // target_em_px = outline_resolution rather than 0 or
+                        // the small render size. Hinting still fires, but at
+                        // ~unity scale (the multiplier `target/outline_res` is
+                        // 1), so it doesn't try to snap stems into a 12-pixel
+                        // box and fragment glyphs. The rasterizer then handles
+                        // the actual downscale to the displayed size via
+                        // `scale = target_height / target_em_px` in the
+                        // coords_scaled branch. Fontinator's 9px atlas output
+                        // for fugue_arial / fugue_arial_italic verifies this
+                        // produces complete, thin glyphs.
                         let outline_res = parsed.physical_font.outline_resolution as i32;
                         let parse_target = if outline_res > 0 { outline_res } else { 0 };
                         let parsed_for_size = if let Some(ref raw) = font_data.pfr_data {
@@ -360,7 +371,10 @@ impl FontManager {
             }
         }
 
-        warn!(
+        // Normal fallback (e.g. 'Arial' has no PFR strike — we drop to the
+        // embedded PFR / bitmap path below). Kept at debug so a per-frame text
+        // render doesn't flood the browser console (which retains every entry).
+        debug!(
             "[font] No PFR re-rasterization match for '{}' at size {}",
             font_name, requested_size,
         );
@@ -1004,13 +1018,120 @@ pub async fn player_load_system_font(path: &str) {
                 debug!("System font loaded successfully");
             });
 
-            warn!("Loaded system font image data: {:?}", image_data);
+            debug!("Loaded system font image data: {:?}", image_data);
         }
         Err(err) => {
             warn!("Error fetching system font: {:?}", err);
             return;
         }
     };
+}
+
+/// Recover a PFR bitmap STRIKE's true vertical metrics by scanning the
+/// rasterized atlas for the cap-top and descender-bottom ink rows within a cell
+/// (both relative to the cell top).
+///
+/// Director licensed the Paige text engine, which draws each line's baseline at
+/// `lineTop + ascent` and the underline down in the descent (Hermes-Paige
+/// `PGGRAFX.C` pgTextOut: `MoveTo(top, top_v + info.ascent)`; `PGTEXT.C`
+/// lineheight = ascent + descent + leading). dirplayer's PFR rasterizer instead
+/// anchors the atlas baseline at `round(outlineAscender * scale)`, which for a
+/// bitmap strike sits ~2px below the strike's true ascent (its cap height) — so
+/// rendered text lands ~2px too low and descenders/underline fall off the bottom
+/// of a tight member box. Callers anchor the scanned cap-top at the box/sprite
+/// top so the baseline lands at the strike's real ascent (matches Shockwave).
+///
+/// Returns `(cap_top_row, descender_bottom_row)`; either is `None` when the font
+/// is not a PFR strike or the reference glyphs carry no ink.
+pub fn pfr_strike_vertical_metrics(
+    font: &BitmapFont,
+    font_bitmap: &Bitmap,
+) -> (Option<i32>, Option<i32>) {
+    if font.char_widths.is_none() {
+        return (None, None);
+    }
+    let cell_ink_rows = |c: u8| -> Option<(i32, i32)> {
+        if c < font.first_char_num {
+            return None;
+        }
+        let idx = (c - font.first_char_num) as usize;
+        let cols = font.grid_columns.max(1) as usize;
+        let cx = (idx % cols) as i32;
+        let cy = (idx / cols) as i32;
+        let sx = cx * font.grid_cell_width as i32 + font.char_offset_x as i32;
+        let sy = cy * font.grid_cell_height as i32 + font.char_offset_y as i32;
+        let fw = font_bitmap.width as i32;
+        let fh = font_bitmap.height as i32;
+        let mut top: Option<i32> = None;
+        let mut bot: Option<i32> = None;
+        for ry in 0..font.char_height as i32 {
+            let mut ink = false;
+            for rx in 0..font.char_width as i32 {
+                let px = sx + rx;
+                let py = sy + ry;
+                if px < 0 || py < 0 || px >= fw || py >= fh {
+                    continue;
+                }
+                let i = ((py as usize) * fw as usize + px as usize) * 4 + 3;
+                if i < font_bitmap.data.len() && font_bitmap.data[i] > 16 {
+                    ink = true;
+                    break;
+                }
+            }
+            if ink {
+                if top.is_none() {
+                    top = Some(ry);
+                }
+                bot = Some(ry);
+            }
+        }
+        match (top, bot) {
+            (Some(t), Some(b)) => Some((t, b)),
+            _ => None,
+        }
+    };
+    let mut cap_top: Option<i32> = None;
+    for &c in b"HEFLTIBRKMNPX".iter() {
+        if let Some((t, _)) = cell_ink_rows(c) {
+            cap_top = Some(cap_top.map_or(t, |a: i32| a.min(t)));
+        }
+    }
+    let mut desc_bot: Option<i32> = None;
+    for &c in b"gypqj".iter() {
+        if let Some((_, b)) = cell_ink_rows(c) {
+            desc_bot = Some(desc_bot.map_or(b, |a: i32| a.max(b)));
+        }
+    }
+    (cap_top, desc_bot)
+}
+
+/// Extra rows a PFR text `.image`/`.rect` must reserve BELOW its
+/// `fixedLineSpace`-based content height so the last line's descender — and the
+/// underline drawn on it (`underline_y = y_pos + pfr_desc_bottom`) — are not
+/// clipped. Habbo's Writer forces `fixedLineSpace = fontSize`, but Volter's
+/// `g/y/p/q/j` descenders (and link underlines) reach `pfr_desc_bottom`, BELOW
+/// that line. Returns 0 when `fixedLineSpace` already covers the descender or the
+/// font is not a PFR/bitmap font.
+///
+/// Derivation: the box must reach `anchor_y + db + 1` (underline row inclusive).
+/// The anchor absorbs `(top_spacing - 1)` for `top_spacing >= 1`, so the reserve
+/// below `fixedLineSpace` is `db + 1 - fixedLineSpace - min(top_spacing, 1)`.
+pub fn pfr_underline_descender_overflow(
+    font: &BitmapFont,
+    font_bitmap: &Bitmap,
+    fixed_line_space: u16,
+    top_spacing: i16,
+) -> u16 {
+    if fixed_line_space == 0 || font.char_widths.is_none() {
+        return 0;
+    }
+    match pfr_strike_vertical_metrics(font, font_bitmap).1 {
+        Some(db) => {
+            let ts1 = top_spacing.clamp(0, 1) as i32;
+            (db + 1 - fixed_line_space as i32 - ts1).max(0) as u16
+        }
+        None => 0,
+    }
 }
 
 pub fn bitmap_font_copy_char(

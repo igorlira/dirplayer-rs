@@ -158,6 +158,14 @@ pub struct TextMember {
     pub bottom_spacing: i16,
     pub width: u16,
     pub height: u16,
+    /// True once Lingo explicitly sets `member.rect`/`member.height` at runtime
+    /// (e.g. Habbo's Text-Wrapper does `member.rect = rect(0,0,w,h)`). Director
+    /// honors such an explicit size even for `#adjust` members, and crucially
+    /// `member.image.height` must then equal `member.rect.height` — otherwise the
+    /// `pimage.copyPixels(member.image, dest=image-height, src=member.rect)` bake
+    /// stretches the text vertically. Distinguishes the runtime-set case from a
+    /// stale single-line authored height (wrap-only #adjust must still measure).
+    pub rect_set_at_runtime: bool,
     pub char_spacing: i32,
     pub tab_stops: Vec<TabStop>,
     pub html_styled_spans: Vec<StyledSpan>,
@@ -446,6 +454,7 @@ impl TextMember {
             anti_alias: false,
             width: 100,
             height: 20,
+            rect_set_at_runtime: false,
             char_spacing: 0,
             tab_stops: Vec::new(),
             html_styled_spans: Vec::new(),
@@ -987,6 +996,64 @@ pub struct FilmLoopMember {
     pub cached_total_frames: Option<u32>,
 }
 
+/// A Linked Movie cast member (`#movie`) — references an external Director
+/// movie (.dir/.dcr) that plays inside a sprite (Director 11.5 Scripting
+/// Dictionary "Linked Movie" media type). Created at runtime via
+/// `new(#movie)`, linked via `member.fileName = <path/url>`, and played by
+/// assigning it to a sprite. The parsed movie is held behind an `Rc` so the
+/// member stays cheap to clone and the (large) file isn't deep-copied.
+///
+/// Phase 1 stores the parsed `DirectorFile` + the linked-movie properties;
+/// nested score advancement + script execution + compositing into the host
+/// sprite are Phase 2 (modelled on `FilmLoopMember`).
+#[derive(Clone)]
+pub struct MovieMember {
+    /// The linked file path/URL (`the fileName of member`).
+    pub file_name: String,
+    /// Whether the linked movie's Lingo runs (`scriptsEnabled`). Director
+    /// defaults linked-movie scripts OFF; callers opt in (DGS sets it to 1).
+    pub scripts_enabled: bool,
+    /// Crop (TRUE) vs scale-to-fit (FALSE) within the sprite rect.
+    pub crop: bool,
+    /// Center the movie within the sprite rect when cropping.
+    pub center: bool,
+    /// Play the linked movie's sound.
+    pub sound: bool,
+    /// Loop the linked movie's playback.
+    pub loops: bool,
+    /// Member width/height (from the authored rect: right-left, bottom-top).
+    pub width: u16,
+    pub height: u16,
+    pub reg_point: (i16, i16),
+    /// Raw .dir/.dcr bytes of the linked movie, captured by the `fileName`
+    /// setter from the net preload cache. `None` until linked. Held behind an
+    /// `Rc` so the member stays cheap to clone; the live nested `Movie` is
+    /// parsed/built from these bytes at activation into the player's nested
+    /// registry (a built `Movie` isn't `Clone`, so it can't live on the member).
+    pub bytes: Option<std::rc::Rc<Vec<u8>>>,
+    /// Base URL the linked movie's own relative references resolve against
+    /// (derived from the resolved net-task URL at fileName time).
+    pub base_url: String,
+}
+
+impl MovieMember {
+    pub fn new() -> Self {
+        Self {
+            file_name: String::new(),
+            scripts_enabled: false,
+            crop: true,
+            center: true,
+            sound: true,
+            loops: true,
+            width: 0,
+            height: 0,
+            reg_point: (0, 0),
+            bytes: None,
+            base_url: String::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SoundMember {
     pub info: SoundInfo,
@@ -1084,6 +1151,59 @@ pub struct QueuedMotion {
     pub offset: f32,       // seconds, -1.0 = #synchronized
 }
 
+/// Per-MODEL bonesPlayer/keyframePlayer animation state.
+///
+/// Director keeps animation state PER MODEL (each model carries its own
+/// #bonesPlayer modifier), but the single fields on `Shockwave3dRuntimeState`
+/// are per-MEMBER. When several skinned models are cloned into one 3D member
+/// (e.g. Rasterwerks clones 5 bots into the single G3D world), they all shared
+/// one motion + one clock — the last `play()` won, so every bot was posed with
+/// the same motion's root rotation (wrong facing, frozen clock). The renderer
+/// skinning and the `bone[]` getters read this per-model map instead; the
+/// member-level single fields remain for the keyframe (motion_transforms) path.
+#[derive(Clone, Debug)]
+pub struct BonesPlayerState {
+    pub animation_time: f32,
+    pub animation_playing: bool,
+    pub current_motion: Option<String>,
+    pub play_rate: f32,
+    pub animation_loop: bool,
+    pub motion_queue: Vec<QueuedMotion>,
+    pub animation_start_time: f32,
+    pub animation_end_time: f32,
+    pub animation_blend_time: f32,
+    pub root_lock: bool,
+    pub animation_scale: f32,
+    pub motion_ended: bool,
+    pub previous_motion: Option<String>,
+    pub blend_weight: f32,
+    pub blend_duration: f32,
+    pub blend_elapsed: f32,
+}
+
+impl Default for BonesPlayerState {
+    fn default() -> Self {
+        Self {
+            animation_time: 0.0,
+            animation_playing: false,
+            current_motion: None,
+            play_rate: 1.0,
+            animation_loop: true,
+            motion_queue: Vec::new(),
+            animation_start_time: 0.0,
+            animation_end_time: -1.0,
+            animation_blend_time: 0.0,
+            root_lock: false,
+            animation_scale: 1.0,
+            motion_ended: false,
+            previous_motion: None,
+            blend_weight: 1.0,
+            blend_duration: 0.0,
+            blend_elapsed: 0.0,
+        }
+    }
+}
+
 /// Mutable runtime state for a Shockwave 3D member (animation, transforms, etc.)
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
@@ -1107,6 +1227,11 @@ pub struct Shockwave3dRuntimeState {
     pub blend_weight: f32,       // 0.0 = all previous, 1.0 = all current
     pub blend_duration: f32,     // total blend time in seconds
     pub blend_elapsed: f32,      // time spent blending
+    /// Per-model animation state, keyed by model node name (lowercase). The
+    /// SOURCE OF TRUTH for skinned models — the single fields above are kept
+    /// for the keyframe (motion_transforms / non-skinned) path. See
+    /// [`BonesPlayerState`]. Access via `bones_player` / `bones_player_mut`.
+    pub bones_players: std::collections::HashMap<String, BonesPlayerState>,
 
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
@@ -1189,6 +1314,12 @@ pub struct Shockwave3dRuntimeState {
     // ─── Detached nodes (parent set to VOID) ───
     pub detached_nodes: std::collections::HashSet<String>,
 
+    /// Manual per-bone LOCAL transform overrides from `bonesPlayer.bone[i].transform = t`.
+    /// Keyed by "modelname:boneindex" (lowercase). The skeleton build substitutes these
+    /// (resolving the bone's rest length for a zero translation), letting procedural
+    /// scripts like updateBoneRotation drive bones — the SweeTarts snake's S-wiggle.
+    pub bone_transform_overrides: std::collections::HashMap<String, [f32; 16]>,
+
     // ─── pointAtOrientation per node ───
     /// Per-node pointAtOrientation: node_name -> (front_axis, up_axis)
     /// Default: ([0,0,1], [0,1,0]) — +Z front, +Y up
@@ -1228,6 +1359,67 @@ pub struct Shockwave3dRuntimeState {
     /// fired (their producers aren't wired up). `unregisterAllEvents`
     /// truncates this Vec.
     pub registered_events: Vec<RegisteredW3dEvent>,
+
+    // ─── Native #collision modifier (addModifier(#collision)) ───
+    /// Per-model collision modifier state, keyed by model node name. Drives
+    /// native W3D collision detection in `events::tick_w3d_collisions`.
+    pub collision_modifiers: std::collections::HashMap<String, W3dCollisionModifier>,
+}
+
+/// Native Shockwave3D #collision modifier state (Director 11.5 collision
+/// modifier). Attached to a model via `model.addModifier(#collision)` and
+/// exposed through the `model.collision` property. Detection runs each frame
+/// in `events::tick_w3d_collisions`; only detection + callback dispatch are
+/// implemented — resolution is a no-op (every consumer so far sets `resolve = 0`).
+#[derive(Clone)]
+pub struct W3dCollisionModifier {
+    /// `collision.enabled` — whether collisions with this model are detected.
+    pub enabled: bool,
+    /// `collision.resolve` — whether collisions are auto-resolved. Stored, not applied.
+    pub resolve: bool,
+    /// `collision.immovable` — stored only.
+    pub immovable: bool,
+    /// `collision.mode` — #box / #sphere / #mesh. Detection uses an axis-aligned
+    /// bounding box for every mode (sufficient for the gameplay callbacks).
+    pub mode: String,
+    /// Handler registered via `collision.setCollisionCallback(#handler, instance)`.
+    pub callback_handler: Option<String>,
+    pub callback_instance: Option<crate::player::script_ref::ScriptInstanceRef>,
+    /// The raw 2nd arg of `setCollisionCallback(#handler, target)`. Director
+    /// invokes a non-instance target's handler as `on handler target, collisionData`
+    /// (the object is the handler's FIRST param), so we keep it to pass through.
+    /// For a script-instance target this is unused (that path binds `me`).
+    pub callback_target: Option<crate::director::lingo::datum::Datum>,
+}
+
+// Manual Debug: `Datum` doesn't implement Debug (it uses `format_datum`), so
+// derive can't cover `callback_target`; just report whether one is set.
+impl std::fmt::Debug for W3dCollisionModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("W3dCollisionModifier")
+            .field("enabled", &self.enabled)
+            .field("resolve", &self.resolve)
+            .field("immovable", &self.immovable)
+            .field("mode", &self.mode)
+            .field("callback_handler", &self.callback_handler)
+            .field("callback_instance", &self.callback_instance)
+            .field("callback_target", &self.callback_target.is_some())
+            .finish()
+    }
+}
+
+impl Default for W3dCollisionModifier {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            resolve: true,
+            immovable: false,
+            mode: "mesh".to_string(),
+            callback_handler: None,
+            callback_instance: None,
+            callback_target: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1417,6 +1609,45 @@ pub struct ParticleSystemState {
 }
 
 impl Shockwave3dRuntimeState {
+    /// Per-model bonesPlayer state (read), case-insensitive by model node name.
+    pub fn bones_player(&self, model: &str) -> Option<&BonesPlayerState> {
+        self.bones_players.get(&model.to_ascii_lowercase())
+    }
+
+    /// Per-model bonesPlayer state (mutable), creating a default entry on first
+    /// use. Director attaches a #bonesPlayer per model; play()/queue()/setters
+    /// route here so each model animates independently.
+    pub fn bones_player_mut(&mut self, model: &str) -> &mut BonesPlayerState {
+        self.bones_players.entry(model.to_ascii_lowercase()).or_default()
+    }
+
+    /// Mirror a model's per-node animation state into the member-level single
+    /// fields. The renderer skinning + bone getters read per-node, but the
+    /// keyframe (motion_transforms) block, auto-play, and legacy queue-pop
+    /// still read the single fields — so we keep them pointed at the most
+    /// recently-acted model (historical per-member behavior). Harmless for
+    /// skinned models (which never consult the single fields).
+    pub fn sync_legacy_from_bones_player(&mut self, model: &str) {
+        if let Some(bp) = self.bones_players.get(&model.to_ascii_lowercase()).cloned() {
+            self.animation_time = bp.animation_time;
+            self.animation_playing = bp.animation_playing;
+            self.current_motion = bp.current_motion;
+            self.play_rate = bp.play_rate;
+            self.animation_loop = bp.animation_loop;
+            self.motion_queue = bp.motion_queue;
+            self.animation_start_time = bp.animation_start_time;
+            self.animation_end_time = bp.animation_end_time;
+            self.animation_blend_time = bp.animation_blend_time;
+            self.root_lock = bp.root_lock;
+            self.animation_scale = bp.animation_scale;
+            self.motion_ended = bp.motion_ended;
+            self.previous_motion = bp.previous_motion;
+            self.blend_weight = bp.blend_weight;
+            self.blend_duration = bp.blend_duration;
+            self.blend_elapsed = bp.blend_elapsed;
+        }
+    }
+
     /// Create runtime state initialized with camera data from the 3DPR info
     /// and optionally auto-start animation if animationEnabled is set.
     pub fn from_info(info: &Shockwave3dInfo, scene: Option<&crate::director::chunks::w3d::types::W3dScene>) -> Self {
@@ -1678,6 +1909,11 @@ pub struct HavokRigidBody {
     pub friction: f64,
     pub active: bool,
     pub pinned: bool,
+    /// HKE `COLLISIONS_DISABLED`: body integrates but is never registered for
+    /// collision detection (skipped by the narrow phase).
+    pub collisions_disabled: bool,
+    /// HKE `CASTS_SHADOWS`: render metadata (display-body shadow); physics no-op.
+    pub casts_shadows: bool,
     pub linear_velocity: [f64; 3],
     pub angular_velocity: [f64; 3],
     pub linear_momentum: [f64; 3],
@@ -1690,10 +1926,23 @@ pub struct HavokRigidBody {
     pub is_convex: bool,
     /// Half-extents of the mesh bounding box, for box inertia computation.
     pub inertia_half_extents: [f64; 3],
-    /// True once the body has received a hover/drive force (applyForce /
-    /// applyForceAtPoint). Such bodies (e.g. the SuperSonic car) keep the
-    /// original collision path; force-free objects use the box-stacking path.
+    /// A Lingo-created movable body defaults to the script-driven vehicle path
+    /// (raycast cars: held up by hover forces, off the box-stacking path). HKE
+    /// bodies load as `false` (passive). A force-free body that is positioned
+    /// kinematically (interpolatingMoveTo) is reclassified to `false` so the
+    /// add-cubes demo box-stacks — see `received_force`.
     pub driven: bool,
+    /// Set once any applied force/torque (applyForce/applyForceAtPoint/
+    /// applyTorque) hits this body. A raycast car hovers every frame, so this is
+    /// true before its recovery interpolatingMoveTo runs — which is how we tell a
+    /// hover vehicle (keep `driven`) from a kinematically-placed stacking block
+    /// (clear `driven`). Never set for the falling cubes.
+    pub received_force: bool,
+    /// True for #box-primitive bodies. A box must not be given the sphere
+    /// "rolling" (ω = v/r) the resting-surface constraint applies to round
+    /// bodies — it slides/tumbles instead. Spheres, cylinders/coins, cars and
+    /// meshes leave this false and keep rolling.
+    pub is_box: bool,
     /// Authored per-axis model scale from the W3D transform, preserved so the
     /// rendered model keeps its size when physics writes back its transform
     /// (the finaldrive car is authored at 0.296×; losing it makes the RaycastCar
@@ -1719,6 +1968,20 @@ pub struct HavokRigidBody {
     /// Set on first collision with a rigid-body-owned mesh. Used each
     /// substep to keep the body on the surface analytically.
     pub resting_normal: Option<RestingContact>,
+    /// Auto-sleep: seconds of continuous stillness left before the body
+    /// deactivates (so resting stacks stop jittering). Reset whenever the body
+    /// moves above threshold or is disturbed by Lingo.
+    pub sleep_countdown: f64,
+    /// Set by the Lingo apply*/velocity setters each step so a per-frame-forced
+    /// body (a driven car) never auto-sleeps. Cleared after the sleep check.
+    pub lingo_disturbed: bool,
+    /// Authored initial state, snapshotted when the body is created, so
+    /// `havok.reset()` can revert the scene to the .hke-defined state.
+    pub initial_position: [f64; 3],
+    pub initial_orientation: [f64; 4],
+    pub initial_linear_velocity: [f64; 3],
+    pub initial_angular_velocity: [f64; 3],
+    pub initial_active: bool,
 }
 
 impl HavokRigidBody {
@@ -1746,6 +2009,8 @@ impl HavokRigidBody {
             friction: 0.5,
             active: true,
             pinned: false,
+            collisions_disabled: false,
+            casts_shadows: false,
             linear_velocity: [0.0; 3],
             angular_velocity: [0.0; 3],
             linear_momentum: [0.0; 3],
@@ -1758,6 +2023,8 @@ impl HavokRigidBody {
             is_convex,
             inertia_half_extents: [10.0; 3],
             driven: false,
+            received_force: false,
+            is_box: false,
             sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: if mass > 0.0 { 1.0 / mass } else { 0.0 },
@@ -1769,6 +2036,13 @@ impl HavokRigidBody {
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
             resting_normal: None,
+            sleep_countdown: 0.5,
+            lingo_disturbed: false,
+            initial_position: [0.0; 3],
+            initial_orientation: [1.0, 0.0, 0.0, 0.0],
+            initial_linear_velocity: [0.0; 3],
+            initial_angular_velocity: [0.0; 3],
+            initial_active: true,
         }
     }
 
@@ -1783,6 +2057,8 @@ impl HavokRigidBody {
             friction: 0.5,
             active: false,
             pinned: true,
+            collisions_disabled: false,
+            casts_shadows: false,
             linear_velocity: [0.0; 3],
             angular_velocity: [0.0; 3],
             linear_momentum: [0.0; 3],
@@ -1795,6 +2071,8 @@ impl HavokRigidBody {
             is_convex,
             inertia_half_extents: [10.0; 3],
             driven: false,
+            received_force: false,
+            is_box: false,
             sync_scale: [1.0; 3],
             orientation: [1.0, 0.0, 0.0, 0.0],
             inverse_mass: 0.0,
@@ -1806,7 +2084,41 @@ impl HavokRigidBody {
             saved_linear_velocity: [0.0; 3],
             saved_angular_velocity: [0.0; 3],
             resting_normal: None,
+            sleep_countdown: 0.5,
+            lingo_disturbed: false,
+            initial_position: [0.0; 3],
+            initial_orientation: [1.0, 0.0, 0.0, 0.0],
+            initial_linear_velocity: [0.0; 3],
+            initial_angular_velocity: [0.0; 3],
+            initial_active: true,
         }
+    }
+
+    /// Record the current transform/velocity as the authored initial state,
+    /// so `havok.reset()` can revert to it.
+    pub fn snapshot_initial(&mut self) {
+        self.initial_position = self.position;
+        self.initial_orientation = self.orientation;
+        self.initial_linear_velocity = self.linear_velocity;
+        self.initial_angular_velocity = self.angular_velocity;
+        self.initial_active = self.active;
+    }
+
+    /// Revert to the snapshotted initial state and clear all accumulated/derived
+    /// runtime state (forces, momenta, resting + sleep state). `havok.reset()`.
+    pub fn restore_initial(&mut self) {
+        self.position = self.initial_position;
+        self.orientation = self.initial_orientation;
+        self.linear_velocity = self.initial_linear_velocity;
+        self.angular_velocity = self.initial_angular_velocity;
+        self.active = self.initial_active;
+        self.force = [0.0; 3];
+        self.torque = [0.0; 3];
+        self.linear_momentum = [0.0; 3];
+        self.angular_momentum = [0.0; 3];
+        self.resting_normal = None;
+        self.sleep_countdown = 0.5;
+        self.lingo_disturbed = false;
     }
 }
 
@@ -1922,6 +2234,10 @@ pub struct HavokCollisionInfo {
     pub body_b: String,
     pub point: [f64; 3],
     pub normal: [f64; 3],
+    /// Impact speed (|normal relative velocity|) at the contact. Passed to Lingo
+    /// collision callbacks as the 5th argument and gated against the
+    /// registerInterest threshold.
+    pub normal_rel_vel: f64,
 }
 
 pub struct HavokPhysicsState {
@@ -2326,6 +2642,14 @@ impl PhysXPhysicsMember {
     pub fn new() -> Self { Self { state: PhysXPhysicsState::default() } }
 }
 
+/// A 3D Groove `.3GM` model cast member (type-15 Xtra media whose XMED payload
+/// begins with the `3DGM` magic). Holds the raw bytes; the Groove Xtra parses
+/// them into a model when the movie calls `LoadShape(memberName)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Groove3gmMember {
+    pub data: Vec<u8>,
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum CastMemberType {
@@ -2341,9 +2665,11 @@ pub enum CastMemberType {
     Sound(SoundMember),
     Font(FontMember),
     Flash(FlashMember),
+    Movie(MovieMember),
     Shockwave3d(Shockwave3dMember),
     HavokPhysics(HavokPhysicsMember),
     PhysXPhysics(PhysXPhysicsMember),
+    Groove3gm(Groove3gmMember),
     Unknown,
 }
 
@@ -2361,9 +2687,11 @@ pub enum CastMemberTypeId {
     Sound,
     Font,
     Flash,
+    Movie,
     Shockwave3d,
     HavokPhysics,
     PhysXPhysics,
+    Groove3gm,
     Unknown,
 }
 
@@ -2406,6 +2734,9 @@ impl fmt::Debug for CastMemberType {
             Self::Flash(_) => {
                 write!(f, "Flash")
             }
+            Self::Movie(_) => {
+                write!(f, "Movie")
+            }
             Self::Shockwave3d(_) => {
                 write!(f, "Shockwave3d")
             }
@@ -2414,6 +2745,9 @@ impl fmt::Debug for CastMemberType {
             }
             Self::PhysXPhysics(_) => {
                 write!(f, "PhysXPhysics")
+            }
+            Self::Groove3gm(_) => {
+                write!(f, "Groove3gm")
             }
             Self::Unknown => {
                 write!(f, "Unknown")
@@ -2437,9 +2771,15 @@ impl CastMemberTypeId {
             Self::Sound => Ok("sound"),
             Self::Font => Ok("font"),
             Self::Flash => Ok("flash"),
+            Self::Movie => Ok("movie"),
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
+            // Director/Groove report .3GM shape members as #G3D — the Groove
+            // Lingo gates shape loading on `member.type = #G3D`
+            // (gGroove: LoadShape only if #G3D), so returning #groove made every
+            // shape get skipped → ShapeID -1 → no 3D world.
+            Self::Groove3gm => Ok("g3d"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -2460,9 +2800,11 @@ impl CastMemberType {
             Self::Sound(_) => CastMemberTypeId::Sound,
             Self::Font(_) => CastMemberTypeId::Font,
             Self::Flash(_) => CastMemberTypeId::Flash,
+            Self::Movie(_) => CastMemberTypeId::Movie,
             Self::Shockwave3d(_) => CastMemberTypeId::Shockwave3d,
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
+            Self::Groove3gm(_) => CastMemberTypeId::Groove3gm,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -2481,6 +2823,7 @@ impl CastMemberType {
             Self::Sound(_) => "sound",
             Self::Font(_) => "font",
             Self::Flash(_) => "flash",
+            Self::Movie(_) => "movie",
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             Self::HavokPhysics(_) => "havok",
             Self::PhysXPhysics(_) => "physics",
@@ -2608,6 +2951,20 @@ impl CastMemberType {
         }
     }
 
+    pub fn as_movie(&self) -> Option<&MovieMember> {
+        return match self {
+            Self::Movie(data) => { Some(data) }
+            _ => { None }
+        }
+    }
+
+    pub fn as_movie_mut(&mut self) -> Option<&mut MovieMember> {
+        return match self {
+            Self::Movie(data) => { Some(data) }
+            _ => { None }
+        }
+    }
+
     pub fn as_shockwave3d(&self) -> Option<&Shockwave3dMember> {
         match self {
             Self::Shockwave3d(data) => Some(data),
@@ -2639,6 +2996,94 @@ impl CastMemberType {
     }
 }
 
+/// Decode an RTE member's RTE2 pre-rendered bitmap into 32-bit RGBA.
+///
+/// Format (matches ScummVM's Director `RTE2::createSurface`):
+/// - Header: width (BE u16), height (BE u16), bpp (BE u16, =4), flags (2) = 8B.
+/// - Body, scanned per row left-to-right. Each step reads a `check` byte:
+///   - `check == 0x1f`: color-change escape — the next 3 bytes are r,g,b for
+///     subsequent pixels.
+///   - otherwise alpha = `check * 255 / max` where `max = (1<<bpp)-1` (15).
+///     - if `check == 0` or `check == max` (the run-coded extremes): read a
+///       `count` byte and emit `count` pixels of that alpha. The special
+///       `check==0, count==0` means end-of-line (rest stays transparent).
+///     - else (intermediate alpha): a single pixel.
+///
+/// `fg` is the default foreground color (from the cast member's info); inline
+/// `0x1f` escapes override it. Returns (width, height, rgba) or None.
+fn decode_rte2_bitmap(data: &[u8], fg: (u8, u8, u8)) -> Option<(u16, u16, Vec<u8>)> {
+    if data.len() < 8 {
+        return None;
+    }
+    let w = ((data[0] as usize) << 8) | data[1] as usize;
+    let h = ((data[2] as usize) << 8) | data[3] as usize;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut bpp = ((data[4] as u32) << 8) | data[5] as u32;
+    if bpp == 0 || bpp > 8 {
+        bpp = 4;
+    }
+    let max = (1u32 << bpp) - 1;
+    let p = &data[8..];
+    let mut rgba = vec![0u8; w * h * 4];
+    let (mut r, mut g, mut b) = fg;
+    let mut i = 0usize;
+    for y in 0..h {
+        let mut x = 0usize;
+        while x < w {
+            if i >= p.len() {
+                break;
+            }
+            let check = p[i] as u32;
+            i += 1;
+            if check == 0x1f {
+                // Color-change escape: next 3 bytes are r,g,b.
+                if i + 2 < p.len() {
+                    r = p[i];
+                    g = p[i + 1];
+                    b = p[i + 2];
+                    i += 3;
+                }
+                continue;
+            }
+            let alpha = (check * 255 / max) as u8;
+            if check == 0 || check == max {
+                // Run-coded extreme: a count byte follows.
+                if i >= p.len() {
+                    break;
+                }
+                let count = p[i];
+                i += 1;
+                if count == 0 && check == 0 {
+                    // End of line — remaining pixels stay transparent.
+                    break;
+                }
+                for _ in 0..count {
+                    if x >= w {
+                        break;
+                    }
+                    let idx = (y * w + x) * 4;
+                    rgba[idx] = r;
+                    rgba[idx + 1] = g;
+                    rgba[idx + 2] = b;
+                    rgba[idx + 3] = alpha;
+                    x += 1;
+                }
+            } else {
+                // Intermediate alpha: single pixel.
+                let idx = (y * w + x) * 4;
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = alpha;
+                x += 1;
+            }
+        }
+    }
+    Some((w as u16, h as u16, rgba))
+}
+
 impl CastMember {
     fn chunk_type_name(c: &Chunk) -> &'static str {
         match c {
@@ -2658,6 +3103,8 @@ impl CastMember {
             Chunk::ScoreOrder(_) => "ScoreOrder",
             Chunk::TileList(_) => "TileList",
             Chunk::Text(_) => "Text",
+            Chunk::RteText(_) => "RteText",
+            Chunk::RteBitmap(_) => "RteBitmap",
             Chunk::Bitmap(_) => "Bitmap",
             Chunk::Palette(_) => "Palette",
             Chunk::Sound(_) => "Sound",
@@ -3192,6 +3639,75 @@ impl CastMember {
         Some((width, height))
     }
 
+    /// Parse the SWF header's FrameCount (the root timeline's total frame
+    /// count) straight from the movie bytes — the authoritative value for
+    /// Director's Flash `member.frameCount` property. Reading it from the SWF
+    /// header (always present in `data`) is correct even while the Ruffle
+    /// instance is still (re)loading; asking Ruffle returns 0 during that
+    /// window, which poisons movies that seed state from `frameCount`
+    /// (bogey_nights' #hiding does `sprite.frame = member.frameCount`, and a 0
+    /// there pins the SWF root at frame 0 and stalls the grab machine).
+    ///
+    /// Header layout after the 8-byte prefix (FWS): RECT (variable), then u16
+    /// FrameRate (8.8 fixed), then u16 FrameCount. Only uncompressed FWS is
+    /// handled here (bogey_nights' straw/longarm are FWS); compressed CWS/ZWS
+    /// fall back to the Ruffle query at the call site.
+    pub fn parse_swf_frame_count(data: &[u8]) -> Option<u16> {
+        if data.len() < 9 || &data[0..3] != b"FWS" {
+            return None;
+        }
+        let rect_start = 8;
+        let nbits = (data[rect_start] >> 3) as usize;
+        let total_bits = 5 + nbits * 4;
+        let rect_bytes = (total_bits + 7) / 8;
+        // rect, then FrameRate (2), then FrameCount (2)
+        let fc_off = rect_start + rect_bytes + 2;
+        if data.len() < fc_off + 2 {
+            return None;
+        }
+        Some(u16::from_le_bytes([data[fc_off], data[fc_off + 1]]))
+    }
+
+    /// Resolve a Flash member's registration point, matching Director's
+    /// `member.regPoint`:
+    /// - `centerRegPoint == true` → the CENTER of the member rect. Director
+    ///   resets the regPoint to center and returns that (pengapop's
+    ///   menuAdOnline: 380×413 → point(190, 206)).
+    /// - `centerRegPoint == false` → the stored authored regPoint
+    ///   (QuickDraw-swapped in FlashInfo::from) — bogey_nights' straw/longarm:
+    ///   point(109, 63).
+    /// `swf_data` is the SWF bytes, used only as a size fallback when the member
+    /// rect is empty. Returns (0, 0) when no FlashInfo is available.
+    fn flash_reg_point(
+        flash_info: Option<&crate::director::enums::FlashInfo>,
+        swf_data: &[u8],
+    ) -> (i16, i16) {
+        match flash_info {
+            Some(info) if info.center_reg_point => {
+                let (l, t, r, b) = info.flash_rect;
+                if r - l > 0 && b - t > 0 {
+                    (((r - l) / 2) as i16, ((b - t) / 2) as i16)
+                } else if let Some((w, h)) = Self::parse_swf_dimensions(swf_data) {
+                    ((w / 2) as i16, (h / 2) as i16)
+                } else {
+                    (0, 0)
+                }
+            }
+            Some(info) if info.reg_point != (0, 0) => {
+                (info.reg_point.0 as i16, info.reg_point.1 as i16)
+            }
+            Some(info) => (info.origin_h as i16, info.origin_v as i16),
+            None => {
+                // No FlashInfo: default to center registration from SWF dims.
+                if let Some((w, h)) = Self::parse_swf_dimensions(swf_data) {
+                    ((w / 2) as i16, (h / 2) as i16)
+                } else {
+                    (0, 0)
+                }
+            }
+        }
+    }
+
     fn make_swf_member(number: u32, chunk: &CastMemberChunk, data: Vec<u8>) -> CastMember {
         // For native Flash members the FlashInfo was parsed during chunk
         // ingest (cast_member.rs:140 `MemberType::Flash` branch). For
@@ -3218,25 +3734,7 @@ impl CastMember {
         // wrong (the old code halved it, getting quarter-size offsets),
         // while parse_swf_dimensions reads straight from the SWF's
         // FrameSize record so it always matches what Ruffle renders.
-        let reg_point = if let Some(ref info) = flash_info {
-            if info.center_reg_point {
-                if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
-                    ((w / 2) as i16, (h / 2) as i16)
-                } else {
-                    (info.reg_point.0 as i16, info.reg_point.1 as i16)
-                }
-            } else {
-                (info.origin_h as i16, info.origin_v as i16)
-            }
-        } else {
-            // OLE-wrapped SWF without a parseable FlashInfo header:
-            // default to center registration from SWF dimensions
-            if let Some((w, h)) = Self::parse_swf_dimensions(&data) {
-                ((w / 2) as i16, (h / 2) as i16)
-            } else {
-                (0, 0)
-            }
-        };
+        let reg_point = Self::flash_reg_point(flash_info.as_ref(), &data);
 
         CastMember {
             number,
@@ -3245,7 +3743,7 @@ impl CastMember {
             member_type: CastMemberType::Flash(FlashMember { data, reg_point, flash_info }),
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
-            reg_point: (0, 0),
+            reg_point: (reg_point.0 as i32, reg_point.1 as i32),
         }
     }
 
@@ -3534,6 +4032,22 @@ impl CastMember {
                 });
             }
 
+            // 1b) 3D Groove `.3GM` model — XMED payload starts with the `3DGM` magic.
+            // Retain the raw bytes so the Groove Xtra can build a shape from them
+            // when the movie calls `LoadShape(memberName)`.
+            if xm.raw_data.len() >= 4 && &xm.raw_data[0..4] == b"3DGM" {
+                debug!("Groove .3GM member #{} detected ({} bytes)", number, xm.raw_data.len());
+                return Some(CastMember {
+                    number,
+                    name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                    comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                    member_type: CastMemberType::Groove3gm(Groove3gmMember { data: xm.raw_data.clone() }),
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (0, 0),
+                });
+            }
+
             // 2) Check if styled text (XMED format)
             // Only parse as styled text if the Ole type string is "text" or empty
             // (avoid mis-parsing raw binary data like lightmap coordinates as text)
@@ -3699,7 +4213,7 @@ impl CastMember {
                 text_member.script_id = xmed_script_id;
                 text_member.member_script_ref = Some(CastMemberRef {
                     cast_lib: cast_lib as i32,
-                    cast_member: xmed_script_id as i32,
+                    cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                 });
             }
             return Some(CastMember {
@@ -4120,7 +4634,7 @@ impl CastMember {
         let xmed_member_script_ref = if xmed_script_id > 0 {
             Some(CastMemberRef {
                 cast_lib: cast_lib as i32,
-                cast_member: xmed_script_id as i32,
+                cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
             })
         } else {
             None
@@ -4150,6 +4664,7 @@ impl CastMember {
             bottom_spacing: styled_text.bottom_spacing as i16,
             width: box_w,
             height: box_h,
+            rect_set_at_runtime: false,
             char_spacing: styled_text.styled_spans.first()
                 .map(|s| s.style.char_spacing as i32)
                 .unwrap_or(0),
@@ -4556,7 +5071,7 @@ impl CastMember {
                     field_member.script_id = field_script_id;
                     field_member.member_script_ref = Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: field_script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     });
                 }
 
@@ -4613,7 +5128,7 @@ impl CastMember {
                         .map(|info| info.header.script_id)
                         .unwrap_or(0);
                     let member_script_ref = if script_id > 0 {
-                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                        Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: number as i32 })
                     } else { None };
                     debug!("Flash member {} is a Shape (via shape_info), script_id={}", number, script_id);
                     return CastMember {
@@ -4650,7 +5165,7 @@ impl CastMember {
                             .map(|info| info.header.script_id)
                             .unwrap_or(0);
                         let member_script_ref = if script_id > 0 {
-                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: script_id as i32 })
+                            Some(CastMemberRef { cast_lib: cast_lib as i32, cast_member: number as i32 })
                         } else { None };
                         debug!("Flash member {} is actually a Shape! script_id={}", number, script_id);
                         return CastMember {
@@ -4693,30 +5208,40 @@ impl CastMember {
                 // make_swf_member site for the same rationale —
                 // FlashInfo.reg_point can be stale; parse_swf_dimensions
                 // reads the SWF FrameSize header directly).
-                let flash_info = chunk.specific_data.flash_info().cloned();
+                // Mirror make_swf_member: the FLSH payload is sometimes in the
+                // parsed specific_data and sometimes only in specific_data_raw.
+                // Without the raw fallback, native Flash members got flash_info
+                // = None → reg_point defaulted to (0,0) (bogey_nights' arm read
+                // regPoint point(0,0) instead of Director's point(109,63)).
+                let flash_info = chunk
+                    .specific_data
+                    .flash_info()
+                    .cloned()
+                    .or_else(|| crate::director::enums::FlashInfo::from(&chunk.specific_data_raw));
                 let bytes_opt = Self::get_first_child_bytes(member_def);
-                let reg_point = if let Some(ref info) = flash_info {
-                    if info.center_reg_point {
-                        if let Some((w, h)) = bytes_opt
-                            .as_deref()
-                            .and_then(Self::parse_swf_dimensions)
-                        {
-                            ((w / 2) as i16, (h / 2) as i16)
-                        } else {
-                            (info.reg_point.0 as i16, info.reg_point.1 as i16)
-                        }
-                    } else {
-                        (info.origin_h as i16, info.origin_v as i16)
-                    }
-                } else {
-                    (0, 0)
-                };
-                if let Some(bytes) = bytes_opt {
+                let reg_point = Self::flash_reg_point(
+                    flash_info.as_ref(),
+                    bytes_opt.as_deref().unwrap_or(&[]),
+                );
+                let flash_member_type = if let Some(bytes) = bytes_opt {
                     CastMemberType::Flash(FlashMember { data: bytes, reg_point, flash_info })
                 } else {
                     warn!("Flash cast member has no data chunk or it is invalid.");
                     CastMemberType::Flash(FlashMember { data: vec![], reg_point, flash_info })
-                }
+                };
+                // Early-return a full CastMember so the computed reg point lands
+                // on CastMember.reg_point too — `member.regPoint` reads that
+                // (CastMember-level) value, not the FlashMember's. Matches the
+                // make_swf_member (OLE) path.
+                return CastMember {
+                    number,
+                    name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                    comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                    member_type: flash_member_type,
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (reg_point.0 as i32, reg_point.1 as i32),
+                };
             }
             MemberType::Ole => {
                 Self::log_ole_start(number, cast_lib, chunk);
@@ -4906,7 +5431,7 @@ impl CastMember {
                     // Create the behavior script reference
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5023,7 +5548,7 @@ impl CastMember {
                 let member_script_ref = if script_id > 0 {
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5110,6 +5635,50 @@ impl CastMember {
                         cached_total_frames: None,
                     })
                 }
+            }
+            MemberType::Movie => {
+                // Linked Movie (`#movie`) member. The linked .dir/.dcr path is
+                // stored in the member info's file_name; content is fetched at
+                // play time (linked, not embedded), so `bytes` stay None until
+                // the fileName setter / activation loads them. Playback flags
+                // share the FilmLoop specific-data layout (reg_point + a flags
+                // byte: center=bit0, crop=1-bit1, sound=bit3, loop=1-bit5);
+                // scriptsEnabled is a Movie-only extra flag (bit TBD, mapped via
+                // the hex dump below).
+                let mut mv = MovieMember::new();
+                if let Some(info) = chunk.member_info.as_ref() {
+                    mv.file_name = info.file_name.clone();
+                }
+                // Specific-data layout (big-endian), fully verified by toggling
+                // each property in Director MX 2004 and diffing the flags byte:
+                //   [0..8]  QuickDraw rect: top, left, bottom, right (u16 each)
+                //   [8..11] reserved (0)
+                //   [11]    flags byte:
+                //             bit0 (0x01) center
+                //             bit1 (0x02) crop        (inverted: crop = !bit1)
+                //             bit3 (0x08) sound
+                //             bit4 (0x10) scriptsEnabled
+                //             bit5 (0x20) loop        (inverted: loop = !bit5)
+                //           (bit2 0x04 is an always-set flag, ignored)
+                //   [12..14] reserved (0)
+                // place_holder.dcr: rect(200,150,300,250) -> 100x100, regPoint
+                // center (50,50); flags 0x0E -> center=F crop=F sound=T
+                // scriptsEnabled=F loop=T (and 0x3E -> scriptsEnabled=T loop=F).
+                let sd = chunk.specific_data_raw.as_slice();
+                let be16 = |i: usize| -> u16 {
+                    if i + 1 < sd.len() { u16::from_be_bytes([sd[i], sd[i + 1]]) } else { 0 }
+                };
+                let (top, left, bottom, right) = (be16(0), be16(2), be16(4), be16(6));
+                let flags = sd.get(11).copied().unwrap_or(0);
+                mv.width = right.saturating_sub(left);
+                mv.height = bottom.saturating_sub(top);
+                mv.reg_point = ((mv.width / 2) as i16, (mv.height / 2) as i16);
+                mv.center = (flags & 0x01) != 0;
+                mv.crop = (flags & 0x02) == 0;
+                mv.sound = (flags & 0x08) != 0;
+                mv.scripts_enabled = (flags & 0x10) != 0;
+                mv.loops = (flags & 0x20) == 0;
+                CastMemberType::Movie(mv)
             }
             MemberType::Sound => {
                 // Log children
@@ -5326,7 +5895,7 @@ impl CastMember {
                     let _script_chunk = &lctx.as_ref().unwrap().scripts[&script_id];
                     Some(CastMemberRef {
                         cast_lib: cast_lib as i32,
-                        cast_member: script_id as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
                     })
                 } else {
                     None
@@ -5345,6 +5914,119 @@ impl CastMember {
                     script_id,
                     member_script_ref: behavior_script_ref,
                 })
+            }
+            MemberType::RTE => {
+                // Rich Text Editor cast member (Director type 12). Children:
+                // RTE0 = style runs (commonly empty), RTE1 = plain text,
+                // RTE2 = a pre-rendered anti-aliased bitmap. Director displays
+                // the RTE2 bitmap, so we decode it and surface the member as a
+                // Bitmap — that gives the exact authored visual (anti-aliased,
+                // correctly colored) AND reuses Bitmap members' existing
+                // cast-member-attached script support (header.script_id), so an
+                // `on mouseUp` navigation handler fires just like Field/Bitmap
+                // buttons. These scripts are not stored as separate Script cast
+                // members. Previously RTE fell through to `_` and became
+                // CastMemberType::Unknown, so the labels were invisible and the
+                // buttons dead (SpongeBob JellyFishin' "next"/"play"/
+                // "instructions").
+
+                let script_id = chunk
+                    .member_info
+                    .as_ref()
+                    .map(|info| info.header.script_id)
+                    .unwrap_or(0);
+                let member_script_ref = if script_id > 0 {
+                    Some(CastMemberRef {
+                        cast_lib: cast_lib as i32,
+                        cast_member: number as i32, // member's own slot; attached script registered at scripts[number]
+                    })
+                } else {
+                    None
+                };
+
+                // Foreground color from cast info specific_data. Layout (34
+                // bytes): rect(0..8), pageRect(8..16), misc(16..25), then an
+                // RGB triple. RTE0 style runs are empty so this is the only
+                // color source. Default to white (visible) if absent.
+                let raw = chunk.specific_data_raw.as_slice();
+                let fg = if raw.len() >= 28 {
+                    (raw[25], raw[26], raw[27])
+                } else {
+                    (255, 255, 255)
+                };
+
+                let rte2 = member_def
+                    .children
+                    .iter()
+                    .find_map(|c| c.as_ref().and_then(|ch| ch.as_rte_bitmap()));
+
+                if let Some((w, h, rgba)) = rte2.and_then(|d| decode_rte2_bitmap(d, fg)) {
+                    let bitmap = Bitmap {
+                        width: w,
+                        height: h,
+                        bit_depth: 32,
+                        original_bit_depth: 32,
+                        data: rgba,
+                        palette_ref: PaletteRef::Default,
+                        matte: None,
+                        use_alpha: true,
+                        trim_white_space: false,
+                        was_trimmed: false,
+                        version: 0,
+                    };
+                    let image_ref = bitmap_manager.add_bitmap(bitmap);
+                    let info = crate::director::enums::BitmapInfo {
+                        width: w,
+                        height: h,
+                        // RTE members register top-left like text (reg point 0,0),
+                        // not bitmap-center, so the score sprite lands correctly.
+                        reg_x: 0,
+                        reg_y: 0,
+                        bit_depth: 32,
+                        use_alpha: true,
+                        ..Default::default()
+                    };
+                    debug!(
+                        "RTE member #{} name='{}' -> Bitmap {}x{} fg={:?} script_id={}",
+                        number,
+                        chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                        w, h, fg, script_id,
+                    );
+                    CastMemberType::Bitmap(BitmapMember {
+                        image_ref,
+                        reg_point: (0, 0),
+                        script_id,
+                        member_script_ref,
+                        info,
+                    })
+                } else {
+                    // No decodable RTE2 — fall back to a TextMember from RTE1
+                    // so text/clicks still work.
+                    let rte_text = member_def
+                        .children
+                        .iter()
+                        .find_map(|c| c.as_ref().and_then(|ch| ch.as_rte_text()))
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut text_member = TextMember::new();
+                    text_member.text = rte_text;
+                    if raw.len() >= 8 {
+                        let be = |i: usize| ((raw[i] as u16) << 8) | (raw[i + 1] as u16);
+                        let w = be(6).saturating_sub(be(2));
+                        let h = be(4).saturating_sub(be(0));
+                        if w > 0 { text_member.width = w; }
+                        if h > 0 { text_member.height = h; }
+                    }
+                    text_member.script_id = script_id;
+                    text_member.member_script_ref = member_script_ref;
+                    debug!(
+                        "RTE member #{} name='{}' (no RTE2) -> TextMember text='{}' script_id={}",
+                        number,
+                        chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                        text_member.text, script_id,
+                    );
+                    CastMemberType::Text(text_member)
+                }
             }
             _ => {
                 // Assuming `chunk.member_type` is an enum backed by a numeric ID

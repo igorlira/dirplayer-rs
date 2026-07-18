@@ -265,8 +265,8 @@ impl HavokPhysicsMemberHandlers {
             });
 
             let mut step_cbs: Vec<(String, DatumRef, f64)> = Vec::new();
-            // Raw collision data: (handler, instance, body_a, body_b, point, normal)
-            let mut raw_collisions: Vec<(String, DatumRef, String, String, [f64;3], [f64;3])> = Vec::new();
+            // Raw collision data: (handler, instance, body_a, body_b, point, normal, nrv)
+            let mut raw_collisions: Vec<(String, DatumRef, String, String, [f64;3], [f64;3], f64)> = Vec::new();
 
             if let Some(havok) = havok {
                 // Step callbacks
@@ -300,12 +300,28 @@ impl HavokPhysicsMemberHandlers {
                             (contact.body_a.eq_ignore_ascii_case(&interest.rb_name1) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name2))
                             || (contact.body_a.eq_ignore_ascii_case(&interest.rb_name2) && contact.body_b.eq_ignore_ascii_case(&interest.rb_name1))
                         };
-                        if matches {
+                        // Gate on the registerInterest threshold: the Xtra only
+                        // fires the callback when the impact (normal relative)
+                        // speed reaches the threshold, so a body merely resting on
+                        // or sliding along a surface (nrv≈0) doesn't trigger a
+                        // collision event. (Frequency throttling is not yet
+                        // applied; freq is 0 for the player car so it's a no-op
+                        // there, and the scripts self-throttle via sndCollisionWait.)
+                        if matches && contact.normal_rel_vel >= interest.threshold {
+                            // Report the registered body (rb_name1) first so the
+                            // callback can treat cd[1] as "self" and cd[2] as the
+                            // other object (matches the Havok Xtra ordering).
+                            let (name_self, name_other) =
+                                if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1) {
+                                    (contact.body_b.clone(), contact.body_a.clone())
+                                } else {
+                                    (contact.body_a.clone(), contact.body_b.clone())
+                                };
                             raw_collisions.push((
                                 interest.handler_name.clone().unwrap(),
                                 interest.script_instance.clone().unwrap(),
-                                contact.body_a.clone(), contact.body_b.clone(),
-                                contact.point, contact.normal,
+                                name_self, name_other,
+                                contact.point, contact.normal, contact.normal_rel_vel,
                             ));
                         }
                     }
@@ -315,18 +331,21 @@ impl HavokPhysicsMemberHandlers {
 
             // Now allocate datums (requires mutable player, no longer borrowing havok)
             let mut collision_cbs = Vec::new();
-            for (handler, instance, ba, bb, pt, nm) in raw_collisions {
+            for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
+                // Match the Havok Xtra collision-callback signature
+                // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
+                // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
+                // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
+                // read cd[5] as an impact speed — On the Run's DriveHuman damage
+                // logic — saw a position instead.)
                 let ba_r = player.alloc_datum(Datum::String(ba));
                 let bb_r = player.alloc_datum(Datum::String(bb));
-                let cx = player.alloc_datum(Datum::Float(pt[0]));
-                let cy = player.alloc_datum(Datum::Float(pt[1]));
-                let cz = player.alloc_datum(Datum::Float(pt[2]));
-                let nx = player.alloc_datum(Datum::Float(nm[0]));
-                let ny = player.alloc_datum(Datum::Float(nm[1]));
-                let nz = player.alloc_datum(Datum::Float(nm[2]));
+                let pt_r = player.alloc_datum(Datum::Vector(pt));
+                let nm_r = player.alloc_datum(Datum::Vector(nm));
+                let nrv_r = player.alloc_datum(Datum::Float(nrv));
                 let info = player.alloc_datum(Datum::List(
                     DatumType::List,
-                    VecDeque::from([ba_r, bb_r, cx, cy, cz, nx, ny, nz]),
+                    VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
                     false,
                 ));
                 collision_cbs.push((handler, instance, info));
@@ -564,6 +583,20 @@ impl HavokPhysicsMemberHandlers {
                 ];
             }
 
+            // Apply the modeler-authored collision tolerance from the HKE subspace
+            // unless the movie passed an explicit tolerance to initialize(). The
+            // Xtra (and the C# HkeParser) take it from the .hke; our hardcoded 0.1
+            // default is only meant for `initialize(member)` calls whose HKE omits
+            // it. On the Run authors 0.35 — the tolerance sets how far a resting
+            // body floats above a surface, so with 0.1 the car sat ~0.1 above the
+            // road, below the ~0.2 raised (visual-only) sidewalk curbs, and
+            // modelsUnderRay then found no ground (pheight=9999 → couldn't drive).
+            if args.len() <= 1 {
+                if let Some(t) = hke.tolerance {
+                    havok.state.tolerance = t as f64;
+                }
+            }
+
             // Apply HKE drag parameters as initial defaults
             // (scripts can override via havok.dragParameters = [...])
             if let Some(ref drag) = hke.drag {
@@ -639,6 +672,28 @@ impl HavokPhysicsMemberHandlers {
                     if let Some(v) = p.linear_velocity {
                         rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
                     }
+                    // Angular velocity is rad/s — scale-independent, do NOT × inv_scale.
+                    if let Some(w) = p.angular_velocity {
+                        rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
+                    }
+                    // Initial orientation from the HKE body's axis-angle. The renderer
+                    // syncs the W3D model from rb.orientation (build_sync_transform), so
+                    // without this a mesh-derived body kept its identity rotation and
+                    // the car spawned facing the wrong way — the HKE places AutoPlayer
+                    // rotated 90 degrees about Z. Axis-angle is scale-independent.
+                    if let Some(o) = p.orientation {
+                        rb.orientation = super::havok_physics::quat_from_axis_angle(
+                            [o[1] as f64, o[2] as f64, o[3] as f64], o[0] as f64);
+                    }
+                    // COLLISIONS_DISABLED: keep the body out of the collision detector.
+                    if let Some(cd) = p.collisions_disabled { rb.collisions_disabled = cd; }
+                    // CASTS_SHADOWS: render metadata (no physics effect).
+                    if let Some(cs) = p.casts_shadows { rb.casts_shadows = cs; }
+                    // DISPLACEMENT is the authored centre of mass (Havok metres); Import
+                    // writes it over the geometric COM. Scale metres → display units.
+                    if let Some(d) = p.displacement {
+                        rb.center_of_mass = [d[0] as f64*inv_scale, d[1] as f64*inv_scale, d[2] as f64*inv_scale];
+                    }
                 }
 
                 // Set position + authored model scale from the W3D transform.
@@ -683,12 +738,47 @@ impl HavokPhysicsMemberHandlers {
                     // COM = local box centre = body-frame offset from the node
                     // origin (model base) to the collision-box centre.
                     let com = [0.5*(lmn[0]+lmx[0]), 0.5*(lmn[1]+lmx[1]), 0.5*(lmn[2]+lmx[2])];
-                    let unit_i = super::havok_physics::box_unit_inertia(he);
+                    // Unit inertia from the actual mesh polyhedron (the engine derives
+                    // mass properties from geometry). A box-AABB inertia is wrong about
+                    // the pitch axis for a long flat chassis. Box fallback for
+                    // degenerate/open meshes.
+                    // Inertia must be built in the SAME spawn-rotated frame as the collision
+                    // mesh `vertices` above (both apply the node transform's rotation), else the
+                    // body tensor stays in the un-rotated mesh frame while rb.orientation (the
+                    // HKE spawn rotation) rotates it AGAIN when the integrator forms the world
+                    // inverse-inertia, double-counting the placement rotation. For an anisotropic
+                    // chassis with a spawn rotation that aliased the pitch axis onto the small
+                    // roll inertia, so the car leaned/pitched far too easily. Rotation only (the
+                    // polyhedron inertia is taken about the centroid; translation must not enter).
+                    let local_verts: Vec<[f64; 3]> = mesh.vertices.iter()
+                        .map(|v| {
+                            let lx = v[0] as f64 * inv_scale;
+                            let ly = v[1] as f64 * inv_scale;
+                            let lz = v[2] as f64 * inv_scale;
+                            if let Some(r) = &xform_rt {
+                                [r[0]*lx + r[3]*ly + r[6]*lz,
+                                 r[1]*lx + r[4]*ly + r[7]*lz,
+                                 r[2]*lx + r[5]*ly + r[8]*lz]
+                            } else {
+                                [lx, ly, lz]
+                            }
+                        })
+                        .collect();
+                    let unit_i = super::havok_physics::compute_polyhedron_unit_inertia(&local_verts, &mesh.triangles)
+                        .map(|(ui, _com, _vol)| ui)
+                        .unwrap_or_else(|| super::havok_physics::box_unit_inertia(he));
                     let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
                     super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
                     let rb = &mut havok.state.rigid_bodies[rb_index];
                     rb.inertia_half_extents = he;
-                    rb.center_of_mass = com;
+                    // Keep the authored DISPLACEMENT (the HKE's real COM, already assigned
+                    // from p.displacement above) — only fall back to the geometric box-centre
+                    // when no COM was authored. The unconditional overwrite discarded it: the
+                    // FinalDrive chassis got the mesh-AABB centre (0.37,2.72,-3.65) instead of
+                    // its real COM (0.49,4.20,-4.95), shifting wheel ray origins + mis-kicking.
+                    if props.and_then(|p| p.displacement).is_none() {
+                        rb.center_of_mass = com;
+                    }
                     rb.unit_inertia_tensor = unit_i;
                     rb.inertia_tensor = it;
                     rb.inverse_inertia_tensor = inv_it;
@@ -742,6 +832,16 @@ impl HavokPhysicsMemberHandlers {
                 if let Some(v) = body_def.linear_velocity {
                     rb.linear_velocity = [v[0] as f64*inv_scale, v[1] as f64*inv_scale, v[2] as f64*inv_scale];
                 }
+                // Angular velocity is rad/s — scale-independent, do NOT × inv_scale.
+                if let Some(w) = body_def.angular_velocity {
+                    rb.angular_velocity = [w[0] as f64, w[1] as f64, w[2] as f64];
+                }
+                if let Some(cd) = body_def.collisions_disabled { rb.collisions_disabled = cd; }
+                if let Some(cs) = body_def.casts_shadows { rb.casts_shadows = cs; }
+                // DISPLACEMENT = authored centre of mass (Havok metres), overrides geometric.
+                if let Some(d) = body_def.displacement {
+                    rb.center_of_mass = [d[0] as f64*inv_scale, d[1] as f64*inv_scale, d[2] as f64*inv_scale];
+                }
 
                 // World transform: prefer the W3D node (matches the render),
                 // fall back to the HKE translation converted to Director units.
@@ -770,7 +870,11 @@ impl HavokPhysicsMemberHandlers {
                     let (mut it, mut inv_it, mut inv_m) = ([0.0; 9], [0.0; 9], 0.0);
                     super::havok_physics::recompute_body_inertia(mass, unit_i, &mut it, &mut inv_it, &mut inv_m);
                     rb.inertia_half_extents = he;
-                    rb.center_of_mass = com;
+                    // Keep the authored DISPLACEMENT COM (tail-only body path) — same fix as
+                    // the mesh-body path above; only use the geometric centre if none authored.
+                    if body_def.displacement.is_none() {
+                        rb.center_of_mass = com;
+                    }
                     rb.unit_inertia_tensor = unit_i;
                     rb.inertia_tensor = it;
                     rb.inverse_inertia_tensor = inv_it;
@@ -856,6 +960,12 @@ impl HavokPhysicsMemberHandlers {
                     length,
                 });
             }
+        }
+
+        // Snapshot every body's authored state so havok.reset() can revert the
+        // scene to the .hke-defined state.
+        for rb in &mut havok.state.rigid_bodies {
+            rb.snapshot_initial();
         }
 
         let movable_names: Vec<String> = havok.state.rigid_bodies.iter()
@@ -1010,8 +1120,37 @@ impl HavokPhysicsMemberHandlers {
             CastMemberType::HavokPhysics(h) => h,
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
+        // havok.reset() "reverts the entire scene back to the state defined in
+        // the .hke file": restore every body to its authored initial transform,
+        // velocity and active flag, and clear runtime state.
         havok.state.sim_time = 0.0;
-        // Reset rigid body states to initial positions would go here
+        havok.state.collision_list_cache.clear();
+        for rb in &mut havok.state.rigid_bodies {
+            rb.restore_initial();
+        }
+
+        // Write the restored transforms back to the W3D scene so the models snap
+        // to their start positions (same path step() uses). Sync all non-fixed
+        // bodies regardless of active flag so even authored-asleep bodies reset.
+        let w3d_cast_lib = havok.state.w3d_cast_lib;
+        let w3d_cast_member = havok.state.w3d_cast_member;
+        let sync_data: Vec<(String, [f32; 16])> = havok.state.rigid_bodies.iter()
+            .filter(|rb| !rb.is_fixed)
+            .map(|rb| {
+                let t = super::havok_physics::build_sync_transform(
+                    rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
+                );
+                (rb.name.clone(), t)
+            })
+            .collect();
+        drop(member);
+        let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
+        for (name, t) in &sync_data {
+            if t.iter().any(|v| !v.is_finite()) { continue; }
+            crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                player, &w3d_ref, name, *t,
+            );
+        }
         Ok(DatumRef::Void)
     }
 
@@ -1107,7 +1246,7 @@ impl HavokPhysicsMemberHandlers {
         };
 
         // Read model's initial transform + mesh bounding box + vertices/faces from W3D scene
-        let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces) = {
+        let (initial_position, mesh_half_extents, mesh_vertices, mesh_faces, prim_type) = {
             let member = player
                 .movie
                 .cast_manager
@@ -1183,12 +1322,20 @@ impl HavokPhysicsMemberHandlers {
                         })
                         .unwrap_or(([10.0, 10.0, 10.0], Vec::new(), Vec::new()));
 
-                    (pos, half_ext, verts, faces)
+                    // Primitive kind of the model resource (#box / #sphere / …), so
+                    // physics can treat a box differently from a rolling sphere.
+                    let prim_type = res_name
+                        .and_then(|rn| w3d.parsed_scene.as_ref()
+                            .and_then(|s| s.model_resources.get(rn.as_str())))
+                        .and_then(|mr| mr.primitive_type.clone())
+                        .unwrap_or_default();
+
+                    (pos, half_ext, verts, faces, prim_type)
                 } else {
-                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
+                    ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new(), String::new())
                 }
             } else {
-                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new())
+                ([0.0; 3], [10.0, 10.0, 10.0], Vec::new(), Vec::new(), String::new())
             }
         };
 
@@ -1205,17 +1352,21 @@ impl HavokPhysicsMemberHandlers {
         // first inner integrate step" behaviour. With the divider handling
         // angular attenuation, the inertia reverts to the mathematically
         // correct polyhedron values here.
-        let unit_inertia = if shape_type.eq_ignore_ascii_case("sphere") {
-            // Sphere inertia: I = (2/5) * r² on all axes (isotropic)
+        // Compute the unit inertia AND the local centre of mass. The COM is the lever
+        // origin for applyForceAtPoint/applyImpulse — leaving it [0,0,0] when the mesh's
+        // true COM is offset (e.g. the SuperSonic car box spans z∈[0,10] → COM z=+5) makes
+        // every off-centre force torque about the wrong point (lever 15 vs 10 → 1.5× error).
+        let (unit_inertia, com) = if shape_type.eq_ignore_ascii_case("sphere") {
+            // Sphere inertia: I = (2/5) * r² on all axes (isotropic); centred.
             let r = mesh_half_extents[0].max(mesh_half_extents[1]).max(mesh_half_extents[2]);
             let i_diag = 0.4 * r * r;
-            [i_diag, 0.0, 0.0, 0.0, i_diag, 0.0, 0.0, 0.0, i_diag]
+            ([i_diag, 0.0, 0.0, 0.0, i_diag, 0.0, 0.0, 0.0, i_diag], [0.0_f64; 3])
         } else {
             crate::player::handlers::datum_handlers::cast_member::havok_physics
                 ::compute_polyhedron_unit_inertia(&mesh_vertices, &mesh_faces)
-                .map(|(ui, _com, _vol)| ui)
-                .unwrap_or_else(|| crate::player::handlers::datum_handlers::cast_member::havok_physics
-                    ::box_unit_inertia(mesh_half_extents))
+                .map(|(ui, com, _vol)| (ui, com))
+                .unwrap_or_else(|| (crate::player::handlers::datum_handlers::cast_member::havok_physics
+                    ::box_unit_inertia(mesh_half_extents), [0.0_f64; 3]))
         };
 
         // Diagnostic: log mesh + computed unit inertia so we can verify it matches
@@ -1256,14 +1407,25 @@ impl HavokPhysicsMemberHandlers {
 
         let mut rb = HavokRigidBody::new_movable(&model_name, mass, is_convex);
         rb.position = initial_position;
-        // A body created by Lingo (makeMovableRigidBody) is a script-driven
-        // vehicle (e.g. the SuperSonic car) — keep it on the original collision
-        // path (hover-driven, no box-stacking). HKE-authored bodies (warehouse
-        // crates, the car-demo chassis) stay on the passive path.
+        // Default a Lingo-created movable body to the script-driven vehicle path
+        // (the raycast cars are held up by hover forces and stay off the
+        // box-stacking path). A body that is only ever positioned kinematically
+        // (interpolatingMoveTo) without ever receiving an applied force is
+        // reclassified there to a passive stacking body, so the add-cubes demo
+        // still box-stacks. HKE-authored bodies load as driven=false already.
         rb.driven = true;
+        // Box primitives must not be given sphere "rolling" on resting surfaces —
+        // a cube slides/tumbles, it doesn't roll. Flag it from the shape-type arg
+        // (#box) or the model resource's primitive type. Spheres, cylinders/coins,
+        // cars and meshes are left to roll exactly as before.
+        rb.is_box = shape_type.eq_ignore_ascii_case("box")
+            || prim_type.eq_ignore_ascii_case("box");
         rb.inertia_half_extents = mesh_half_extents;
         rb.unit_inertia_tensor = unit_inertia;
-        // Apply mass → finalise inertia / inverseInertia (PPC setMass 0x4c930)
+        // The mesh-derived local COM is the lever origin for force/impulse-at-point. The
+        // car box's COM is (0,0,+5); without this, off-centre forces torque about the origin.
+        rb.center_of_mass = com;
+        // Apply mass → finalise inertia / inverseInertia.
         crate::player::handlers::datum_handlers::cast_member::havok_physics::recompute_body_inertia(
             mass,
             rb.unit_inertia_tensor,
@@ -1274,6 +1436,7 @@ impl HavokPhysicsMemberHandlers {
 
         havok.state.rigid_bodies.push(rb);
         let new_rb_index = havok.state.rigid_bodies.len() - 1;
+        havok.state.rigid_bodies[new_rb_index].snapshot_initial();
         // Re-link collision mesh for this body
         for cmesh in &mut havok.state.collision_meshes {
             if cmesh.name.eq_ignore_ascii_case(&model_name) && cmesh.body_index.is_none() {
@@ -1423,6 +1586,7 @@ impl HavokPhysicsMemberHandlers {
         let rb = HavokRigidBody::new_fixed(&model_name, is_convex);
         havok.state.rigid_bodies.push(rb);
         let rb_index = havok.state.rigid_bodies.len() - 1;
+        havok.state.rigid_bodies[rb_index].snapshot_initial();
 
         if let Some(mut cmesh) = collision_mesh {
             cmesh.body_index = Some(rb_index);

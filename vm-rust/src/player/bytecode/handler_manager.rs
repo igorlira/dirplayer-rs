@@ -255,6 +255,8 @@ impl StaticBytecodeHandlerManager {
             OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(ctx),
             OpCode::IntoSpr => SpriteCompareBytecodeHandler::into_sprite(ctx),
             OpCode::CallJavaScript => FlowControlBytecodeHandler::call_javascript(ctx),
+            OpCode::StartTell => FlowControlBytecodeHandler::start_tell(ctx),
+            OpCode::EndTell => FlowControlBytecodeHandler::end_tell(ctx),
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);
@@ -273,6 +275,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::ObjCallV4 => true,
             OpCode::LocalCall => true,
             OpCode::SetObjProp => true,
+            OpCode::TellCall => true,
             _ => false,
         }
     }
@@ -289,6 +292,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::ObjCallV4 => FlowControlBytecodeHandler::obj_call_v4(&ctx).await,
             OpCode::LocalCall => FlowControlBytecodeHandler::local_call(&ctx).await,
             OpCode::SetObjProp => GetSetBytecodeHandler::set_obj_prop(&ctx).await,
+            OpCode::TellCall => FlowControlBytecodeHandler::tell_call(&ctx).await,
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);
@@ -305,7 +309,7 @@ pub async fn player_execute_bytecode<'a>(
     ctx: &BytecodeHandlerContext,
 ) -> Result<HandlerExecutionResult, ScriptError> {
     let (opcode, bytecode_text, should_trace) = {
-        let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        let player = unsafe { crate::player::player_ref() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
 
         let handler = unsafe { &*ctx.handler_def_ptr };
@@ -387,7 +391,7 @@ pub async fn player_execute_bytecode<'a>(
     // Trace bytecode execution before running
     if should_trace {
         let trace_file = {
-            let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+            let player = unsafe { crate::player::player_ref() };
             let msg = format!("--> {}", bytecode_text);
             trace_output(player, &msg);
             player.movie.trace_log_file.clone()

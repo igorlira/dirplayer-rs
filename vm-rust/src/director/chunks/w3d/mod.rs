@@ -16,6 +16,7 @@ pub mod raycast;
 pub mod skeleton;
 pub mod gltf_export;
 pub mod subdivision;
+pub mod text3d;
 
 pub use types::W3dScene;
 

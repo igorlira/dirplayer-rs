@@ -149,6 +149,14 @@ pub fn stage_scale(player: &DirPlayer) -> (f64, f64) {
 /// scaled per-rect via `get_concrete_sprite_render_rect` rather than via a
 /// global projection transform — keeps text/bitmaps sharp at the target size.
 pub fn apply_stage_draw_rect(player: &DirPlayer) {
+    // The WebGL2 renderer is shared and belongs to the HOST stage. A nested
+    // `#movie` sub-player is headless (rendered via render_stage_to_bitmap into
+    // a bitmap), so it must never resize the shared renderer — doing so
+    // reprojected the host's content to the sub's dimensions, zooming the whole
+    // stage. Only the host (active id 0) owns the on-screen renderer.
+    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+        return;
+    }
     let (draw_w, draw_h) = stage_canvas_dims(player);
     // 1x1 only occurs before any movie has loaded (movie.rect is 0x0, clamped).
     // Skip resizing to avoid triggering external canvas-size observers (e.g.

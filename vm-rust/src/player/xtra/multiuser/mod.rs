@@ -458,7 +458,7 @@ impl MultiuserXtraManager {
 
                 let (tx, rx) = async_std::channel::unbounded();
                 instance.socket_tx = Some(tx);
-                spawn_local(async move {
+                crate::player::spawn_player_local(async move {
                     while let Ok(message) = rx.recv().await {
                         // Check if WebSocket is open (readyState == 1) before sending
                         // readyState: 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED

@@ -50,7 +50,19 @@ pub struct HkeBodyProps {
     pub orientation: Option<[f32; 4]>,
     /// Initial linear velocity (Havok metres/s).
     pub linear_velocity: Option<[f32; 3]>,
+    /// Initial angular velocity (radians/s — scale-independent, NOT × worldScale).
+    pub angular_velocity: Option<[f32; 3]>,
     pub active: Option<bool>,
+    /// `COLLISIONS_DISABLED` — when true the body is NOT registered with the
+    /// collision detector (it still integrates under gravity/forces but never
+    /// collides). From `Import`: `if (!collisions_disabled) addRigidBody(...)`.
+    pub collisions_disabled: Option<bool>,
+    /// `DISPLACEMENT` — the authored CENTER OF MASS (Havok metres). `Import`
+    /// writes it to the body's COM slot *after* computeMassProperties, so it
+    /// overrides the geometric centre of mass.
+    pub displacement: Option<[f32; 3]>,
+    /// `CASTS_SHADOWS` — render metadata (display-body shadow); not used by physics.
+    pub casts_shadows: Option<bool>,
     pub primitives: Vec<HkePrimitive>,
 }
 
@@ -75,6 +87,11 @@ pub struct HkeCable {
 pub struct HkeWorld {
     pub world_name: String,
     pub world_scale: f32,
+    /// Collision tolerance authored in the modeler and stored in the HKE subspace
+    /// (`havok.tolerance`). The Xtra uses it as the "objects are touching" distance,
+    /// which also sets how far above a surface a resting body floats. `initialize()`
+    /// uses it when the movie doesn't pass an explicit tolerance argument.
+    pub tolerance: Option<f32>,
     pub gravity: Option<[f32; 3]>,
     pub drag: Option<HkeDragAction>,
     pub meshes: Vec<HkeCollisionMesh>,
@@ -82,7 +99,28 @@ pub struct HkeWorld {
     pub cables: Vec<HkeCable>,
 }
 
-// --- Markers and tokens (from C# HkeParser.cs) ---
+// --- Markers and tokens ---
+//
+// HKE field tokens are the ELF/PJW hash of the field's keyword string. In the
+// binary HKE every value is preceded by its 4-byte little-endian token id, and
+// the field order is fixed per record type. `elf_hash` below reproduces the
+// hash; the test module asserts every constant equals elf_hash(its keyword), so
+// these ids are exact rather than approximate.
+
+/// HKE token hash (ELF/PJW). `token_id = elf_hash(KEYWORD)`.
+pub fn elf_hash(s: &str) -> u32 {
+    let mut h: u32 = 0;
+    for &c in s.as_bytes() {
+        h = h.wrapping_mul(16).wrapping_add(c as u32);
+        let g = h & 0xF000_0000;
+        if g != 0 {
+            h ^= g >> 24;
+        }
+        h &= !g;
+    }
+    h
+}
+
 const ENTRY_MARKER: [u8; 6] = [0xA9, 0xEE, 0x9F, 0x01, 0x45, 0x30];
 const ENTRY_SEPARATOR: [u8; 8] = [0xEF, 0xCD, 0xAB, 0x12, 0xC9, 0x0A, 0xA3, 0x0E];
 
@@ -119,20 +157,31 @@ const DEACTIVATOR_ACTION_MARKER: [u8; 16] = [
 ];
 const SUBSPACE_MARKER: [u8; 4] = [0x95, 0x05, 0xC6, 0x00];
 
-// Property tokens (4 bytes each, followed by value)
-const RESTITUTION_TOKEN: [u8; 4] = [0xF9, 0x6E, 0xC7, 0x08];
-const STATIC_FRICTION_TOKEN: [u8; 4] = [0x0E, 0x67, 0x55, 0x00];
-const DYNAMIC_FRICTION_TOKEN: [u8; 4] = [0xAE, 0xA1, 0xC1, 0x00];
-const TRANSLATION_TOKEN: [u8; 4] = [0x0E, 0xEC, 0x5F, 0x08];
-const ACTIVE_TOKEN: [u8; 4] = [0xA5, 0x8E, 0x58, 0x04];
-const PRIMITIVE_MASS_TOKEN: [u8; 4] = [0x83, 0x16, 0x05, 0x00];
-const ORIENTATION_TOKEN: [u8; 4] = [0x4E, 0x89, 0x86, 0x04]; // [angle, axisX, axisY, axisZ]
-const LINEAR_VELOCITY_TOKEN: [u8; 4] = [0xD9, 0x4A, 0xA5, 0x0C]; // [vx, vy, vz] m/s
-const PLANE_NORMAL_TOKEN: [u8; 4] = [0x25, 0x06, 0x55, 0x00]; // [nx, ny, nz, dist]
-const SPHERE_RADIUS_TOKEN: [u8; 4] = [0xA3, 0x8E, 0x65, 0x05]; // [radius]
+// Property tokens (4 bytes each, followed by value). Keyword in the trailing
+// comment is the verified elf_hash() pre-image (see the test module).
+const RESTITUTION_TOKEN: [u8; 4] = [0xF9, 0x6E, 0xC7, 0x08]; // "ELLASTICITY" (sic)
+const STATIC_FRICTION_TOKEN: [u8; 4] = [0x0E, 0x67, 0x55, 0x00]; // "STATIC_FRICTION"
+const DYNAMIC_FRICTION_TOKEN: [u8; 4] = [0xAE, 0xA1, 0xC1, 0x00]; // "DYNAMIC_FRICTION"
+const TRANSLATION_TOKEN: [u8; 4] = [0x0E, 0xEC, 0x5F, 0x08]; // "TRANSLATION"
+const ACTIVE_TOKEN: [u8; 4] = [0xA5, 0x8E, 0x58, 0x04]; // "ACTIVE"
+const PRIMITIVE_MASS_TOKEN: [u8; 4] = [0x83, 0x16, 0x05, 0x00]; // "MASS"
+const ORIENTATION_TOKEN: [u8; 4] = [0x4E, 0x89, 0x86, 0x04]; // "ROTATION" [angle, axisX, axisY, axisZ]
+const LINEAR_VELOCITY_TOKEN: [u8; 4] = [0xD9, 0x4A, 0xA5, 0x0C]; // "LINEAR_VELOCITY" [vx, vy, vz] m/s
+const ANGULAR_VELOCITY_TOKEN: [u8; 4] = [0xF9, 0x58, 0x11, 0x04]; // "ANGULAR_VELOCITY" [wx, wy, wz] rad/s
+const PLANE_NORMAL_TOKEN: [u8; 4] = [0x25, 0x06, 0x55, 0x00]; // "PLANE" [nx, ny, nz, dist]
+const SPHERE_RADIUS_TOKEN: [u8; 4] = [0xA3, 0x8E, 0x65, 0x05]; // "RADIUS"
+
+// Per-body fields read from the HKE rigid-body record (Export*::Import order).
+// Token ids derived from elf_hash() and checked in the test module.
+// COLLISIONS_DISABLED gates whether the body is registered for collision;
+// DISPLACEMENT is the authored centre of mass; CASTS_SHADOWS is render-only.
+const COLLISIONS_DISABLED_TOKEN: [u8; 4] = [0x24, 0x0D, 0xF8, 0x08]; // "COLLISIONS_DISABLED" bool
+const DISPLACEMENT_TOKEN: [u8; 4] = [0x34, 0x9D, 0xF8, 0x01]; // "DISPLACEMENT" vec3 (= centre of mass)
+const CASTS_SHADOWS_TOKEN: [u8; 4] = [0xC3, 0x2D, 0xAD, 0x00]; // "CASTS_SHADOWS" bool
 
 // Subspace tokens
 const SUBSPACE_GRAVITY_TOKEN: [u8; 4] = [0xD9, 0xAE, 0x66, 0x0C];
+const SUBSPACE_TOLERANCE_TOKEN: [u8; 4] = [0x35, 0x1B, 0xA6, 0x00];
 
 // Drag action tokens
 const DRAG_LINEAR_TOKEN: [u8; 4] = [0xC7, 0x74, 0x33, 0x06];
@@ -142,6 +191,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
     let mut world = HkeWorld {
         world_name: String::new(),
         world_scale: 0.0254,
+        tolerance: None,
         gravity: None,
         drag: None,
         meshes: Vec::new(),
@@ -274,6 +324,9 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld) {
             if world.gravity.is_none() {
                 world.gravity = try_read_vec3_after_token(payload, &SUBSPACE_GRAVITY_TOKEN);
             }
+            if world.tolerance.is_none() {
+                world.tolerance = try_read_f32_after_token(payload, &SUBSPACE_TOLERANCE_TOKEN);
+            }
             pos = end;
             continue;
         }
@@ -384,7 +437,11 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
         translation: try_read_vec3_after_token(payload, &TRANSLATION_TOKEN),
         orientation: try_read_vec4_after_token(payload, &ORIENTATION_TOKEN),
         linear_velocity: try_read_vec3_after_token(payload, &LINEAR_VELOCITY_TOKEN),
+        angular_velocity: try_read_vec3_after_token(payload, &ANGULAR_VELOCITY_TOKEN),
         active: try_read_bool_after_token(payload, &ACTIVE_TOKEN),
+        collisions_disabled: try_read_bool_after_token(payload, &COLLISIONS_DISABLED_TOKEN),
+        displacement: try_read_vec3_after_token(payload, &DISPLACEMENT_TOKEN),
+        casts_shadows: try_read_bool_after_token(payload, &CASTS_SHADOWS_TOKEN),
         primitives: Vec::new(),
     };
 
