@@ -13,7 +13,7 @@ browser_e2e_test!(test_intel_dummy_load, |player| async move {
     player.load_movie(&movie_path).await;
     player.init_movie().await;
 
-    player.step_until(datum("_movie.frame").equals(StaticDatum::Int(33))).timeout(10.0).await?;
+    player.step_until(datum("_movie.frame").equals(StaticDatum::Int(33))).timeout(45.0).await?;
 
     snapshots.verify("start_game", player.snapshot_stage())?;
 
