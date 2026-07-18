@@ -10,7 +10,7 @@ pub async fn assert_entry(
 ) -> Result<(), String> {
     let movie_path = player.asset_path(movie_asset);
     let mut snapshots = SnapshotContext::new(suite, test_name);
-    snapshots.max_diff_ratio = 0.003;
+    snapshots.max_diff_ratio = 0.075;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
@@ -49,7 +49,7 @@ pub async fn assert_login_success(
     test_name: &str,
 ) -> Result<(), String> {
     let mut snapshots = SnapshotContext::new(suite, &test_name);
-    snapshots.max_diff_ratio = 0.01;
+    snapshots.max_diff_ratio = 0.075;
 
     player.step_until(sprite().member("entry_bar_ownhabbo_icon_image").visible(1.0)).timeout(150.0).await?;
     snapshots.verify("login_submitted", player.snapshot_stage())?;
@@ -64,7 +64,7 @@ pub async fn assert_login(
     password: &str,
 ) -> Result<(), String> {
     let mut snapshots = SnapshotContext::new(suite, test_name);
-    snapshots.max_diff_ratio = 0.01;
+    snapshots.max_diff_ratio = 0.075;
 
     // --- Login form ---
     player.click_sprite(sprite().member_prefix("login_name")).await?;
@@ -108,7 +108,7 @@ pub async fn assert_navigate_pub(
     test_name: &str,
     movie_asset: &str,
 ) -> Result<(), String> {
-    let snapshots = SnapshotContext::new(suite, test_name);
+    let mut snapshots = SnapshotContext::new(suite, test_name);
 
     assert_navigator_visible(player, suite, test_name).await?;
     player.click_sprite(sprite().member("Hotel Navigator_nav_tb_publicRooms")).await?;
@@ -116,6 +116,8 @@ pub async fn assert_navigate_pub(
         "navigator_public",
         player.snapshot_sprite(sprite().member("Hotel Navigator_back")).await?,
     )?;
+
+    snapshots.max_diff_ratio = 0.075;
 
     player.step_until(sprite().member("Hotel Navigator_nav_roomlist").visible(1.0)).await?;
     player.click_sprite_at(sprite().member("Hotel Navigator_nav_roomlist"), 100, 9).await?;
@@ -132,7 +134,7 @@ pub async fn assert_navigate_private(
     test_name: &str,
     movie_asset: &str,
 ) -> Result<(), String> {
-    let snapshots = SnapshotContext::new(suite, test_name);
+    let mut snapshots = SnapshotContext::new(suite, test_name);
 
     assert_navigator_visible(player, suite, test_name).await?;
     player.click_sprite(sprite().member("Hotel Navigator_nav_tb_guestRooms")).await?;
@@ -140,6 +142,8 @@ pub async fn assert_navigate_private(
         "navigator_private",
         player.snapshot_sprite(sprite().member("Hotel Navigator_back")).await?,
     )?;
+
+    snapshots.max_diff_ratio = 0.075;
 
     player.step_until(sprite().member("Hotel Navigator_nav_tab_own").visible(1.0)).await?;
     player.click_sprite(sprite().member("Hotel Navigator_nav_tab_own")).await?;

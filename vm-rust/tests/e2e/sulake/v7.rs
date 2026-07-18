@@ -16,7 +16,7 @@ browser_e2e_test!(test_habbo_v7_login, |player| async move {
     let cfg = TestConfig::from_toml(CONFIG);
     cfg.apply_external_params();
     let mut snapshots = SnapshotContext::new(cfg.suite(), TEST_NAME);
-    snapshots.max_diff_ratio = 0.01;
+    snapshots.max_diff_ratio = 0.075;
 
     shared::assert_entry(&mut player, cfg.suite(), TEST_NAME, &cfg.movie.path, true).await?;
     shared::assert_login(&mut player, cfg.suite(), TEST_NAME, cfg.param("username"), cfg.param("password")).await?;

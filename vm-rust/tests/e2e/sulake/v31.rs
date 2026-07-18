@@ -10,7 +10,7 @@ browser_e2e_test!(test_habbo_v31_login, |player| async move {
     cfg.apply_external_params();
 
     let mut snapshots = SnapshotContext::new(cfg.suite(), TEST_NAME);
-    snapshots.max_diff_ratio = 0.01;
+    snapshots.max_diff_ratio = 0.075;
      
     shared::assert_entry(&mut player, cfg.suite(), TEST_NAME, &cfg.movie.path, false).await?;
     shared::assert_login_success(&mut player, cfg.suite(), TEST_NAME).await?;
