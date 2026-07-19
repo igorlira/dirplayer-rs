@@ -207,6 +207,28 @@ pub fn raycast_scene_multi(
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
             direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
         };
+        // Handedness of this node's world transform. The ray is tested in LOCAL
+        // space against a normal built as cross(e1,e2) from the local winding, but
+        // the front/back test below is a statement about WORLD space. A transform
+        // with a negative determinant is a MIRROR (the side-mirror-one-wheel-mesh
+        // authoring trick), and a reflection reverses the effective winding — so a
+        // triangle that faces the ray in world space faces away from it in local
+        // space, and the cull keeps the wrong side.
+        //
+        // FinalDrive's car has exactly this: two of its four wheels (wheec, wheelb)
+        // are mirrored instances. Without compensation, its startup hover rays
+        // returned the NEAR face of those wheels where Director returns the FAR one
+        // (10.4/5.4 vs 21.2/23.3), turning Director's pitch kick into a roll kick.
+        //
+        // Column-major upper-3x3 (cols 0/1/2), det = c0 · (c1 × c2). This is a
+        // no-op for every non-mirrored model (det > 0), so ordinary geometry is
+        // byte-identical — including the #front box behaviour the cull is tuned for.
+        let cull_flip = {
+            let c0 = [world_transform[0], world_transform[1], world_transform[2]];
+            let c1 = [world_transform[4], world_transform[5], world_transform[6]];
+            let c2 = [world_transform[8], world_transform[9], world_transform[10]];
+            dot(c0, cross(c1, c2)) < 0.0
+        };
 
         // Debug: log MainA sub-mesh info and check floor face on first call
         if node.name == "MainA" {
@@ -288,7 +310,7 @@ pub fn raycast_scene_multi(
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist, cull_flip) {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
@@ -310,7 +332,7 @@ pub fn raycast_scene_multi(
         for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
                 let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, &node.name, (mi + 1) as u32, max_dist, cull_flip) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
                     for v in &mut hit.vertices {
@@ -353,6 +375,9 @@ fn raycast_mesh(
     model_name: &str,
     mesh_id: u32,
     max_dist: f32,
+    // True when the node's world transform is a mirror (negative determinant),
+    // which reverses the effective winding — see raycast_scene_multi.
+    cull_flip: bool,
 ) -> Option<RayHit> {
     // BVH disabled temporarily - use brute force for all meshes to match C# reference
     // TODO: debug BVH to find why it misses floor faces
@@ -383,9 +408,16 @@ fn raycast_mesh(
             // re-path/mismatch), no line-of-sight to the player (never fires), and rockets
             // detonating on adjacent geometry (self-splash). Skip a face the ray is exiting
             // (its normal points along the ray direction).
-            if dot(normal, ray.direction) >= 0.0 {
+            if (dot(normal, ray.direction) >= 0.0) != cull_flip {
                 continue;
             }
+            // Director reports isectNormal pointing OUT of the surface the ray
+            // enters, i.e. opposing the ray. Under a mirror the local winding is
+            // reversed, so the raw cross(e1,e2) normal comes out negated relative
+            // to that convention — flip it back. (Verified against Director on
+            // FinalDrive's mirrored wheels: same face, same distance, but our
+            // normal was the exact negation of Director's.)
+            let normal = if cull_flip { [-normal[0], -normal[1], -normal[2]] } else { normal };
 
             if t > 0.0 && t < max_dist {
                 if closest.as_ref().map_or(true, |c| t < c.distance) {
@@ -584,6 +616,9 @@ fn raycast_bvh(
     model_name: &str,
     mesh_id: u32,
     max_dist: f32,
+    // True when the node's world transform is a mirror (negative determinant),
+    // which reverses the effective winding — see raycast_scene_multi.
+    cull_flip: bool,
 ) -> Option<RayHit> {
     match node {
         BvhNode::Leaf { face_indices } => {
@@ -598,7 +633,7 @@ fn raycast_bvh(
                     let edge1 = sub(positions[i1], positions[i0]);
                     let edge2 = sub(positions[i2], positions[i0]);
                     let normal = normalize(cross(edge1, edge2));
-                    if dot(normal, ray.direction) > 0.0 { continue; }
+                    if (dot(normal, ray.direction) > 0.0) != cull_flip { continue; }
 
                     let cdist = closest.as_ref().map(|c| c.distance).unwrap_or(max_dist);
                     if t > 0.0 && t < cdist {
@@ -627,9 +662,9 @@ fn raycast_bvh(
             if !bounds.ray_intersect(ray, max_dist) {
                 return None;
             }
-            let hit_left = raycast_bvh(ray, left, positions, faces, tex_coords, model_name, mesh_id, max_dist);
+            let hit_left = raycast_bvh(ray, left, positions, faces, tex_coords, model_name, mesh_id, max_dist, cull_flip);
             let new_max = hit_left.as_ref().map(|h| h.distance).unwrap_or(max_dist);
-            let hit_right = raycast_bvh(ray, right, positions, faces, tex_coords, model_name, mesh_id, new_max);
+            let hit_right = raycast_bvh(ray, right, positions, faces, tex_coords, model_name, mesh_id, new_max, cull_flip);
 
             match (hit_left, hit_right) {
                 (Some(l), Some(r)) => if l.distance <= r.distance { Some(l) } else { Some(r) },
