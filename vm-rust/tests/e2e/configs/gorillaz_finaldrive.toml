@@ -1,0 +1,5 @@
+[movie]
+path = "dcr_gorillaz/finaldrive/finaldrive.dcr"
+
+[test]
+suite = "gorillaz"
