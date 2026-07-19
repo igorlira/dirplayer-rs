@@ -1591,12 +1591,23 @@ pub fn local_connection_send(
 /// `event:`-scheme URL — Director's Flash Asset Xtra convention for sending a
 /// Lingo message back to the host movie.
 ///
-/// The body is whitespace-tokenised: the first token is the handler name,
-/// the rest are arguments (symbols if they start with `#`, integers if
-/// numeric, otherwise plain strings). So `send #done` invokes `on send`
-/// with `#done` as its first arg — `send` is not a keyword, it's just the
-/// most common handler name games define for routing to sendSprite /
-/// sendAllSprites (e.g. storyscramble's BehaviorScript 24).
+/// The first whitespace-delimited token is the handler name. The remainder is
+/// the argument list, which Director's Flash Asset Xtra spells as a normal
+/// Lingo argument list — comma-separated literals. age_of_speed's off-game SWF
+/// builds `event:flash_start "1","1","0","1","1","0","1"` for
+/// `on flash_start me, fRaceId, fAmbientationId, …`; splitting that on
+/// whitespace yielded ONE String argument and left every real parameter VOID
+/// (`member(179 + gLevelID)` then resolved to an empty slot).
+///
+/// Quoting is significant and must be preserved: a quoted `"1"` stays a
+/// String, because these scripts compare against string literals
+/// (`if fGenericHelp = "1"`, `if fAudioState = "0"`) — coercing it to Int
+/// would silently break those tests.
+///
+/// Bodies with no comma keep the older whitespace tokenisation, so `send #done`
+/// still invokes `on send` with `#done` as its first arg — `send` is not a
+/// keyword, it's just the most common handler name games define for routing to
+/// sendSprite / sendAllSprites (e.g. storyscramble's BehaviorScript 24).
 ///
 /// `cast_lib` / `cast_member` identify the Flash member that fired the
 /// navigation, so a future revision can target the host sprite first; for now
@@ -1620,17 +1631,54 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
     // matches the script-side spelling.
     let handler_name = handler_token.trim_start_matches('#').to_string();
 
+    // Everything after the handler token is the argument list.
+    let rest = trimmed[handler_token.len()..].trim();
+
+    // Split on commas that are OUTSIDE double quotes — an argument may legally
+    // contain one (`flash_openURL "http://host/p?a=1,2"`).
+    let mut raw_args: Vec<String> = Vec::new();
+    if !rest.is_empty() {
+        let mut current = String::new();
+        let mut in_quotes = false;
+        for ch in rest.chars() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    current.push(ch);
+                }
+                ',' if !in_quotes => {
+                    raw_args.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        raw_args.push(current.trim().to_string());
+
+        // No commas at all: fall back to the historical whitespace split so
+        // legacy space-separated bodies keep working. An unquoted single token
+        // is unaffected either way; a *quoted* one must stay whole.
+        if raw_args.len() == 1 && !raw_args[0].starts_with('"') {
+            raw_args = rest.split_whitespace().map(|s| s.to_string()).collect();
+        }
+    }
+
     let mut arg_refs: Vec<player::datum_ref::DatumRef> = Vec::new();
-    for tok in tokens {
+    for tok in raw_args {
         // Token typing matches what Director's interpreter would produce
         // when re-tokenising the event body before invoking the handler:
+        // - double-quoted → String, verbatim (quoting wins over numeric look)
         // - leading `#` → Symbol
-        // - parses as i32 → Int
+        // - parses as i32 / f64 → Int / Float
         // - otherwise → String (downstream handlers can `value()` / `integer()`)
-        let datum = if let Some(sym) = tok.strip_prefix('#') {
+        let datum = if tok.len() >= 2 && tok.starts_with('"') && tok.ends_with('"') {
+            Datum::String(tok[1..tok.len() - 1].to_string())
+        } else if let Some(sym) = tok.strip_prefix('#') {
             Datum::Symbol(sym.to_string())
         } else if let Ok(n) = tok.parse::<i32>() {
             Datum::Int(n)
+        } else if let Ok(f) = tok.parse::<f64>() {
+            Datum::Float(f)
         } else {
             Datum::String(tok.to_string())
         };
