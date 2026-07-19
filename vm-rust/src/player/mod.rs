@@ -203,7 +203,22 @@ pub struct PlayerVMExecutionItem {
     pub completer: Option<ManualFutureCompleter<Result<DatumRef, ScriptError>>>,
 }
 
-pub const MAX_STACK_SIZE: usize = 50;
+/// Lingo call-stack depth at which we give up and report runaway recursion.
+///
+/// This is a backstop for a *hung movie*, not a correctness check, and it has to
+/// clear the deepest recursion real content performs. 50 was far too low:
+/// age_of_speed's `Gameplay::CalculateDistanceFromStart` walks the track ring
+/// with one nested call per token, so it needs one frame per token plus the
+/// enclosing event frames — 61 for level 1's 58-token ring, and its token tables
+/// run to at least `t80` (83 frames) on other levels. A correct walk was being
+/// killed at 46.
+///
+/// Note there is no cheaper structural test available: every frame of that
+/// legitimate recursion shares one script, handler and bytecode index (a single
+/// recursive call site), which is exactly the shape a runaway loop has. Depth is
+/// the only signal that separates them, so the value just needs enough headroom.
+/// Scopes are pre-allocated `Scope` structs, so headroom is cheap.
+pub const MAX_STACK_SIZE: usize = 512;
 
 pub struct DirPlayer {
     pub net_manager: NetManager,
@@ -2980,9 +2995,26 @@ impl DirPlayer {
     pub fn push_scope(&mut self) -> ScopeRef {
         if (self.scope_count + 1) as usize >= MAX_STACK_SIZE {
             // Try to get some context about what's on the stack
-            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\nRecent scope stack:\n");
-            let start = if self.scope_count > 10 { self.scope_count - 10 } else { 0 };
-            for i in start..self.scope_count {
+            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\nScope stack (outermost frames, then the deepest):\n");
+            // Show the BOTTOM of the stack as well as the top. The tail alone
+            // can't tell a genuinely infinite recursion from a legitimately deep
+            // one, because you can't see how much is outer context and how much
+            // is the repeating handler.
+            const HEAD: u32 = 5;
+            const TAIL: u32 = 25;
+            let indices: Vec<u32> = if self.scope_count <= HEAD + TAIL {
+                (0..self.scope_count).collect()
+            } else {
+                (0..HEAD).chain((self.scope_count - TAIL)..self.scope_count).collect()
+            };
+            let mut last: Option<u32> = None;
+            for i in indices {
+                if let Some(prev) = last {
+                    if i != prev + 1 {
+                        stack_trace.push_str(&format!("  … {} more frames …\n", i - prev - 1));
+                    }
+                }
+                last = Some(i);
                 if let Some(scope) = self.scopes.get(i as ScopeRef) {
                     // Try to get the handler name from the script
                     let handler_info = if let Some(script) = self.movie.cast_manager.get_script_by_ref(&scope.script_ref) {
