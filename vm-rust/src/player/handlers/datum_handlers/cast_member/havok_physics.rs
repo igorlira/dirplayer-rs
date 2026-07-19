@@ -927,7 +927,7 @@ fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &Coll
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
             let t = v3_cross(r, impulse);
-            let ang_impulse = mat3_transform(rb.inverse_inertia_tensor, t);
+            let ang_impulse = mat3_transform(world_inv_inertia(rb), t);
             rb.angular_velocity = v3_add(rb.angular_velocity, ang_impulse);
         }
     }
@@ -939,7 +939,7 @@ fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &Coll
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(neg, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
             let t = v3_cross(r, neg);
-            let ang_impulse = mat3_transform(rb.inverse_inertia_tensor, t);
+            let ang_impulse = mat3_transform(world_inv_inertia(rb), t);
             rb.angular_velocity = v3_add(rb.angular_velocity, ang_impulse);
         }
     }
@@ -965,7 +965,7 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let scaled = v3_scale(driving_impulse, rb.mass);
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, v3_cross(r, scaled)));
+            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, scaled)));
         }
     }
     // Body B
@@ -975,7 +975,7 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let neg_scaled = v3_neg(v3_scale(driving_impulse, rb.mass));
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(neg_scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, v3_cross(r, neg_scaled)));
+            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, neg_scaled)));
         }
     }
 }
@@ -1008,7 +1008,7 @@ fn compute_effective_inverse_mass(state: &HavokPhysicsState, contact: &Collision
         result += rb_a.inverse_mass;
         let r = v3_sub(contact.point, rb_a.position);
         let rxn = v3_cross(r, n);
-        let ang_contrib = v3_cross(mat3_transform(rb_a.inverse_inertia_tensor, rxn), r);
+        let ang_contrib = v3_cross(mat3_transform(world_inv_inertia(rb_a), rxn), r);
         result += v3_dot(n, ang_contrib);
     }
     // Body B
@@ -1018,11 +1018,28 @@ fn compute_effective_inverse_mass(state: &HavokPhysicsState, contact: &Collision
             result += rb_b.inverse_mass;
             let r = v3_sub(contact.point, rb_b.position);
             let rxn = v3_cross(r, n);
-            let ang_contrib = v3_cross(mat3_transform(rb_b.inverse_inertia_tensor, rxn), r);
+            let ang_contrib = v3_cross(mat3_transform(world_inv_inertia(rb_b), rxn), r);
             result += v3_dot(n, ang_contrib);
         }
     }
     result
+}
+
+/// World-frame inverse inertia: R · Iinv_body · Rᵀ.
+///
+/// Havok keeps TWO inertia representations and uses them in different places:
+///   * the BODY-frame constant, used by the angular integration step
+///     (`angVel += dt · (Iinv_BODY · torque)`, no rotation), and
+///   * a WORLD matrix rebuilt from it each step, used ONLY by the contact solver.
+///
+/// So anything that combines the tensor with world-space quantities — contact
+/// lever arms, normals, impulses, constraint torques — must use THIS one, while
+/// the integrator must not. Mixing them up is frame-inconsistent and only looks
+/// right while a body sits near its spawn orientation; it diverges badly once
+/// the body rotates (e.g. a car going round a loop).
+pub fn world_inv_inertia(rb: &crate::player::cast_member::HavokRigidBody) -> [f64; 9] {
+    let r = quat_to_mat3(rb.orientation);
+    mat3_mul(mat3_mul(r, rb.inverse_inertia_tensor), mat3_transpose(r))
 }
 
 /// Point velocity: v_linear + omega × (point - position)
@@ -1170,7 +1187,7 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_a, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, t));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
                 // Post damping: vel *= (1 - 0.001)
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
@@ -1185,7 +1202,7 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_b, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, t));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
                 rb.angular_velocity = v3_scale(rb.angular_velocity, factor);
@@ -1236,14 +1253,14 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
             let rb = &mut state.rigid_bodies[idx_a];
             if !rb.pinned {
                 let neg = v3_neg(total_torque);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, neg));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), neg));
             }
         }
         // Apply +torque to body B
         if let Some(ib) = idx_b {
             let rb = &mut state.rigid_bodies[ib];
             if !rb.pinned {
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, total_torque));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), total_torque));
             }
         }
     }
@@ -1393,9 +1410,34 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // per-axis divider in world frame is equivalent to body frame. If we
     // ever needed to simulate a car that flips upside down the correct thing
     // would be to rotate torque to body frame, divide per axis, rotate back.
-    let force_scale: f64 = (n_subs * n_subs) as f64;    // 49
-    let torque_scale_pitch_roll: f64 = force_scale * (62.0 / 7.0);  // 434
-    let torque_scale_yaw: f64 = force_scale * 3.24;                  // 158.76
+    // LINEAR force attenuation: 6·N, measured directly against Director.
+    //
+    // A Lingo probe applied a known force at the centre of mass (no torque) and
+    // read back the resulting velocity over step(0.025, N) for N = 1, 7, 20:
+    //
+    //     N        1         7        20
+    //     Director 1.6667    0.2381   0.0833     → N·Δv  = 1.6667  (∝ 1/N)
+    //     dirplayer 10.0000  0.2041   0.0250     → N²·Δv = 10.0    (∝ 1/N²)
+    //
+    // Exact to every digit printed. Director scales as 1/N — the force survives
+    // exactly one substep of dt/N, because the force accumulator is cleared on
+    // every integration step. (F/m)·dt = 10.0 here, so Director's response is
+    // (F/m)·dt/(6N). The extra factor of 6 is measured but unexplained: it is not
+    // in the substep structure, and not in the Lingo force entry points (their
+    // worldScale conversion cancels against the velocity readback's).
+    //
+    // The previous value was N². It survived because at the N=7 these movies
+    // use, N²=49 and 6N=42 are only 17% apart — and the two prior experiments
+    // both tested force_scale=N (=7), which is 6× too strong, hence "way worse"
+    // / uncontrollable. 6N matches Director at N=1, 7 AND 20, not just at 7.
+    let force_scale: f64 = 6.0 * n_subs as f64;         // 42 at N=7 (was 49)
+    // Torque is left on the OLD N² basis deliberately: the probe measured only
+    // the linear response (angV stayed 0), so there is no measurement of
+    // Director's torque law to justify moving it. These keep their previous
+    // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
+    let n_sq = (n_subs * n_subs) as f64;                // 49 at N=7
+    let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0);  // 434
+    let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
     let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.force, rb.torque)).collect();
 
@@ -1445,7 +1487,30 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // user testing — probably because killing roll response during a turn
     // breaks the natural lean-into-the-turn dynamic the springs rely on.
     //
-    // Mirrors Havok's `applyDamping` helper at PPC 0x4cf00 (x86 `sub_10013770`).
+    // Numerical angular damping — not a clamp.
+    //
+    // Simple isotropic per-frame decay. Attempts at per-axis body-frame
+    // damping (pitch/roll/yaw tuned individually) made turning worse in
+    // user testing — probably because killing roll response during a turn
+    // breaks the natural lean-into-the-turn dynamic the springs rely on.
+    //
+    // NOTE: this does NOT correspond to anything in the engine, despite what this
+    // comment used to claim. The engine damps velocity only through dashpot actions
+    // — a linear dashpot by 0.1%, an angular one by 0% — and it scales linear and
+    // angular together. There is no global per-frame damping in the engine's step
+    // loop, so a body driven purely by forces (a RaycastCar's hover springs, with no
+    // dashpots) should receive none. Our 10%/frame is 100x the largest real value
+    // and unconditional; it absorbs spurious spin our contact solver leaks.
+    //
+    // TRIED AND REJECTED, do not redo without new information:
+    //   * setting it to 0.0 (faithful) — improved FinalDrive four-wheel contact
+    //     45% -> 56%, but regressed other games;
+    //   * skipping it for bodies that received a Lingo force this frame (derived from
+    //     the `saved_forces` snapshot above) — FinalDrive 45% -> 66.5%, still rejected
+    //     in testing.
+    // The real fix is to make the contact solver dissipate like Havok's (friction,
+    // resting contacts, deactivator) so the crutch can go entirely; see the abandoned
+    // faithful solver in Desktop\havok\"havok_physics copy.rs".
     const ANGULAR_DRIFT_DAMP: f64 = 0.1; //0.05;
     let ang_factor = 1.0 - ANGULAR_DRIFT_DAMP;
     for rb in &mut state.rigid_bodies {

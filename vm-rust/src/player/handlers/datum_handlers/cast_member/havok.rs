@@ -13,6 +13,7 @@ use crate::{
     },
 };
 
+
 /// Build a large static quad collision mesh for an (infinite) Havok plane
 /// primitive, centred at `center` with surface normal `n_world` (both in
 /// Director world units). Two triangles, wound so their geometric normal
@@ -742,27 +743,28 @@ impl HavokPhysicsMemberHandlers {
                     // mass properties from geometry). A box-AABB inertia is wrong about
                     // the pitch axis for a long flat chassis. Box fallback for
                     // degenerate/open meshes.
-                    // Inertia must be built in the SAME spawn-rotated frame as the collision
-                    // mesh `vertices` above (both apply the node transform's rotation), else the
-                    // body tensor stays in the un-rotated mesh frame while rb.orientation (the
-                    // HKE spawn rotation) rotates it AGAIN when the integrator forms the world
-                    // inverse-inertia, double-counting the placement rotation. For an anisotropic
-                    // chassis with a spawn rotation that aliased the pitch axis onto the small
-                    // roll inertia, so the car leaned/pitched far too easily. Rotation only (the
-                    // polyhedron inertia is taken about the centroid; translation must not enter).
+                    // Inertia is built from the RAW, UNROTATED mesh vertices — the body's
+                    // own frame. It must NOT be pre-rotated by the node/spawn transform.
+                    //
+                    // The previous code pre-rotated these by the node/spawn transform,
+                    // on the assumption that the integrator would otherwise rotate the
+                    // tensor a second time when forming the world inverse inertia. That
+                    // assumption is wrong: the angular update applies the BODY-frame
+                    // inverse inertia DIRECTLY to a world-frame torque, with no
+                    // R·Iinv·Rᵀ. Pre-rotating therefore baked the placement rotation
+                    // into the tensor and applied it once too often.
+                    //
+                    // Verified against Director on FinalDrive's chassis: the angular
+                    // response to a known torque, predicted from the raw-vertex tensor
+                    // applied body-direct, matches Director's measured direction to
+                    // 0.00°; the pre-rotated form is 28.45° off. (applyAngularImpulse is
+                    // a separate path that does use the world tensor, and already matched.)
                     let local_verts: Vec<[f64; 3]> = mesh.vertices.iter()
-                        .map(|v| {
-                            let lx = v[0] as f64 * inv_scale;
-                            let ly = v[1] as f64 * inv_scale;
-                            let lz = v[2] as f64 * inv_scale;
-                            if let Some(r) = &xform_rt {
-                                [r[0]*lx + r[3]*ly + r[6]*lz,
-                                 r[1]*lx + r[4]*ly + r[7]*lz,
-                                 r[2]*lx + r[5]*ly + r[8]*lz]
-                            } else {
-                                [lx, ly, lz]
-                            }
-                        })
+                        .map(|v| [
+                            v[0] as f64 * inv_scale,
+                            v[1] as f64 * inv_scale,
+                            v[2] as f64 * inv_scale,
+                        ])
                         .collect();
                     let unit_i = super::havok_physics::compute_polyhedron_unit_inertia(&local_verts, &mesh.triangles)
                         .map(|(ui, _com, _vol)| ui)
