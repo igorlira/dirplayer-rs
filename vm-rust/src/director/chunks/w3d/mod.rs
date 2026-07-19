@@ -5,6 +5,7 @@
 /// materials, textures, shaders, scene graph nodes, lights, skeletons, and animations.
 
 pub mod types;
+pub mod merge;
 pub mod block_types;
 pub mod block_reader;
 pub mod bitstream;
