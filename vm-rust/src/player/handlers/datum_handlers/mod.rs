@@ -231,10 +231,34 @@ pub async fn player_call_datum_handler(
                         }
                     })
                 }
-                _ => Err(ScriptError::new_code(
-                    ScriptErrorCode::HandlerNotFound,
-                    format!("No handler {handler_name} for datum <_movie>"),
-                )),
+                // The Movie object's method surface mirrors Director's global
+                // command surface — `_movie.updateStage()` and `updateStage()`
+                // are the same call (Director 11.5 Scripting Dictionary shows
+                // both forms for updateStage, puppetSprite, stopEvent, preLoad,
+                // …). Rather than re-listing each one here, fall through to the
+                // built-in dispatcher; only a name it doesn't know is an error.
+                _ => {
+                    use crate::player::handlers::manager::BuiltInHandlerManager;
+                    if BuiltInHandlerManager::has_async_handler(handler_name) {
+                        Box::pin(BuiltInHandlerManager::call_async_handler(handler_name, &args))
+                            .await
+                    } else {
+                        // Keep reporting an unknown name as HandlerNotFound (with
+                        // the <_movie> wording) — callers use that code to decide
+                        // whether to keep searching; a genuine failure *inside* a
+                        // known handler must keep its own error.
+                        BuiltInHandlerManager::call_handler(handler_name, &args).map_err(|e| {
+                            if e.message.starts_with("No built-in handler:") {
+                                ScriptError::new_code(
+                                    ScriptErrorCode::HandlerNotFound,
+                                    format!("No handler {handler_name} for datum <_movie>"),
+                                )
+                            } else {
+                                e
+                            }
+                        })
+                    }
+                }
             }
         }
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
