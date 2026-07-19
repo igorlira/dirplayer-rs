@@ -712,6 +712,23 @@ impl HavokPhysicsMemberHandlers {
                 let rb_index = havok.state.rigid_bodies.len();
                 havok.state.rigid_bodies.push(rb);
 
+                // Store the collision hull in BODY-LOCAL space for movable bodies.
+                // `vertices` is baked in world space at the spawn pose; convert it to
+                // local (relative to the body's spawn position, un-rotated by its spawn
+                // orientation) so the narrow phase can transform it to the live pose
+                // each frame. Lets a hover vehicle collide with its actual chassis
+                // shape against scenery instead of a blocky bounding box.
+                if mass > 0.0 {
+                    use super::havok_physics::{quat_conjugate, quat_rotate_v, v3_sub};
+                    let spawn = &havok.state.rigid_bodies[rb_index];
+                    let pos0 = spawn.position;
+                    let inv_q = quat_conjugate(spawn.orientation);
+                    let local: Vec<[f64; 3]> = vertices.iter()
+                        .map(|w| quat_rotate_v(inv_q, v3_sub(*w, pos0)))
+                        .collect();
+                    havok.state.rigid_bodies[rb_index].collision_hull_local = local;
+                }
+
                 // Only link collision mesh to movable bodies. Fixed body meshes
                 // stay unowned (body_index=None) so the ground contact filter
                 // can skip them — hover/spring scripts handle ground interaction.

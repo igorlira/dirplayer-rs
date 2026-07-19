@@ -633,6 +633,101 @@ pub fn detect_body_contacts(
     contacts
 }
 
+/// Collide a body's actual convex hull (its own collision-mesh vertices) against
+/// static scenery, instead of its bounding box. Used for a hover vehicle so its
+/// thin car chassis clears geometry a box would ram (e.g. a rising loop wall).
+///
+/// `hull_world` are the body's collision vertices already transformed to the live
+/// pose. For each static triangle we take the DEEPEST hull vertex along the
+/// triangle normal (the support point) and, if it penetrates within the tolerance
+/// band and projects onto the face, emit a contact there. Only the single deepest
+/// contact per body is kept by the caller.
+fn detect_hull_contacts(
+    meshes: &[CollisionMesh], hull_world: &[V3], body_idx: usize, tolerance: f64,
+    bodies: &[crate::player::cast_member::HavokRigidBody],
+) -> Vec<CollisionContact> {
+    let mut contacts = Vec::new();
+    if hull_world.is_empty() { return contacts; }
+    // Hull AABB for broad-phase culling.
+    let (mut hmn, mut hmx) = ([f64::MAX; 3], [f64::MIN; 3]);
+    for v in hull_world {
+        for i in 0..3 { if v[i] < hmn[i] { hmn[i] = v[i]; } if v[i] > hmx[i] { hmx[i] = v[i]; } }
+    }
+    // Deepest penetration we still treat as a real contact. Must scale with the
+    // HULL size, not `tolerance`: when the car flips and slams the ground, the
+    // chassis punches deep in a single frame, and a small fixed limit would reject
+    // that contact and let the body fall through. The box path used
+    // `-eff_radius*2` (≈ box size) for the same reason. Larger than the hull is a
+    // clear back-face artifact (a vertex poked through thin road to the underside).
+    let hull_span = (hmx[0]-hmn[0]).max(hmx[1]-hmn[1]).max(hmx[2]-hmn[2]);
+    let deep_reject = -(hull_span * 2.0 + tolerance);
+    // Hull centre, used to orient each triangle normal toward the body. Road meshes
+    // have inconsistent triangle winding (worse on a curved loop), so the raw
+    // cross-product normal may point either way; the box path stayed winding-agnostic
+    // via `dist.abs()`, and this does the same for the support test. Without it the
+    // support picked the wrong-side vertex, no backstop contact fired, and the car
+    // tunnelled through the road on the way down.
+    let hc = [(hmn[0]+hmx[0])*0.5, (hmn[1]+hmx[1])*0.5, (hmn[2]+hmx[2])*0.5];
+    for (mesh_idx, mesh) in meshes.iter().enumerate() {
+        // Static scenery only: an unowned mesh, or one owned by a pinned body.
+        // (A movable body's own baked mesh is skipped — it's the hull's source.)
+        if let Some(owner) = mesh.body_index {
+            if !bodies[owner].pinned { continue; }
+        }
+        if hmx[0] + tolerance < mesh.aabb_min[0] || hmn[0] - tolerance > mesh.aabb_max[0] { continue; }
+        if hmx[1] + tolerance < mesh.aabb_min[1] || hmn[1] - tolerance > mesh.aabb_max[1] { continue; }
+        if hmx[2] + tolerance < mesh.aabb_min[2] || hmn[2] - tolerance > mesh.aabb_max[2] { continue; }
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            // Per-triangle broad-phase: skip if the triangle's AABB does not overlap
+            // the (small) hull's AABB. The chassis touches only a handful of the road's
+            // thousands of triangles, so this cull turns the O(tris × hull_verts) inner
+            // loop into O(tris + near_tris × hull_verts) and removes the driving lag.
+            let tmn = [v0[0].min(v1[0]).min(v2[0]), v0[1].min(v1[1]).min(v2[1]), v0[2].min(v1[2]).min(v2[2])];
+            let tmx = [v0[0].max(v1[0]).max(v2[0]), v0[1].max(v1[1]).max(v2[1]), v0[2].max(v1[2]).max(v2[2])];
+            if tmx[0] + tolerance < hmn[0] || tmn[0] - tolerance > hmx[0]
+                || tmx[1] + tolerance < hmn[1] || tmn[1] - tolerance > hmx[1]
+                || tmx[2] + tolerance < hmn[2] || tmn[2] - tolerance > hmx[2] { continue; }
+            let mut normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
+            if v3_len_sq(normal) < 1e-10 { continue; }
+            // Orient the normal toward the hull, so the support test is independent of
+            // triangle winding (see `hc`).
+            if v3_dot(v3_sub(hc, v0), normal) < 0.0 {
+                normal = [-normal[0], -normal[1], -normal[2]];
+            }
+            // Deepest hull vertex along -normal (most penetrating below the face).
+            let mut best_dist = f64::MAX;
+            let mut best_pt = [0.0; 3];
+            for &w in hull_world {
+                let d = v3_dot(v3_sub(w, v0), normal);
+                if d < best_dist { best_dist = d; best_pt = w; }
+            }
+            // Touching within `tolerance`; reject only clearly-through-the-backface
+            // hits (deeper than the hull itself — see `deep_reject`).
+            if best_dist > tolerance { continue; }
+            if best_dist < deep_reject { continue; }
+            let proj = v3_sub(best_pt, v3_scale(normal, best_dist));
+            if pt_in_tri_3d(proj, v0, v1, v2) {
+                let depth = tolerance - best_dist;
+                let va = body_point_velocity(&bodies[body_idx], best_pt);
+                let nrv = (va[0]*normal[0] + va[1]*normal[1] + va[2]*normal[2]).abs();
+                contacts.push(CollisionContact {
+                    body_a: body_idx,
+                    body_b: mesh.body_index,
+                    point: best_pt,
+                    normal,
+                    depth,
+                    mesh_index: Some(mesh_idx),
+                    normal_rel_vel: nrv,
+                });
+            }
+        }
+    }
+    contacts
+}
+
 /// Segment-segment closest points (for triangle-triangle distance).
 /// From C# CollisionDetection.cs — SegmentSegmentClosest
 fn segment_segment_closest(p0: V3, p1: V3, q0: V3, q1: V3) -> (V3, V3) {
@@ -1990,17 +2085,28 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         // (crates, blocks) use the box-stacking path.
         let body_passive = passive_scene && !rb.driven;
 
-        // Use the body's actual half-extents (box support) for collision.
-        let he = rb.inertia_half_extents;
-        // Box-stacking objects test against the COM-offset box centre (so boxes
-        // rest flush). Driven bodies keep the original origin-centred test.
-        let center = if body_passive {
-            v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+        // A hover vehicle with a stored hull collides against scenery using its
+        // ACTUAL chassis vertices (transformed to the live pose), not its bounding
+        // box — a car chassis is far thinner than its box, whose corners otherwise
+        // ram a rising loop wall the real hull clears. Everything else keeps the
+        // box-support narrow phase it was tuned against.
+        let contacts = if rb.received_force && !rb.collision_hull_local.is_empty() {
+            let hull_world: Vec<V3> = rb.collision_hull_local.iter()
+                .map(|l| v3_add(rb.position, quat_rotate_v(rb.orientation, *l)))
+                .collect();
+            detect_hull_contacts(&state.collision_meshes, &hull_world, bi, state.tolerance, &state.rigid_bodies)
         } else {
-            rb.position
+            // Use the body's actual half-extents (box support) for collision.
+            let he = rb.inertia_half_extents;
+            // Box-stacking objects test against the COM-offset box centre (so boxes
+            // rest flush). Driven bodies keep the original origin-centred test.
+            let center = if body_passive {
+                v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+            } else {
+                rb.position
+            };
+            detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies)
         };
-
-        let contacts = detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies);
         // Keep only the deepest contact per body to avoid duplicate impulses
         // from coplanar triangles (e.g. two triangles forming a box face).
         let mut best: Option<CollisionContact> = None;

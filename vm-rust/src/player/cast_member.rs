@@ -1926,6 +1926,14 @@ pub struct HavokRigidBody {
     pub is_convex: bool,
     /// Half-extents of the mesh bounding box, for box inertia computation.
     pub inertia_half_extents: [f64; 3],
+    /// The body's collision hull vertices in BODY-LOCAL space (relative to
+    /// `position`, un-rotated by the spawn orientation). Populated for HKE movable
+    /// bodies from their own collision mesh. When present, a hover vehicle
+    /// (`received_force`) collides against static scenery using these actual
+    /// vertices (transformed to the live pose) instead of its bounding box — a car
+    /// chassis is far thinner than its box, whose corners otherwise ram a rising
+    /// loop wall the real hull would clear. Empty ⇒ fall back to the box.
+    pub collision_hull_local: Vec<[f64; 3]>,
     /// A Lingo-created movable body defaults to the script-driven vehicle path
     /// (raycast cars: held up by hover forces, off the box-stacking path). HKE
     /// bodies load as `false` (passive). A force-free body that is positioned
@@ -2022,6 +2030,7 @@ impl HavokRigidBody {
             is_fixed: false,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            collision_hull_local: Vec::new(),
             driven: false,
             received_force: false,
             is_box: false,
@@ -2070,6 +2079,7 @@ impl HavokRigidBody {
             is_fixed: true,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            collision_hull_local: Vec::new(),
             driven: false,
             received_force: false,
             is_box: false,
