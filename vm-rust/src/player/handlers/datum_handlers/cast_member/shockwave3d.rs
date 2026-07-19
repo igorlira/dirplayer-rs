@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::debug;
+use log::{debug, warn};
 use wasm_bindgen::JsCast;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     player::{
         cast_lib::CastMemberRef,
         cast_member::{CastMemberType, Shockwave3dMember, Text3dSource, Text3dState},
-        reserve_player_mut,
+        reserve_player_mut, reserve_player_ref,
         DatumRef, DirPlayer, ScriptError,
     },
     console_warn,
@@ -34,6 +34,108 @@ fn log(msg: &str) {
 pub struct Shockwave3dMemberHandlers {}
 
 impl Shockwave3dMemberHandlers {
+    /// `member(x).loadFile(fileName {, overwrite, generateUniqueNames})`
+    ///
+    /// Director 11.5 Scripting Dictionary, `loadFile()`: imports the assets of a
+    /// W3D file into a 3D cast member. `overwrite` (default TRUE) replaces the
+    /// member's assets rather than adding to them; `generateUniqueNames`
+    /// (default TRUE) renames incoming elements that collide with existing ones.
+    ///
+    /// age_of_speed loads every level this way — `member(11 + gLevelID)
+    /// .loadFile("data/level_1.W3D")` in "Frame Load Data", plus the shared
+    /// materials and sky members — so with this stubbed out the track had no
+    /// models at all.
+    pub async fn load_file(
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let (file_name, overwrite, generate_unique_names) = reserve_player_ref(|player| {
+            let file_name = args
+                .get(0)
+                .map(|a| player.get_datum(a).string_value().unwrap_or_default())
+                .unwrap_or_default();
+            // Both flags default to TRUE per the dictionary.
+            let flag = |i: usize| {
+                args.get(i)
+                    .map(|a| player.get_datum(a).int_value().unwrap_or(1) != 0)
+                    .unwrap_or(true)
+            };
+            (file_name, flag(1), flag(2))
+        });
+
+        if file_name.is_empty() {
+            return Err(ScriptError::new(
+                "loadFile requires a file name".to_string(),
+            ));
+        }
+
+        // Fetch through NetManager, same as importFileInto.
+        let task_id = reserve_player_mut(|player| {
+            player.net_manager.preload_net_thing(file_name.clone())
+        });
+        {
+            let player = unsafe { crate::player::player_mut() };
+            if !player.net_manager.is_task_done(Some(task_id)) {
+                player.net_manager.await_task(task_id).await;
+            }
+        }
+        let bytes = reserve_player_ref(|player| player.net_manager.get_task_result(Some(task_id)));
+        let bytes = match bytes {
+            Some(Ok(b)) if !b.is_empty() => b,
+            _ => {
+                warn!("loadFile: could not fetch '{}'", file_name);
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void)));
+            }
+        };
+
+        let scene = match crate::director::chunks::w3d::parse_w3d(&bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "loadFile: failed to parse '{}' ({} bytes): {}",
+                    file_name, bytes.len(), e
+                );
+                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void)));
+            }
+        };
+        debug!(
+            "loadFile: '{}' -> {} nodes, {} model_resources, {} shaders (overwrite={}, uniqueNames={})",
+            file_name, scene.nodes.len(), scene.model_resources.len(), scene.shaders.len(),
+            overwrite, generate_unique_names
+        );
+
+        reserve_player_mut(|player| {
+            let member = player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(member_ref)
+                .ok_or_else(|| ScriptError::new("loadFile: member not found".to_string()))?;
+            let w3d = member
+                .member_type
+                .as_shockwave3d_mut()
+                .ok_or_else(|| {
+                    ScriptError::new("loadFile: member is not a Shockwave3D member".to_string())
+                })?;
+
+            if overwrite || w3d.parsed_scene.is_none() {
+                // Replace outright, and drop runtime state that named the old
+                // scene's models/shaders (per-node shader overrides, animation
+                // players, …) — those names no longer exist.
+                let info = w3d.info.clone();
+                let rc_scene = std::rc::Rc::new(scene);
+                w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(
+                    &info,
+                    Some(&rc_scene),
+                );
+                w3d.source_scene = Some(rc_scene.clone());
+                w3d.parsed_scene = Some(rc_scene);
+            } else if let Some(existing) = w3d.scene_mut() {
+                existing.merge_from(scene, generate_unique_names);
+            }
+            Ok(player.alloc_datum(Datum::Void))
+        })
+    }
+
     fn native_text_alignment(alignment: &str) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
@@ -2417,8 +2519,9 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
-                    // loadFile, getPref, setPref — stubs
-                    if handler_name == "loadFile" || handler_name == "getPref" || handler_name == "setPref" {
+                    // getPref, setPref — stubs. (`loadFile` is handled on the
+                    // async path in cast_member_ref.rs; it must fetch the W3D.)
+                    if handler_name == "getPref" || handler_name == "setPref" {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 

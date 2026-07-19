@@ -108,6 +108,10 @@ impl CastMemberRefHandlers {
         if handler_name.eq_ignore_ascii_case("importFileInto") {
             return true;
         }
+        // 3D `member.loadFile(w3dFile …)` fetches the W3D over the net.
+        if handler_name.eq_ignore_ascii_case("loadFile") {
+            return true;
+        }
         if handler_name != "step" { return false; }
         // Check if this is a Havok member
         reserve_player_ref(|player| {
@@ -148,6 +152,20 @@ impl CastMemberRefHandlers {
                 return crate::player::handlers::manager::BuiltInHandlerManager::call_async_handler(
                     "importFileInto", &forwarded,
                 ).await;
+            }
+            if _handler_name.eq_ignore_ascii_case("loadFile") {
+                let member_ref = reserve_player_ref(|player| match player.get_datum(datum) {
+                    Datum::CastMember(r) => Some(r.to_owned()),
+                    _ => None,
+                });
+                let member_ref = match member_ref {
+                    Some(r) => r,
+                    None => return Err(ScriptError::new(
+                        "loadFile: receiver must be a cast member".to_string(),
+                    )),
+                };
+                return crate::player::handlers::datum_handlers::cast_member::shockwave3d::
+                    Shockwave3dMemberHandlers::load_file(&member_ref, args).await;
             }
             // Run the full physics step via the monolithic sync path.
             // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
