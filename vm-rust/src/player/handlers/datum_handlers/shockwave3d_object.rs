@@ -4013,6 +4013,63 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
+                // node.child(whichChildNodeName) / node.child(index) —
+                // Director 11.5 Scripting Dictionary, "child (3D)": returns the
+                // child node with that name, or at that 1-based index, in the
+                // parent node's child list. Without this arm the call fell
+                // through to `get_prop(datum, "child")`, which ignores the
+                // argument and hands back the whole child LIST — age_of_speed's
+                // `lAccRef = lModelRef.child(lWingName)` then did
+                // `lAccRef.shaderList[i] = …` against a list ("No handler
+                // setProp for list datum"). Undocumented lookups return VOID,
+                // matching the movie's `if lAccRef <> VOID` guard.
+                "child" => {
+                    use crate::director::chunks::w3d::types::W3dNodeType;
+                    use crate::director::lingo::datum::Shockwave3dObjectRef;
+                    // Bare `node.child` (no argument) is the child LIST property.
+                    if args.len() != 1 {
+                        return Self::get_prop(datum, "child");
+                    }
+                    let scene = match player.movie.cast_manager.find_member_by_ref(&member_ref)
+                        .and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.parsed_scene.clone())
+                    {
+                        Some(s) => s,
+                        None => return Ok(player.alloc_datum(Datum::Void)),
+                    };
+                    let children: Vec<_> = scene.nodes.iter()
+                        .filter(|n| n.parent_name.eq_ignore_ascii_case(&s3d_ref.name))
+                        .collect();
+                    // Node names are matched case-insensitively (as elsewhere in
+                    // this module); an Int argument selects by 1-based index.
+                    let found = match player.get_datum(&args[0]) {
+                        Datum::Int(i) => {
+                            let idx = *i - 1;
+                            if idx < 0 { None } else { children.get(idx as usize).copied() }
+                        }
+                        other => {
+                            let name = other.string_value().unwrap_or_default();
+                            children.iter().copied()
+                                .find(|n| n.name.eq_ignore_ascii_case(&name))
+                        }
+                    };
+                    let child = match found {
+                        Some(c) => c,
+                        None => return Ok(player.alloc_datum(Datum::Void)),
+                    };
+                    let obj_type = match child.node_type {
+                        W3dNodeType::View => "camera",
+                        W3dNodeType::Light => "light",
+                        W3dNodeType::Group => "group",
+                        _ => "model",
+                    };
+                    Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                        cast_lib: s3d_ref.cast_lib,
+                        cast_member: s3d_ref.cast_member,
+                        object_type: obj_type.to_string(),
+                        name: child.name.clone(),
+                    })))
+                },
                 "getPropRef" | "getProp" => {
                     // model.shaderList[I] → getPropRef(#shaderList, I)
                     // args[0] = property name (symbol/string), args[1] = index
@@ -5620,9 +5677,19 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(Datum::Symbol("none".to_string()))) // default #none
             },
             "boundingSphere" => {
-                // Return [vector(0,0,0), 100.0] as placeholder
-                let center = player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]));
-                let radius = player.alloc_datum(Datum::Float(100.0));
+                // Director 11.5 Scripting Dictionary, `boundingSphere`: "describes
+                // a sphere that contains the model, group, light, or camera AND ITS
+                // CHILDREN", as [vector center, float radius] in world space.
+                //
+                // This used to return a hardcoded [vector(0,0,0), 100.0]. age_of_speed's
+                // culling manager buckets every track token into a world grid with
+                // `BoxOverlapsSphere(blockMax, blockMin, model.boundingSphere[2],
+                // model.boundingSphere[1], 2)` — with every sphere pinned at the origin
+                // and the track out around x = -68000, no block ever matched, so
+                // `pTokenBlocks` stayed empty and `getToken` always returned "not found".
+                let (center, radius) = model_bounding_sphere(player, scene, model_name, member_ref);
+                let center = player.alloc_datum(Datum::Vector(center));
+                let radius = player.alloc_datum(Datum::Float(radius));
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List,
                     VecDeque::from(vec![center, radius]),
@@ -6753,6 +6820,140 @@ fn get_node_transform(
 /// node_transforms cache is only flushed once per frame (sync_persistent_transforms).
 /// Mid-script callers (e.g. addChild #preserveWorld, run right after the position is
 /// set) must see the live value, not the stale cache.
+/// World matrix of a node: its live local transform composed with its ancestors'.
+///
+/// Mirrors the walk in `get_world_position` (live transforms, case-insensitive
+/// parent lookup, depth-capped against cycles) but keeps the full matrix.
+fn node_world_matrix(
+    player: &crate::player::DirPlayer,
+    scene: &W3dScene,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: &str,
+) -> [f32; 16] {
+    let mut result = get_node_transform_live(player, member_ref, node_name);
+    let mut current_parent = scene
+        .nodes
+        .iter()
+        .find(|n| n.name.eq_ignore_ascii_case(node_name))
+        .map(|n| n.parent_name.clone())
+        .unwrap_or_default();
+    for _ in 0..20 {
+        if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") {
+            break;
+        }
+        match scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current_parent)) {
+            Some(pn) => {
+                let pt = get_node_transform_live(player, member_ref, &pn.name);
+                result = mat4_mul_f32(&pt, &result);
+                current_parent = pn.parent_name.clone();
+            }
+            None => break,
+        }
+    }
+    result
+}
+
+/// `model.boundingSphere` — [center, radius] in world space, covering the node
+/// and all its descendants (Director 11.5 Scripting Dictionary, `boundingSphere`).
+///
+/// Vertices come from the node's model resource (CLOD meshes, or a raw mesh of
+/// the same name), transformed to world space by the node's world matrix. The
+/// center is the midpoint of the world-space AABB and the radius the greatest
+/// distance from it to any vertex — a sphere that provably contains every point,
+/// which is what the property promises.
+///
+/// A node with no geometry of its own (a group, light, camera, or an empty
+/// parent) still contributes its own origin, so a childless one yields
+/// [its world position, 0.0] rather than collapsing to the scene origin.
+fn model_bounding_sphere(
+    player: &crate::player::DirPlayer,
+    scene: &W3dScene,
+    model_name: &str,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+) -> ([f64; 3], f64) {
+    // The node plus every descendant (case-insensitive parent match, as elsewhere).
+    let mut names: Vec<String> = vec![model_name.to_string()];
+    let mut stack = vec![model_name.to_string()];
+    while let Some(parent) = stack.pop() {
+        for n in &scene.nodes {
+            if n.parent_name.eq_ignore_ascii_case(&parent)
+                && !names.iter().any(|e| e.eq_ignore_ascii_case(&n.name))
+            {
+                names.push(n.name.clone());
+                stack.push(n.name.clone());
+            }
+        }
+    }
+
+    let mut min = [f64::MAX; 3];
+    let mut max = [f64::MIN; 3];
+    let mut points: Vec<[f64; 3]> = Vec::new();
+
+    for name in &names {
+        let world = node_world_matrix(player, scene, member_ref, name);
+        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(name));
+
+        // Collect this node's local-space vertices.
+        let mut local: Vec<[f32; 3]> = Vec::new();
+        if let Some(n) = node {
+            let key = if !n.model_resource_name.is_empty() {
+                n.model_resource_name.clone()
+            } else {
+                n.resource_name.clone()
+            };
+            if let Some(meshes) = scene.clod_meshes.get(&key) {
+                for mesh in meshes {
+                    local.extend_from_slice(&mesh.positions);
+                }
+            }
+            if local.is_empty() {
+                if let Some(raw) = scene.raw_meshes.iter().find(|m| m.name.eq_ignore_ascii_case(&key)) {
+                    local.extend_from_slice(&raw.positions);
+                }
+            }
+        }
+        // No geometry: contribute the node's own origin so groups/lights still
+        // report a sensible centre.
+        if local.is_empty() {
+            local.push([0.0, 0.0, 0.0]);
+        }
+
+        for v in &local {
+            let (x, y, z) = (v[0] as f64, v[1] as f64, v[2] as f64);
+            let w = [
+                world[0] as f64 * x + world[4] as f64 * y + world[8] as f64 * z + world[12] as f64,
+                world[1] as f64 * x + world[5] as f64 * y + world[9] as f64 * z + world[13] as f64,
+                world[2] as f64 * x + world[6] as f64 * y + world[10] as f64 * z + world[14] as f64,
+            ];
+            for i in 0..3 {
+                if w[i] < min[i] { min[i] = w[i]; }
+                if w[i] > max[i] { max[i] = w[i]; }
+            }
+            points.push(w);
+        }
+    }
+
+    if points.is_empty() {
+        return ([0.0, 0.0, 0.0], 0.0);
+    }
+
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let mut radius_sq = 0.0f64;
+    for p in &points {
+        let d = (p[0] - center[0]).powi(2)
+            + (p[1] - center[1]).powi(2)
+            + (p[2] - center[2]).powi(2);
+        if d > radius_sq {
+            radius_sq = d;
+        }
+    }
+    (center, radius_sq.sqrt())
+}
+
 fn get_node_transform_live(
     player: &crate::player::DirPlayer,
     member_ref: &crate::player::cast_lib::CastMemberRef,
