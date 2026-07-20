@@ -1393,8 +1393,26 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 },
                 "transparent" => {
-                    // transparent = 1 means use alpha blending
-                    // Just store in the material opacity if needed
+                    // transparent = 1 → the shader alpha-BLENDS (soft), Director's
+                    // default. Track the shader so a model wearing it is drawn in the
+                    // transparent pass even at blend=100, rather than the hard alpha-test
+                    // cutout pass. transparent = 0 → opaque (texture alpha ignored).
+                    if s3d_ref.object_type == "shader" {
+                        let on = match &value {
+                            Datum::Int(v) => *v != 0,
+                            Datum::Float(v) => *v != 0.0,
+                            _ => true,
+                        };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if on {
+                                    w3d.runtime_state.transparent_shaders.insert(s3d_ref.name.clone());
+                                } else {
+                                    w3d.runtime_state.transparent_shaders.remove(&s3d_ref.name);
+                                }
+                            }
+                        }
+                    }
                     Ok(())
                 },
                 "shininess" | "flat" | "renderStyle" => {
@@ -3355,12 +3373,21 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                             _ => (0.0, 0.0),
                         };
-                        let max_models = if args.len() > 1 {
-                            player.get_datum(&args[1]).int_value().unwrap_or(100) as usize
-                        } else { 100 };
-                        let detailed = if args.len() > 2 {
-                            player.get_datum(&args[2]).string_value().unwrap_or_default() == "detailed"
-                        } else { false };
+                        // modelsUnderLoc(point {, maxModels|options {, options}}). The
+                        // optional trailing args come in either order/forms: an integer is
+                        // the max model count; a symbol (#simple/#detailed) is the level of
+                        // detail. The unicraft galaxy calls `modelsUnderLoc(loc, #simple)` —
+                        // parsing that symbol as maxModels yielded 0, silently returning no
+                        // hits (nothing was ever selectable).
+                        let mut max_models = 100usize;
+                        let mut detailed = false;
+                        for a in args.iter().skip(1) {
+                            match player.get_datum(a) {
+                                Datum::Symbol(s) => { if s.eq_ignore_ascii_case("detailed") { detailed = true; } }
+                                Datum::Int(n) => { if *n > 0 { max_models = *n as usize; } }
+                                d => { if let Ok(n) = d.int_value() { if n > 0 { max_models = n as usize; } } }
+                            }
+                        }
 
                         let (scene, node_transforms, excluded) = {
                             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -3405,10 +3432,68 @@ impl Shockwave3dObjectDatumHandlers {
                             let (orig_w, orig_h) = get_member_default_rect_size(player, &member_ref);
 
                             let ray = raycast::screen_to_ray_shockwave(sx, sy, width, height, orig_w, orig_h, fov_deg, &cam_world);
-                            let hits = raycast::raycast_scene_multi(
-                                &ray, &scene, 100000.0, max_models,
+                            // Director's modelsUnderLoc has no pick-distance limit — it hits any
+                            // model along the ray. A 100000 cap missed large-coordinate scenes
+                            // (unicraft's galaxy: camera ~140000 units from the planets → hits=0,
+                            // so no hover/select). Use an effectively-unbounded range.
+                            let mut hits = raycast::raycast_scene_multi(
+                                &ray, &scene, 1.0e9, max_models,
                                 Some(&node_transforms), Some(&excluded), None,
                             );
+
+                            // #sphere (and other) primitives are generated at RUNTIME in the
+                            // renderer, so their geometry is not in parsed_scene and the
+                            // mesh-based raycast above can't see them. Add an analytic ray-sphere
+                            // test for sphere-primitive models (mirrors the singular modelUnderLoc
+                            // path) — without it the galaxy's planets were never pickable.
+                            for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+                                if excluded.contains(&node.name) { continue; }
+                                if hits.iter().any(|h| h.model_name == node.name) { continue; }
+                                let res_key = if !node.model_resource_name.is_empty() {
+                                    &node.model_resource_name
+                                } else { &node.resource_name };
+                                let is_sphere = scene.model_resources.get(res_key.as_str())
+                                    .and_then(|r| r.primitive_type.as_deref())
+                                    .map_or(false, |t| t == "sphere");
+                                if !is_sphere { continue; }
+                                let pos = node_transforms.get(&node.name)
+                                    .map(|t| [t[12], t[13], t[14]])
+                                    .unwrap_or([node.transform[12], node.transform[13], node.transform[14]]);
+                                let radius = scene.model_resources.get(res_key.as_str())
+                                    .map(|r| {
+                                        let he = [r.primitive_width, r.primitive_height, r.primitive_length, r.primitive_radius];
+                                        he.iter().cloned().fold(0.0f32, f32::max)
+                                    })
+                                    .filter(|r| *r > 0.01)
+                                    .unwrap_or(5.0);
+                                // 3× radius picking tolerance (matches modelUnderLoc) to absorb
+                                // the small projection mismatch between renderer and raycast.
+                                let pick_radius = radius * 3.0;
+                                let oc = [ray.origin[0]-pos[0], ray.origin[1]-pos[1], ray.origin[2]-pos[2]];
+                                let a = ray.direction[0]*ray.direction[0] + ray.direction[1]*ray.direction[1] + ray.direction[2]*ray.direction[2];
+                                let b = 2.0 * (oc[0]*ray.direction[0] + oc[1]*ray.direction[1] + oc[2]*ray.direction[2]);
+                                let c = oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2] - pick_radius*pick_radius;
+                                let disc = b*b - 4.0*a*c;
+                                if disc >= 0.0 {
+                                    let t = (-b - disc.sqrt()) / (2.0 * a);
+                                    if t > 0.0 {
+                                        let p = [ray.origin[0]+t*ray.direction[0], ray.origin[1]+t*ray.direction[1], ray.origin[2]+t*ray.direction[2]];
+                                        let nrm = [p[0]-pos[0], p[1]-pos[1], p[2]-pos[2]];
+                                        let nl = (nrm[0]*nrm[0]+nrm[1]*nrm[1]+nrm[2]*nrm[2]).sqrt().max(1e-6);
+                                        hits.push(raycast::RayHit {
+                                            model_name: node.name.clone(),
+                                            distance: t,
+                                            position: p,
+                                            normal: [nrm[0]/nl, nrm[1]/nl, nrm[2]/nl],
+                                            face_index: 0, mesh_id: 0,
+                                            vertices: [[0.0f32; 3]; 3], uv_coord: [0.0, 0.0],
+                                        });
+                                    }
+                                }
+                            }
+                            // Nearest-first, capped to the requested model count.
+                            hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+                            hits.truncate(max_models);
 
                             if !hits.is_empty() {
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
@@ -4751,13 +4836,20 @@ impl Shockwave3dObjectDatumHandlers {
                                     .unwrap_or(0)
                             }
                             "overlay" | "backdrop" => {
-                                // camera.overlay.count / camera.backdrop.count
+                                // camera.overlay.count / camera.backdrop.count.
+                                // camera_overlays is keyed by the LOWERCASED camera name
+                                // (see addOverlay), so this lookup must lowercase too. Without
+                                // it, a mixed-case camera name (`w.camera[1]` → "DefaultView")
+                                // returned count 0, so scripts capturing `pN = cam.overlay.count`
+                                // got 0 and then wrote `overlay[0]` — hitting the wrong overlay
+                                // (the unicraft galaxy blanked its "Choose Planet" title this way).
                                 let is_overlay = prop_name == "overlay";
+                                let cam_key = s3d_ref.name.to_ascii_lowercase();
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 member.and_then(|m| m.member_type.as_shockwave3d())
                                     .map(|w3d| {
                                         let map = if is_overlay { &w3d.runtime_state.camera_overlays } else { &w3d.runtime_state.camera_backdrops };
-                                        map.get(&s3d_ref.name).map(|v| v.len()).unwrap_or(0)
+                                        map.get(&cam_key).map(|v| v.len()).unwrap_or(0)
                                     })
                                     .unwrap_or(0)
                             }
@@ -7559,11 +7651,21 @@ fn apply_rotation(
             mat4_mul_f32(&m, &rot)
         }
     };
-    // Keep the node positioned in place (m * rot already preserves translation,
-    // but restore explicitly for the world-frame branch).
-    result[12] = m[12];
-    result[13] = m[13];
-    result[14] = m[14];
+    // #self rotates the node in place about its OWN position, so restore the
+    // translation (the #self branch built a pure rotation×scale basis with a zero
+    // translation column). #world / #parent rotate relative to the frame's ORIGIN,
+    // which orbits a non-origin node's position around it — Director's `rotate`
+    // (unlike `preRotate`) moves the position (Scripting Dictionary: a transform
+    // with a positional offset rotated 180° lands "on the opposite side of the
+    // orbit"). The unicraft galaxy menu orbits its camera this way
+    // (`camera.rotate(vector(0,0,v), #world)` + `pointAt(origin)`); pinning the
+    // translation left the camera static and the platter frozen. `rot · m` already
+    // carries the orbited translation, so keep it for the world/parent frame.
+    if !world_relative {
+        result[12] = m[12];
+        result[13] = m[13];
+        result[14] = m[14];
+    }
     set_node_transform(player, member_ref, node_name, result);
 }
 
