@@ -1446,6 +1446,16 @@ impl Shockwave3dMemberHandlers {
                         // the shield's sunset texture.
                         let mut texture_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
+                        // Namespace prefix for cloned NODE names (must be unique per
+                        // clone). Resource/mesh names instead follow loadFile's merge
+                        // rule: keep the incoming name unless it collides, so bare-name
+                        // lookups like `modelResource("bonus_money")` still resolve after
+                        // a same-named clone. `res_rename` maps lowercase source
+                        // resource/mesh name -> destination name (populated below).
+                        let ns = format!("{}_", obj_name);
+                        let mut res_rename: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
                             let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
@@ -1480,9 +1490,6 @@ impl Shockwave3dMemberHandlers {
                                 src_textures.len(),
                                 source_resource_name, source_model_resource_name,
                             );
-
-                            // Namespace prefix to avoid name collisions
-                            let ns = format!("{}_", obj_name);
 
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -1636,9 +1643,47 @@ impl Shockwave3dMemberHandlers {
                                             "[CLONE-SHADERS] '{}' used_shaders={:?} used_textures={:?} shader_map={:?}",
                                             obj_name, used_shader_names, used_texture_names, shader_name_map
                                         ));
-                                        // Model resources: namespace to prevent collisions
+                                        // Plan resource/mesh renames like loadFile's merge:
+                                        // keep each incoming name unless it collides with an
+                                        // existing destination name, in which case give it a
+                                        // unique "-clone<N>" suffix. Model resources, CLOD
+                                        // meshes and raw meshes share one namespace (a node's
+                                        // resource_name may name any of them).
+                                        {
+                                            let mut taken: std::collections::HashSet<String> =
+                                                scene.model_resources.keys().map(|k| k.to_ascii_lowercase()).collect();
+                                            taken.extend(scene.raw_meshes.iter().map(|m| m.name.to_ascii_lowercase()));
+                                            taken.extend(scene.clod_meshes.keys().map(|k| k.to_ascii_lowercase()));
+                                            let mut src_names: Vec<String> =
+                                                src_model_resources.iter().map(|(k, _)| k.clone()).collect();
+                                            src_names.extend(src_clod_meshes.iter().map(|(k, _)| k.clone()));
+                                            src_names.extend(src_raw_meshes.iter().map(|m| m.name.clone()));
+                                            for name in src_names {
+                                                if name.is_empty() { continue; }
+                                                let key = name.to_ascii_lowercase();
+                                                if res_rename.contains_key(&key) { continue; }
+                                                let dst = if taken.contains(&key) {
+                                                    let mut n = 1;
+                                                    loop {
+                                                        let cand = format!("{}-clone{}", name, n);
+                                                        if !taken.contains(&cand.to_ascii_lowercase()) { break cand; }
+                                                        n += 1;
+                                                    }
+                                                } else {
+                                                    name.clone()
+                                                };
+                                                taken.insert(dst.to_ascii_lowercase());
+                                                res_rename.insert(key, dst);
+                                            }
+                                        }
+                                        // Helper: resolve a source resource/mesh name through the map.
+                                        let map_res = |name: &str| -> String {
+                                            res_rename.get(&name.to_ascii_lowercase()).cloned()
+                                                .unwrap_or_else(|| name.to_string())
+                                        };
+                                        // Model resources: insert under their (collision-renamed) names.
                                         for (res_name, res_info) in &src_model_resources {
-                                            let new_name = format!("{}{}", ns, res_name);
+                                            let new_name = map_res(res_name);
                                             if !scene.model_resources.contains_key(&new_name) {
                                                 let mut cloned_res = res_info.clone();
                                                 for binding in &mut cloned_res.shader_bindings {
@@ -1651,9 +1696,9 @@ impl Shockwave3dMemberHandlers {
                                                 scene.model_resources.insert(new_name, cloned_res);
                                             }
                                         }
-                                        // CLOD meshes: namespace to prevent collisions
+                                        // CLOD meshes: insert under their (collision-renamed) names.
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
-                                            let new_name = format!("{}{}", ns, mesh_name);
+                                            let new_name = map_res(mesh_name);
                                             if !scene.clod_meshes.contains_key(&new_name) {
                                                 scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
@@ -1671,9 +1716,9 @@ impl Shockwave3dMemberHandlers {
                                                 scene.texture_content_version += 1;
                                             }
                                         }
-                                        // Raw meshes: namespace to prevent collisions
+                                        // Raw meshes: insert under their (collision-renamed) names.
                                         for raw_mesh in &src_raw_meshes {
-                                            let new_name = format!("{}{}", ns, raw_mesh.name);
+                                            let new_name = map_res(&raw_mesh.name);
                                             if !scene.raw_meshes.iter().any(|m| m.name == new_name) {
                                                 let mut cloned = raw_mesh.clone();
                                                 cloned.name = new_name;
@@ -1694,9 +1739,9 @@ impl Shockwave3dMemberHandlers {
                                         }
                                         // Copy skeletons
                                         let skel_key = if !source_model_resource_name.is_empty() {
-                                            format!("{}{}", ns, source_model_resource_name)
+                                            map_res(&source_model_resource_name)
                                         } else if !source_resource_name.is_empty() {
-                                            format!("{}{}", ns, source_resource_name)
+                                            map_res(&source_resource_name)
                                         } else { String::new() };
                                         for skeleton in &src_skeletons {
                                             if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
@@ -1711,13 +1756,18 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
 
-                        // Add the cloned object to the target scene
-                        let ns = format!("{}_", obj_name);
+                        // Add the cloned object to the target scene. Resolve the root
+                        // model's resource pointers through the same collision-only
+                        // rename map used when the resources were inserted above.
+                        let map_res_out = |name: &str| -> String {
+                            res_rename.get(&name.to_ascii_lowercase()).cloned()
+                                .unwrap_or_else(|| name.to_string())
+                        };
                         let mapped_resource = if !source_resource_name.is_empty() {
-                            format!("{}{}", ns, source_resource_name)
+                            map_res_out(&source_resource_name)
                         } else { source_resource_name.clone() };
                         let mapped_model_resource = if !source_model_resource_name.is_empty() {
-                            format!("{}{}", ns, source_model_resource_name)
+                            map_res_out(&source_model_resource_name)
                         } else { source_model_resource_name.clone() };
 
                         // Don't propagate "DefaultShader" as the node-level shader —
@@ -1794,12 +1844,13 @@ impl Shockwave3dMemberHandlers {
                                             } else if let Some(new_parent) = node_name_map.get(&cloned.parent_name.to_ascii_lowercase()) {
                                                 cloned.parent_name = new_parent.clone();
                                             }
-                                            // Namespace child resource names to match cloned mesh data
+                                            // Repoint child resource names to the (collision-
+                                            // renamed) keys the cloned mesh data was inserted under.
                                             if !cloned.resource_name.is_empty() {
-                                                cloned.resource_name = format!("{}{}", ns, cloned.resource_name);
+                                                cloned.resource_name = map_res_out(&cloned.resource_name);
                                             }
                                             if !cloned.model_resource_name.is_empty() {
-                                                cloned.model_resource_name = format!("{}{}", ns, cloned.model_resource_name);
+                                                cloned.model_resource_name = map_res_out(&cloned.model_resource_name);
                                             }
                                             // Remap shader name if it was renamed during clone
                                             if let Some(new_shader) = shader_name_map.get(&cloned.shader_name) {
