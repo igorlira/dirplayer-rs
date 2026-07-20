@@ -1683,6 +1683,11 @@ impl BuiltInHandlerManager {
             "scrollbyline" => TypeHandlers::scroll_by_line(args),
             "scrollbypage" => TypeHandlers::scroll_by_page(args),
             "rollover" => MovieHandlers::rollover(args),
+            // Legacy function form of the read-only mouse position properties
+            // (`mouseH()` / `mouseV()` — same value as `the mouseH` / `the mouseV`),
+            // in movie/stage pixels. Used by older movies for hit-region tests.
+            "mouseh" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.0)))),
+            "mousev" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.1)))),
             "getpropat" => TypeHandlers::get_prop_at(args),
             "puppetsound" => MovieHandlers::puppet_sound(args),
             "pi" => TypeHandlers::pi(args),
