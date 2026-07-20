@@ -8,6 +8,16 @@ use crate::{
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
 
+/// Director's integer value of a color: a paletteIndex is its index; an RGB
+/// color packs to `r<<16 | g<<8 | b` (the 24-bit value `getPixel(pt, #integer)`
+/// returns for 32-bit images). Used when a color is combined with a scalar.
+fn color_ref_to_i32(c: &ColorRef) -> i32 {
+    match c {
+        ColorRef::PaletteIndex(i) => *i as i32,
+        ColorRef::Rgb(r, g, b) => ((*r as i32) << 16) | ((*g as i32) << 8) | (*b as i32),
+    }
+}
+
 /// Allocate a new `DateObject` whose timestamp is `days_delta` days from
 /// the source date's timestamp. Used by `add_datums` / `subtract_datums`
 /// to implement Director's `date + N` and `date - N` arithmetic, which
@@ -853,6 +863,19 @@ pub fn divide_datums(
             Datum::List(list_type.clone(), result_items, *sorted)
         }
         (Datum::Void, _) => Datum::Int(0),
+        // A color combined with a scalar coerces to its packed integer value
+        // (Director: rgb(r,g,b) → r<<16|g<<8|b, paletteIndex → index). unicraft's
+        // terrainPreview samples a heightmap via `getPixel(x,y) / 65536.0` (no
+        // #integer) and relies on this to pull the red channel out of the packed RGB.
+        (Datum::ColorRef(c), Datum::Int(r)) => {
+            if *r == 0 { Datum::Int(0) } else { Datum::Int(color_ref_to_i32(c) / *r) }
+        }
+        (Datum::ColorRef(c), Datum::Float(r)) => Datum::Float(color_ref_to_i32(c) as f64 / *r),
+        (Datum::Int(l), Datum::ColorRef(c)) => {
+            let d = color_ref_to_i32(c);
+            if d == 0 { Datum::Int(0) } else { Datum::Int(*l / d) }
+        }
+        (Datum::Float(l), Datum::ColorRef(c)) => Datum::Float(l / color_ref_to_i32(c) as f64),
         (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
             let mut result = VecDeque::new();
             for item in list {
