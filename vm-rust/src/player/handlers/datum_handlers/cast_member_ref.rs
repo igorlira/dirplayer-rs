@@ -204,6 +204,30 @@ impl CastMemberRefHandlers {
         match handler_name {
             "duplicate" => Self::duplicate(datum, args),
             "erase" => Self::erase(datum, args),
+            "getPixel" | "setPixel" => {
+                // Director lets image methods be called directly on a bitmap MEMBER
+                // (`member.getPixel(x,y)`), proxying to the member's image object.
+                // unicraft's terrainPreview samples a heightmap this way.
+                use crate::player::handlers::datum_handlers::bitmap::BitmapDatumHandlers;
+                let image_datum = reserve_player_mut(|player| {
+                    let member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new(format!("{}: not a cast member", handler_name))),
+                    };
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                        .ok_or_else(|| ScriptError::new(format!("{}: member not found", handler_name)))?;
+                    match &member.member_type {
+                        CastMemberType::Bitmap(b) => Ok(player.alloc_datum(Datum::BitmapRef(b.image_ref))),
+                        other => Err(ScriptError::new(format!(
+                            "{}: member type {:?} has no image", handler_name, other.member_type_id()))),
+                    }
+                })?;
+                if handler_name == "getPixel" {
+                    BitmapDatumHandlers::get_pixel(&image_datum, args)
+                } else {
+                    BitmapDatumHandlers::set_pixel(&image_datum, args)
+                }
+            }
             "charPosToLoc" => {
                 let member_arg = datum.clone();
                 let mut delegated_args: Vec<DatumRef> = Vec::with_capacity(args.len() + 1);
