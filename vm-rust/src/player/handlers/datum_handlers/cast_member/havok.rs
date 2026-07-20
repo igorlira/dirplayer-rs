@@ -1189,11 +1189,19 @@ impl HavokPhysicsMemberHandlers {
             CastMemberType::HavokPhysics(h) => h,
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
-        let _found = havok
+        let found = havok
             .state
             .rigid_bodies
             .iter()
             .any(|rb| rb.name.eq_ignore_ascii_case(&name));
+
+        // Director returns VOID for a name that isn't a live rigid body; scripts
+        // rely on it (unicraft's initHavok: `repeat with rb in getRBList(...) / if
+        // rb = VOID then exit repeat`). Returning a ref for a missing body made a
+        // later `disableCollision(rb.name, ...)` throw "not found".
+        if !found {
+            return Ok(player.alloc_datum(Datum::Void));
+        }
 
         Ok(player.alloc_datum(Datum::HavokObjectRef(HavokObjectRef {
             cast_lib: member_ref.cast_lib,
