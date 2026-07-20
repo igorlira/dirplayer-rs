@@ -359,9 +359,17 @@ impl HavokObjectDatumHandlers {
                     // interpolatingMoveTo won't reclassify a hover vehicle as a
                     // passive stacking block. See HavokRigidBody::received_force.
                     rb.received_force = true;
-                    rb.force[0] += force[0];
-                    rb.force[1] += force[1];
-                    rb.force[2] += force[2];
+                    // A force applied from a step callback (age-of-speed gravity) is
+                    // per-sub-step and must not be force_scale-attenuated — route it
+                    // to the full-strength accumulator. See IN_STEP_CALLBACK.
+                    let acc = if super::cast_member::havok_physics::in_step_callback() {
+                        &mut rb.step_force
+                    } else {
+                        &mut rb.force
+                    };
+                    acc[0] += force[0];
+                    acc[1] += force[1];
+                    acc[2] += force[2];
                 }
                 Ok(DatumRef::Void)
             }
@@ -384,21 +392,21 @@ impl HavokObjectDatumHandlers {
                     // interpolatingMoveTo can't reclassify this vehicle as a
                     // passive stacking block. See HavokRigidBody::received_force.
                     rb.received_force = true;
-                    // Add linear force (world-space)
-                    rb.force[0] += force[0];
-                    rb.force[1] += force[1];
-                    rb.force[2] += force[2];
 
-                    // Compute world-space lever arm from model-local point.
-                    // From x86 sub_10005A73: rel = point - COM, world_lever = quat_rotate(rel)
+                    // Compute world-space lever arm from the model-local point, so
+                    // torque = lever × force.
                     let rel = v3_sub(point, rb.center_of_mass);
                     let r = quat_rotate_v(rb.orientation, rel);
-
-                    // Torque = cross(world_lever, force)
                     let t = v3_cross(r, force);
-                    rb.torque[0] += t[0];
-                    rb.torque[1] += t[1];
-                    rb.torque[2] += t[2];
+
+                    // A force applied from a step callback is per-sub-step (full
+                    // strength); a force from the frame update is once-per-frame and
+                    // gets force_scale attenuation. Route to the matching accumulator.
+                    if super::cast_member::havok_physics::in_step_callback() {
+                        for i in 0..3 { rb.step_force[i] += force[i]; rb.step_torque[i] += t[i]; }
+                    } else {
+                        for i in 0..3 { rb.force[i] += force[i]; rb.torque[i] += t[i]; }
+                    }
                 }
                 Ok(DatumRef::Void)
             }
