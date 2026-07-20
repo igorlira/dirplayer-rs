@@ -1356,6 +1356,57 @@ impl SpriteDatumHandlers {
             }
         }
 
+        // Direct Flash method call: `sprite(N).someFn(args)` on a Flash-member
+        // sprite invokes the SWF's ActionScript function of that name (Director's
+        // Flash asset method surface — e.g. unicraft's `sprite(12).readUnlockLevel()`
+        // / `writeUnlockLevel(n)` save system). No built-in or behaviour handled it,
+        // so forward to Ruffle. Wait for the instance to be ready first (matching the
+        // getVariable/callFunction path); the JS bridge also queues+replays the call
+        // if it fires early, so the side effect (a callback into Lingo) still runs.
+        if let Ok(Some((sn, cl, cm))) = Self::resolve_sprite_flash_member(&datum) {
+            let is_flash = reserve_player_ref(|player| {
+                player.movie.cast_manager
+                    .find_member_by_ref(&crate::player::cast_lib::CastMemberRef { cast_lib: cl, cast_member: cm })
+                    .map(|m| matches!(m.member_type, crate::player::cast_member::CastMemberType::Flash(_)))
+                    .unwrap_or(false)
+            });
+            if is_flash {
+                let ready = is_flash_instance_ready(sn).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+                if !ready {
+                    reserve_player_mut(|player| player.pre_dispatch_flash_members());
+                    wait_for_flash_ready(sn as i16).await;
+                }
+                reserve_player_mut(|player| { player.flash_ready_sprites.insert(sn as i16); });
+                // Ruffle's argsXml is a JSON array (see flashPlayerManager callFunction).
+                let json_args = reserve_player_ref(|player| {
+                    let parts: Vec<String> = args.iter().map(|a| match player.get_datum(a) {
+                        Datum::Int(i) => i.to_string(),
+                        Datum::Float(f) => f.to_string(),
+                        Datum::String(s) => format!("{:?}", s),
+                        Datum::Symbol(s) => format!("{:?}", s),
+                        _ => "null".to_string(),
+                    }).collect();
+                    format!("[{}]", parts.join(","))
+                });
+                match ruffle_call_function(sn, &root_flash_path(handler_name), &json_args) {
+                    Ok(val) => {
+                        let datum = if let Some(s) = val.as_string() {
+                            Datum::String(s)
+                        } else if let Some(b) = val.as_bool() {
+                            Datum::Int(if b { 1 } else { 0 })
+                        } else if let Some(n) = val.as_f64() {
+                            if n.fract() == 0.0 && n.abs() < i32::MAX as f64 { Datum::Int(n as i32) } else { Datum::Float(n) }
+                        } else {
+                            Datum::Void
+                        };
+                        return reserve_player_mut(|player| Ok(player.alloc_datum(datum)));
+                    }
+                    Err(e) => warn!("sprite direct Flash method '{}' error: {:?}", handler_name, e),
+                }
+                return Ok(DatumRef::Void);
+            }
+        }
+
         // In Director, calling a handler on a sprite that doesn't handle it
         // is silently ignored and returns void.
         Ok(DatumRef::Void)
