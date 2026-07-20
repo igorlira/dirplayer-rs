@@ -171,12 +171,20 @@ impl CastMemberRefHandlers {
             // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
             let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
 
-            // After the step, invoke step callbacks (async, post-step).
+            // After the step, invoke step callbacks (async, post-step). A step
+            // callback may apply per-sub-step forces (age-of-speed applies gravity
+            // this way); mark that context so applyForce routes to the full-strength
+            // `step_force` accumulator rather than the force_scale-attenuated one.
+            // The gravity callback runs synchronously (a plain applyForce loop), so
+            // the flag can't leak across an await.
+            use super::cast_member::havok_physics::IN_STEP_CALLBACK;
             for (cb_handler, cb_instance, dt_value) in &step_cbs {
                 let dt_ref = reserve_player_mut(|player| {
                     player.alloc_datum(Datum::Float(*dt_value))
                 });
+                IN_STEP_CALLBACK.with(|c| c.set(true));
                 let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![dt_ref]).await;
+                IN_STEP_CALLBACK.with(|c| c.set(false));
             }
 
             // Invoke collision interest callbacks (async, post-step).

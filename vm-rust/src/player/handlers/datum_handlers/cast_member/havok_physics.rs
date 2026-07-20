@@ -3,6 +3,29 @@
 
 use crate::player::cast_member::HavokPhysicsState;
 
+thread_local! {
+    /// True while a Havok STEP CALLBACK (registerStepCallback) is executing.
+    /// A step callback fires once per sub-step (per the Xtra docs), so any force it
+    /// applies is per-sub-step and must be applied at FULL strength — NOT attenuated
+    /// by `force_scale`, which is calibrated for once-per-frame game forces. While
+    /// this is set, `applyForce`/`applyForceAtPoint` route into `rb.step_force`
+    /// instead of `rb.force`. Single-threaded wasm, so a thread-local Cell is safe.
+    pub static IN_STEP_CALLBACK: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Run `f` with the step-callback flag set, restoring it afterwards.
+pub fn with_step_callback_flag<R>(f: impl FnOnce() -> R) -> R {
+    IN_STEP_CALLBACK.with(|c| c.set(true));
+    let r = f();
+    IN_STEP_CALLBACK.with(|c| c.set(false));
+    r
+}
+
+/// True while a step callback is executing (see `IN_STEP_CALLBACK`).
+pub fn in_step_callback() -> bool {
+    IN_STEP_CALLBACK.with(|c| c.get())
+}
+
 // ============================================================
 // TYPE ALIASES
 // ============================================================
@@ -1535,6 +1558,12 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
     let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.force, rb.torque)).collect();
+    // Step-callback forces (registerStepCallback, e.g. age-of-speed gravity) are
+    // per-sub-step and applied at FULL strength — no force_scale — because the
+    // callback in real Havok fires once per sub-step. dirplayer fires it once but
+    // re-applies here every sub-step, which is equivalent for a constant force.
+    let saved_step: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
+        .map(|rb| (rb.step_force, rb.step_torque)).collect();
 
     for _sub in 0..n_subs {
         // Reset forces to game values each substep (gravity/drag added in
@@ -1554,14 +1583,14 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
                     (force_scale, force_scale, force_scale)
                 };
                 rb.force = [
-                    saved_forces[i].0[0]/fs,
-                    saved_forces[i].0[1]/fs,
-                    saved_forces[i].0[2]/fs,
+                    saved_forces[i].0[0]/fs + saved_step[i].0[0],
+                    saved_forces[i].0[1]/fs + saved_step[i].0[1],
+                    saved_forces[i].0[2]/fs + saved_step[i].0[2],
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/tsp,   // world X ≈ body pitch
-                    saved_forces[i].1[1]/tsp,   // world Y ≈ body roll
-                    saved_forces[i].1[2]/tsy,   // world Z ≈ body yaw
+                    saved_forces[i].1[0]/tsp + saved_step[i].1[0],   // world X ≈ body pitch
+                    saved_forces[i].1[1]/tsp + saved_step[i].1[1],   // world Y ≈ body roll
+                    saved_forces[i].1[2]/tsy + saved_step[i].1[2],   // world Z ≈ body yaw
                 ];
             }
         }
@@ -1569,10 +1598,13 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         step_single(state, sub_dt);
     }
 
-    // Clear forces after all substeps
+    // Clear forces after all substeps. step_force too — the step callback re-sets
+    // it fresh each frame (post-step), so it must not accumulate across frames.
     for rb in &mut state.rigid_bodies {
         rb.force = [0.0; 3];
         rb.torque = [0.0; 3];
+        rb.step_force = [0.0; 3];
+        rb.step_torque = [0.0; 3];
     }
 
     // Numerical angular damping — not a clamp.

@@ -1920,6 +1920,14 @@ pub struct HavokRigidBody {
     pub angular_momentum: [f64; 3],
     pub force: [f64; 3],
     pub torque: [f64; 3],
+    /// Force/torque applied from a Havok STEP CALLBACK (registerStepCallback).
+    /// The docs say a step callback fires once per sub-step, so these are applied
+    /// at FULL strength every sub-step — NOT attenuated by `force_scale`, which is
+    /// calibrated for once-per-frame game forces. Age-of-speed applies gravity this
+    /// way (`rb.applyForce(gravity*mass)` in its callback); without this the gravity
+    /// came out ~1/6 strength and cars launched off ramps never landed.
+    pub step_force: [f64; 3],
+    pub step_torque: [f64; 3],
     pub center_of_mass: [f64; 3],
     pub corrector: HavokCorrector,
     pub is_fixed: bool,
@@ -2025,6 +2033,8 @@ impl HavokRigidBody {
             angular_momentum: [0.0; 3],
             force: [0.0; 3],
             torque: [0.0; 3],
+            step_force: [0.0; 3],
+            step_torque: [0.0; 3],
             center_of_mass: [0.0; 3],
             corrector: HavokCorrector::default(),
             is_fixed: false,
@@ -2074,6 +2084,8 @@ impl HavokRigidBody {
             angular_momentum: [0.0; 3],
             force: [0.0; 3],
             torque: [0.0; 3],
+            step_force: [0.0; 3],
+            step_torque: [0.0; 3],
             center_of_mass: [0.0; 3],
             corrector: HavokCorrector::default(),
             is_fixed: true,
