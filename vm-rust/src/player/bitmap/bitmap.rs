@@ -1311,7 +1311,7 @@ pub fn resolve_palette_table(
 /// Decompress PackBits/RLE-compressed alpha data with even-padded row width.
 /// Director stores alpha rows padded to 2-byte boundaries; without accounting for
 /// this, odd-width bitmaps get a cumulative 1-byte-per-row diagonal shear.
-fn decompress_alpha_rle(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+pub fn decompress_alpha_rle(data: &[u8], width: usize, height: usize) -> Vec<u8> {
     let padded_width = (width + 1) & !1;
     let pixel_count = width * height;
     let padded_total = padded_width * height;

@@ -8,7 +8,7 @@ use crate::CastMemberRef;
 
 use super::{
     bitmap::{
-        bitmap::{decode_jpeg_bitmap, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
+        bitmap::{decode_jpeg_bitmap, decompress_alpha_rle, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
         manager::{BitmapManager, BitmapRef},
     },
     score::Score,
@@ -3383,6 +3383,77 @@ impl CastMember {
                 }
             }
         } else {
+            // Some 32-bit members store the colour image as a JPEG in an `ediM`
+            // (Media) chunk plus a separate `ALFA` alpha plane, with NO BITD.
+            // Route those to the JPEG+ALFA decoder. Without this, the Raw fallback
+            // below feeds the ALFA alpha plane (w*h bytes) into the 32-bit RLE
+            // decoder, which expects w*h*4 bytes — it decodes only height/4 rows
+            // and leaves the rest of the image black.
+            let edim_jpeg: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                c.as_ref().and_then(|chunk| match chunk {
+                    Chunk::Media(m)
+                        if m.audio_data.len() >= 3
+                            && m.audio_data[0] == 0xFF
+                            && m.audio_data[1] == 0xD8
+                            && m.audio_data[2] == 0xFF => Some(&m.audio_data),
+                    _ => None,
+                })
+            });
+            if let Some(jpeg) = edim_jpeg {
+                let alfa: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                    c.as_ref().and_then(|chunk| match chunk {
+                        Chunk::Raw(d) if !d.is_empty() => Some(d),
+                        _ => None,
+                    })
+                });
+                return match decode_jpeg_bitmap(jpeg, bitmap_info, alfa) {
+                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
+                    Err(e) => {
+                        warn!("Failed to decode ediM JPEG bitmap {}: {:?}. Using empty image.", number, e);
+                        bitmap_manager.add_bitmap(Bitmap::new(
+                            1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+                        ))
+                    }
+                };
+            }
+
+            // A 32-bit alpha+JPEG member whose ediM (colour) chunk is unresolvable —
+            // e.g. an afterburned .dcr whose ABMP omits the per-member ediM while the
+            // KEY* table still references it — arrives here with ONLY the ALFA plane.
+            // The ALFA RLE-decompresses to w*h bytes; feeding it to the 32-bit decoder
+            // (which expects w*h*4) over-reads at row height/4 and renders black with a
+            // warning per bitmap. Build a transparent bitmap from the alpha plane
+            // instead (the colour is genuinely absent from this file).
+            if bitmap_info.bit_depth == 32 {
+                let alfa = member_def.children.iter().find_map(|c| {
+                    c.as_ref().and_then(|chunk| match chunk {
+                        Chunk::Raw(d) if !d.is_empty() => Some(d),
+                        _ => None,
+                    })
+                });
+                if let Some(alfa) = alfa {
+                    let (w, h) = (bitmap_info.width as usize, bitmap_info.height as usize);
+                    let alpha = decompress_alpha_rle(alfa, w, h);
+                    let mut rgba = vec![0u8; w * h * 4];
+                    for i in 0..(w * h) {
+                        rgba[i * 4 + 3] = alpha.get(i).copied().unwrap_or(0);
+                    }
+                    return bitmap_manager.add_bitmap(Bitmap {
+                        width: bitmap_info.width,
+                        height: bitmap_info.height,
+                        bit_depth: 32,
+                        original_bit_depth: 32,
+                        data: rgba,
+                        palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                        matte: None,
+                        use_alpha: bitmap_info.use_alpha,
+                        trim_white_space: bitmap_info.trim_white_space,
+                        was_trimmed: false,
+                        version: 0,
+                    });
+                }
+            }
+
             // No BITD chunk — try Raw chunk data as bitmap pixel data.
             // Chunk::Raw can be either ALFA data or an unrecognized chunk type
             // that contains actual bitmap pixel data, so we must try decompression.
