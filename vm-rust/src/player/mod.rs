@@ -3864,21 +3864,19 @@ pub async fn player_call_script_handler_raw_args(
     let mut backjumps: u32 = 0;
 
     loop {
-        // Check if scope was reused (generation changed = scope was popped and re-pushed)
-        let current_gen = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).unwrap().generation
+        // Single player access per op: read scope generation + bytecode_index and
+        // whether the debugger is active, in ONE closure and ONE scope-slot lookup
+        // (previously two). At ~1M ops/frame this per-op lookup is a real cost.
+        let (current_gen, bytecode_index, debugger_active) = reserve_player_ref(|player| {
+            let scope = player.scopes.get(scope_ref).unwrap();
+            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
+                || !matches!(player.step_mode, StepMode::None);
+            (scope.generation, scope.bytecode_index, debugging)
         });
+        // Scope was reused (generation changed = popped and re-pushed) → done.
         if current_gen != scope_generation {
             break;
         }
-
-        // Single player access to read bytecode_index and debugger state
-        let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
-            let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
-            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
-                || !matches!(player.step_mode, StepMode::None);
-            (bi, debugging)
-        });
 
         // Only check breakpoints and step mode if the debugger is actually active
         if debugger_active {

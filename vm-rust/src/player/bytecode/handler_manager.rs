@@ -39,8 +39,11 @@ struct ExecutionHistoryEntry {
 const EXECUTION_HISTORY_SIZE: usize = 100;
 
 thread_local! {
-    static EXECUTION_HISTORY: std::cell::RefCell<ExecutionHistory> =
-        std::cell::RefCell::new(ExecutionHistory::new());
+    // UnsafeCell, not RefCell: this is written on EVERY bytecode op (~1M/frame),
+    // so the RefCell borrow-flag check was pure per-op overhead. wasm is single-
+    // threaded and `push`/reads never re-enter, so direct access is sound.
+    static EXECUTION_HISTORY: std::cell::UnsafeCell<ExecutionHistory> =
+        std::cell::UnsafeCell::new(ExecutionHistory::new());
 }
 
 struct ExecutionHistory {
@@ -99,14 +102,15 @@ fn record_execution(
     script_cast_member: i32,
 ) {
     EXECUTION_HISTORY.with(|history| {
-        history.borrow_mut().push(ExecutionHistoryEntry {
+        // SAFETY: single-threaded wasm; push does not re-enter or alias.
+        unsafe { (*history.get()).push(ExecutionHistoryEntry {
             opcode: opcode_u16,
             bytecode_pos,
             operand,
             handler_name_id,
             script_cast_lib,
             script_cast_member,
-        });
+        }); }
     });
 }
 
@@ -121,7 +125,8 @@ pub fn dump_execution_history_on_error(error_message: &str) {
         console::error_1(&format!("Error: {}", error_message).into());
 
         EXECUTION_HISTORY.with(|history| {
-            let history = history.borrow();
+            // SAFETY: single-threaded; no concurrent writer during error dump.
+            let history = unsafe { &*history.get() };
             let player = unsafe { PLAYER_OPT.as_ref() };
 
             for (i, entry) in history.iter_recent().enumerate() {
