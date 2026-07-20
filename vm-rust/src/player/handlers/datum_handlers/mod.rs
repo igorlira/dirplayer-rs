@@ -261,6 +261,52 @@ pub async fn player_call_datum_handler(
                 }
             }
         }
+        DatumType::StageRef => {
+            // `(the stage).PROP` and `(the stage).PROP[i]` compile to
+            // getProp/getPropRef/getAt on the Stage datum (e.g. the unicraft galaxy's
+            // `(the stage).rect[3] - (the stage).rect[1]`). Without a StageRef arm these
+            // fell to the `_ =>` default → VOID, so stageWidth came out 0 (title baked
+            // off-screen, and the mouse→rotation math divided by zero → endless spin).
+            // Resolve the property via get_stage_prop and index Rect/Point/List results.
+            match handler_name {
+                "getProp" | "getAt" | "getPropRef" if !args.is_empty() => {
+                    reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::Datum;
+                        let prop_name = player.get_datum(&args[0]).string_value()?;
+                        let prop_datum = crate::player::stage::get_stage_prop(player, &prop_name)?;
+                        if args.len() > 1 {
+                            let index = player.get_datum(&args[1]).int_value()?;
+                            let idx = (index as usize).saturating_sub(1);
+                            match prop_datum {
+                                Datum::Rect(vals, _) => {
+                                    if idx < 4 { Ok(player.alloc_datum(Datum::Int(vals[idx] as i32))) }
+                                    else { Ok(DatumRef::Void) }
+                                }
+                                Datum::Point(vals, _) => {
+                                    if idx < 2 { Ok(player.alloc_datum(Datum::Int(vals[idx] as i32))) }
+                                    else { Ok(DatumRef::Void) }
+                                }
+                                Datum::List(_, items, _) => {
+                                    if idx < items.len() { Ok(items[idx].clone()) } else { Ok(DatumRef::Void) }
+                                }
+                                other => Ok(player.alloc_datum(other)),
+                            }
+                        } else {
+                            Ok(player.alloc_datum(prop_datum))
+                        }
+                    })
+                }
+                _ => {
+                    // Bare property/method access: try get_stage_prop, else VOID.
+                    reserve_player_mut(|player| {
+                        match crate::player::stage::get_stage_prop(player, handler_name) {
+                            Ok(d) => Ok(player.alloc_datum(d)),
+                            Err(_) => Ok(DatumRef::Void),
+                        }
+                    })
+                }
+            }
+        }
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Transform3d => transform3d::Transform3dDatumHandlers::call(obj_ref, handler_name, args),
