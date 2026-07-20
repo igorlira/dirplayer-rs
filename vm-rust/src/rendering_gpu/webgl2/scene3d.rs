@@ -69,6 +69,7 @@ struct Shader3d {
     u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
+    u_texture_unlit: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
     u_has_lightmap: Option<WebGlUniformLocation>,
     u_lightmap_intensity: Option<WebGlUniformLocation>,
@@ -416,6 +417,7 @@ uniform float u_opacity;
 uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
+uniform int u_texture_unlit;   // 1 = #replace first layer: show texture as-is (unlit)
 uniform sampler2D u_lightmap_tex;
 uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
 uniform float u_lightmap_intensity;
@@ -590,7 +592,12 @@ void main() {
         // are identity-white for normal meshes; extruded 3D text bakes its tunnel
         // shading here (gray side walls vs white front) so the glyphs read 3D.
         vec3 vcol_t = (u_has_vertex_color > 0) ? v_vertex_color.rgb : vec3(1.0);
-        vec3 final_color = tex_sample.rgb * lighting * vcol_t;
+        // #replace first layer (u_texture_unlit): the texture is shown as-is, not
+        // blended with the surface shading (Director: "prevents the texture from
+        // being blended with the color set by the shader's diffuse property"). Used
+        // by skybox/backdrop planes so the nebula shows at full brightness instead of
+        // being dimmed by the ambient-only lighting.
+        vec3 final_color = (u_texture_unlit > 0) ? tex_sample.rgb : tex_sample.rgb * lighting * vcol_t;
 
         // Apply second texture layer (shadow/lightmap) if present
         if (u_has_lightmap > 0) {
@@ -733,6 +740,7 @@ void main() {
             u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
+            u_texture_unlit: u("u_texture_unlit"),
             u_lightmap_tex: u("u_lightmap_tex"),
             u_has_lightmap: u("u_has_lightmap"),
             u_lightmap_intensity: u("u_lightmap_intensity"),
@@ -2001,9 +2009,12 @@ void main() {
                             }
                         }
                     }
-                    if opacity < 0.999 {
-                        // Genuinely translucent → defer to the transparent pass, sorted
-                        // by camera distance.
+                    // Translucent (blend<100) OR a script-marked `transparent` shader
+                    // (soft alpha blend, e.g. the galaxy glow plane at blend=100) →
+                    // transparent pass, sorted back-to-front. Without the transparent-shader
+                    // branch such a plane fell to the cutout pass and rendered as a hard
+                    // opaque disk instead of a soft glow.
+                    if opacity < 0.999 || Self::model_uses_transparent_shader(model_node, runtime_state) {
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
@@ -2534,7 +2545,14 @@ void main() {
         };
         let res_info = scene.model_resources.get(resource);
 
-        let is_skybox = model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox");
+        // Rasterwerks tags its skybox nodes `SB_*` under a `*SkyBox*` parent; other
+        // movies just name a big camera-enclosing box "skybox" (unicraft clones one
+        // from a cast member and scales it ×1000). Both need the same treatment:
+        // render inside-out (no cull), camera-centered, past the normal far plane —
+        // otherwise the box's inner faces are culled/clipped and the starfield
+        // background is missing (only the foreground galaxy plane shows).
+        let is_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox"))
+            || model_node.name.to_ascii_lowercase().contains("skybox");
         let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
@@ -2589,7 +2607,10 @@ void main() {
                 sky_view[14] = 0.0;
                 gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &sky_view);
                 let near = projection_matrix[14] / (projection_matrix[10] - 1.0);
-                let far = 200000.0f32;
+                // Generous far: the box is camera-centered and drawn depth-masked, so
+                // precision is irrelevant; it only must not clip a large scaled skybox
+                // (Rasterwerks ≈32000; unicraft's is scaled ×1000 to hundreds of thousands).
+                let far = 8_000_000.0f32;
                 let nf = 1.0 / (near - far);
                 let mut sky_proj = *projection_matrix;
                 sky_proj[10] = (far + near) * nf;
@@ -2701,6 +2722,22 @@ void main() {
                 .or_else(|| m.get(&0))
                 .or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v))
         })
+    }
+
+    /// True if the model's effective shader was explicitly marked `.transparent = 1`
+    /// by the script (tracked in runtime_state.transparent_shaders). Such a model
+    /// alpha-blends softly and belongs in the transparent pass even at full opacity.
+    fn model_uses_transparent_shader(
+        model_node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let rs = match runtime_state { Some(rs) => rs, None => return false };
+        if rs.transparent_shaders.is_empty() { return false; }
+        let name = Self::node_shader_override(rs, &model_node.name, None)
+            .cloned()
+            .unwrap_or_else(|| model_node.shader_name.clone());
+        if name.is_empty() { return false; }
+        rs.transparent_shaders.iter().any(|s| s.eq_ignore_ascii_case(&name))
     }
 
     fn get_model_opacity(
@@ -3800,7 +3837,7 @@ void main() {
             .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
-        Self::apply_blend_mode(gl, opacity, first_blend_func, force_blend);
+        Self::apply_blend_mode(gl, shader, opacity, first_blend_func, force_blend);
     }
 
     /// Get the first texture layer's blend_func for a model node
@@ -3873,7 +3910,7 @@ void main() {
                 }
                 let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
+                Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -3974,7 +4011,7 @@ void main() {
                     .map(|l| l.blend_func)
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
+                Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -4013,7 +4050,7 @@ void main() {
             } else {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
             }
-            Self::apply_blend_mode(gl, mat.opacity, best_blend_func, force_blend);
+            Self::apply_blend_mode(gl, shader, mat.opacity, best_blend_func, force_blend);
             return true;
         }
 
@@ -4033,7 +4070,10 @@ void main() {
 
     /// Set GL blend mode based on material opacity and shader blend function.
     /// `force_blend` = true when drawing in the transparent pass (models with alpha textures).
-    fn apply_blend_mode(gl: &WebGl2RenderingContext, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
+    fn apply_blend_mode(gl: &WebGl2RenderingContext, shader: &Shader3d, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
+        // #replace (2) first layer → texture shown unlit (as-is). See the fragment
+        // shader's u_texture_unlit branch. All other modes shade normally.
+        gl.uniform1i(shader.u_texture_unlit.as_ref(), if first_layer_blend_func == 2 { 1 } else { 0 });
         if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
@@ -4369,7 +4409,29 @@ void main() {
 
         let (fov, near, far, aspect) = if let Some(node) = view_node {
             let mut f = node.far_plane;
-            if f > 100000.0 || f <= 0.0 { f = 10000.0; }
+            // Director's default camera `yon` is effectively unbounded, but dirplayer
+            // stores a small default (10000) on empty 3D members and previously clamped
+            // any far > 100000 back down to 10000. Large-coordinate scenes (e.g. the
+            // unicraft galaxy — camera at ~180000 units, geometry at the origin) were
+            // then entirely far-clipped and rendered black (picking still worked because
+            // raycasts ignore the far plane). When the stored far is that default /
+            // invalid / over-large sentinel, fit it to the furthest geometry from the
+            // camera instead. Explicitly-set, in-range far values (e.g. gameplay `yon`)
+            // are left alone — no per-frame scan and no override.
+            let needs_fit = f <= 0.0 || f > 100000.0 || (f - 10000.0).abs() < 0.5;
+            if needs_fit {
+                let cam_world = self.accumulate_transform_with_state(scene, node, runtime_state);
+                let cp = [cam_world[12], cam_world[13], cam_world[14]];
+                let mut scene_far = 0.0f32;
+                for m in scene.nodes.iter().filter(|nn| nn.node_type == W3dNodeType::Model) {
+                    let wt = self.accumulate_transform_with_state(scene, m, runtime_state);
+                    let d = ((wt[12]-cp[0]).powi(2) + (wt[13]-cp[1]).powi(2) + (wt[14]-cp[2]).powi(2)).sqrt();
+                    if d > scene_far { scene_far = d; }
+                }
+                // Margin for object radius / geometry beyond node origin, floored so tiny
+                // scenes keep a sane far, capped so depth precision stays usable.
+                f = (scene_far * 1.5).clamp(10000.0, 4_000_000.0);
+            }
             let mut n = node.near_plane;
             if n <= 0.0 { n = 1.0; }
             // Director scales the projection plane to fit the SPRITE rect, so the
@@ -4422,11 +4484,19 @@ void main() {
 
         // dirplayer injects fallback default lights (Default*/UI*) so an unlit scene
         // is still visible. When the movie supplies its OWN directional/spot lighting
-        // (e.g. frog01's spot/spot2), those synthetic fallbacks flood the scene and
-        // wash out the intended mood — so suppress them in that case. Baked content
-        // lights (e.g. AmbientLightResource from the .w3d) are kept.
+        // (e.g. frog01's spot/spot2), the synthetic *directional* fallback floods the
+        // scene and washes out the intended mood — so suppress it in that case. Baked
+        // content lights (e.g. AmbientLightResource from the .w3d) are kept.
+        //
+        // The AMBIENT fallback (DefaultAmbient) is NOT suppressed: it stands in for
+        // Director's always-present default ambient in an empty 3D member, and movies
+        // configure it directly (e.g. `w.light(1).color = rgb(255,255,255)`) as the
+        // scene's base fill. Dropping it left ambient-lit scenes (unicraft's galaxy)
+        // fully black.
         let is_fallback_light = |name: &str| matches!(name,
             "DefaultAmbient" | "DefaultDirectional" | "UIAmbient" | "UIDirectional");
+        let is_fallback_directional = |name: &str| matches!(name,
+            "DefaultDirectional" | "UIDirectional");
         let has_movie_light = scene.lights.iter().any(|l|
             l.enabled && !is_fallback_light(&l.name)
             && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
@@ -4462,8 +4532,9 @@ void main() {
                 if !light.enabled {
                     continue;
                 }
-                // Suppress dirplayer's synthetic fallback lights when the movie lights itself.
-                if has_movie_light && is_fallback_light(&light.name) {
+                // Suppress only the synthetic fallback *directional* key when the movie
+                // lights itself; keep the ambient fallback as Director's base fill.
+                if has_movie_light && is_fallback_directional(&light.name) {
                     continue;
                 }
                 // Skip lights that have been removed from world

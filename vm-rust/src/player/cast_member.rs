@@ -1246,6 +1246,13 @@ pub struct Shockwave3dRuntimeState {
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
     pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,
+    /// Shader names (as authored) the script explicitly set `.transparent = 1` on.
+    /// Such shaders alpha-BLEND softly (Director's default #blend), so a model
+    /// carrying one is routed to the transparent pass even at blend=100 — instead
+    /// of the hard-edged alpha-test cutout pass (which turned the galaxy glow plane
+    /// into an opaque white disk). Only script-set shaders are tracked, so parsed
+    /// .w3d cutout foliage (frog01) is unaffected.
+    pub transparent_shaders: std::collections::HashSet<String>,
     /// Text3D model resources created by `someTextMember.extrude3d(thisScene)`,
     /// keyed by the resource name in this member's scene. Retains the source
     /// glyphs + extrude state so the resource's tunnelDepth/bevelType/bevelDepth/
