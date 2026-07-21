@@ -3411,27 +3411,30 @@ impl Score {
         }
     }
 
-    pub fn get_frame_palette(&self, frame: u32) -> PaletteRef {
+    /// The most recent palette-channel entry at or before `frame` that selects a
+    /// real **custom cast palette** (member > 0), carrying forward across frames
+    /// that don't change the palette. Returns `None` when no such entry exists, in
+    /// which case the caller should fall back to the movie's default palette.
+    ///
+    /// Channel entries with `member <= 0` are treated as "no palette change" here:
+    /// confirmed against real Adobe Director on Ask Chef, where the kitchen frames'
+    /// `member == -1` / `member == 0` entries leave the movie default palette
+    /// (counter.pict) active rather than forcing a SystemMac built-in.
+    pub fn get_frame_cast_palette(&self, frame: u32) -> Option<PaletteRef> {
         self.palette_channel_data
             .iter()
             .rev()
-            .find(|(frame_idx, _, _)| *frame_idx < frame)
-            .map(|(_, cast_lib, member)| {
-                if *member < 0 {
-                    // Negative member = built-in palette
-                    PaletteRef::from(*member, *cast_lib, 0)
-                } else if *member > 0 {
-                    // Positive member = cast member palette
-                    PaletteRef::Member(CastMemberRef {
+            .filter(|(frame_idx, _, _)| *frame_idx < frame)
+            .find_map(|(_, cast_lib, member)| {
+                if *member > 0 {
+                    Some(PaletteRef::Member(CastMemberRef {
                         cast_lib: *cast_lib as i32,
                         cast_member: *member as i32,
-                    })
+                    }))
                 } else {
-                    // member == 0: use system default
-                    PaletteRef::BuiltIn(get_system_default_palette())
+                    None
                 }
             })
-            .unwrap_or_else(|| PaletteRef::BuiltIn(get_system_default_palette()))
     }
 }
 

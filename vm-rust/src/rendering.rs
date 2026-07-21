@@ -338,12 +338,14 @@ pub fn render_preview_bitmap(
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
             let palettes = &player.movie.cast_manager.palettes();
+            // bg_color is a bare palette index -> resolve via the active palette.
+            let active_palette = player.movie.get_active_palette(player.movie.current_frame);
             bitmap.fill_relative_rect(
                 0, 0, 0, 0,
                 resolve_color_ref(
                     &palettes,
                     &player.bg_color,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
+                    &active_palette,
                     original_bit_depth,
                 ),
                 palettes,
@@ -1334,7 +1336,7 @@ fn render_filmloop_from_channel_data(
                     ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
                 };
 
-                let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                let frame_palette = player.movie.get_active_palette(player.movie.current_frame);
                 bitmap.draw_shape_with_sprite(&temp_sprite, &shape_member.shape_info, sprite_rect, &palettes, &frame_palette);
             }
             CastMemberType::VectorShape(vector_member) => {
@@ -1708,7 +1710,10 @@ pub fn render_score_to_bitmap_with_offset(
         return;
     }
 
-    // For stage rendering, use the player's background color
+    // For stage rendering, use the player's background color. The stage color is a
+    // bare palette index, so resolve it through the movie's active palette for this
+    // frame (score palette channel -> movie default palette -> system).
+    let active_palette = player.movie.get_active_palette(player.movie.current_frame);
     bitmap.clear_rect(
         dest_rect.left,
         dest_rect.top,
@@ -1717,7 +1722,7 @@ pub fn render_score_to_bitmap_with_offset(
         resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &active_palette,
             bitmap.original_bit_depth,
         ),
         &palettes,
@@ -1997,7 +2002,7 @@ pub fn render_score_to_bitmap_with_offset(
                     }
                 }
 
-                let frame_palette = player.movie.score.get_frame_palette(player.movie.current_frame);
+                let frame_palette = player.movie.get_active_palette(player.movie.current_frame);
                 debug!(
                     "  SHAPE RENDER: channel {} member {:?} type {:?} size {}x{} color {:?} bg {:?} ink {} blend {} filled={} lineThick={}",
                     channel_num, sprite.member, shape_member.shape_info.shape_type,

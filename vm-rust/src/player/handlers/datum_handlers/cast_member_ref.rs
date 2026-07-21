@@ -771,8 +771,7 @@ impl CastMemberRefHandlers {
                             let palettes: &_ = &*palettes_rc;
                             let frame_palette = player
                                 .movie
-                                .score
-                                .get_frame_palette(player.movie.current_frame);
+                                .get_active_palette(player.movie.current_frame);
                             let fg_rgb = resolve_color_ref(
                                 palettes,
                                 &ColorRef::PaletteIndex(info_owned.fore_color),

@@ -173,6 +173,36 @@ impl Movie {
         self.stage_color_ref = stage_color_ref;
     }
 
+    /// The movie's default palette (cast/VWCF config) as a `PaletteRef`, if set.
+    /// `member > 0` is a custom palette cast member; `member < 0` a built-in id.
+    pub fn default_palette_ref(&self) -> Option<crate::player::bitmap::bitmap::PaletteRef> {
+        use crate::player::bitmap::bitmap::PaletteRef;
+        let config = &self.file.as_ref()?.config;
+        let member = config.default_palette_member;
+        if member > 0 {
+            Some(PaletteRef::Member(CastMemberRef {
+                cast_lib: config.default_palette_castlib as i32,
+                cast_member: member as i32,
+            }))
+        } else if member < 0 {
+            Some(PaletteRef::from(member, config.default_palette_castlib, 0))
+        } else {
+            None
+        }
+    }
+
+    /// The palette active for `frame`, used to resolve bare palette indices (the
+    /// stage background colour, shape colours, …). Resolution order matches Adobe
+    /// Director: the most recent score palette-channel entry that sets a real cast
+    /// palette, else the movie's default palette, else the system palette.
+    pub fn get_active_palette(&self, frame: u32) -> crate::player::bitmap::bitmap::PaletteRef {
+        use crate::player::bitmap::bitmap::{get_system_default_palette, PaletteRef};
+        self.score
+            .get_frame_cast_palette(frame)
+            .or_else(|| self.default_palette_ref())
+            .unwrap_or_else(|| PaletteRef::BuiltIn(get_system_default_palette()))
+    }
+
     pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
         match_ci!(prop, {
             "alertHook" => match self.alert_hook.to_owned() {
