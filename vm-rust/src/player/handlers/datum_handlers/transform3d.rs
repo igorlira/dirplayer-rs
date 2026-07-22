@@ -198,6 +198,7 @@ impl Transform3dDatumHandlers {
             "scale" => Self::scale(datum, args, true),
             "preScale" => Self::scale(datum, args, false),
             "inverse" => Self::inverse(datum),
+            "invert" => Self::invert(datum),
             "duplicate" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
             "interpolate" => Self::interpolate(datum, args),
@@ -363,6 +364,21 @@ impl Transform3dDatumHandlers {
             };
             let inv = mat4_invert_affine(&m);
             Ok(player.alloc_datum(Datum::Transform3d(inv)))
+        })
+    }
+
+    /// invert() inverts the transform IN PLACE (mutates the original), unlike
+    /// inverse() which returns a copy (Director Scripting Dictionary).
+    fn invert(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
+            let m = match player.get_datum(datum) {
+                Datum::Transform3d(m) => *m,
+                _ => return Err(ScriptError::new("Expected Transform3d".into())),
+            };
+            let inv = mat4_invert_affine(&m);
+            *player.get_datum_mut(datum) = Datum::Transform3d(inv);
+            Ok(DatumRef::Void)
         })
     }
 

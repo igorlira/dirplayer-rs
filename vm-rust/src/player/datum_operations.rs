@@ -710,12 +710,21 @@ pub fn multiply_datums(
             let z = m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14];
             Datum::Vector([x, y, z])
         }
-        // Transform3d * Transform3d = matrix multiply
+        // Transform3d * Transform3d = matrix multiply.
+        // Director transforms are column-major / column-vector: `transform * vector`
+        // applies the transform to the vector (T·v), so `A * B` must be the standard
+        // product A·B for (A*B)*v == A*(B*v) to hold. `A * B` therefore applies B's
+        // effects first, then A's (e.g. `bone.worldTransform * localOffset` places the
+        // local offset in the bone's world frame). Column-major indexing: M[row][col] = m[col*4+row].
         (Datum::Transform3d(a), Datum::Transform3d(b)) => {
             let mut r = [0.0f64; 16];
-            for row in 0..4 {
-                for col in 0..4 {
-                    r[row * 4 + col] = a[row*4]*b[col] + a[row*4+1]*b[4+col] + a[row*4+2]*b[8+col] + a[row*4+3]*b[12+col];
+            for col in 0..4 {
+                for row in 0..4 {
+                    r[col * 4 + row] =
+                        a[row] * b[col*4]
+                        + a[4 + row] * b[col*4 + 1]
+                        + a[8 + row] * b[col*4 + 2]
+                        + a[12 + row] * b[col*4 + 3];
                 }
             }
             Datum::Transform3d(r)
