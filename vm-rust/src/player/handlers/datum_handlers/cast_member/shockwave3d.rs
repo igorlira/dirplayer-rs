@@ -1737,18 +1737,27 @@ impl Shockwave3dMemberHandlers {
                                                 scene.nodes.push(node.clone());
                                             }
                                         }
-                                        // Copy skeletons
+                                        // Copy the skeleton that BELONGS to the source model
+                                        // (named after its resource), not just the first skeleton
+                                        // in the source scene — which may be a DIFFERENT model's
+                                        // rig (e.g. a 3-bone hair skeleton). Copying the wrong one
+                                        // left the cloned biped with too few bones, so bone[6]
+                                        // (the head) was out of range: the hair fell back to the
+                                        // model transform and the skeletal animation couldn't pose.
                                         let skel_key = if !source_model_resource_name.is_empty() {
                                             map_res(&source_model_resource_name)
                                         } else if !source_resource_name.is_empty() {
                                             map_res(&source_resource_name)
                                         } else { String::new() };
-                                        for skeleton in &src_skeletons {
+                                        let src_skel = src_skeletons.iter().find(|s|
+                                                s.name.eq_ignore_ascii_case(&source_model_resource_name)
+                                                || s.name.eq_ignore_ascii_case(&source_resource_name))
+                                            .or_else(|| src_skeletons.first());
+                                        if let Some(skeleton) = src_skel {
                                             if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
                                                 let mut cloned = skeleton.clone();
                                                 cloned.name = skel_key.clone();
                                                 scene.skeletons.push(cloned);
-                                                break;
                                             }
                                         }
                                     }

@@ -1579,10 +1579,18 @@ impl Shockwave3dObjectDatumHandlers {
                                 "bias" => lod.bias = value.to_float().unwrap_or(100.0) as f32,
                                 _ => {},
                             });
-                            // Re-decode CLOD meshes at the new LOD level
+                            // Re-decode CLOD meshes ONLY when an explicit `level` is set.
+                            // `bias`/`auto` configure the auto-LOD system (distance-based) and must
+                            // NOT re-tessellate the mesh on assignment — Director's `lod.bias` "has
+                            // no effect when auto is FALSE" and never swaps geometry by itself.
+                            // Re-decoding on a `bias` set replaced the good mesh with a re-decoded
+                            // one whose texcoords were lost, so a skinned, script-textured model
+                            // (the LEGO minifig) went untextured/yellow one frame after
+                            // `lod.bias = 15`.
                             let lod_level = lod.level;
                             let node_name = s3d_ref.name.clone();
-                            if let Some(scene) = w3d.scene_mut() {
+                            if prop_name.eq_ignore_ascii_case("level") {
+                              if let Some(scene) = w3d.scene_mut() {
                                 // Find the resource name for this model node
                                 let resource_key = scene.nodes.iter()
                                     .find(|n| n.name == node_name)
@@ -1605,6 +1613,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         scene.mesh_content_version += 1;
                                     }
                                 }
+                              }
                             }
                         }
                     }
@@ -5514,7 +5523,30 @@ impl Shockwave3dObjectDatumHandlers {
                     if detached {
                         Ok(player.alloc_datum(Datum::Void))
                     } else {
-                        Ok(player.alloc_datum(Datum::String(n.parent_name.clone())))
+                        // Director returns the parent NODE object (model/camera/light/
+                        // group), not its name — so chained access like
+                        // `model.parent.getWorldTransform()` works. The world root
+                        // ("World") is a group. Resolve the parent node's type.
+                        use crate::director::lingo::datum::Shockwave3dObjectRef;
+                        use crate::director::chunks::w3d::types::W3dNodeType;
+                        let pname = n.parent_name.clone();
+                        if pname.is_empty() {
+                            Ok(player.alloc_datum(Datum::Void))
+                        } else {
+                            let obj_type = scene.nodes.iter()
+                                .find(|pn| pn.name.eq_ignore_ascii_case(&pname))
+                                .map(|pn| match pn.node_type {
+                                    W3dNodeType::View => "camera",
+                                    W3dNodeType::Light => "light",
+                                    W3dNodeType::Group => "group",
+                                    _ => "model",
+                                })
+                                .unwrap_or("group");
+                            Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                                cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
+                                object_type: obj_type.to_string(), name: pname,
+                            })))
+                        }
                     }
                 } else {
                     Ok(player.alloc_datum(Datum::Void))
@@ -6438,10 +6470,30 @@ impl Shockwave3dObjectDatumHandlers {
                 if detached {
                     Ok(player.alloc_datum(Datum::Void))
                 } else {
-                    let parent = scene.nodes.iter().find(|n| n.name == node_name)
+                    // Return the parent NODE object (not its name) so chained access
+                    // like `node.parent.getWorldTransform()` works. World root = group.
+                    use crate::director::lingo::datum::Shockwave3dObjectRef;
+                    use crate::director::chunks::w3d::types::W3dNodeType;
+                    let pname = scene.nodes.iter().find(|n| n.name == node_name)
                         .map(|n| n.parent_name.clone())
                         .unwrap_or_default();
-                    Ok(player.alloc_datum(Datum::String(parent)))
+                    if pname.is_empty() {
+                        Ok(player.alloc_datum(Datum::Void))
+                    } else {
+                        let obj_type = scene.nodes.iter()
+                            .find(|pn| pn.name.eq_ignore_ascii_case(&pname))
+                            .map(|pn| match pn.node_type {
+                                W3dNodeType::View => "camera",
+                                W3dNodeType::Light => "light",
+                                W3dNodeType::Group => "group",
+                                _ => "model",
+                            })
+                            .unwrap_or("group");
+                        Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                            cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
+                            object_type: obj_type.to_string(), name: pname,
+                        })))
+                    }
                 }
             },
             "transform" => {
