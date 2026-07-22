@@ -4160,9 +4160,20 @@ void main() {
             _ => return false,
         };
 
+        // The biped mesh is bound to the MOTION's frame 0, not the skeleton HTree rest —
+        // so build inv_bind from the motion's first frame for it. (Other rigs bind to rest.)
+        let bind_to_motion_frame0 = resource_name.to_ascii_lowercase().contains("biped");
+
         // Compute inverse bind matrices fresh (bypass cache to ensure correct transpose)
         let inv_bind_fresh = {
-            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, None, 0.0);
+            let bind_motion = if bind_to_motion_frame0 {
+                let cmn = runtime_state.and_then(|rs| rs.bones_player(model_name))
+                    .filter(|b| b.current_motion.is_some())
+                    .and_then(|b| b.current_motion.as_deref())
+                    .or_else(|| runtime_state.and_then(|rs| rs.current_motion.as_deref()));
+                cmn.and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)))
+            } else { None };
+            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, bind_motion, 0.0);
             rest.iter().map(|m| {
                 // Proper column-major affine inverse: R^-1 = R^T, t^-1 = -R^T * t
                 let (r00,r01,r02) = (m[0], m[4], m[8]);
