@@ -1992,29 +1992,21 @@ void main() {
                     }
                     // Check if this model is transparent
                     let opacity = self.get_model_opacity(scene, model_node, runtime_state);
-                    // One-time log for lightbox/water/black opacity
-                    if model_node.name.contains("lightbox") || model_node.name.contains("water")
-                        || model_node.name.contains("BLACK") || model_node.name.contains("BAR_")
-                    {
-                        use std::sync::Mutex;
-                        use std::collections::HashSet;
-                        static LOGGED_OP: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                        if let Ok(mut guard) = LOGGED_OP.lock() {
-                            let set = guard.get_or_insert_with(HashSet::new);
-                            if set.insert(model_node.name.clone()) {
-                                log(&format!(
-                                    "[W3D-OPACITY] model=\"{}\" opacity={:.3} pass={}",
-                                    model_node.name, opacity, if opacity < 0.999 { "transparent" } else { "opaque" }
-                                ));
-                            }
-                        }
-                    }
                     // Translucent (blend<100) OR a script-marked `transparent` shader
                     // (soft alpha blend, e.g. the galaxy glow plane at blend=100) →
                     // transparent pass, sorted back-to-front. Without the transparent-shader
                     // branch such a plane fell to the cutout pass and rendered as a hard
                     // opaque disk instead of a soft glow.
-                    if opacity < 0.999 || Self::model_uses_transparent_shader(model_node, runtime_state) {
+                    // Director gates transparency on shader.blend (default 100 = opaque)
+                    // and shader.transparent, NOT on the W3D material's opacity field. So a
+                    // low material opacity only means "translucent" when the surface isn't
+                    // an opaque textured solid — otherwise finalDrive's `chassis` (material
+                    // opacity 0.2, opaque camo texture) rendered 20% see-through, letting you
+                    // look through the car body at the passengers.
+                    let is_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
+                        || (opacity < 0.999
+                            && !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state));
+                    if is_transparent {
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
@@ -2718,9 +2710,24 @@ void main() {
         mesh_idx: Option<usize>,
     ) -> Option<&'a String> {
         rs.node_shaders.get(node_name).and_then(|m| {
-            mesh_idx.and_then(|idx| m.get(&idx))
-                .or_else(|| m.get(&0))
-                .or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v))
+            match mesh_idx {
+                Some(idx) => m.get(&idx)
+                    // Whole-model fallback: a `model.shaderList = shader` assignment
+                    // (applied to every mesh) is stored as the SOLE override at index
+                    // 0. Only then does a mesh without its own entry inherit it. When
+                    // the script set specific indices (`shaderList[1]`, `shaderList[2]`,
+                    // …), an unset mesh keeps its DEFAULT resource shader — otherwise the
+                    // LEGO minifig's legs (mesh 2, no override) inherited the head shader
+                    // (mesh 0) and rendered as yellow skin instead of blue legs.
+                    .or_else(|| if m.len() == 1 { m.get(&0) } else { None }),
+                // Whole-model query (no mesh index): return a representative override —
+                // mesh 0, else the lowest index. Used by opacity / transparent-shader /
+                // material lookups that need the model's primary shader (e.g. unicraft's
+                // galaxy glow plane, whose `.transparent = 1` shader must still be found).
+                // The per-mesh render path passes Some(idx), so this can't re-leak the
+                // LEGO legs (that's guarded by the Some branch above).
+                None => m.get(&0).or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v)),
+            }
         })
     }
 
@@ -2809,6 +2816,43 @@ void main() {
 
     /// Check if a model's shader references any texture that has alpha data.
     /// Used to route such models to the transparent rendering pass.
+    /// True if the model is covered by a fully-OPAQUE diffuse texture (a bound texture
+    /// layer whose image has no alpha). Director gates transparency on shader.blend
+    /// (default 100 = opaque), NOT on the W3D material's opacity field — so a textured
+    /// solid like finalDrive's `chassis` (material opacity 0.2, opaque camo texture)
+    /// must render solid, not 20% see-through. A genuinely translucent surface is a
+    /// plain colour material or an alpha texture, which this returns false for.
+    fn model_has_opaque_texture(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return false };
+        let mut shader_names: Vec<String> = Vec::new();
+        if let Some(rs) = runtime_state {
+            if let Some(m) = rs.node_shaders.get(&model_node.name) { shader_names.extend(m.values().cloned()); }
+        }
+        if !model_node.shader_name.is_empty() { shader_names.push(model_node.shader_name.clone()); }
+        let resource = if !model_node.model_resource_name.is_empty() { &model_node.model_resource_name } else { &model_node.resource_name };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for b in &res_info.shader_bindings { for s in &b.mesh_bindings { shader_names.push(s.clone()); } }
+        }
+        for shader_name in &shader_names {
+            if let Some(sh) = Self::find_shader_ci(&scene.shaders, shader_name) {
+                for layer in &sh.texture_layers {
+                    let lname = layer.name.to_lowercase();
+                    // A loaded texture that is NOT flagged as carrying alpha = opaque cover.
+                    if gpu_data.textures.contains_key(&lname) && !gpu_data.alpha_textures.contains(&lname) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn model_has_alpha_texture(
         &self,
         scene: &W3dScene,
@@ -3945,8 +3989,13 @@ void main() {
             }
         }
 
+        // Per-mesh: query THIS mesh's override (not the whole model). Passing None here
+        // leaked mesh 0's shader onto every unset mesh — the LEGO minifig legs (mesh 2,
+        // no override) inherited the head shader (mesh 0) and rendered yellow. A single
+        // whole-model `shaderList = shader` is still honored: node_shader_override's
+        // Some(idx) branch returns mesh 0 when it's the sole override.
         let effective_shader_name = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
             .cloned()
             .unwrap_or_else(|| model_node.shader_name.clone());
         if !effective_shader_name.is_empty() {
