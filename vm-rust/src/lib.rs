@@ -1360,11 +1360,14 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         if let Some(scene) = w3d.scene_mut() {
-                            // Only bump the content version when the pixels actually
-                            // change size (cheap static-SWF guard mirroring the
-                            // renderer's length-based incremental check).
+                            // Bump the content version when the pixels actually change —
+                            // by CONTENT, not just byte length. A Flash SWF often renders
+                            // a blank frame during load then its real image at the SAME
+                            // size, so a length-only guard would freeze the texture on the
+                            // blank frame (frog01's water/road/bank environment). The
+                            // renderer's incremental upload compares a content hash too.
                             let changed = scene.texture_images.get(&tex_name)
-                                .map_or(true, |old| old.len() != tex_data.len());
+                                .map_or(true, |old| old.as_slice() != tex_data.as_slice());
                             scene.texture_images.insert(tex_name.clone(), tex_data);
                             if changed {
                                 scene.texture_content_version += 1;
