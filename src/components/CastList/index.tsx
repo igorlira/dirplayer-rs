@@ -21,6 +21,8 @@ function getMemberTypeIcon(memberType?: string, scriptType?: string): string | n
     case 'shape': return '/icons/member-types/8-shape.png';
     case 'text': return '/icons/member-types/text.png';
     case 'sound': return '/icons/member-types/audio.png';
+    case 'transition': return '/icons/member-types/transition.png';
+    case 'groove3gm': return '/icons/member-types/xtra.png';
     default: return null;
   }
 }

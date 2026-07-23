@@ -2758,6 +2758,7 @@ pub enum CastMemberTypeId {
     HavokPhysics,
     PhysXPhysics,
     Groove3gm,
+    Transition,
     Unknown,
 }
 
@@ -2849,6 +2850,7 @@ impl CastMemberTypeId {
             // (gGroove: LoadShape only if #G3D), so returning #groove made every
             // shape get skipped → ShapeID -1 → no 3D world.
             Self::Groove3gm => Ok("g3d"),
+            Self::Transition => Ok("transition"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -2876,7 +2878,7 @@ impl CastMemberType {
             Self::Groove3gm(_) => CastMemberTypeId::Groove3gm,
             // No dedicated CastMemberTypeId; transitions are score-driven, not queried
             // via `the type of member`, so Unknown is adequate here.
-            Self::Transition(_) => CastMemberTypeId::Unknown,
+            Self::Transition(_) => CastMemberTypeId::Transition,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -2899,6 +2901,8 @@ impl CastMemberType {
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             Self::HavokPhysics(_) => "havok",
             Self::PhysXPhysics(_) => "physics",
+            Self::Groove3gm(_) => "groove3gm",
+            Self::Transition(_) => "transition",
             _ => "unknown",
         };
     }
