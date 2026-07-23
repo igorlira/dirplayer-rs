@@ -1415,7 +1415,43 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
-                "shininess" | "flat" | "renderStyle" => {
+                "shininess" => {
+                    // Director shader.shininess is 0..100; IFX stores it on the material
+                    // as a 0..1 value (GL_SHININESS = that * 128). Route it onto the
+                    // shader's material so the renderer's specular exponent picks it up.
+                    if s3d_ref.object_type == "shader" {
+                        let s01 = (value.to_float().unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32;
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    // Get-or-create the shader's material (same pattern as
+                                    // the blend setter): runtime newShader()s have no material
+                                    // until a property is set, so create one and link it.
+                                    let mat_info = {
+                                        let shader = scene.shaders.iter_mut()
+                                            .find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name));
+                                        shader.map(|shader| {
+                                            if shader.material_name.is_empty() {
+                                                shader.material_name = format!("{}_mat", s3d_ref.name);
+                                            }
+                                            shader.material_name.clone()
+                                        })
+                                    };
+                                    if let Some(mat_name) = mat_info {
+                                        if let Some(mat) = scene.materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&mat_name)) {
+                                            mat.shininess = s01;
+                                        } else {
+                                            use crate::director::chunks::w3d::types::W3dMaterial;
+                                            scene.materials.push(W3dMaterial { name: mat_name, shininess: s01, ..Default::default() });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                "flat" | "renderStyle" => {
                     // Accept these shader properties silently
                     Ok(())
                 },
@@ -5948,9 +5984,8 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(color_to_datum(c)))
             },
             "shininess" => {
-                let v = material.map(|m| {
-                    if m.shininess > 0.0 { m.shininess } else { m.reflectivity * 100.0 }
-                }).unwrap_or(0.0);
+                // Stored 0..1 (IFX); Director exposes it as 0..100.
+                let v = material.map(|m| m.shininess * 100.0).unwrap_or(0.0);
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
             "blend" => {

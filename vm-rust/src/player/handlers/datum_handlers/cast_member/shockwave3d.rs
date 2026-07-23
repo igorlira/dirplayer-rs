@@ -2054,6 +2054,9 @@ impl Shockwave3dMemberHandlers {
                                                 attenuation: [1.0, 0.0, 0.0],
                                                 spot_angle: 90.0, // Director default
                                                 enabled: true,
+                                                // Director's newLight enables specular by default (scripts that
+                                                // want highlights set only shininess, never light.specular).
+                                                specular: true,
                                                 ..Default::default()
                                             });
                                             scene.nodes.push(W3dNode {
