@@ -1158,8 +1158,48 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(())
                 },
                 "specular" => {
-                    // For lights: specular = 1/0 (enable/disable specular contribution)
-                    // For shaders: handled elsewhere
+                    // light.specular = TRUE/FALSE enables/disables this light's specular
+                    // contribution (Rasterwerks drives it from a config bool). shader.specular
+                    // is a COLOUR set on the material (Rasterwerks sets rgb(0,0,0) to kill a
+                    // shader's highlight). Both were previously silent no-ops.
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                if s3d_ref.object_type == "light" {
+                                    let on = match &value {
+                                        Datum::Int(v) => *v != 0,
+                                        Datum::Float(v) => *v != 0.0,
+                                        _ => true,
+                                    };
+                                    if let Some(light) = scene.lights.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&s3d_ref.name)) {
+                                        light.specular = on;
+                                    }
+                                } else if s3d_ref.object_type == "shader" {
+                                    let color = match &value {
+                                        Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) =>
+                                            [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0],
+                                        _ => [0.5, 0.5, 0.5, 1.0],
+                                    };
+                                    // Resolve/create the shader's material (same as the
+                                    // diffuse/ambient/emissive colour setter) and set specular.
+                                    let mat_name = scene.shaders.iter()
+                                        .find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name))
+                                        .map(|s| if s.material_name.is_empty() { s.name.clone() } else { s.material_name.clone() });
+                                    if let Some(mat_name) = mat_name {
+                                        if let Some(m) = scene.materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&mat_name)) {
+                                            m.specular = color;
+                                        } else {
+                                            use crate::director::chunks::w3d::types::W3dMaterial;
+                                            scene.materials.push(W3dMaterial { name: mat_name.clone(), specular: color, ..Default::default() });
+                                            if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name.eq_ignore_ascii_case(&s3d_ref.name)) {
+                                                if shader.material_name.is_empty() { shader.material_name = mat_name; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Ok(())
                 },
                 "spotAngle" => {
@@ -1253,7 +1293,7 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
-                "diffuse" | "ambient" | "emissive" | "specular" => {
+                "diffuse" | "ambient" | "emissive" => {
                   if s3d_ref.object_type != "shader" { return Ok(()); }
                     debug!(
                         "[W3D-SET] shader(\"{}\").{}", s3d_ref.name, prop_name
@@ -1307,7 +1347,6 @@ impl Shockwave3dObjectDatumHandlers {
                                             }
                                         }
                                     },
-                                    "specular" => mat.specular = color,
                                     _ => {},
                                 })
                             }
