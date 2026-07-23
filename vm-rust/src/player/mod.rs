@@ -2837,8 +2837,17 @@ impl DirPlayer {
             "colorDepth" => Ok(Datum::Int(32)),
             "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
             "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay" => Ok(Datum::Int(0)),
-            "timeoutLapsed" => Ok(Datum::Int(0)),
+            "timeoutLength" => Ok(Datum::Int(self.movie.timeout_length)),
+            "timeoutKeyDown" => Ok(datum_bool(self.movie.timeout_keydown)),
+            "timeoutMouse" => Ok(datum_bool(self.movie.timeout_mouse)),
+            "timeoutPlay" => Ok(Datum::Int(0)),
+            "timeoutLapsed" => {
+                let lapsed = ((crate::player::testing_shared::now_ms()
+                    - self.movie.timeout_last_reset_ms)
+                    * 60.0 / 1000.0)
+                    .max(0.0) as i32;
+                Ok(Datum::Int(lapsed))
+            }
             "soundEnabled" => Ok(Datum::Int(1)),
             "soundLevel" => Ok(Datum::Int(7)), // max volume
             "beepOn" | "fixStageSize" => Ok(Datum::Int(0)),
