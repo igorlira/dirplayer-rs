@@ -132,6 +132,9 @@ pub struct Score {
     pub sound_channel_spans: HashMap<u32, (u32, u32)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
+    /// Transition effect channel: per frame, the (cast_lib, member) of the
+    /// transition applied when the playhead enters that frame.
+    pub transition_channel_data: Vec<(u32, i16, i16)>,
     pub frame_labels: Vec<FrameLabel>,
     pub sound_channel_triggered: HashMap<u16, u32>,
     pub keyframes_cache: Arc<HashMap<u16, ChannelKeyframes>>,
@@ -269,6 +272,7 @@ impl Score {
             sound_channel_spans: HashMap::new(),
             tempo_channel_data: vec![],
             palette_channel_data: vec![],
+            transition_channel_data: vec![],
             sprite_spans: vec![],
             sound_channel_triggered: HashMap::new(),
             keyframes_cache: Arc::new(HashMap::new()),
@@ -2915,6 +2919,7 @@ impl Score {
         self.sound_channel_data = score_chunk.frame_data.sound_channel_data.clone();
         self.tempo_channel_data = score_chunk.frame_data.tempo_channel_data.clone();
         self.palette_channel_data = score_chunk.frame_data.palette_channel_data.clone();
+        self.transition_channel_data = score_chunk.frame_data.transition_channel_data.clone();
         self.keyframes_cache = Arc::new(build_all_keyframes_cache(
             &score_chunk.frame_data.frame_channel_data,
             &score_chunk.frame_intervals
@@ -3432,6 +3437,20 @@ impl Score {
                 }
             })
             .unwrap_or_else(|| PaletteRef::BuiltIn(get_system_default_palette()))
+    }
+
+    /// The transition cast member applied when the playhead ENTERS `frame`, if the
+    /// transition effect channel has an entry on that exact frame. Director fires a
+    /// score transition on the frame it's placed in (between the previous stage and
+    /// this frame's stage).
+    pub fn get_frame_transition(&self, frame: u32) -> Option<CastMemberRef> {
+        self.transition_channel_data
+            .iter()
+            .find(|(f, _, member)| *f == frame && *member > 0)
+            .map(|(_, cast_lib, member)| CastMemberRef {
+                cast_lib: *cast_lib as i32,
+                cast_member: *member as i32,
+            })
     }
 }
 

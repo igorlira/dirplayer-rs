@@ -1793,8 +1793,37 @@ impl BuiltInHandlerManager {
                 })
             }
             "puppettransition" => {
-                log::warn!("puppetTransition is not implemented");
-                Ok(DatumRef::Void)
+                // puppetTransition(int {, time, size, area}) or (transitionMemberRef).
+                // Applies the transition between the current stage and the next frame;
+                // we hand it to the same engine the score transition channel uses.
+                // (Director 11.5 Scripting Dictionary: time is in quarter-seconds.)
+                reserve_player_mut(|player| {
+                    let arg0 = args.get(0).map(|d| player.get_datum(d).clone());
+                    let info = match arg0 {
+                        Some(Datum::Int(code)) => {
+                            let time_qs = args.get(1).map(|d| player.get_datum(d).int_value().unwrap_or(0)).unwrap_or(0);
+                            let size = args.get(2).map(|d| player.get_datum(d).int_value().unwrap_or(1)).unwrap_or(1);
+                            Some(crate::player::cast_member::TransitionInfo {
+                                transition_type: code.clamp(1, 52) as u8,
+                                chunk_size: size.clamp(1, 128) as u8,
+                                // quarter-seconds → ms
+                                duration_ms: (time_qs.max(0).min(120) as u16).saturating_mul(250),
+                            })
+                        }
+                        Some(Datum::CastMember(r)) => {
+                            player.movie.cast_manager.find_member_by_ref(&r).and_then(|m| match &m.member_type {
+                                crate::player::cast_member::CastMemberType::Transition(t) => Some(t.info),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(info) = info {
+                        player.pending_transition = Some(info);
+                        player.begin_transition_hold(info.duration_ms);
+                    }
+                    Ok(DatumRef::Void)
+                })
             }
             "preload" => {
                 // All cast data is resident in memory (WASM) — there's nothing to

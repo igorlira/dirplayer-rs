@@ -174,7 +174,159 @@ fn interpolate_path_position(path_keyframes: &SpritePathKeyframes, frame: u32) -
     }
 }
 
+/// An in-progress score/puppet transition: the captured pre-transition stage
+/// (`old_bitmap`), the effect to run, and when it started. `draw_frame` blends
+/// `old_bitmap` → the freshly-rendered new stage per elapsed progress until done.
+pub struct TransitionPlayback {
+    pub old_bitmap: Bitmap,
+    pub info: crate::player::cast_member::TransitionInfo,
+    pub start_ms: i64,
+}
+
+/// Composite a transition frame in place: `cur` holds the freshly-rendered NEW stage,
+/// `old` the captured pre-transition stage. `progress` is 0..1. Reveal-style effects
+/// copy `old` back over the not-yet-revealed pixels; dissolve/fallback crossfades.
+/// Built-in codes per the Director 11.5 Scripting Dictionary `puppetTransition` table.
+fn apply_transition_effect(cur: &mut Bitmap, old: &Bitmap, ty: u8, chunk: u8, progress: f32) {
+    let w = cur.width as i64;
+    let h = cur.height as i64;
+    if old.width as i64 != w || old.height as i64 != h || old.data.len() != cur.data.len() {
+        return;
+    }
+    composite_transition_pixels(cur.data.as_mut_slice(), old.data.as_slice(), w, h, ty, chunk, progress);
+}
+
+/// Stable per-cell pseudo-random value in 0..1 for dissolve/random effects.
+fn transition_cell_hash(a: i64, b: i64) -> f32 {
+    let h = (a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663)) as u32;
+    (h & 0xffff) as f32 / 65535.0
+}
+
+/// Slice-level transition compositing shared by both backends (Canvas2D's
+/// `Bitmap` path above and the WebGL2 framebuffer path). `cur_d` holds the
+/// freshly-rendered NEW stage RGBA (top-left origin), `old_d` the captured
+/// pre-transition stage; both are `w*h*4` bytes. See `apply_transition_effect`.
+///
+/// Effect patterns (codes 1..52, Director 11.5 `puppetTransition` table) were
+/// matched against a frame-by-frame capture of Director's own playback: center-
+/// out effects grow a band/box from the centre, edges-in close from the borders,
+/// covers slide the NEW frame on from a side/corner, reveals slide the OLD frame
+/// off to expose the NEW underneath, strips sweep diagonally, and dissolves fill
+/// pseudo-random cells whose size scales with the `chunk` (size) argument.
+pub fn composite_transition_pixels(cur_d: &mut [u8], old_d: &[u8], w: i64, h: i64, ty: u8, chunk: u8, progress: f32) {
+    if old_d.len() != cur_d.len() || cur_d.len() < (w * h * 4) as usize {
+        return;
+    }
+    let p = progress.clamp(0.0, 1.0);
+    let n = cur_d.len();
+    let pw = (p as f64 * w as f64) as i64;
+    let ph = (p as f64 * h as f64) as i64;
+    let cs = (chunk.max(1) as i64).min(64);
+    let pf = p as f64;
+    // Blind/checkerboard cell geometry.
+    let band_h = (h / 16).max(1);
+    let band_w = (w / 16).max(1);
+    let cell_w = (w / 12).max(1);
+    let cell_h = (h / 9).max(1);
+    // Strip width for the diagonal staircase effects (39-46): ~16 strips.
+    let strip_w = (w / 16).max(1);
+    let strip_h = (h / 16).max(1);
+
+    // `keep_new(x,y)` true → keep the NEW pixel; false → restore the OLD pixel.
+    let keep_new: Box<dyn Fn(i64, i64) -> bool> = match ty {
+        // --- Wipes (1-4): a single hard edge sweeps across ---
+        1 => Box::new(move |x, _| x < pw),           // wipe right (new grows L→R)
+        2 => Box::new(move |x, _| x >= w - pw),      // wipe left
+        3 => Box::new(move |_, y| y < ph),           // wipe down
+        4 => Box::new(move |_, y| y >= h - ph),      // wipe up
+        // --- Center-out (band/box grows from centre) & Edges-in (closes from borders) ---
+        5 => Box::new(move |x, _| (x - w / 2).abs() < pw / 2),                 // center out horizontal (full-height band)
+        6 => Box::new(move |x, _| (x - w / 2).abs() >= (w - pw) / 2),          // edges in horizontal
+        7 => Box::new(move |_, y| (y - h / 2).abs() < ph / 2),                 // center out vertical (full-width band)
+        8 => Box::new(move |_, y| (y - h / 2).abs() >= (h - ph) / 2),          // edges in vertical
+        9 => Box::new(move |x, y| (x - w / 2).abs() < pw / 2 && (y - h / 2).abs() < ph / 2),          // center out square
+        10 => Box::new(move |x, y| (x - w / 2).abs() >= (w - pw) / 2 || (y - h / 2).abs() >= (h - ph) / 2), // edges in square
+        // --- Pushes (11-14): new slides in from a side (edge for solid fills) ---
+        11 => Box::new(move |x, _| x >= w - pw),     // push left (new enters right)
+        12 => Box::new(move |x, _| x < pw),          // push right
+        13 => Box::new(move |_, y| y < ph),          // push down
+        14 => Box::new(move |_, y| y >= h - ph),     // push up
+        // --- Reveals (15-22): OLD slides off, exposing NEW; diagonals leave an L-shape ---
+        15 => Box::new(move |_, y| y >= h - ph),                       // reveal up
+        16 => Box::new(move |x, y| x < pw || y >= h - ph),             // reveal up-right
+        17 => Box::new(move |x, _| x < pw),                            // reveal right
+        18 => Box::new(move |x, y| x < pw || y < ph),                  // reveal down-right
+        19 => Box::new(move |_, y| y < ph),                            // reveal down
+        20 => Box::new(move |x, y| x >= w - pw || y < ph),             // reveal down-left
+        21 => Box::new(move |x, _| x >= w - pw),                       // reveal left
+        22 => Box::new(move |x, y| x >= w - pw || y >= h - ph),        // reveal up-left
+        // --- Dissolves (23-26): pseudo-random cells; size scales with `chunk` ---
+        23 => Box::new(move |x, y| transition_cell_hash(x / cs, y / cs) < p),          // pixels fast
+        24 => { let cw = (cs * 4).max(1); let ch = (cs * 2).max(1); Box::new(move |x, y| transition_cell_hash(x / cw, y / ch) < p) }, // boxy rectangles
+        25 => { let c = (cs * 3).max(1); Box::new(move |x, y| transition_cell_hash(x / c, y / c) < p) },  // boxy squares
+        26 => Box::new(move |x, y| transition_cell_hash(x / cs.max(2), y / cs.max(2)) < p),               // patterns
+        // --- Random rows / columns (27-28): whole lines appear in random order ---
+        27 => Box::new(move |_, y| transition_cell_hash(y, 0) < p),
+        28 => Box::new(move |x, _| transition_cell_hash(x, 0) < p),
+        // --- Covers (29-36): NEW slides on top from a side/corner (corner = box grow) ---
+        29 => Box::new(move |_, y| y < ph),                            // cover down
+        30 => Box::new(move |x, y| x >= w - pw && y < ph),             // cover down-left (from top-right)
+        31 => Box::new(move |x, y| x < pw && y < ph),                  // cover down-right (from top-left)
+        32 => Box::new(move |x, _| x >= w - pw),                       // cover left
+        33 => Box::new(move |x, _| x < pw),                            // cover right
+        34 => Box::new(move |_, y| y >= h - ph),                       // cover up
+        35 => Box::new(move |x, y| x >= w - pw && y >= h - ph),        // cover up-left (from bottom-right)
+        36 => Box::new(move |x, y| x < pw && y >= h - ph),             // cover up-right (from bottom-left)
+        // --- Venetian (horizontal) blinds (37): slats open together ---
+        37 => { let open = (pf * band_h as f64) as i64; Box::new(move |_, y| (y % band_h) < open) },
+        // --- Checkerboard (38): even cells fill first half, odd cells second half ---
+        38 => Box::new(move |x, y| {
+            let parity = (((x / cell_w) + (y / cell_h)) & 1) as f32;
+            (p - parity * 0.5) * 2.0 > 0.0
+        }),
+        // --- Strips (39-46): diagonal staircase. "bottom"/"top" step in vertical
+        //     strips (quantize X); "left"/"right" step in horizontal strips (Y). ---
+        39 => Box::new(move |x, y| { let qx = (x / strip_w * strip_w) as f64 / w as f64; qx + (y as f64 / h as f64) < 2.0 * pf }),                       // bottom, build left  (TL, step X)
+        40 => Box::new(move |x, y| { let qx = (x / strip_w * strip_w) as f64 / w as f64; (1.0 - qx) + (y as f64 / h as f64) < 2.0 * pf }),               // bottom, build right (TR, step X)
+        41 => Box::new(move |x, y| { let qy = (y / strip_h * strip_h) as f64 / h as f64; (x as f64 / w as f64) + qy < 2.0 * pf }),                       // left, build down    (TL, step Y)
+        42 => Box::new(move |x, y| { let qy = (y / strip_h * strip_h) as f64 / h as f64; (x as f64 / w as f64) + (1.0 - qy) < 2.0 * pf }),               // left, build up      (BL, step Y)
+        43 => Box::new(move |x, y| { let qy = (y / strip_h * strip_h) as f64 / h as f64; (1.0 - (x as f64 / w as f64)) + qy < 2.0 * pf }),               // right, build down   (TR, step Y)
+        44 => Box::new(move |x, y| { let qy = (y / strip_h * strip_h) as f64 / h as f64; (1.0 - (x as f64 / w as f64)) + (1.0 - qy) < 2.0 * pf }),       // right, build up     (BR, step Y)
+        45 => Box::new(move |x, y| { let qx = (x / strip_w * strip_w) as f64 / w as f64; qx + (1.0 - (y as f64 / h as f64)) < 2.0 * pf }),               // top, build left     (BL, step X)
+        46 => Box::new(move |x, y| { let qx = (x / strip_w * strip_w) as f64 / w as f64; (1.0 - qx) + (1.0 - (y as f64 / h as f64)) < 2.0 * pf }),       // top, build right    (BR, step X)
+        // --- Zoom open (box grows from centre) / close (closes from edges) ---
+        47 => Box::new(move |x, y| (x - w / 2).abs() < pw / 2 && (y - h / 2).abs() < ph / 2),
+        48 => Box::new(move |x, y| (x - w / 2).abs() >= (w - pw) / 2 || (y - h / 2).abs() >= (h - ph) / 2),
+        // --- Vertical blinds (49) ---
+        49 => { let open = (pf * band_w as f64) as i64; Box::new(move |x, _| (x % band_w) < open) },
+        // --- Dissolve bits/pixels (50-52): fine pseudo-random cells ---
+        50 => Box::new(move |x, y| transition_cell_hash(x / cs, y / cs) < p),
+        51 => Box::new(move |x, y| transition_cell_hash(x, y) < p),        // per-pixel
+        52 => Box::new(move |x, y| transition_cell_hash(x / cs.max(2), y / cs.max(2)) < p),
+        // Unknown code → smooth crossfade.
+        _ => {
+            let inv = 1.0 - p;
+            for i in (0..n).step_by(4) {
+                cur_d[i] = (old_d[i] as f32 * inv + cur_d[i] as f32 * p) as u8;
+                cur_d[i + 1] = (old_d[i + 1] as f32 * inv + cur_d[i + 1] as f32 * p) as u8;
+                cur_d[i + 2] = (old_d[i + 2] as f32 * inv + cur_d[i + 2] as f32 * p) as u8;
+            }
+            return;
+        }
+    };
+
+    for y in 0..h {
+        for x in 0..w {
+            if !keep_new(x, y) {
+                let i = ((y * w + x) * 4) as usize;
+                cur_d[i..i + 4].copy_from_slice(&old_d[i..i + 4]);
+            }
+        }
+    }
+}
+
 pub struct PlayerCanvasRenderer {
+    pub active_transition: Option<TransitionPlayback>,
     pub container_element: Option<web_sys::HtmlElement>,
     pub preview_container_element: Option<web_sys::HtmlElement>,
     pub canvas: web_sys::HtmlCanvasElement,
@@ -3262,6 +3414,17 @@ impl PlayerCanvasRenderer {
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
         }
+        // A score/puppet transition just started: snapshot the CURRENT stage (the
+        // pre-transition image) before render_stage_to_bitmap overwrites it with the
+        // new frame. Play it out below over the transition's duration.
+        if let Some(info) = player.pending_transition.take() {
+            self.active_transition = Some(TransitionPlayback {
+                old_bitmap: self.bitmap.clone(),
+                info,
+                start_ms: Local::now().timestamp_millis(),
+            });
+        }
+
         let bitmap = &mut self.bitmap;
         render_stage_to_bitmap(player, bitmap, self.debug_selected_channel_num);
 
@@ -3324,6 +3487,21 @@ impl PlayerCanvasRenderer {
                 0,
             );
         }
+
+        // Play out an active transition: blend the captured OLD stage into the freshly
+        // rendered NEW one per elapsed progress. Releases the player's playhead hold
+        // on completion (precise sync); a time failsafe in the player backs it up.
+        if let Some(trans) = self.active_transition.take() {
+            let elapsed = Local::now().timestamp_millis() - trans.start_ms;
+            let progress = (elapsed as f32 / trans.info.duration_ms.max(1) as f32).min(1.0);
+            apply_transition_effect(bitmap, &trans.old_bitmap, trans.info.transition_type, trans.info.chunk_size, progress);
+            if progress < 1.0 {
+                self.active_transition = Some(trans);
+            } else {
+                player.score_transition_active = false;
+            }
+        }
+
         let slice_data = Clamped(bitmap.data.as_slice());
         let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
             slice_data,
@@ -3698,6 +3876,7 @@ pub(crate) fn create_canvas2d_renderer(
     preview_ctx.set_image_smoothing_enabled(false);
 
     PlayerCanvasRenderer {
+        active_transition: None,
         container_element: None,
         preview_container_element: None,
         canvas,

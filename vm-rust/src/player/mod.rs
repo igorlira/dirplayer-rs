@@ -450,6 +450,18 @@ pub struct DirPlayer {
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
+    /// A score transition detected on frame entry, awaiting playback start by the
+    /// renderer (which snapshots the pre-transition stage). Set by advance_frame.
+    pub pending_transition: Option<crate::player::cast_member::TransitionInfo>,
+    /// True while a score/puppet transition holds the playhead (Director blocks
+    /// during a transition). The renderer clears it when the animation completes
+    /// (precise sync). A separate field from `is_in_transition` (which means a
+    /// movie swap is loading) so the two never collide.
+    pub score_transition_active: bool,
+    /// Failsafe deadline (wall-clock ms) for the transition hold: if the renderer
+    /// never signals completion (backend swap, stopped movie), the hold clears
+    /// here so a transition can never permanently freeze the movie.
+    pub transition_hold_until_ms: Option<i64>,
     pub actor_list_generation: u64,
     pub behavior_channel_cache_generation: u64,
     pub active_stage_filmloop_cache_generation: u64,
@@ -625,6 +637,9 @@ impl DirPlayer {
             pending_restart: false,
             movie_reload_data: None,
             is_in_transition: false,
+            pending_transition: None,
+            score_transition_active: false,
+            transition_hold_until_ms: None,
             actor_list_generation: 0,
             behavior_channel_cache_generation: 0,
             active_stage_filmloop_cache_generation: 0,
@@ -1509,6 +1524,14 @@ impl DirPlayer {
         if !self.is_playing {
             return;
         }
+        // A score transition is playing out (rendered per-frame by the renderer):
+        // hold the playhead until it finishes so the movie doesn't run ahead of the
+        // visible dissolve/wipe (matches Director, which blocks during a transition).
+        // Time-based so it self-clears — it can never permanently freeze the movie.
+        if self.transition_hold_active() {
+            self.stage_dirty = true;
+            return;
+        }
         self.stage_dirty = true;
 
         let prev_frame = self.movie.current_frame;
@@ -1529,6 +1552,22 @@ impl DirPlayer {
         // stage image again.
         if prev_frame != next_frame {
             self.stage_image_dirty = false;
+
+            // A transition placed on the entered frame plays between the previous
+            // stage and this frame's stage. Look up the transition member and hand
+            // its effect to the renderer, then pause the playhead until it completes.
+            if let Some(trans_ref) = self.movie.score.get_frame_transition(next_frame) {
+                let info = self.movie.cast_manager
+                    .find_member_by_ref(&trans_ref)
+                    .and_then(|m| match &m.member_type {
+                        crate::player::cast_member::CastMemberType::Transition(t) => Some(t.info),
+                        _ => None,
+                    });
+                if let Some(info) = info {
+                    self.pending_transition = Some(info);
+                    self.begin_transition_hold(info.duration_ms);
+                }
+            }
         }
 
         // NOTE: Filmloop frames are advanced solely by update_filmloop_frames() in the main loop.
@@ -1541,6 +1580,34 @@ impl DirPlayer {
             JsApi::dispatch_frame_changed(self.movie.current_frame);
             self.has_player_frame_changed = true;
         }
+    }
+
+    /// True while the playhead is held for a score/puppet transition. Normally
+    /// the renderer clears `score_transition_active` the moment its animation
+    /// completes (precise sync); the wall-clock deadline is only a failsafe so a
+    /// missed completion signal can never permanently freeze the movie.
+    pub fn transition_hold_active(&mut self) -> bool {
+        if !self.score_transition_active {
+            return false;
+        }
+        if let Some(deadline) = self.transition_hold_until_ms {
+            if chrono::Local::now().timestamp_millis() >= deadline {
+                self.score_transition_active = false;
+                self.transition_hold_until_ms = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Begin holding the playhead for a transition of `duration_ms`. The renderer
+    /// releases the hold on completion; the failsafe deadline is set generously
+    /// past the animation window so it never trips during normal playback.
+    pub fn begin_transition_hold(&mut self, duration_ms: u16) {
+        self.score_transition_active = true;
+        let dur = (duration_ms as i64).clamp(1, 4000);
+        self.transition_hold_until_ms =
+            Some(chrono::Local::now().timestamp_millis() + dur + 2000);
     }
 
     pub fn stop(&mut self) {
@@ -4659,6 +4726,21 @@ pub async fn run_single_frame() -> (bool, bool) {
     if !is_playing {
         return (false, is_script_paused);
     }
+
+    // A score/puppet transition is animating: hold ALL frame processing (scripts +
+    // advance) until it finishes, so the movie doesn't run ahead of the visible
+    // effect (and so a per-frame `puppetTransition` in a `go the frame` loop can't
+    // reset it every tick). The hold is time-based and self-clearing, so it can
+    // never permanently freeze the movie. The ~24fps draw loop keeps rendering the
+    // transition. Matches Director, which blocks the playhead during a transition.
+    if reserve_player_mut(|player| player.transition_hold_active()) {
+        reserve_player_mut(|player| { player.stage_dirty = true; });
+        return (is_playing, is_script_paused);
+    }
+
+    // Global idle timeout (`the timeoutScript` / `the timeoutLength`): fire the
+    // timeOut event + primary script once the idle period lapses. Runs every tick.
+    crate::player::events::check_global_timeout().await;
 
     // Deferred puppetSprite(N,FALSE) revert: a sprite unpuppeted on a prior tick
     // and not re-puppeted / re-membered since reverts to the Score now (Director
