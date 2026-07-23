@@ -1447,7 +1447,7 @@ impl Shockwave3dObjectDatumHandlers {
                     //   shader.blendSourceList[3]   = #constant
                     //   shader.blendConstantList[3] = 50.0
                     // (encodings mirror the blend*List setters in this file:
-                    //  tex_mode 4=#reflection, blend_func 3=#blend, blend_src 0=#constant.)
+                    //  tex_mode 4=#reflection, blend_func 3=#blend, blend_src 1=#constant.)
                     if s3d_ref.object_type != "shader" { return Ok(()); }
                     let tex_name = match value {
                         Datum::Shockwave3dObjectRef(r) => r.name.clone(),
@@ -1470,7 +1470,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     layer.name = tex_name;
                                     layer.tex_mode = 4;     // #reflection
                                     layer.blend_func = 3;   // #blend
-                                    layer.blend_src = 0;    // #constant
+                                    layer.blend_src = 1;    // #constant (IFX BlendSource: 0=alpha,1=constant)
                                     // Default constant 50% per the dictionary; a later
                                     // blendConstantList[3] assignment overrides it.
                                     if layer.blend_const <= 0.0 {
@@ -3898,14 +3898,16 @@ impl Shockwave3dObjectDatumHandlers {
                         } else if prop_name == "blendFunctionList" {
                             // Set blend function for a texture layer
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            // IFX BlendFunction bytes: 0=replace(SELECT_ARG0), 1=add,
+                            // 2=multiply(MODULATE), 3=blend(INTERPOLATE). See IFXShaderLitTexture.h.
                             let blend_val = match &value {
                                 Datum::Symbol(s) => match s.as_str() {
-                                    "add" => 1u8,
-                                    "replace" => 2,
+                                    "replace" => 0u8,
+                                    "add" => 1,
                                     "blend" => 3,
-                                    _ => 0, // multiply
+                                    _ => 2, // multiply
                                 },
-                                _ => 0,
+                                _ => 2,
                             };
                             let idx = (index as usize).saturating_sub(1);
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -3923,9 +3925,10 @@ impl Shockwave3dObjectDatumHandlers {
                         } else if prop_name == "blendSourceList" {
                             // Set blend source for a texture layer (#alpha or #constant)
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            // IFX BlendSource bytes: 0=alpha, 1=constant. See IFXShaderLitTexture.h.
                             let src_val = match &value {
-                                Datum::Symbol(s) if s == "alpha" => 1u8,
-                                _ => 0, // constant
+                                Datum::Symbol(s) if s == "alpha" => 0u8,
+                                _ => 1, // constant
                             };
                             let idx = (index as usize).saturating_sub(1);
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -4424,10 +4427,10 @@ impl Shockwave3dObjectDatumHandlers {
                                 if let Some(s) = shader {
                                     if let Some(layer) = s.texture_layers.get(idx) {
                                         let sym = match layer.blend_func {
+                                            0 => "replace",
                                             1 => "add",
-                                            2 => "replace",
                                             3 => "blend",
-                                            _ => "multiply",
+                                            _ => "multiply", // 2=MODULATE, and MODULATE2X/4X → closest
                                         };
                                         Some(player.alloc_datum(Datum::Symbol(sym.to_string())))
                                     } else {
@@ -4471,7 +4474,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     .and_then(|scene| scene.shaders.iter().find(|s| s.name == s3d_ref.name))
                                     .and_then(|shader| shader.texture_layers.get(idx))
                                     .map(|layer| {
-                                        if layer.blend_src == 1 { "alpha" } else { "constant" }
+                                        if layer.blend_src == 0 { "alpha" } else { "constant" }
                                     })
                                     .unwrap_or("constant");
                                 Some(player.alloc_datum(Datum::Symbol(val.to_string())))
@@ -5977,14 +5980,14 @@ impl Shockwave3dObjectDatumHandlers {
                 // First texture layer's blend function
                 let v = shader.and_then(|s| s.texture_layers.first())
                     .map(|l| l.blend_func).unwrap_or(0);
-                let sym = match v { 1 => "add", 2 => "replace", 3 => "blend", _ => "multiply" };
+                let sym = match v { 0 => "replace", 1 => "add", 3 => "blend", _ => "multiply" };
                 Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
             },
             "blendSource" => {
                 // First texture layer's blend source
                 let v = shader.and_then(|s| s.texture_layers.first())
                     .map(|l| l.blend_src).unwrap_or(0);
-                let sym = if v == 1 { "alpha" } else { "constant" };
+                let sym = if v == 0 { "alpha" } else { "constant" };
                 Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
             },
             "textureMode" => {
@@ -6125,10 +6128,10 @@ impl Shockwave3dObjectDatumHandlers {
                 if let Some(s) = shader {
                     for layer in &s.texture_layers {
                         let sym = match layer.blend_func {
+                            0 => "replace",
                             1 => "add",
-                            2 => "replace",
                             3 => "blend",
-                            _ => "multiply",
+                            _ => "multiply", // 2=MODULATE, and MODULATE2X/4X → closest
                         };
                         items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
                     }
@@ -6144,7 +6147,7 @@ impl Shockwave3dObjectDatumHandlers {
                 let mut items = VecDeque::new();
                 if let Some(s) = shader {
                     for layer in &s.texture_layers {
-                        let sym = if layer.blend_src == 1 { "alpha" } else { "constant" };
+                        let sym = if layer.blend_src == 0 { "alpha" } else { "constant" };
                         items.push_back(player.alloc_datum(Datum::Symbol(sym.to_string())));
                     }
                 }
