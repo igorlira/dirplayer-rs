@@ -1249,8 +1249,9 @@ void main() {
                 let (bi_opt, bw_opt) = if !mesh.bone_indices.is_empty() && !mesh.bone_weights.is_empty()
                     && mesh.bone_indices.len() == mesh.positions.len()
                 {
-                    bone_idx_packed = pack_bone_vec4_f32(&mesh.bone_indices);
-                    bone_wgt_packed = pack_bone_weights_vec4(&mesh.bone_weights);
+                    let (idx_p, wgt_p) = pack_bone_influences_sorted(&mesh.bone_indices, &mesh.bone_weights);
+                    bone_idx_packed = idx_p;
+                    bone_wgt_packed = wgt_p;
                     // Diagnostic: log bone data stats for first mesh with bones
                     {
                         use std::sync::Mutex; use std::collections::HashSet;
@@ -4369,11 +4370,12 @@ void main() {
             for i in 0..bone_count {
                 let cur_rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
                 let prev_rel = mat4_multiply_col_major(&root_relinv, &prev_matrices[i]);
-                let cur = mat4_multiply_col_major(&cur_rel, &inv_bind[i]);
-                let prev = mat4_multiply_col_major(&prev_rel, &inv_bind[i]);
-                for j in 0..16 {
-                    skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
-                }
+                // Blend the two posed bone transforms with proper rotation SLERP (not an
+                // element-wise matrix lerp, which collapses limbs mid-blend), then apply
+                // the shared inverse-bind after the blend.
+                let blended_rel = blend_bone_transform_trs(&prev_rel, &cur_rel, blend_weight);
+                let final_mat = mat4_multiply_col_major(&blended_rel, &inv_bind[i]);
+                skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
             }
         } else {
             for i in 0..bone_count {
@@ -5041,36 +5043,34 @@ fn decode_dxt1_block(block: &[u8], rgba: &mut [u8], start_x: u32, start_y: u32, 
 // ─── Bone data helpers ───
 
 /// Pack variable-length bone indices into fixed vec4 (as f32 for vertex attribute).
-fn pack_bone_vec4_f32(indices: &[Vec<u32>]) -> Vec<[f32; 4]> {
-    indices.iter().map(|v| {
-        let mut out = [0.0f32; 4];
-        for (i, &idx) in v.iter().take(4).enumerate() {
-            // Clamp to max bone uniform array size to prevent out-of-bounds GPU access
-            out[i] = (idx as f32).min(47.0);
+/// Pack per-vertex bone influences into fixed vec4 index + weight arrays. IFX keeps up
+/// to 6 influences SORTED BY MAGNITUDE; the GPU path caps at 4. The W3D decoder stores
+/// influences UNSORTED (bone[0] is the residual `1-Σothers`), so a naive take(4) can
+/// drop the HEAVIEST bones and pull a >4-influence vertex (spine/shoulder/hip) toward
+/// the wrong joints. So sort each vertex's (index, weight) pairs by weight descending,
+/// keep the 4 largest, then renormalize the survivors to sum 1.
+fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    let mut idx_out = Vec::with_capacity(indices.len());
+    let mut wgt_out = Vec::with_capacity(indices.len());
+    for (vi, idxs) in indices.iter().enumerate() {
+        let wts = weights.get(vi).map(|w| w.as_slice()).unwrap_or(&[]);
+        let mut pairs: Vec<(u32, f32)> = idxs.iter().enumerate()
+            .map(|(k, &b)| (b, wts.get(k).copied().unwrap_or(0.0).max(0.0)))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs.truncate(4);
+        let mut idx4 = [0.0f32; 4];
+        let mut wgt4 = [0.0f32; 4];
+        for (k, &(b, w)) in pairs.iter().enumerate() {
+            idx4[k] = (b as f32).min(47.0); // clamp to bone uniform array size
+            wgt4[k] = w;
         }
-        out
-    }).collect()
-}
-
-/// Pack variable-length bone weights into fixed vec4, normalized to sum to 1.
-fn pack_bone_weights_vec4(weights: &[Vec<f32>]) -> Vec<[f32; 4]> {
-    weights.iter().map(|v| {
-        let mut out = [0.0f32; 4];
-        for (i, &w) in v.iter().take(4).enumerate() {
-            out[i] = w.max(0.0); // clamp negatives to 0 (bad IQ can produce negative weights)
-        }
-        // Normalize so weights sum to 1.0
-        let sum: f32 = out.iter().sum();
-        if sum > 0.001 {
-            for w in out.iter_mut() {
-                *w /= sum;
-            }
-        } else {
-            // No weights — assign full weight to bone 0
-            out[0] = 1.0;
-        }
-        out
-    }).collect()
+        let sum: f32 = wgt4.iter().sum();
+        if sum > 0.001 { for w in wgt4.iter_mut() { *w /= sum; } } else { wgt4[0] = 1.0; }
+        idx_out.push(idx4);
+        wgt_out.push(wgt4);
+    }
+    (idx_out, wgt_out)
 }
 
 // ─── Matrix math helpers ───
@@ -5275,6 +5275,69 @@ fn generate_planar_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
 }
 
 /// Multiply two column-major 4x4 matrices: result = A * B
+/// Blend two column-major affine bone transforms by decomposing each into
+/// translation + rotation(quaternion) + scale, LERPing translation/scale and
+/// SLERPing rotation, then recomposing. A motion crossfade must interpolate real
+/// rotations — an element-wise matrix lerp of two rotation bases is non-orthonormal
+/// and collapses/skews limbs at mid-blend. Mirrors IFX IFXCharacter::BlendBoneNode
+/// (blend the bone transform, then build the matrix).
+fn blend_bone_transform_trs(a: &[f32; 16], b: &[f32; 16], t: f32) -> [f32; 16] {
+    fn decomp(m: &[f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+        let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+        let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+        let (ix, iy, iz) = (1.0 / sx.max(1e-8), 1.0 / sy.max(1e-8), 1.0 / sz.max(1e-8));
+        // normalized rotation columns → r_{row,col}
+        let (r00, r10, r20) = (m[0] * ix, m[1] * ix, m[2] * ix);
+        let (r01, r11, r21) = (m[4] * iy, m[5] * iy, m[6] * iy);
+        let (r02, r12, r22) = (m[8] * iz, m[9] * iz, m[10] * iz);
+        let tr = r00 + r11 + r22;
+        let q = if tr > 0.0 {
+            let s = 0.5 / (tr + 1.0).sqrt();
+            [(r21 - r12) * s, (r02 - r20) * s, (r10 - r01) * s, 0.25 / s]
+        } else if r00 > r11 && r00 > r22 {
+            let s = 2.0 * (1.0 + r00 - r11 - r22).sqrt();
+            [0.25 * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s]
+        } else if r11 > r22 {
+            let s = 2.0 * (1.0 + r11 - r00 - r22).sqrt();
+            [(r01 + r10) / s, 0.25 * s, (r12 + r21) / s, (r02 - r20) / s]
+        } else {
+            let s = 2.0 * (1.0 + r22 - r00 - r11).sqrt();
+            [(r02 + r20) / s, (r12 + r21) / s, 0.25 * s, (r10 - r01) / s]
+        };
+        ([m[12], m[13], m[14]], q, [sx, sy, sz])
+    }
+    let (ta, qa, sa) = decomp(a);
+    let (tb, qb, sb) = decomp(b);
+    // SLERP qa → qb (shortest arc)
+    let mut qb2 = qb;
+    let mut dot = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    if dot < 0.0 { for k in 0..4 { qb2[k] = -qb2[k]; } dot = -dot; }
+    let q = if dot > 0.9995 {
+        let mut r = [0.0f32; 4];
+        for k in 0..4 { r[k] = qa[k] + (qb2[k] - qa[k]) * t; }
+        let n = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]).sqrt().max(1e-8);
+        [r[0] / n, r[1] / n, r[2] / n, r[3] / n]
+    } else {
+        let theta = dot.clamp(-1.0, 1.0).acos();
+        let st = theta.sin();
+        let (wa, wb) = (((1.0 - t) * theta).sin() / st, (t * theta).sin() / st);
+        [qa[0] * wa + qb2[0] * wb, qa[1] * wa + qb2[1] * wb, qa[2] * wa + qb2[2] * wb, qa[3] * wa + qb2[3] * wb]
+    };
+    let tr = [ta[0] + (tb[0] - ta[0]) * t, ta[1] + (tb[1] - ta[1]) * t, ta[2] + (tb[2] - ta[2]) * t];
+    let sc = [sa[0] + (sb[0] - sa[0]) * t, sa[1] + (sb[1] - sa[1]) * t, sa[2] + (sb[2] - sa[2]) * t];
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, xz, yz) = (x * y, x * z, y * z);
+    let (wx, wy, wz) = (w * x, w * y, w * z);
+    [
+        (1.0 - 2.0 * (yy + zz)) * sc[0], (2.0 * (xy + wz)) * sc[0], (2.0 * (xz - wy)) * sc[0], 0.0,
+        (2.0 * (xy - wz)) * sc[1], (1.0 - 2.0 * (xx + zz)) * sc[1], (2.0 * (yz + wx)) * sc[1], 0.0,
+        (2.0 * (xz + wy)) * sc[2], (2.0 * (yz - wx)) * sc[2], (1.0 - 2.0 * (xx + yy)) * sc[2], 0.0,
+        tr[0], tr[1], tr[2], 1.0,
+    ]
+}
+
 fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut r = [0.0f32; 16];
     for col in 0..4 {
