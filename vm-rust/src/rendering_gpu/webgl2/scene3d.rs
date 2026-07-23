@@ -3576,11 +3576,9 @@ void main() {
                     continue;
                 }
 
-                // Blend mode mapping:
-                //   blend_func 0 = #multiply / GL_REPLACE (ambiguous)
-                //   blend_func 1 = #add / GL_ADD
-                //   blend_func 2 = #replace / GL_MODULATE
-                //   blend_func 3 = #blend / GL_DECAL
+                // IFX blend func (IFXEnums.h): 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
+                // 2 = IFX_MODULATE (out = tex * incoming), 3 = IFX_INTERPOLATE.
+                // Mapped to our extra-layer modes below (1 = multiply, 2 = add).
                 let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
                     // Lightmap-only meshes (empty textureList[1], lightmap in textureList[2])
                     // should shade as material color multiplied by light intensity.
@@ -4128,9 +4126,15 @@ void main() {
     /// Set GL blend mode based on material opacity and shader blend function.
     /// `force_blend` = true when drawing in the transparent pass (models with alpha textures).
     fn apply_blend_mode(gl: &WebGl2RenderingContext, shader: &Shader3d, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
-        // #replace (2) first layer → texture shown unlit (as-is). See the fragment
-        // shader's u_texture_unlit branch. All other modes shade normally.
-        gl.uniform1i(shader.u_texture_unlit.as_ref(), if first_layer_blend_func == 2 { 1 } else { 0 });
+        // IFX first-layer blend func: 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
+        // 2 = IFX_MODULATE (out = texture * lit color — the NORMAL lit case).
+        // Blend func alone never disables lighting: a full-bright element (skybox,
+        // galaxy backdrop) achieves that through an emissive material / bright ambient,
+        // not by mislabelling IFX_MODULATE as "#replace". Treating blend_func==2 as
+        // unlit flattened every ordinary textured model (e.g. the Dummy character,
+        // whose whole face is IFX_MODULATE), so `u_texture_unlit` stays off here.
+        let _ = first_layer_blend_func;
+        gl.uniform1i(shader.u_texture_unlit.as_ref(), 0);
         if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
