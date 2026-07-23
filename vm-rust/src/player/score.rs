@@ -5561,6 +5561,20 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 let bitmap_font = player.font_manager.font_cache.get(&cache_key).cloned();
                 let inner_width = (field_width - extras).max(1) as u16;
 
+                // A fixed_line_space wildly larger than the font size is a
+                // mis-parsed field box-height (STXT run height), not a real
+                // per-line stride. Used as the line height it makes a one-line
+                // field measure thousands of px tall, stretching an #adjust box
+                // (and its filled background) to the stage bottom. The render
+                // path already rejects it the same way (render_text_to_texture);
+                // apply the guard here so the measured height agrees.
+                let natural_lh = if field_member.font_size > 0 { field_member.font_size } else { 12 };
+                let sane_fls = if field_member.fixed_line_space as u32 > (natural_lh as u32) * 5 / 2 {
+                    0
+                } else {
+                    field_member.fixed_line_space
+                };
+
                 let from_bitmap = bitmap_font.as_ref().map(|f| {
                     if field_member.word_wrap {
                         measure_text_wrapped(
@@ -5568,7 +5582,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                             f,
                             inner_width,
                             true,
-                            field_member.fixed_line_space,
+                            sane_fls,
                             field_member.top_spacing,
                             0,
                             0,
@@ -5578,7 +5592,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                             &field_member.text,
                             f,
                             None,
-                            field_member.fixed_line_space,
+                            sane_fls,
                             field_member.top_spacing,
                             0,
                         ).1 as i32
@@ -5609,7 +5623,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                         if field_member.word_wrap { inner_width as i32 } else { 0 },
                         field_member.top_spacing,
                         0,
-                        field_member.fixed_line_space,
+                        sane_fls,
                     );
                     if h > 0 { Some(h as i32) } else { None }
                 })
@@ -5626,6 +5640,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 .trim_start_matches('#')
                 .to_ascii_lowercase();
             let _ = box_type_norm; // (used only for legacy debug logs; safe to drop later)
+            // The field's authored box height (member.height ≈ Director's
+            // pageHeight, mirrored from the field rect and kept in sync by the
+            // rect/height setters). This — NOT sprite.height — is the floor for
+            // an auto-growing #adjust field: a puppet sprite whose height was
+            // never set (or an oversized .dir score box) otherwise stretches the
+            // filled background all the way down to the stage bottom.
+            let member_box_h = field_member
+                .height
+                .max((field_member.rect_bottom - field_member.rect_top).max(0) as u16)
+                as i32;
             let (field_height, height_arm) = if is_adjust && measured_plus_extras.is_some() {
                 // #adjust is the ONLY box type that auto-grows. #fixed clips
                 // overflow, #scroll adds a scrollbar (also clips visually),
@@ -5634,9 +5658,12 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // measured text is — typing past the bottom is supposed to
                 // disappear or be refused, not stretch the field.
                 let m = measured_plus_extras.unwrap();
-                (m.max(sprite.height.max(1)), "adjust+measured")
+                (m.max(member_box_h.max(1)), "adjust+measured")
+            } else if is_adjust && member_box_h > 0 {
+                // #adjust with no measurable content: use the authored box.
+                (member_box_h, "adjust+member-height")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
-                ((field_member.text_height as i32 + extras).max(sprite.height), "wrap+adjust+text_height")
+                ((field_member.text_height as i32 + extras).max(member_box_h), "wrap+adjust+text_height")
             } else if field_member.word_wrap
                 && measured_plus_extras.is_some()
                 && sprite.height > 0
