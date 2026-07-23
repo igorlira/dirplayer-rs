@@ -1281,7 +1281,35 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         // stack, so processing events (which push/pop scopes) during a command
         // handler's async yield (e.g. nothing()) would corrupt the scope data.
         // Ephemeral events like mouseWithin will be re-dispatched on the next tick.
-        let skip = reserve_player_ref(|player| player.in_mouse_command || player.command_handler_yielding || player.is_in_transition);
+        // A score/puppet transition is modal in Director (input is ignored while it
+        // plays), so hold events during it too; it self-clears when the animation
+        // completes (renderer-driven, with a time failsafe) and can't get stuck.
+        // User input resets the idle-timeout counter (Director: mouse CLICKS and
+        // keystrokes restart the timeout period, gated by timeoutMouse /
+        // timeoutKeyDown — mouse MOVEMENT does not).
+        {
+            let name = match &item {
+                PlayerVMEvent::Global(n, _) => Some(n.as_str()),
+                PlayerVMEvent::Targeted(n, _, _) => Some(n.as_str()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                let is_mouse = matches!(name, "mouseDown" | "mouseUp" | "rightMouseDown" | "rightMouseUp");
+                let is_key = matches!(name, "keyDown" | "keyUp");
+                if is_mouse || is_key {
+                    reserve_player_mut(|player| {
+                        if (is_mouse && player.movie.timeout_mouse)
+                            || (is_key && player.movie.timeout_keydown)
+                        {
+                            player.movie.timeout_last_reset_ms =
+                                crate::player::testing_shared::now_ms();
+                        }
+                    });
+                }
+            }
+        }
+
+        let skip = reserve_player_mut(|player| player.in_mouse_command || player.command_handler_yielding || player.is_in_transition || player.transition_hold_active());
         if skip {
             continue;
         }

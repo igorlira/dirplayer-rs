@@ -54,6 +54,18 @@ fn caret_blink_visible_now() -> bool {
 /// Selection-highlight color, matched to the CPU path's `SELECTION_COLOR`.
 const SELECTION_HIGHLIGHT: (u8, u8, u8) = (164, 205, 255);
 
+/// An in-progress score/puppet transition. `old_pixels` is the stage as it
+/// looked before the score change (captured from the preserved drawing buffer,
+/// top-left origin RGBA); `draw_frame` composites it over the freshly-rendered
+/// new stage per elapsed progress until the duration elapses.
+struct TransitionPlayback {
+    old_pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    info: crate::player::cast_member::TransitionInfo,
+    start_ms: i64,
+}
+
 /// WebGL2 hardware-accelerated renderer
 ///
 /// This renderer uses WebGL2 to offload compositing to the GPU,
@@ -105,6 +117,16 @@ pub struct WebGL2Renderer {
     /// Reused texture for compositing the script-owned stage framebuffer
     /// (`(the stage).image` imaging-Lingo overlay). Re-uploaded each frame.
     stage_image_texture: Option<web_sys::WebGlTexture>,
+    /// Active score/puppet transition being animated over the draw loop.
+    active_transition: Option<TransitionPlayback>,
+    /// Reused texture for compositing the transition frame. Re-uploaded each frame.
+    transition_texture: Option<web_sys::WebGlTexture>,
+    /// GPU copy of the previously-presented frame. The default drawing buffer is
+    /// not reliably preserved for CPU readback between frames, so a transition
+    /// reads its OLD image back from here. Refreshed each frame via copyTexImage2D.
+    prev_frame_texture: Option<web_sys::WebGlTexture>,
+    /// Reusable framebuffer for reading `prev_frame_texture` back to the CPU.
+    prev_frame_fbo: Option<web_sys::WebGlFramebuffer>,
     /// Shockwave 3D scene renderer
     scene3d: scene3d::Scene3dRenderer,
     /// Engine-agnostic external-Xtra 3D scene renderer (scene3d host API — used
@@ -198,6 +220,10 @@ impl WebGL2Renderer {
             trails_texture: None,
             trails_size: (0, 0),
             stage_image_texture: None,
+            active_transition: None,
+            transition_texture: None,
+            prev_frame_texture: None,
+            prev_frame_fbo: None,
             scene3d: scene3d::Scene3dRenderer::new(),
             xtra_scenes: xtra_scene::XtraSceneRenderer::new(),
             native_cursor_cache: None,
@@ -580,6 +606,140 @@ impl WebGL2Renderer {
         self.quad.unbind(gl);
     }
 
+    /// Read the default framebuffer's RGBA pixels, flipped to a top-left origin
+    /// so the layout matches a `Bitmap` (GL reads bottom-left first).
+    fn read_framebuffer_rgba(&self) -> Vec<u8> {
+        let (width, height) = self.size;
+        let gl = self.context.gl();
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+        let _ = gl.read_pixels_with_opt_u8_array(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixels),
+        );
+        let row = width as usize * 4;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..height as usize {
+            let src = (height as usize - 1 - y) * row;
+            let dst = y * row;
+            flipped[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+        }
+        flipped
+    }
+
+    /// Upload a top-left-origin RGBA buffer and draw it full-stage (Copy ink),
+    /// like `draw_stage_image_overlay` but for the transition composite buffer.
+    fn blit_fullscreen_rgba(&mut self, data: &[u8], w: u32, h: u32) {
+        if w == 0 || h == 0 || data.len() != w as usize * h as usize * 4 {
+            return;
+        }
+        if self.transition_texture.is_none() {
+            self.transition_texture = self.context.create_texture().ok();
+        }
+        let texture = match &self.transition_texture {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        if self.context.upload_texture_rgba(&texture, w, h, data).is_err() {
+            return;
+        }
+
+        let (width, height) = self.size;
+        let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
+        let program = match self.shader_manager.get_program(effective_ink) {
+            Some(p) => p,
+            None => return,
+        };
+        self.context.set_blend_alpha();
+
+        let gl = self.context.gl();
+        self.quad.bind(gl);
+        gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+        if let Some(ref loc) = program.u_texture {
+            gl.uniform1i(Some(loc), 0);
+        }
+        if let Some(ref loc) = program.u_sprite_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, width as f32, height as f32);
+        }
+        if let Some(ref loc) = program.u_tex_rect {
+            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
+        }
+        if let Some(ref loc) = program.u_flip {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_skew {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_rotation_center {
+            gl.uniform2f(Some(loc), 0.0, 0.0);
+        }
+        if let Some(ref loc) = program.u_blend {
+            gl.uniform1f(Some(loc), 1.0);
+        }
+        self.quad.draw(gl);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        self.quad.unbind(gl);
+    }
+
+    /// Blend the captured OLD stage over the freshly-rendered NEW stage per
+    /// elapsed progress and present the result. On completion it clears the
+    /// transition and releases the player's `score_transition_active` hold so the
+    /// frame loop resumes exactly when the animation ends (precise sync).
+    fn composite_transition(&mut self, player: &mut DirPlayer) {
+        let (info, start_ms, w, h) = match &self.active_transition {
+            Some(t) => (t.info.clone(), t.start_ms, t.width, t.height),
+            None => return,
+        };
+        if (w, h) != self.size {
+            // Stage resized mid-transition: abort cleanly.
+            self.active_transition = None;
+            player.score_transition_active = false;
+            return;
+        }
+        let elapsed = chrono::Local::now().timestamp_millis() - start_ms;
+        let dur = info.duration_ms.max(1) as i64;
+        let progress = (elapsed as f32 / dur as f32).clamp(0.0, 1.0);
+
+        let mut composited = self.read_framebuffer_rgba();
+        if let Some(t) = &self.active_transition {
+            crate::rendering::composite_transition_pixels(
+                &mut composited,
+                &t.old_pixels,
+                w as i64,
+                h as i64,
+                info.transition_type,
+                info.chunk_size,
+                progress,
+            );
+        }
+        // The stage framebuffer reads back with alpha=0 (opaque RGB, unreliable
+        // alpha). The blit uses alpha blending, so a restored-OLD pixel carrying
+        // alpha=0 would be fully transparent and show the freshly-rendered NEW
+        // frame straight through — making the effect invisible. Force the whole
+        // composite opaque so the blit replaces the stage with old↔new pixels.
+        for px in composited.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        self.blit_fullscreen_rgba(&composited, w, h);
+
+        if progress >= 1.0 {
+            self.active_transition = None;
+            player.score_transition_active = false;
+        }
+    }
+
     /// Draw the current frame
     /// True if the sprite in `channel_num` is a Shockwave3D member with
     /// directToStage enabled. Such sprites are composited directly to the screen
@@ -624,6 +784,27 @@ impl WebGL2Renderer {
         for member_ref in player.movie.cast_manager.drain_texture_invalidations() {
             self.texture_cache.invalidate_for_member(&member_ref);
             self.rendered_text_cache.invalidate_for_member(&member_ref);
+        }
+
+        // Score/puppet transition: the draw buffer still holds the PREVIOUS
+        // (pre-change) frame (preserveDrawingBuffer is forced on), so snapshot it
+        // as the transition's OLD image before we overwrite it. The composite
+        // pass at the end of draw_frame blends old→new over the effect duration.
+        if self.active_transition.is_none() {
+            if let Some(info) = player.pending_transition.take() {
+                let (w, h) = self.size;
+                let old_pixels = self.read_prev_frame_rgba();
+                if old_pixels.len() == (w as usize * h as usize * 4) {
+                    let start_ms = chrono::Local::now().timestamp_millis();
+                    self.active_transition = Some(TransitionPlayback {
+                        old_pixels,
+                        width: w,
+                        height: h,
+                        info,
+                        start_ms,
+                    });
+                }
+            }
         }
 
         // Clear with stage background color
@@ -782,6 +963,14 @@ impl WebGL2Renderer {
             }
         }
 
+        // Composite an in-progress score/puppet transition: blend the captured
+        // OLD stage over the freshly-rendered NEW stage per elapsed progress and
+        // present it. Releases the player's playhead hold on completion.
+        if self.active_transition.is_some() {
+            self.composite_transition(player);
+            self.shader_manager.clear_active();
+        }
+
         // Force the canvas alpha channel to 1.0 everywhere before present.
         // The WebGL2 context uses `alpha: true` (needed for copyTexSubImage2D
         // trails compatibility), which means per-pixel framebuffer alpha
@@ -799,6 +988,90 @@ impl WebGL2Renderer {
             gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
             gl.color_mask(true, true, true, true);
         }
+
+        // Snapshot the just-presented frame into a GPU texture so a transition
+        // beginning next frame can read it back as its OLD image. Skip while a
+        // nested `#movie` sub-player is rendering into the host framebuffer.
+        if unsafe { crate::player::ACTIVE_PLAYER_ID } == 0 {
+            self.copy_framebuffer_to_prev();
+        }
+    }
+
+    /// Copy the current default framebuffer into `prev_frame_texture` (GPU-side,
+    /// no CPU stall). Allocates/resizes the texture as needed.
+    fn copy_framebuffer_to_prev(&mut self) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        if self.prev_frame_texture.is_none() {
+            self.prev_frame_texture = self.context.gl().create_texture();
+        }
+        let tex = match &self.prev_frame_texture {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let gl = self.context.gl();
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&tex));
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::NEAREST as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
+        gl.copy_tex_image_2d(
+            WebGl2RenderingContext::TEXTURE_2D,
+            0,
+            WebGl2RenderingContext::RGBA,
+            0,
+            0,
+            w as i32,
+            h as i32,
+            0,
+        );
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+    }
+
+    /// Read `prev_frame_texture` back to the CPU as top-left-origin RGBA (the
+    /// captured OLD frame for a starting transition).
+    fn read_prev_frame_rgba(&mut self) -> Vec<u8> {
+        let (w, h) = self.size;
+        let tex = match &self.prev_frame_texture {
+            Some(t) => t.clone(),
+            None => return vec![0u8; w as usize * h as usize * 4],
+        };
+        if self.prev_frame_fbo.is_none() {
+            self.prev_frame_fbo = self.context.gl().create_framebuffer();
+        }
+        let fbo = self.prev_frame_fbo.clone();
+        let gl = self.context.gl();
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, fbo.as_ref());
+        gl.framebuffer_texture_2d(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            WebGl2RenderingContext::COLOR_ATTACHMENT0,
+            WebGl2RenderingContext::TEXTURE_2D,
+            Some(&tex),
+            0,
+        );
+        let mut pixels = vec![0u8; w as usize * h as usize * 4];
+        let _ = gl.read_pixels_with_opt_u8_array(
+            0,
+            0,
+            w as i32,
+            h as i32,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixels),
+        );
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
+        // Copied from the bottom-left-origin framebuffer; flip to top-left.
+        let row = w as usize * 4;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..h as usize {
+            let src = (h as usize - 1 - y) * row;
+            let dst = y * row;
+            flipped[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
+        }
+        flipped
     }
 
     pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {

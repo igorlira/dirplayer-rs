@@ -2699,7 +2699,44 @@ pub enum CastMemberType {
     HavokPhysics(HavokPhysicsMember),
     PhysXPhysics(PhysXPhysicsMember),
     Groove3gm(Groove3gmMember),
+    Transition(TransitionMember),
     Unknown,
+}
+
+/// A score/puppet transition member. Director stores these as raw member-type 14,
+/// so they're detected by their transition-shaped specific data rather than the type
+/// id. `info` carries the built-in effect (Director 11.5 Dictionary `puppetTransition`).
+#[derive(Clone, Debug)]
+pub struct TransitionMember {
+    pub info: TransitionInfo,
+}
+
+/// Decoded from a transition member's 6-byte specific data:
+/// `[reserved][chunkSize][type][flags=02][duration u16 BE]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransitionInfo {
+    /// Built-in transition code, 1-52.
+    pub transition_type: u8,
+    /// Chunk size in pixels (1-128); smaller = smoother/slower.
+    pub chunk_size: u8,
+    /// Duration in milliseconds.
+    pub duration_ms: u16,
+}
+
+impl TransitionInfo {
+    /// Parse from a transition member's specific data. Returns None unless it looks
+    /// like a transition (>=6 bytes with a valid 1-52 type code) — this is what
+    /// distinguishes a built-in transition (raw type 14) from a real Xtra member.
+    pub fn from_member_bytes(b: &[u8]) -> Option<TransitionInfo> {
+        if b.len() < 6 { return None; }
+        let ty = b[2];
+        if ty == 0 || ty > 52 { return None; }
+        Some(TransitionInfo {
+            transition_type: ty,
+            chunk_size: b[1].max(1),
+            duration_ms: ((b[4] as u16) << 8) | (b[5] as u16),
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -2775,6 +2812,9 @@ impl fmt::Debug for CastMemberType {
             Self::PhysXPhysics(_) => {
                 write!(f, "PhysXPhysics")
             }
+            Self::Transition(_) => {
+                write!(f, "Transition")
+            }
             Self::Groove3gm(_) => {
                 write!(f, "Groove3gm")
             }
@@ -2834,6 +2874,9 @@ impl CastMemberType {
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
             Self::Groove3gm(_) => CastMemberTypeId::Groove3gm,
+            // No dedicated CastMemberTypeId; transitions are score-driven, not queried
+            // via `the type of member`, so Unknown is adequate here.
+            Self::Transition(_) => CastMemberTypeId::Unknown,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -6129,6 +6172,14 @@ impl CastMember {
                     );
                     CastMemberType::Text(text_member)
                 }
+            }
+            MemberType::Xtra if TransitionInfo::from_member_bytes(&chunk.specific_data_raw).is_some() => {
+                // Director stores built-in score/puppet transitions as raw member-type
+                // 14 (dirplayer's `Xtra`) with a 6-byte record; detect them by shape so
+                // real Xtra members aren't misread. The transition/effect channel
+                // references these by number (see Score::get_frame_transition).
+                let info = TransitionInfo::from_member_bytes(&chunk.specific_data_raw).unwrap();
+                CastMemberType::Transition(TransitionMember { info })
             }
             _ => {
                 // Assuming `chunk.member_type` is an enum backed by a numeric ID
