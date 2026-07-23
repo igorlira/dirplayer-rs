@@ -2054,6 +2054,7 @@ impl Shockwave3dMemberHandlers {
                                                 attenuation: [1.0, 0.0, 0.0],
                                                 spot_angle: 90.0, // Director default
                                                 enabled: true,
+                                                ..Default::default()
                                             });
                                             scene.nodes.push(W3dNode {
                                                 name: obj_name.clone(), node_type: W3dNodeType::Light,

@@ -154,6 +154,7 @@ impl W3dFileParser {
                 enabled: true,
                 spot_angle: 90.0,
                 attenuation: [1.0, 0.0, 0.0],
+                ..Default::default()
             });
             self.scene.nodes.push(W3dNode {
                 name: "UIAmbient".to_string(),
@@ -186,6 +187,7 @@ impl W3dFileParser {
                 enabled: true,
                 spot_angle: 90.0,
                 attenuation: [1.0, 0.0, 0.0],
+                ..Default::default()
             });
             // Only the Z axis (columns 8/9/10) is read for a directional light's
             // orientation; X/Y axes and position are unused but kept sane.
@@ -306,7 +308,12 @@ impl W3dFileParser {
     fn parse_light_resource(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
         let name = r.read_ifx_string()?;
         let light_type_raw = r.read_u8()?;
-        let enabled = r.read_u8()? != 0;
+        // IFX light attribute bitfield (IFXLightResource::LightAttributes):
+        // bit0 ENABLED, bit1 SPECULAR, bit2 SPOTDECAY.
+        let attr_byte = r.read_u8()?;
+        let enabled = (attr_byte & 0x01) != 0;
+        let specular = (attr_byte & 0x02) != 0;
+        let spot_decay = (attr_byte & 0x04) != 0;
         let cr = r.read_f32()?;
         let cg = r.read_f32()?;
         let cb = r.read_f32()?;
@@ -324,7 +331,7 @@ impl W3dFileParser {
             _ => W3dLightType::Point,
         };
 
-        log(&format!("  Light: \"{}\" type={:?} color=({:.2},{:.2},{:.2})", name, light_type, cr, cg, cb));
+        log(&format!("  Light: \"{}\" type={:?} color=({:.2},{:.2},{:.2}) specular={} spotDecay={}", name, light_type, cr, cg, cb, specular, spot_decay));
         self.scene.lights.push(W3dLight {
             name,
             light_type,
@@ -332,6 +339,8 @@ impl W3dFileParser {
             attenuation: [a0, a1, a2],
             spot_angle,
             enabled,
+            specular,
+            spot_decay,
         });
         Ok(())
     }

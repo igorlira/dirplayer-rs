@@ -320,6 +320,11 @@ pub struct W3dLight {
     pub attenuation: [f32; 3],
     pub spot_angle: f32,
     pub enabled: bool,
+    /// IFX light attribute bits (IFXLightResource::LightAttributes): SPECULAR = 1<<1
+    /// (this light contributes specular highlights), SPOTDECAY = 1<<2 (spot cone has a
+    /// smooth center→edge falloff; off = uniform intensity with a hard cutoff).
+    pub specular: bool,
+    pub spot_decay: bool,
 }
 
 impl Default for W3dLight {
@@ -331,6 +336,8 @@ impl Default for W3dLight {
             attenuation: [1.0, 0.0, 0.0],
             spot_angle: 90.0,
             enabled: true,
+            specular: false,
+            spot_decay: false,
         }
     }
 }
