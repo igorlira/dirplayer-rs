@@ -3888,6 +3888,7 @@ impl CastMember {
             enabled: true,
             spot_angle: 90.0,
             attenuation: [1.0, 0.0, 0.0],
+            ..Default::default()
         });
         // Default directional light (IFX default: 0.75)
         scene.lights.push(W3dLight {
@@ -3897,6 +3898,7 @@ impl CastMember {
             enabled: true,
             spot_angle: 90.0,
             attenuation: [1.0, 0.0, 0.0],
+            ..Default::default()
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
