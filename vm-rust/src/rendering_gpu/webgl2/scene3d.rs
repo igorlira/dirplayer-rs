@@ -1998,14 +1998,22 @@ void main() {
                     // branch such a plane fell to the cutout pass and rendered as a hard
                     // opaque disk instead of a soft glow.
                     // Director gates transparency on shader.blend (default 100 = opaque)
-                    // and shader.transparent, NOT on the W3D material's opacity field. So a
-                    // low material opacity only means "translucent" when the surface isn't
-                    // an opaque textured solid — otherwise finalDrive's `chassis` (material
-                    // opacity 0.2, opaque camo texture) rendered 20% see-through, letting you
-                    // look through the car body at the passengers.
-                    let is_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
-                        || (opacity < 0.999
-                            && !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state));
+                    // and shader.transparent, NOT on the W3D material's opacity field. A model
+                    // is only actually see-through when the surface isn't an opaque textured
+                    // solid — so an OPAQUE diffuse texture forces the opaque pass regardless of
+                    // a low material opacity OR a `.transparent = 1` flag. This fixes two cases:
+                    //   * finalDrive `chassis` (material opacity 0.2, opaque camo) — was 20%
+                    //     see-through, showing the passengers through the car body.
+                    //   * LEGO SuperSonic — its shaders inherit Director's default
+                    //     `transparent = TRUE` (at blend=100 = opaque); tracking that flag
+                    //     dumped every opaque-textured prop into the depth-off transparent pass,
+                    //     so warehouse boxes/coils rendered as floating dark solids.
+                    // Genuine translucents (galaxy glow's alpha texture, plain-colour water)
+                    // have no opaque texture, so they stay in the transparent pass.
+                    let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
+                        || opacity < 0.999;
+                    let is_transparent = wants_transparent
+                        && !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state);
                     if is_transparent {
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
