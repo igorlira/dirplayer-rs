@@ -11,7 +11,7 @@ use crate::{
         font::{bitmap_font_copy_char, BitmapFont},
         geometry::IntRect,
         sprite::{ColorRef, is_skew_flip},
-        bitmap::bitmap::{get_system_default_palette, PaletteRef}, Sprite, Score,
+        bitmap::bitmap::{get_system_default_palette, PaletteRef, BuiltInPalette}, Sprite, Score,
         reserve_player_mut,
     },
 };
@@ -2217,6 +2217,38 @@ impl Bitmap {
 
         // Check for skew-based flip (skew=±180° combined with rotation produces a mirror)
         let has_skew_flip = is_skew_flip(params.skew);
+
+        // Fast path — copy a 32-bit RGBA source into an 8-bit GRAYSCALE destination
+        // (Director's text→alpha-mask→texture HUD pattern: `grayImage.copyPixels(textImage)`
+        // then `rgba.setAlpha(grayImage)`). The grayscale value must be the SOURCE ALPHA
+        // (0=transparent..255=opaque). Routing this through the colour path matched the
+        // reversed Mac grayscale CLUT (white glyph → index 0), so setAlpha turned the
+        // glyphs transparent and left the fill opaque (LEGO SuperSonic HUD digits invisible
+        // / white-blocked). Plain copy ink, no rotation/skew.
+        if ink == 0 && !has_sprite_rotation && !has_skew_flip
+            && self.bit_depth == 8
+            && matches!(self.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+            && src.bit_depth == 32
+        {
+            let dw = self.width as usize;
+            for dy in min_dst_y..max_dst_y {
+                if dy < 0 || dy >= self.height as i32 { continue; }
+                for dx in min_dst_x..max_dst_x {
+                    if dx < 0 || dx >= self.width as i32 { continue; }
+                    let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
+                    let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
+                    let sx = (src_left_f + rel_x * scale_x).floor() as i32;
+                    let sy = (src_top_f + rel_y * scale_y).floor() as i32;
+                    if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { continue; }
+                    let si = ((sy as usize) * src.width as usize + sx as usize) * 4 + 3;
+                    if si < src.data.len() {
+                        self.data[(dy as usize) * dw + dx as usize] = src.data[si];
+                    }
+                }
+            }
+            self.matte = None;
+            return;
+        }
 
         // ----------------------------------------------------------
         // Director-style draw bounds (allow rotated overflow)
