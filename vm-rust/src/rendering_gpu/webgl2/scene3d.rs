@@ -107,6 +107,7 @@ struct Shader3d {
     u_light_atten: Option<WebGlUniformLocation>,
     u_light_dir: Option<WebGlUniformLocation>,
     u_light_spot_angle: Option<WebGlUniformLocation>,
+    u_light_spot_exp: Option<WebGlUniformLocation>,
     u_camera_pos: Option<WebGlUniformLocation>,
     u_global_ambient: Option<WebGlUniformLocation>,
     u_fog_enabled: Option<WebGlUniformLocation>,
@@ -445,6 +446,7 @@ uniform int u_light_type[8];
 uniform vec3 u_light_atten[8];   // (constant, linear, quadratic) per light
 uniform vec3 u_light_dir[8];     // direction for directional/spot lights
 uniform float u_light_spot_angle[8]; // spot cone angle (radians, 0 = not spot)
+uniform float u_light_spot_exp[8];   // spot falloff exponent (0 = uniform/hard edge, SpotDecay off)
 uniform vec3 u_camera_pos;
 uniform vec3 u_global_ambient;
 
@@ -535,6 +537,12 @@ void main() {
     if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
     vec3 V = normalize(u_camera_pos - v_position);
+    // Director/IFX lighting is ONE-SIDED (max(0,N·L)) — surfaces facing away from a
+    // light fall into shadow, which is what carves the directional shading. Flip the
+    // shading normal to face the viewer so genuinely double-sided geometry still
+    // receives light without depending on winding (the projection Y-flip makes
+    // gl_FrontFacing unreliable).
+    vec3 Nl = (dot(N, V) < 0.0) ? -N : N;
 
     vec4 tex_sample = texture(u_diffuse_tex, v_texcoord);
 
@@ -573,11 +581,17 @@ void main() {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
                         float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
-                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                        // IFX/OpenGL spot cone. When SpotDecay is ON the light carries a
+                        // GL_SPOT_EXPONENT (u_light_spot_exp = log10(.04)/log10(cos(outer)),
+                        // computed per light) so the beam is full at the centre and 0.04 at
+                        // the outer edge. When SpotDecay is OFF the exponent is 0 → pow()==1
+                        // → uniform intensity inside the cone with a hard cutoff, matching
+                        // Director/IFX. A tiny smoothstep only anti-aliases the rim.
+                        else atten *= pow(spot_cos, u_light_spot_exp[i]) * smoothstep(cone_cos, cone_cos + 0.02, spot_cos);
                     }
                 }
                 // Two-sided lighting: use abs(N·L) so back faces also receive light
-                float diff = abs(dot(N, L));
+                float diff = max(dot(Nl, L), 0.0);
                 // Toon shading: quantize NdotL into discrete steps
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
@@ -670,12 +684,18 @@ void main() {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
                         float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
-                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                        // IFX/OpenGL spot cone. When SpotDecay is ON the light carries a
+                        // GL_SPOT_EXPONENT (u_light_spot_exp = log10(.04)/log10(cos(outer)),
+                        // computed per light) so the beam is full at the centre and 0.04 at
+                        // the outer edge. When SpotDecay is OFF the exponent is 0 → pow()==1
+                        // → uniform intensity inside the cone with a hard cutoff, matching
+                        // Director/IFX. A tiny smoothstep only anti-aliases the rim.
+                        else atten *= pow(spot_cos, u_light_spot_exp[i]) * smoothstep(cone_cos, cone_cos + 0.02, spot_cos);
                     }
                 }
 
                 // Two-sided lighting: use abs(N·L) so back faces also receive light
-                float diff = abs(dot(N, L));
+                float diff = max(dot(Nl, L), 0.0);
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
@@ -683,7 +703,7 @@ void main() {
 
                 if (u_shininess > 0.0 && diff > 0.0) {
                     vec3 H = normalize(L + V);
-                    float spec = pow(max(dot(N, H), 0.0), u_shininess);
+                    float spec = pow(max(dot(Nl, H), 0.0), u_shininess);
                     result += u_light_color[i] * u_specular_color.rgb * spec * atten;
                 }
             }
@@ -767,6 +787,7 @@ void main() {
             u_light_atten: u("u_light_atten[0]"),
             u_light_dir: u("u_light_dir[0]"),
             u_light_spot_angle: u("u_light_spot_angle[0]"),
+            u_light_spot_exp: u("u_light_spot_exp[0]"),
             u_camera_pos: u("u_camera_pos"),
             u_global_ambient: u("u_global_ambient"),
             u_fog_enabled: u("u_fog_enabled"),
@@ -4551,6 +4572,7 @@ void main() {
         let mut attenuations = [0.0f32; 24]; // 8 * 3 (constant, linear, quadratic)
         let mut directions = [0.0f32; 24];   // 8 * 3 (direction for spot/directional)
         let mut spot_angles = [0.0f32; 8];   // cone angle in radians
+        let mut spot_exps = [0.0f32; 8];     // GL_SPOT_EXPONENT (0 = SpotDecay off, uniform)
         let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
@@ -4660,16 +4682,29 @@ void main() {
 
                 // Spot angle (degrees → radians)
                 spot_angles[li] = if lt == 3 { light.spot_angle.to_radians() } else { 0.0 };
+                // SpotDecay ON → GL_SPOT_EXPONENT so the beam reaches 0.04 at the outer
+                // cone edge (exp = log10(.04)/log10(cos(outer))); OFF → 0 (uniform + hard
+                // cutoff). Clamp the log to avoid a blow-up for near-0° cones.
+                spot_exps[li] = if lt == 3 && light.spot_decay {
+                    let cone_cos = spot_angles[li].cos().min(0.9999).max(1e-4);
+                    (0.04f32.ln() / cone_cos.ln()).clamp(0.0, 128.0)
+                } else {
+                    0.0
+                };
 
                 if let Some(light_node) = scene.nodes.iter().find(|n| {
                     n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
                 }) {
                     let world_t = self.accumulate_transform_with_state(scene, light_node, runtime_state);
                     if lt == 1 {
-                        // Directional: direction = -Z axis of world transform
-                        positions[li * 3]     = -world_t[8];
-                        positions[li * 3 + 1] = -world_t[9];
-                        positions[li * 3 + 2] = -world_t[10];
+                        // Directional: the beam travels along the light's -Z (confirmed by
+                        // the spot cone, which uses -Z as its aim). The shader's L is the
+                        // direction *to* the light, i.e. the opposite = +Z. (The old code
+                        // used -Z here, which only looked right because diffuse used
+                        // abs(N·L); with one-sided max() the sign must be correct.)
+                        positions[li * 3]     = world_t[8];
+                        positions[li * 3 + 1] = world_t[9];
+                        positions[li * 3 + 2] = world_t[10];
                         directions[li * 3]     = -world_t[8];
                         directions[li * 3 + 1] = -world_t[9];
                         directions[li * 3 + 2] = -world_t[10];
@@ -4707,6 +4742,7 @@ void main() {
         gl.uniform3fv_with_f32_array(shader.u_light_atten.as_ref(), &attenuations[..n * 3]);
         gl.uniform3fv_with_f32_array(shader.u_light_dir.as_ref(), &directions[..n * 3]);
         gl.uniform1fv_with_f32_array(shader.u_light_spot_angle.as_ref(), &spot_angles[..n]);
+        gl.uniform1fv_with_f32_array(shader.u_light_spot_exp.as_ref(), &spot_exps[..n]);
         gl.uniform3f(shader.u_global_ambient.as_ref(), global_ambient[0], global_ambient[1], global_ambient[2]);
     }
 
