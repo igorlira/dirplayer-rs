@@ -422,6 +422,7 @@ pub async fn player_dispatch_movie_callback(
             "mouseUp" => &player.movie.mouse_up_script,
             "keyDown" => &player.movie.key_down_script,
             "keyUp" => &player.movie.key_up_script,
+            "timeOut" => &player.movie.timeout_script,
             _ => return None,
         };
         let callback = callback.as_ref()?;
@@ -1730,6 +1731,51 @@ pub async fn dispatch_event_to_all_behaviors(
 
 pub async fn player_wait_available() {
     player_semaphone().lock().await;
+}
+
+/// The global idle timeout (`the timeoutLength` / `the timeoutScript`, distinct
+/// from `timeout()` objects). Once `timeoutLength` ticks pass without mouse-click
+/// or key input, Director sends a `timeOut` event and runs the primary
+/// `timeoutScript`. Called once per frame tick. Memory-game card resolution
+/// (`gotOne` / `reAnimate`) depends on this.
+pub async fn check_global_timeout() {
+    let fire = reserve_player_mut(|player| {
+        if !player.is_playing {
+            return false;
+        }
+        let now = crate::player::testing_shared::now_ms();
+        let m = &mut player.movie;
+        // Un-initialized (movie just started): anchor the counter to now.
+        if m.timeout_last_reset_ms <= 0.0 {
+            m.timeout_last_reset_ms = now;
+            return false;
+        }
+        if m.timeout_length <= 0 {
+            return false;
+        }
+        let lapsed_ticks = ((now - m.timeout_last_reset_ms) * 60.0 / 1000.0) as i32;
+        if lapsed_ticks >= m.timeout_length {
+            m.timeout_last_reset_ms = now; // re-base for the next period
+            true
+        } else {
+            false
+        }
+    });
+    if !fire {
+        return;
+    }
+    // Primary `the timeoutScript` (e.g. the memory game's "gotOne" / "reAnimate").
+    if let Err(err) = player_dispatch_movie_callback("timeOut").await {
+        if err.code != ScriptErrorCode::Abort && err.code != ScriptErrorCode::HandlerNotFound {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
+    }
+    // `on timeOut` system message to frame/movie scripts.
+    if let Err(err) = player_invoke_frame_and_movie_scripts("timeOut", &vec![]).await {
+        if err.code != ScriptErrorCode::Abort && err.code != ScriptErrorCode::HandlerNotFound {
+            reserve_player_mut(|player| player.on_script_error(&err));
+        }
+    }
 }
 
 /// Dispatch system events to all timeout targets

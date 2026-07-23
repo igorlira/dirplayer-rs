@@ -39,6 +39,16 @@ pub struct Movie {
     pub key_down_script: Option<ScriptReceiver>,
     pub key_up_script: Option<ScriptReceiver>,
     pub timeout_script: Option<ScriptReceiver>,
+    /// `the timeoutLength` — idle ticks (1/60 s) before a `timeOut` event fires.
+    /// Director default is 10800 (3 min). See `check_global_timeout`.
+    pub timeout_length: i32,
+    /// `the timeoutMouse` / `timeoutKeyDown` — when TRUE (default), mouse / key
+    /// activity resets the idle counter.
+    pub timeout_mouse: bool,
+    pub timeout_keydown: bool,
+    /// Wall-clock ms of the last idle-counter reset (input activity or a fire).
+    /// `the timeoutLapsed` is derived from this.
+    pub timeout_last_reset_ms: f64,
     pub allow_custom_caching: bool,
     pub trace_script: bool,
     pub trace_log_file: String,
@@ -104,6 +114,10 @@ impl Movie {
             key_down_script: None,
             key_up_script: None,
             timeout_script: None,
+            timeout_length: 10800,
+            timeout_mouse: true,
+            timeout_keydown: true,
+            timeout_last_reset_ms: 0.0,
             allow_custom_caching: false,
             trace_script: false,
             trace_log_file: String::new(),
@@ -512,8 +526,25 @@ impl Movie {
                     }
                 }
             },
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay"
-            | "timeoutLapsed" | "soundEnabled" | "soundLevel"
+            "timeoutLength" => {
+                // Idle ticks before `timeOut`. Restart the idle counter so the
+                // countdown runs from now (the movie usually sets this right after
+                // the activity that should trigger the eventual timeout).
+                self.timeout_length = value.int_value()?;
+                self.timeout_last_reset_ms = crate::player::testing_shared::now_ms();
+                Ok(())
+            },
+            "timeoutMouse" => { self.timeout_mouse = value.int_value()? != 0; Ok(()) },
+            "timeoutKeyDown" => { self.timeout_keydown = value.int_value()? != 0; Ok(()) },
+            "timeoutLapsed" => {
+                // Writable: `set the timeoutLapsed` re-bases the idle counter.
+                let ticks = value.int_value()? as f64;
+                self.timeout_last_reset_ms =
+                    crate::player::testing_shared::now_ms() - ticks * (1000.0 / 60.0);
+                Ok(())
+            },
+            "timeoutPlay"
+            | "soundEnabled" | "soundLevel"
             | "beepOn" | "centerStage" | "exitLock" | "fixStageSize"
             // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
             // read/write) toggles whether Flash cast members mix their audio into the
