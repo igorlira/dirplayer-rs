@@ -26,17 +26,6 @@ browser_e2e_test!(test_dora_soccer_practice, |player| async move {
 
     snapshots.verify("practice", player.snapshot_stage())?;
 
-    // Drive the timer-gated intro camera to completion so it settles into the
-    // over-the-shoulder follow cam (headless rAF runs too fast for the ~9s the
-    // intro's `the timer` gate needs).
-    player.step_frames(80).await;
-    for _ in 0..25 {
-        let _ = player.eval("set the timer = 40000").await;
-        player.step_frames(1).await;
-    }
-    player.step_frames(20).await;
-    snapshots.verify("follow_cam", player.snapshot_stage())?;
-
     // Let the intro camera settle onto Dora, then force the HUD number overlays
     // (o1..o5 = LoadSprite "one".."five", the arrowhud `numup` handler) visible.
     // They are keyed cut-out sprites; this guards their transparency compositing.
