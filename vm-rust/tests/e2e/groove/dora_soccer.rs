@@ -115,5 +115,12 @@ browser_e2e_test!(test_dora_soccer_do_sets_behavior_props, |player| async move {
         .await
         .expect("lowercase built-in `sendsprite` via do must not be 'No built-in handler'");
 
+    // The timeoptions queue can leave `thingtodo = "sound"` and run `do("sound")`
+    // — bare `sound` with no args must be a no-op, not an out-of-bounds panic.
+    player
+        .eval("do(\"sound\")")
+        .await
+        .expect("`do(\\\"sound\\\")` (no args) must be a harmless no-op");
+
     Ok(())
 });

@@ -1771,6 +1771,13 @@ impl TypeHandlers {
 
     pub fn sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
+            // Bare `sound` with no arguments is a harmless no-op in Director, not
+            // a crash. Dora Soccer's timeoptions queue can leave `thingtodo =
+            // "sound"` and later run `do("sound")`; indexing args[0] here panicked
+            // (index out of bounds) and took down the whole VM.
+            if args.is_empty() {
+                return Ok(DatumRef::Void);
+            }
             let first_arg = player.get_datum(&args[0]).clone();
             // Command form: sound(#verb, channelNum, ...args)
             // e.g. sound #stop, 3  or  sound #play, 1, member("snd")
