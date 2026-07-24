@@ -108,5 +108,12 @@ browser_e2e_test!(test_dora_soccer_do_sets_behavior_props, |player| async move {
         "the idle clip `do(\"stb = [1,103,115,1]\")` must land on the behavior property"
     );
 
+    // A `do` string with a lowercase built-in command must resolve — the game
+    // queues `do("sendsprite 1,#endcamera")` (handler names are case-insensitive).
+    player
+        .eval("do(\"sendsprite 1,#nosuchhandler\")")
+        .await
+        .expect("lowercase built-in `sendsprite` via do must not be 'No built-in handler'");
+
     Ok(())
 });
