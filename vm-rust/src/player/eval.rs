@@ -14,7 +14,7 @@ use crate::{
         datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
         handlers::datum_handlers::{player_call_datum_handler, prop_list::PropListUtils, string_chunk::StringChunkUtils},
         player_call_global_handler, reserve_player_mut,
-        script::{get_lctx_for_script, get_obj_prop, player_set_obj_prop, script_get_prop_opt},
+        script::{get_lctx_for_script, get_obj_prop, player_set_obj_prop, script_get_prop_opt, script_set_prop},
         DirPlayer,
     },
 };
@@ -459,6 +459,36 @@ fn parse_number_value(pair: Pair<Rule>) -> Result<f64, ScriptError> {
                 .map_err(|e| ScriptError::new(format!("Invalid number: {}", e)))
         }
         _ => Err(ScriptError::new(format!("Expected number, got {:?}", pair.as_rule())))
+    }
+}
+
+/// For a bare-identifier assignment executed via `do`/eval, return the current
+/// scope's receiver instance IF it declares `ident_name` as a property — so the
+/// assignment lands on the behavior's property rather than a global (Director
+/// scoping). Mirrors the identifier READ resolution and only matches a genuinely
+/// declared instance property (not `ancestor`/`script`/`ilk` or global names).
+fn current_do_receiver_with_prop(
+    player: &DirPlayer,
+    ident_name: &str,
+) -> Option<crate::player::script_ref::ScriptInstanceRef> {
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+    use crate::player::ci_string::CiStr;
+
+    if player.scope_count == 0 || (player.scope_count as usize) > player.scopes.len() {
+        return None;
+    }
+    let raw = if player.current_breakpoint.is_some() {
+        player.eval_scope_index.unwrap_or(player.scope_count - 1)
+    } else {
+        player.scope_count - 1
+    };
+    let scope = player.scopes.get(raw as usize)?;
+    let receiver = scope.receiver.clone()?;
+    let inst = player.allocator.get_script_instance(&receiver);
+    if inst.properties.contains_key(CiStr::new(ident_name)) {
+        Some(receiver)
+    } else {
+        None
     }
 }
 
@@ -1831,6 +1861,19 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         player.set_movie_prop(prop_name, right_datum_value)?;
                         Ok(right_datum)
                     } else {
+                        // Director scoping for `do`/eval: a bare-identifier
+                        // assignment targets the current handler's receiver
+                        // PROPERTY when one is declared, and only otherwise a
+                        // global — mirroring the identifier READ path above.
+                        // Behaviors store per-instance tables this way, e.g. Dora
+                        // Soccer loads its animation clips with
+                        // `do("stb = [1,103,115,1]")` in beginSprite; writing a
+                        // global left the behavior's `stb` property VOID, so its
+                        // `aframe = stb[2]` was 0 and she stayed frozen at frame 0.
+                        if let Some(receiver) = current_do_receiver_with_prop(player, ident_name) {
+                            script_set_prop(player, &receiver, ident_name, &right_datum, true)?;
+                            return Ok(right_datum);
+                        }
                         player.globals.insert(ident_name.to_owned(), right_datum.clone());
                         Ok(right_datum)
                     }
