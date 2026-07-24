@@ -203,7 +203,22 @@ pub struct PlayerVMExecutionItem {
     pub completer: Option<ManualFutureCompleter<Result<DatumRef, ScriptError>>>,
 }
 
-pub const MAX_STACK_SIZE: usize = 50;
+/// Lingo call-stack depth at which we give up and report runaway recursion.
+///
+/// This is a backstop for a *hung movie*, not a correctness check, and it has to
+/// clear the deepest recursion real content performs. 50 was far too low:
+/// age_of_speed's `Gameplay::CalculateDistanceFromStart` walks the track ring
+/// with one nested call per token, so it needs one frame per token plus the
+/// enclosing event frames — 61 for level 1's 58-token ring, and its token tables
+/// run to at least `t80` (83 frames) on other levels. A correct walk was being
+/// killed at 46.
+///
+/// Note there is no cheaper structural test available: every frame of that
+/// legitimate recursion shares one script, handler and bytecode index (a single
+/// recursive call site), which is exactly the shape a runaway loop has. Depth is
+/// the only signal that separates them, so the value just needs enough headroom.
+/// Scopes are pre-allocated `Scope` structs, so headroom is cheap.
+pub const MAX_STACK_SIZE: usize = 512;
 
 pub struct DirPlayer {
     pub net_manager: NetManager,
@@ -435,6 +450,18 @@ pub struct DirPlayer {
     /// True while a net movie transition is in progress.
     /// Prevents the event loop from dispatching external events during the transition.
     pub is_in_transition: bool,
+    /// A score transition detected on frame entry, awaiting playback start by the
+    /// renderer (which snapshots the pre-transition stage). Set by advance_frame.
+    pub pending_transition: Option<crate::player::cast_member::TransitionInfo>,
+    /// True while a score/puppet transition holds the playhead (Director blocks
+    /// during a transition). The renderer clears it when the animation completes
+    /// (precise sync). A separate field from `is_in_transition` (which means a
+    /// movie swap is loading) so the two never collide.
+    pub score_transition_active: bool,
+    /// Failsafe deadline (wall-clock ms) for the transition hold: if the renderer
+    /// never signals completion (backend swap, stopped movie), the hold clears
+    /// here so a transition can never permanently freeze the movie.
+    pub transition_hold_until_ms: Option<i64>,
     pub actor_list_generation: u64,
     pub behavior_channel_cache_generation: u64,
     pub active_stage_filmloop_cache_generation: u64,
@@ -610,6 +637,9 @@ impl DirPlayer {
             pending_restart: false,
             movie_reload_data: None,
             is_in_transition: false,
+            pending_transition: None,
+            score_transition_active: false,
+            transition_hold_until_ms: None,
             actor_list_generation: 0,
             behavior_channel_cache_generation: 0,
             active_stage_filmloop_cache_generation: 0,
@@ -1494,6 +1524,14 @@ impl DirPlayer {
         if !self.is_playing {
             return;
         }
+        // A score transition is playing out (rendered per-frame by the renderer):
+        // hold the playhead until it finishes so the movie doesn't run ahead of the
+        // visible dissolve/wipe (matches Director, which blocks during a transition).
+        // Time-based so it self-clears — it can never permanently freeze the movie.
+        if self.transition_hold_active() {
+            self.stage_dirty = true;
+            return;
+        }
         self.stage_dirty = true;
 
         let prev_frame = self.movie.current_frame;
@@ -1514,6 +1552,22 @@ impl DirPlayer {
         // stage image again.
         if prev_frame != next_frame {
             self.stage_image_dirty = false;
+
+            // A transition placed on the entered frame plays between the previous
+            // stage and this frame's stage. Look up the transition member and hand
+            // its effect to the renderer, then pause the playhead until it completes.
+            if let Some(trans_ref) = self.movie.score.get_frame_transition(next_frame) {
+                let info = self.movie.cast_manager
+                    .find_member_by_ref(&trans_ref)
+                    .and_then(|m| match &m.member_type {
+                        crate::player::cast_member::CastMemberType::Transition(t) => Some(t.info),
+                        _ => None,
+                    });
+                if let Some(info) = info {
+                    self.pending_transition = Some(info);
+                    self.begin_transition_hold(info.duration_ms);
+                }
+            }
         }
 
         // NOTE: Filmloop frames are advanced solely by update_filmloop_frames() in the main loop.
@@ -1526,6 +1580,34 @@ impl DirPlayer {
             JsApi::dispatch_frame_changed(self.movie.current_frame);
             self.has_player_frame_changed = true;
         }
+    }
+
+    /// True while the playhead is held for a score/puppet transition. Normally
+    /// the renderer clears `score_transition_active` the moment its animation
+    /// completes (precise sync); the wall-clock deadline is only a failsafe so a
+    /// missed completion signal can never permanently freeze the movie.
+    pub fn transition_hold_active(&mut self) -> bool {
+        if !self.score_transition_active {
+            return false;
+        }
+        if let Some(deadline) = self.transition_hold_until_ms {
+            if chrono::Local::now().timestamp_millis() >= deadline {
+                self.score_transition_active = false;
+                self.transition_hold_until_ms = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Begin holding the playhead for a transition of `duration_ms`. The renderer
+    /// releases the hold on completion; the failsafe deadline is set generously
+    /// past the animation window so it never trips during normal playback.
+    pub fn begin_transition_hold(&mut self, duration_ms: u16) {
+        self.score_transition_active = true;
+        let dur = (duration_ms as i64).clamp(1, 4000);
+        self.transition_hold_until_ms =
+            Some(chrono::Local::now().timestamp_millis() + dur + 2000);
     }
 
     pub fn stop(&mut self) {
@@ -2822,8 +2904,17 @@ impl DirPlayer {
             "colorDepth" => Ok(Datum::Int(32)),
             "fullColorPermit" => Ok(Datum::Int(1)), // Full color mode is permitted
             "timer" => Ok(Datum::Int(get_elapsed_ticks(self.start_time))),
-            "timeoutLength" | "timeoutKeyDown" | "timeoutMouse" | "timeoutPlay" => Ok(Datum::Int(0)),
-            "timeoutLapsed" => Ok(Datum::Int(0)),
+            "timeoutLength" => Ok(Datum::Int(self.movie.timeout_length)),
+            "timeoutKeyDown" => Ok(datum_bool(self.movie.timeout_keydown)),
+            "timeoutMouse" => Ok(datum_bool(self.movie.timeout_mouse)),
+            "timeoutPlay" => Ok(Datum::Int(0)),
+            "timeoutLapsed" => {
+                let lapsed = ((crate::player::testing_shared::now_ms()
+                    - self.movie.timeout_last_reset_ms)
+                    * 60.0 / 1000.0)
+                    .max(0.0) as i32;
+                Ok(Datum::Int(lapsed))
+            }
             "soundEnabled" => Ok(Datum::Int(1)),
             "soundLevel" => Ok(Datum::Int(7)), // max volume
             "beepOn" | "fixStageSize" => Ok(Datum::Int(0)),
@@ -2980,9 +3071,26 @@ impl DirPlayer {
     pub fn push_scope(&mut self) -> ScopeRef {
         if (self.scope_count + 1) as usize >= MAX_STACK_SIZE {
             // Try to get some context about what's on the stack
-            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\nRecent scope stack:\n");
-            let start = if self.scope_count > 10 { self.scope_count - 10 } else { 0 };
-            for i in start..self.scope_count {
+            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\nScope stack (outermost frames, then the deepest):\n");
+            // Show the BOTTOM of the stack as well as the top. The tail alone
+            // can't tell a genuinely infinite recursion from a legitimately deep
+            // one, because you can't see how much is outer context and how much
+            // is the repeating handler.
+            const HEAD: u32 = 5;
+            const TAIL: u32 = 25;
+            let indices: Vec<u32> = if self.scope_count <= HEAD + TAIL {
+                (0..self.scope_count).collect()
+            } else {
+                (0..HEAD).chain((self.scope_count - TAIL)..self.scope_count).collect()
+            };
+            let mut last: Option<u32> = None;
+            for i in indices {
+                if let Some(prev) = last {
+                    if i != prev + 1 {
+                        stack_trace.push_str(&format!("  … {} more frames …\n", i - prev - 1));
+                    }
+                }
+                last = Some(i);
                 if let Some(scope) = self.scopes.get(i as ScopeRef) {
                     // Try to get the handler name from the script
                     let handler_info = if let Some(script) = self.movie.cast_manager.get_script_by_ref(&scope.script_ref) {
@@ -3832,21 +3940,19 @@ pub async fn player_call_script_handler_raw_args(
     let mut backjumps: u32 = 0;
 
     loop {
-        // Check if scope was reused (generation changed = scope was popped and re-pushed)
-        let current_gen = reserve_player_ref(|player| {
-            player.scopes.get(scope_ref).unwrap().generation
+        // Single player access per op: read scope generation + bytecode_index and
+        // whether the debugger is active, in ONE closure and ONE scope-slot lookup
+        // (previously two). At ~1M ops/frame this per-op lookup is a real cost.
+        let (current_gen, bytecode_index, debugger_active) = reserve_player_ref(|player| {
+            let scope = player.scopes.get(scope_ref).unwrap();
+            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
+                || !matches!(player.step_mode, StepMode::None);
+            (scope.generation, scope.bytecode_index, debugging)
         });
+        // Scope was reused (generation changed = popped and re-pushed) → done.
         if current_gen != scope_generation {
             break;
         }
-
-        // Single player access to read bytecode_index and debugger state
-        let (bytecode_index, debugger_active) = reserve_player_ref(|player| {
-            let bi = player.scopes.get(scope_ref).unwrap().bytecode_index;
-            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
-                || !matches!(player.step_mode, StepMode::None);
-            (bi, debugging)
-        });
 
         // Only check breakpoints and step mode if the debugger is actually active
         if debugger_active {
@@ -4620,6 +4726,21 @@ pub async fn run_single_frame() -> (bool, bool) {
     if !is_playing {
         return (false, is_script_paused);
     }
+
+    // A score/puppet transition is animating: hold ALL frame processing (scripts +
+    // advance) until it finishes, so the movie doesn't run ahead of the visible
+    // effect (and so a per-frame `puppetTransition` in a `go the frame` loop can't
+    // reset it every tick). The hold is time-based and self-clearing, so it can
+    // never permanently freeze the movie. The ~24fps draw loop keeps rendering the
+    // transition. Matches Director, which blocks the playhead during a transition.
+    if reserve_player_mut(|player| player.transition_hold_active()) {
+        reserve_player_mut(|player| { player.stage_dirty = true; });
+        return (is_playing, is_script_paused);
+    }
+
+    // Global idle timeout (`the timeoutScript` / `the timeoutLength`): fire the
+    // timeOut event + primary script once the idle period lapses. Runs every tick.
+    crate::player::events::check_global_timeout().await;
 
     // Deferred puppetSprite(N,FALSE) revert: a sprite unpuppeted on a prior tick
     // and not re-puppeted / re-membered since reverts to the Score now (Director

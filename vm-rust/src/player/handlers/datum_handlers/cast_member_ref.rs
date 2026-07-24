@@ -108,6 +108,10 @@ impl CastMemberRefHandlers {
         if handler_name.eq_ignore_ascii_case("importFileInto") {
             return true;
         }
+        // 3D `member.loadFile(w3dFile …)` fetches the W3D over the net.
+        if handler_name.eq_ignore_ascii_case("loadFile") {
+            return true;
+        }
         if handler_name != "step" { return false; }
         // Check if this is a Havok member
         reserve_player_ref(|player| {
@@ -149,16 +153,38 @@ impl CastMemberRefHandlers {
                     "importFileInto", &forwarded,
                 ).await;
             }
+            if _handler_name.eq_ignore_ascii_case("loadFile") {
+                let member_ref = reserve_player_ref(|player| match player.get_datum(datum) {
+                    Datum::CastMember(r) => Some(r.to_owned()),
+                    _ => None,
+                });
+                let member_ref = match member_ref {
+                    Some(r) => r,
+                    None => return Err(ScriptError::new(
+                        "loadFile: receiver must be a cast member".to_string(),
+                    )),
+                };
+                return crate::player::handlers::datum_handlers::cast_member::shockwave3d::
+                    Shockwave3dMemberHandlers::load_file(&member_ref, args).await;
+            }
             // Run the full physics step via the monolithic sync path.
             // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
             let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
 
-            // After the step, invoke step callbacks (async, post-step).
+            // After the step, invoke step callbacks (async, post-step). A step
+            // callback may apply per-sub-step forces (age-of-speed applies gravity
+            // this way); mark that context so applyForce routes to the full-strength
+            // `step_force` accumulator rather than the force_scale-attenuated one.
+            // The gravity callback runs synchronously (a plain applyForce loop), so
+            // the flag can't leak across an await.
+            use super::cast_member::havok_physics::IN_STEP_CALLBACK;
             for (cb_handler, cb_instance, dt_value) in &step_cbs {
                 let dt_ref = reserve_player_mut(|player| {
                     player.alloc_datum(Datum::Float(*dt_value))
                 });
+                IN_STEP_CALLBACK.with(|c| c.set(true));
                 let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![dt_ref]).await;
+                IN_STEP_CALLBACK.with(|c| c.set(false));
             }
 
             // Invoke collision interest callbacks (async, post-step).
@@ -178,6 +204,30 @@ impl CastMemberRefHandlers {
         match handler_name {
             "duplicate" => Self::duplicate(datum, args),
             "erase" => Self::erase(datum, args),
+            "getPixel" | "setPixel" => {
+                // Director lets image methods be called directly on a bitmap MEMBER
+                // (`member.getPixel(x,y)`), proxying to the member's image object.
+                // unicraft's terrainPreview samples a heightmap this way.
+                use crate::player::handlers::datum_handlers::bitmap::BitmapDatumHandlers;
+                let image_datum = reserve_player_mut(|player| {
+                    let member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new(format!("{}: not a cast member", handler_name))),
+                    };
+                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                        .ok_or_else(|| ScriptError::new(format!("{}: member not found", handler_name)))?;
+                    match &member.member_type {
+                        CastMemberType::Bitmap(b) => Ok(player.alloc_datum(Datum::BitmapRef(b.image_ref))),
+                        other => Err(ScriptError::new(format!(
+                            "{}: member type {:?} has no image", handler_name, other.member_type_id()))),
+                    }
+                })?;
+                if handler_name == "getPixel" {
+                    BitmapDatumHandlers::get_pixel(&image_datum, args)
+                } else {
+                    BitmapDatumHandlers::set_pixel(&image_datum, args)
+                }
+            }
             "charPosToLoc" => {
                 let member_arg = datum.clone();
                 let mut delegated_args: Vec<DatumRef> = Vec::with_capacity(args.len() + 1);

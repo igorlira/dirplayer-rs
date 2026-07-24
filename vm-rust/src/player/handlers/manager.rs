@@ -941,16 +941,19 @@ impl BuiltInHandlerManager {
     }
 
     pub fn has_async_handler(name: &str) -> bool {
-        match name {
+        // Lingo handler names are case-insensitive; the sync `call_handler`
+        // already lowercases, and `do`/eval strings often use non-canonical case
+        // (Dora Soccer queues `do("sendsprite 1,#endcamera")`), so match lowercase.
+        match name.to_lowercase().as_str() {
             "call" => true,
             "new" => true,
-            "newObject" => true,
-            "callAncestor" => true,
-            "sendSprite" => true,
-            "sendAllSprites" => true,
+            "newobject" => true,
+            "callancestor" => true,
+            "sendsprite" => true,
+            "sendallsprites" => true,
             "value" => true,
             "do" => true,
-            "updateStage" => true,
+            "updatestage" => true,
             "go" => true,
             // `play movie X` / `play frame X of movie Y` compile to play(frame, movie)
             // and must load a movie like `go` (async). The 1-arg Flash form is handled
@@ -960,7 +963,7 @@ impl BuiltInHandlerManager {
             // Old-style Lingo lets `importFileInto member, url, props` be
             // called as a global verb; route it to the same async impl as
             // the method form `member.importFileInto(url, props)`.
-            "importFileInto" => true,
+            "importfileinto" => true,
             _ => false,
         }
     }
@@ -969,16 +972,17 @@ impl BuiltInHandlerManager {
         name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match name {
+        // Case-insensitive to match `has_async_handler` and Lingo semantics.
+        match name.to_lowercase().as_str() {
             "call" => Self::call(args).await,
             "new" => TypeHandlers::new(args).await,
-            "newObject" => TypeHandlers::new_object(args).await,
-            "callAncestor" => TypeHandlers::call_ancestor(args).await,
-            "sendSprite" => MovieHandlers::send_sprite(args).await,
-            "sendAllSprites" => MovieHandlers::send_all_sprites(args).await,
+            "newobject" => TypeHandlers::new_object(args).await,
+            "callancestor" => TypeHandlers::call_ancestor(args).await,
+            "sendsprite" => MovieHandlers::send_sprite(args).await,
+            "sendallsprites" => MovieHandlers::send_all_sprites(args).await,
             "value" => TypeHandlers::value(args).await,
             "do" => Self::do_command(args).await,
-            "updateStage" => MovieHandlers::update_stage(args).await,
+            "updatestage" => MovieHandlers::update_stage(args).await,
             "go" => MovieHandlers::go(args).await,
             // The global `play` command. `play movie X` / `play frame X of movie Y`
             // compile to play(frame, movie) — the SAME arg shape as `go`, so route the
@@ -1040,7 +1044,7 @@ impl BuiltInHandlerManager {
                 }
             }
             "nothing" => MovieHandlers::nothing_async(args).await,
-            "importFileInto" => Self::import_file_into(args).await,
+            "importfileinto" => Self::import_file_into(args).await,
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
@@ -1683,6 +1687,11 @@ impl BuiltInHandlerManager {
             "scrollbyline" => TypeHandlers::scroll_by_line(args),
             "scrollbypage" => TypeHandlers::scroll_by_page(args),
             "rollover" => MovieHandlers::rollover(args),
+            // Legacy function form of the read-only mouse position properties
+            // (`mouseH()` / `mouseV()` — same value as `the mouseH` / `the mouseV`),
+            // in movie/stage pixels. Used by older movies for hit-region tests.
+            "mouseh" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.0)))),
+            "mousev" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.1)))),
             "getpropat" => TypeHandlers::get_prop_at(args),
             "puppetsound" => MovieHandlers::puppet_sound(args),
             "pi" => TypeHandlers::pi(args),
@@ -1788,8 +1797,37 @@ impl BuiltInHandlerManager {
                 })
             }
             "puppettransition" => {
-                log::warn!("puppetTransition is not implemented");
-                Ok(DatumRef::Void)
+                // puppetTransition(int {, time, size, area}) or (transitionMemberRef).
+                // Applies the transition between the current stage and the next frame;
+                // we hand it to the same engine the score transition channel uses.
+                // (Director 11.5 Scripting Dictionary: time is in quarter-seconds.)
+                reserve_player_mut(|player| {
+                    let arg0 = args.get(0).map(|d| player.get_datum(d).clone());
+                    let info = match arg0 {
+                        Some(Datum::Int(code)) => {
+                            let time_qs = args.get(1).map(|d| player.get_datum(d).int_value().unwrap_or(0)).unwrap_or(0);
+                            let size = args.get(2).map(|d| player.get_datum(d).int_value().unwrap_or(1)).unwrap_or(1);
+                            Some(crate::player::cast_member::TransitionInfo {
+                                transition_type: code.clamp(1, 52) as u8,
+                                chunk_size: size.clamp(1, 128) as u8,
+                                // quarter-seconds → ms
+                                duration_ms: (time_qs.max(0).min(120) as u16).saturating_mul(250),
+                            })
+                        }
+                        Some(Datum::CastMember(r)) => {
+                            player.movie.cast_manager.find_member_by_ref(&r).and_then(|m| match &m.member_type {
+                                crate::player::cast_member::CastMemberType::Transition(t) => Some(t.info),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(info) = info {
+                        player.pending_transition = Some(info);
+                        player.begin_transition_hold(info.duration_ms);
+                    }
+                    Ok(DatumRef::Void)
+                })
             }
             "preload" => {
                 // All cast data is resident in memory (WASM) — there's nothing to

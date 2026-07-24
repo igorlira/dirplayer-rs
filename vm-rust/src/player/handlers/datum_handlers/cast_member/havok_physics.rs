@@ -3,6 +3,29 @@
 
 use crate::player::cast_member::HavokPhysicsState;
 
+thread_local! {
+    /// True while a Havok STEP CALLBACK (registerStepCallback) is executing.
+    /// A step callback fires once per sub-step (per the Xtra docs), so any force it
+    /// applies is per-sub-step and must be applied at FULL strength — NOT attenuated
+    /// by `force_scale`, which is calibrated for once-per-frame game forces. While
+    /// this is set, `applyForce`/`applyForceAtPoint` route into `rb.step_force`
+    /// instead of `rb.force`. Single-threaded wasm, so a thread-local Cell is safe.
+    pub static IN_STEP_CALLBACK: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Run `f` with the step-callback flag set, restoring it afterwards.
+pub fn with_step_callback_flag<R>(f: impl FnOnce() -> R) -> R {
+    IN_STEP_CALLBACK.with(|c| c.set(true));
+    let r = f();
+    IN_STEP_CALLBACK.with(|c| c.set(false));
+    r
+}
+
+/// True while a step callback is executing (see `IN_STEP_CALLBACK`).
+pub fn in_step_callback() -> bool {
+    IN_STEP_CALLBACK.with(|c| c.get())
+}
+
 // ============================================================
 // TYPE ALIASES
 // ============================================================
@@ -633,6 +656,101 @@ pub fn detect_body_contacts(
     contacts
 }
 
+/// Collide a body's actual convex hull (its own collision-mesh vertices) against
+/// static scenery, instead of its bounding box. Used for a hover vehicle so its
+/// thin car chassis clears geometry a box would ram (e.g. a rising loop wall).
+///
+/// `hull_world` are the body's collision vertices already transformed to the live
+/// pose. For each static triangle we take the DEEPEST hull vertex along the
+/// triangle normal (the support point) and, if it penetrates within the tolerance
+/// band and projects onto the face, emit a contact there. Only the single deepest
+/// contact per body is kept by the caller.
+fn detect_hull_contacts(
+    meshes: &[CollisionMesh], hull_world: &[V3], body_idx: usize, tolerance: f64,
+    bodies: &[crate::player::cast_member::HavokRigidBody],
+) -> Vec<CollisionContact> {
+    let mut contacts = Vec::new();
+    if hull_world.is_empty() { return contacts; }
+    // Hull AABB for broad-phase culling.
+    let (mut hmn, mut hmx) = ([f64::MAX; 3], [f64::MIN; 3]);
+    for v in hull_world {
+        for i in 0..3 { if v[i] < hmn[i] { hmn[i] = v[i]; } if v[i] > hmx[i] { hmx[i] = v[i]; } }
+    }
+    // Deepest penetration we still treat as a real contact. Must scale with the
+    // HULL size, not `tolerance`: when the car flips and slams the ground, the
+    // chassis punches deep in a single frame, and a small fixed limit would reject
+    // that contact and let the body fall through. The box path used
+    // `-eff_radius*2` (≈ box size) for the same reason. Larger than the hull is a
+    // clear back-face artifact (a vertex poked through thin road to the underside).
+    let hull_span = (hmx[0]-hmn[0]).max(hmx[1]-hmn[1]).max(hmx[2]-hmn[2]);
+    let deep_reject = -(hull_span * 2.0 + tolerance);
+    // Hull centre, used to orient each triangle normal toward the body. Road meshes
+    // have inconsistent triangle winding (worse on a curved loop), so the raw
+    // cross-product normal may point either way; the box path stayed winding-agnostic
+    // via `dist.abs()`, and this does the same for the support test. Without it the
+    // support picked the wrong-side vertex, no backstop contact fired, and the car
+    // tunnelled through the road on the way down.
+    let hc = [(hmn[0]+hmx[0])*0.5, (hmn[1]+hmx[1])*0.5, (hmn[2]+hmx[2])*0.5];
+    for (mesh_idx, mesh) in meshes.iter().enumerate() {
+        // Static scenery only: an unowned mesh, or one owned by a pinned body.
+        // (A movable body's own baked mesh is skipped — it's the hull's source.)
+        if let Some(owner) = mesh.body_index {
+            if !bodies[owner].pinned { continue; }
+        }
+        if hmx[0] + tolerance < mesh.aabb_min[0] || hmn[0] - tolerance > mesh.aabb_max[0] { continue; }
+        if hmx[1] + tolerance < mesh.aabb_min[1] || hmn[1] - tolerance > mesh.aabb_max[1] { continue; }
+        if hmx[2] + tolerance < mesh.aabb_min[2] || hmn[2] - tolerance > mesh.aabb_max[2] { continue; }
+        for tri in &mesh.triangles {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            // Per-triangle broad-phase: skip if the triangle's AABB does not overlap
+            // the (small) hull's AABB. The chassis touches only a handful of the road's
+            // thousands of triangles, so this cull turns the O(tris × hull_verts) inner
+            // loop into O(tris + near_tris × hull_verts) and removes the driving lag.
+            let tmn = [v0[0].min(v1[0]).min(v2[0]), v0[1].min(v1[1]).min(v2[1]), v0[2].min(v1[2]).min(v2[2])];
+            let tmx = [v0[0].max(v1[0]).max(v2[0]), v0[1].max(v1[1]).max(v2[1]), v0[2].max(v1[2]).max(v2[2])];
+            if tmx[0] + tolerance < hmn[0] || tmn[0] - tolerance > hmx[0]
+                || tmx[1] + tolerance < hmn[1] || tmn[1] - tolerance > hmx[1]
+                || tmx[2] + tolerance < hmn[2] || tmn[2] - tolerance > hmx[2] { continue; }
+            let mut normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
+            if v3_len_sq(normal) < 1e-10 { continue; }
+            // Orient the normal toward the hull, so the support test is independent of
+            // triangle winding (see `hc`).
+            if v3_dot(v3_sub(hc, v0), normal) < 0.0 {
+                normal = [-normal[0], -normal[1], -normal[2]];
+            }
+            // Deepest hull vertex along -normal (most penetrating below the face).
+            let mut best_dist = f64::MAX;
+            let mut best_pt = [0.0; 3];
+            for &w in hull_world {
+                let d = v3_dot(v3_sub(w, v0), normal);
+                if d < best_dist { best_dist = d; best_pt = w; }
+            }
+            // Touching within `tolerance`; reject only clearly-through-the-backface
+            // hits (deeper than the hull itself — see `deep_reject`).
+            if best_dist > tolerance { continue; }
+            if best_dist < deep_reject { continue; }
+            let proj = v3_sub(best_pt, v3_scale(normal, best_dist));
+            if pt_in_tri_3d(proj, v0, v1, v2) {
+                let depth = tolerance - best_dist;
+                let va = body_point_velocity(&bodies[body_idx], best_pt);
+                let nrv = (va[0]*normal[0] + va[1]*normal[1] + va[2]*normal[2]).abs();
+                contacts.push(CollisionContact {
+                    body_a: body_idx,
+                    body_b: mesh.body_index,
+                    point: best_pt,
+                    normal,
+                    depth,
+                    mesh_index: Some(mesh_idx),
+                    normal_rel_vel: nrv,
+                });
+            }
+        }
+    }
+    contacts
+}
+
 /// Segment-segment closest points (for triangle-triangle distance).
 /// From C# CollisionDetection.cs — SegmentSegmentClosest
 fn segment_segment_closest(p0: V3, p1: V3, q0: V3, q1: V3) -> (V3, V3) {
@@ -927,7 +1045,7 @@ fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &Coll
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
             let t = v3_cross(r, impulse);
-            let ang_impulse = mat3_transform(rb.inverse_inertia_tensor, t);
+            let ang_impulse = mat3_transform(world_inv_inertia(rb), t);
             rb.angular_velocity = v3_add(rb.angular_velocity, ang_impulse);
         }
     }
@@ -939,7 +1057,7 @@ fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &Coll
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(neg, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
             let t = v3_cross(r, neg);
-            let ang_impulse = mat3_transform(rb.inverse_inertia_tensor, t);
+            let ang_impulse = mat3_transform(world_inv_inertia(rb), t);
             rb.angular_velocity = v3_add(rb.angular_velocity, ang_impulse);
         }
     }
@@ -965,7 +1083,7 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let scaled = v3_scale(driving_impulse, rb.mass);
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, v3_cross(r, scaled)));
+            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, scaled)));
         }
     }
     // Body B
@@ -975,7 +1093,7 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let neg_scaled = v3_neg(v3_scale(driving_impulse, rb.mass));
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(neg_scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, v3_cross(r, neg_scaled)));
+            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, neg_scaled)));
         }
     }
 }
@@ -1008,7 +1126,7 @@ fn compute_effective_inverse_mass(state: &HavokPhysicsState, contact: &Collision
         result += rb_a.inverse_mass;
         let r = v3_sub(contact.point, rb_a.position);
         let rxn = v3_cross(r, n);
-        let ang_contrib = v3_cross(mat3_transform(rb_a.inverse_inertia_tensor, rxn), r);
+        let ang_contrib = v3_cross(mat3_transform(world_inv_inertia(rb_a), rxn), r);
         result += v3_dot(n, ang_contrib);
     }
     // Body B
@@ -1018,11 +1136,28 @@ fn compute_effective_inverse_mass(state: &HavokPhysicsState, contact: &Collision
             result += rb_b.inverse_mass;
             let r = v3_sub(contact.point, rb_b.position);
             let rxn = v3_cross(r, n);
-            let ang_contrib = v3_cross(mat3_transform(rb_b.inverse_inertia_tensor, rxn), r);
+            let ang_contrib = v3_cross(mat3_transform(world_inv_inertia(rb_b), rxn), r);
             result += v3_dot(n, ang_contrib);
         }
     }
     result
+}
+
+/// World-frame inverse inertia: R · Iinv_body · Rᵀ.
+///
+/// Havok keeps TWO inertia representations and uses them in different places:
+///   * the BODY-frame constant, used by the angular integration step
+///     (`angVel += dt · (Iinv_BODY · torque)`, no rotation), and
+///   * a WORLD matrix rebuilt from it each step, used ONLY by the contact solver.
+///
+/// So anything that combines the tensor with world-space quantities — contact
+/// lever arms, normals, impulses, constraint torques — must use THIS one, while
+/// the integrator must not. Mixing them up is frame-inconsistent and only looks
+/// right while a body sits near its spawn orientation; it diverges badly once
+/// the body rotates (e.g. a car going round a loop).
+pub fn world_inv_inertia(rb: &crate::player::cast_member::HavokRigidBody) -> [f64; 9] {
+    let r = quat_to_mat3(rb.orientation);
+    mat3_mul(mat3_mul(r, rb.inverse_inertia_tensor), mat3_transpose(r))
 }
 
 /// Point velocity: v_linear + omega × (point - position)
@@ -1170,7 +1305,7 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_a, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, t));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
                 // Post damping: vel *= (1 - 0.001)
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
@@ -1185,7 +1320,7 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_b, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, t));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
                 rb.angular_velocity = v3_scale(rb.angular_velocity, factor);
@@ -1236,14 +1371,14 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
             let rb = &mut state.rigid_bodies[idx_a];
             if !rb.pinned {
                 let neg = v3_neg(total_torque);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, neg));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), neg));
             }
         }
         // Apply +torque to body B
         if let Some(ib) = idx_b {
             let rb = &mut state.rigid_bodies[ib];
             if !rb.pinned {
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(rb.inverse_inertia_tensor, total_torque));
+                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), total_torque));
             }
         }
     }
@@ -1393,11 +1528,42 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // per-axis divider in world frame is equivalent to body frame. If we
     // ever needed to simulate a car that flips upside down the correct thing
     // would be to rotate torque to body frame, divide per axis, rotate back.
-    let force_scale: f64 = (n_subs * n_subs) as f64;    // 49
-    let torque_scale_pitch_roll: f64 = force_scale * (62.0 / 7.0);  // 434
-    let torque_scale_yaw: f64 = force_scale * 3.24;                  // 158.76
+    // LINEAR force attenuation: 6·N, measured directly against Director.
+    //
+    // A Lingo probe applied a known force at the centre of mass (no torque) and
+    // read back the resulting velocity over step(0.025, N) for N = 1, 7, 20:
+    //
+    //     N        1         7        20
+    //     Director 1.6667    0.2381   0.0833     → N·Δv  = 1.6667  (∝ 1/N)
+    //     dirplayer 10.0000  0.2041   0.0250     → N²·Δv = 10.0    (∝ 1/N²)
+    //
+    // Exact to every digit printed. Director scales as 1/N — the force survives
+    // exactly one substep of dt/N, because the force accumulator is cleared on
+    // every integration step. (F/m)·dt = 10.0 here, so Director's response is
+    // (F/m)·dt/(6N). The extra factor of 6 is measured but unexplained: it is not
+    // in the substep structure, and not in the Lingo force entry points (their
+    // worldScale conversion cancels against the velocity readback's).
+    //
+    // The previous value was N². It survived because at the N=7 these movies
+    // use, N²=49 and 6N=42 are only 17% apart — and the two prior experiments
+    // both tested force_scale=N (=7), which is 6× too strong, hence "way worse"
+    // / uncontrollable. 6N matches Director at N=1, 7 AND 20, not just at 7.
+    let force_scale: f64 = 6.0 * n_subs as f64;         // 42 at N=7 (was 49)
+    // Torque is left on the OLD N² basis deliberately: the probe measured only
+    // the linear response (angV stayed 0), so there is no measurement of
+    // Director's torque law to justify moving it. These keep their previous
+    // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
+    let n_sq = (n_subs * n_subs) as f64;                // 49 at N=7
+    let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0);  // 434
+    let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
     let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.force, rb.torque)).collect();
+    // Step-callback forces (registerStepCallback, e.g. age-of-speed gravity) are
+    // per-sub-step and applied at FULL strength — no force_scale — because the
+    // callback in real Havok fires once per sub-step. dirplayer fires it once but
+    // re-applies here every sub-step, which is equivalent for a constant force.
+    let saved_step: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
+        .map(|rb| (rb.step_force, rb.step_torque)).collect();
 
     for _sub in 0..n_subs {
         // Reset forces to game values each substep (gravity/drag added in
@@ -1417,14 +1583,14 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
                     (force_scale, force_scale, force_scale)
                 };
                 rb.force = [
-                    saved_forces[i].0[0]/fs,
-                    saved_forces[i].0[1]/fs,
-                    saved_forces[i].0[2]/fs,
+                    saved_forces[i].0[0]/fs + saved_step[i].0[0],
+                    saved_forces[i].0[1]/fs + saved_step[i].0[1],
+                    saved_forces[i].0[2]/fs + saved_step[i].0[2],
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/tsp,   // world X ≈ body pitch
-                    saved_forces[i].1[1]/tsp,   // world Y ≈ body roll
-                    saved_forces[i].1[2]/tsy,   // world Z ≈ body yaw
+                    saved_forces[i].1[0]/tsp + saved_step[i].1[0],   // world X ≈ body pitch
+                    saved_forces[i].1[1]/tsp + saved_step[i].1[1],   // world Y ≈ body roll
+                    saved_forces[i].1[2]/tsy + saved_step[i].1[2],   // world Z ≈ body yaw
                 ];
             }
         }
@@ -1432,10 +1598,13 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
         step_single(state, sub_dt);
     }
 
-    // Clear forces after all substeps
+    // Clear forces after all substeps. step_force too — the step callback re-sets
+    // it fresh each frame (post-step), so it must not accumulate across frames.
     for rb in &mut state.rigid_bodies {
         rb.force = [0.0; 3];
         rb.torque = [0.0; 3];
+        rb.step_force = [0.0; 3];
+        rb.step_torque = [0.0; 3];
     }
 
     // Numerical angular damping — not a clamp.
@@ -1445,7 +1614,30 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // user testing — probably because killing roll response during a turn
     // breaks the natural lean-into-the-turn dynamic the springs rely on.
     //
-    // Mirrors Havok's `applyDamping` helper at PPC 0x4cf00 (x86 `sub_10013770`).
+    // Numerical angular damping — not a clamp.
+    //
+    // Simple isotropic per-frame decay. Attempts at per-axis body-frame
+    // damping (pitch/roll/yaw tuned individually) made turning worse in
+    // user testing — probably because killing roll response during a turn
+    // breaks the natural lean-into-the-turn dynamic the springs rely on.
+    //
+    // NOTE: this does NOT correspond to anything in the engine, despite what this
+    // comment used to claim. The engine damps velocity only through dashpot actions
+    // — a linear dashpot by 0.1%, an angular one by 0% — and it scales linear and
+    // angular together. There is no global per-frame damping in the engine's step
+    // loop, so a body driven purely by forces (a RaycastCar's hover springs, with no
+    // dashpots) should receive none. Our 10%/frame is 100x the largest real value
+    // and unconditional; it absorbs spurious spin our contact solver leaks.
+    //
+    // TRIED AND REJECTED, do not redo without new information:
+    //   * setting it to 0.0 (faithful) — improved FinalDrive four-wheel contact
+    //     45% -> 56%, but regressed other games;
+    //   * skipping it for bodies that received a Lingo force this frame (derived from
+    //     the `saved_forces` snapshot above) — FinalDrive 45% -> 66.5%, still rejected
+    //     in testing.
+    // The real fix is to make the contact solver dissipate like Havok's (friction,
+    // resting contacts, deactivator) so the crutch can go entirely; see the abandoned
+    // faithful solver in Desktop\havok\"havok_physics copy.rs".
     const ANGULAR_DRIFT_DAMP: f64 = 0.1; //0.05;
     let ang_factor = 1.0 - ANGULAR_DRIFT_DAMP;
     for rb in &mut state.rigid_bodies {
@@ -1925,17 +2117,28 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         // (crates, blocks) use the box-stacking path.
         let body_passive = passive_scene && !rb.driven;
 
-        // Use the body's actual half-extents (box support) for collision.
-        let he = rb.inertia_half_extents;
-        // Box-stacking objects test against the COM-offset box centre (so boxes
-        // rest flush). Driven bodies keep the original origin-centred test.
-        let center = if body_passive {
-            v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+        // A hover vehicle with a stored hull collides against scenery using its
+        // ACTUAL chassis vertices (transformed to the live pose), not its bounding
+        // box — a car chassis is far thinner than its box, whose corners otherwise
+        // ram a rising loop wall the real hull clears. Everything else keeps the
+        // box-support narrow phase it was tuned against.
+        let contacts = if rb.received_force && !rb.collision_hull_local.is_empty() {
+            let hull_world: Vec<V3> = rb.collision_hull_local.iter()
+                .map(|l| v3_add(rb.position, quat_rotate_v(rb.orientation, *l)))
+                .collect();
+            detect_hull_contacts(&state.collision_meshes, &hull_world, bi, state.tolerance, &state.rigid_bodies)
         } else {
-            rb.position
+            // Use the body's actual half-extents (box support) for collision.
+            let he = rb.inertia_half_extents;
+            // Box-stacking objects test against the COM-offset box centre (so boxes
+            // rest flush). Driven bodies keep the original origin-centred test.
+            let center = if body_passive {
+                v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+            } else {
+                rb.position
+            };
+            detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies)
         };
-
-        let contacts = detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies);
         // Keep only the deepest contact per body to avoid duplicate impulses
         // from coplanar triangles (e.g. two triangles forming a box face).
         let mut best: Option<CollisionContact> = None;

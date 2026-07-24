@@ -8,7 +8,7 @@ use crate::CastMemberRef;
 
 use super::{
     bitmap::{
-        bitmap::{decode_jpeg_bitmap, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
+        bitmap::{decode_jpeg_bitmap, decompress_alpha_rle, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
         manager::{BitmapManager, BitmapRef},
     },
     score::Score,
@@ -1246,6 +1246,13 @@ pub struct Shockwave3dRuntimeState {
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
     pub node_shaders: std::collections::HashMap<String, std::collections::HashMap<usize, String>>,
+    /// Shader names (as authored) the script explicitly set `.transparent = 1` on.
+    /// Such shaders alpha-BLEND softly (Director's default #blend), so a model
+    /// carrying one is routed to the transparent pass even at blend=100 — instead
+    /// of the hard-edged alpha-test cutout pass (which turned the galaxy glow plane
+    /// into an opaque white disk). Only script-set shaders are tracked, so parsed
+    /// .w3d cutout foliage (frog01) is unaffected.
+    pub transparent_shaders: std::collections::HashSet<String>,
     /// Text3D model resources created by `someTextMember.extrude3d(thisScene)`,
     /// keyed by the resource name in this member's scene. Retains the source
     /// glyphs + extrude state so the resource's tunnelDepth/bevelType/bevelDepth/
@@ -1920,12 +1927,28 @@ pub struct HavokRigidBody {
     pub angular_momentum: [f64; 3],
     pub force: [f64; 3],
     pub torque: [f64; 3],
+    /// Force/torque applied from a Havok STEP CALLBACK (registerStepCallback).
+    /// The docs say a step callback fires once per sub-step, so these are applied
+    /// at FULL strength every sub-step — NOT attenuated by `force_scale`, which is
+    /// calibrated for once-per-frame game forces. Age-of-speed applies gravity this
+    /// way (`rb.applyForce(gravity*mass)` in its callback); without this the gravity
+    /// came out ~1/6 strength and cars launched off ramps never landed.
+    pub step_force: [f64; 3],
+    pub step_torque: [f64; 3],
     pub center_of_mass: [f64; 3],
     pub corrector: HavokCorrector,
     pub is_fixed: bool,
     pub is_convex: bool,
     /// Half-extents of the mesh bounding box, for box inertia computation.
     pub inertia_half_extents: [f64; 3],
+    /// The body's collision hull vertices in BODY-LOCAL space (relative to
+    /// `position`, un-rotated by the spawn orientation). Populated for HKE movable
+    /// bodies from their own collision mesh. When present, a hover vehicle
+    /// (`received_force`) collides against static scenery using these actual
+    /// vertices (transformed to the live pose) instead of its bounding box — a car
+    /// chassis is far thinner than its box, whose corners otherwise ram a rising
+    /// loop wall the real hull would clear. Empty ⇒ fall back to the box.
+    pub collision_hull_local: Vec<[f64; 3]>,
     /// A Lingo-created movable body defaults to the script-driven vehicle path
     /// (raycast cars: held up by hover forces, off the box-stacking path). HKE
     /// bodies load as `false` (passive). A force-free body that is positioned
@@ -2017,11 +2040,14 @@ impl HavokRigidBody {
             angular_momentum: [0.0; 3],
             force: [0.0; 3],
             torque: [0.0; 3],
+            step_force: [0.0; 3],
+            step_torque: [0.0; 3],
             center_of_mass: [0.0; 3],
             corrector: HavokCorrector::default(),
             is_fixed: false,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            collision_hull_local: Vec::new(),
             driven: false,
             received_force: false,
             is_box: false,
@@ -2065,11 +2091,14 @@ impl HavokRigidBody {
             angular_momentum: [0.0; 3],
             force: [0.0; 3],
             torque: [0.0; 3],
+            step_force: [0.0; 3],
+            step_torque: [0.0; 3],
             center_of_mass: [0.0; 3],
             corrector: HavokCorrector::default(),
             is_fixed: true,
             is_convex,
             inertia_half_extents: [10.0; 3],
+            collision_hull_local: Vec::new(),
             driven: false,
             received_force: false,
             is_box: false,
@@ -2670,7 +2699,44 @@ pub enum CastMemberType {
     HavokPhysics(HavokPhysicsMember),
     PhysXPhysics(PhysXPhysicsMember),
     Groove3gm(Groove3gmMember),
+    Transition(TransitionMember),
     Unknown,
+}
+
+/// A score/puppet transition member. Director stores these as raw member-type 14,
+/// so they're detected by their transition-shaped specific data rather than the type
+/// id. `info` carries the built-in effect (Director 11.5 Dictionary `puppetTransition`).
+#[derive(Clone, Debug)]
+pub struct TransitionMember {
+    pub info: TransitionInfo,
+}
+
+/// Decoded from a transition member's 6-byte specific data:
+/// `[reserved][chunkSize][type][flags=02][duration u16 BE]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransitionInfo {
+    /// Built-in transition code, 1-52.
+    pub transition_type: u8,
+    /// Chunk size in pixels (1-128); smaller = smoother/slower.
+    pub chunk_size: u8,
+    /// Duration in milliseconds.
+    pub duration_ms: u16,
+}
+
+impl TransitionInfo {
+    /// Parse from a transition member's specific data. Returns None unless it looks
+    /// like a transition (>=6 bytes with a valid 1-52 type code) — this is what
+    /// distinguishes a built-in transition (raw type 14) from a real Xtra member.
+    pub fn from_member_bytes(b: &[u8]) -> Option<TransitionInfo> {
+        if b.len() < 6 { return None; }
+        let ty = b[2];
+        if ty == 0 || ty > 52 { return None; }
+        Some(TransitionInfo {
+            transition_type: ty,
+            chunk_size: b[1].max(1),
+            duration_ms: ((b[4] as u16) << 8) | (b[5] as u16),
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -2692,6 +2758,7 @@ pub enum CastMemberTypeId {
     HavokPhysics,
     PhysXPhysics,
     Groove3gm,
+    Transition,
     Unknown,
 }
 
@@ -2746,6 +2813,9 @@ impl fmt::Debug for CastMemberType {
             Self::PhysXPhysics(_) => {
                 write!(f, "PhysXPhysics")
             }
+            Self::Transition(_) => {
+                write!(f, "Transition")
+            }
             Self::Groove3gm(_) => {
                 write!(f, "Groove3gm")
             }
@@ -2780,6 +2850,7 @@ impl CastMemberTypeId {
             // (gGroove: LoadShape only if #G3D), so returning #groove made every
             // shape get skipped → ShapeID -1 → no 3D world.
             Self::Groove3gm => Ok("g3d"),
+            Self::Transition => Ok("transition"),
             Self::Unknown => Ok("unknown"),
         };
     }
@@ -2805,6 +2876,9 @@ impl CastMemberType {
             Self::HavokPhysics(_) => CastMemberTypeId::HavokPhysics,
             Self::PhysXPhysics(_) => CastMemberTypeId::PhysXPhysics,
             Self::Groove3gm(_) => CastMemberTypeId::Groove3gm,
+            // No dedicated CastMemberTypeId; transitions are score-driven, not queried
+            // via `the type of member`, so Unknown is adequate here.
+            Self::Transition(_) => CastMemberTypeId::Transition,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -2827,6 +2901,8 @@ impl CastMemberType {
             Self::Shockwave3d(w3d) => if w3d.converted_from_text { "text" } else { "shockwave3d" },
             Self::HavokPhysics(_) => "havok",
             Self::PhysXPhysics(_) => "physics",
+            Self::Groove3gm(_) => "groove3gm",
+            Self::Transition(_) => "transition",
             _ => "unknown",
         };
     }
@@ -3361,6 +3437,77 @@ impl CastMember {
                 }
             }
         } else {
+            // Some 32-bit members store the colour image as a JPEG in an `ediM`
+            // (Media) chunk plus a separate `ALFA` alpha plane, with NO BITD.
+            // Route those to the JPEG+ALFA decoder. Without this, the Raw fallback
+            // below feeds the ALFA alpha plane (w*h bytes) into the 32-bit RLE
+            // decoder, which expects w*h*4 bytes — it decodes only height/4 rows
+            // and leaves the rest of the image black.
+            let edim_jpeg: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                c.as_ref().and_then(|chunk| match chunk {
+                    Chunk::Media(m)
+                        if m.audio_data.len() >= 3
+                            && m.audio_data[0] == 0xFF
+                            && m.audio_data[1] == 0xD8
+                            && m.audio_data[2] == 0xFF => Some(&m.audio_data),
+                    _ => None,
+                })
+            });
+            if let Some(jpeg) = edim_jpeg {
+                let alfa: Option<&Vec<u8>> = member_def.children.iter().find_map(|c| {
+                    c.as_ref().and_then(|chunk| match chunk {
+                        Chunk::Raw(d) if !d.is_empty() => Some(d),
+                        _ => None,
+                    })
+                });
+                return match decode_jpeg_bitmap(jpeg, bitmap_info, alfa) {
+                    Ok(new_bitmap) => bitmap_manager.add_bitmap(new_bitmap),
+                    Err(e) => {
+                        warn!("Failed to decode ediM JPEG bitmap {}: {:?}. Using empty image.", number, e);
+                        bitmap_manager.add_bitmap(Bitmap::new(
+                            1, 1, 8, 8, 0, PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
+                        ))
+                    }
+                };
+            }
+
+            // A 32-bit alpha+JPEG member whose ediM (colour) chunk is unresolvable —
+            // e.g. an afterburned .dcr whose ABMP omits the per-member ediM while the
+            // KEY* table still references it — arrives here with ONLY the ALFA plane.
+            // The ALFA RLE-decompresses to w*h bytes; feeding it to the 32-bit decoder
+            // (which expects w*h*4) over-reads at row height/4 and renders black with a
+            // warning per bitmap. Build a transparent bitmap from the alpha plane
+            // instead (the colour is genuinely absent from this file).
+            if bitmap_info.bit_depth == 32 {
+                let alfa = member_def.children.iter().find_map(|c| {
+                    c.as_ref().and_then(|chunk| match chunk {
+                        Chunk::Raw(d) if !d.is_empty() => Some(d),
+                        _ => None,
+                    })
+                });
+                if let Some(alfa) = alfa {
+                    let (w, h) = (bitmap_info.width as usize, bitmap_info.height as usize);
+                    let alpha = decompress_alpha_rle(alfa, w, h);
+                    let mut rgba = vec![0u8; w * h * 4];
+                    for i in 0..(w * h) {
+                        rgba[i * 4 + 3] = alpha.get(i).copied().unwrap_or(0);
+                    }
+                    return bitmap_manager.add_bitmap(Bitmap {
+                        width: bitmap_info.width,
+                        height: bitmap_info.height,
+                        bit_depth: 32,
+                        original_bit_depth: 32,
+                        data: rgba,
+                        palette_ref: PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+                        matte: None,
+                        use_alpha: bitmap_info.use_alpha,
+                        trim_white_space: bitmap_info.trim_white_space,
+                        was_trimmed: false,
+                        version: 0,
+                    });
+                }
+            }
+
             // No BITD chunk — try Raw chunk data as bitmap pixel data.
             // Chunk::Raw can be either ALFA data or an unrecognized chunk type
             // that contains actual bitmap pixel data, so we must try decompression.
@@ -3788,6 +3935,7 @@ impl CastMember {
             enabled: true,
             spot_angle: 90.0,
             attenuation: [1.0, 0.0, 0.0],
+            ..Default::default()
         });
         // Default directional light (IFX default: 0.75)
         scene.lights.push(W3dLight {
@@ -3797,6 +3945,7 @@ impl CastMember {
             enabled: true,
             spot_angle: 90.0,
             attenuation: [1.0, 0.0, 0.0],
+            ..Default::default()
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
@@ -6027,6 +6176,14 @@ impl CastMember {
                     );
                     CastMemberType::Text(text_member)
                 }
+            }
+            MemberType::Xtra if TransitionInfo::from_member_bytes(&chunk.specific_data_raw).is_some() => {
+                // Director stores built-in score/puppet transitions as raw member-type
+                // 14 (dirplayer's `Xtra`) with a 6-byte record; detect them by shape so
+                // real Xtra members aren't misread. The transition/effect channel
+                // references these by number (see Score::get_frame_transition).
+                let info = TransitionInfo::from_member_bytes(&chunk.specific_data_raw).unwrap();
+                CastMemberType::Transition(TransitionMember { info })
             }
             _ => {
                 // Assuming `chunk.member_type` is an enum backed by a numeric ID

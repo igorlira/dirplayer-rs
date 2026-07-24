@@ -445,6 +445,9 @@ pub struct ScoreFrameData {
     pub sound_channel_data: Vec<(u32, u16, SoundChannelData)>,
     pub tempo_channel_data: Vec<(u32, TempoChannelData)>,
     pub palette_channel_data: Vec<(u32, i16, i16)>,
+    /// Transition effect channel (channel 2): per frame, the (cast_lib, member)
+    /// of the transition member applied when the playhead enters that frame.
+    pub transition_channel_data: Vec<(u32, i16, i16)>,
 }
 
 impl Default for ScoreFrameData {
@@ -456,6 +459,7 @@ impl Default for ScoreFrameData {
             sound_channel_data: Vec::new(),
             tempo_channel_data: Vec::new(),
             palette_channel_data: Vec::new(),
+            transition_channel_data: Vec::new(),
         }
     }
 }
@@ -631,6 +635,7 @@ impl ScoreFrameData {
         let mut sound_channel_data: Vec<(u32, u16, SoundChannelData)> = vec![];
         let mut tempo_channel_data: Vec<(u32, TempoChannelData)> = vec![];
         let mut palette_channel_data: Vec<(u32, i16, i16)> = vec![];
+        let mut transition_channel_data: Vec<(u32, i16, i16)> = vec![];
 
         let mut frame_index: u32 = 0;
         while !reader.eof() && frame_index < header.frame_count {
@@ -921,8 +926,16 @@ impl ScoreFrameData {
                         let pos = frame_start + (channel_index as usize) * (header.sprite_record_size as usize);
                         channel_reader.jmp(pos);
 
-                        if channel_index == 0 || channel_index == 2 {
-                            // Channel 0 = Script, Channel 2 = Transition (skip)
+                        if channel_index == 0 {
+                            // Channel 0 = Script (skip)
+                        } else if channel_index == 2 {
+                            // Channel 2 = Transition: castLib @0-1, member @2-3 — a
+                            // reference to the transition cast member applied on entry.
+                            let trans_cast_lib = channel_reader.read_i16().unwrap_or(0);
+                            let trans_member = channel_reader.read_i16().unwrap_or(0);
+                            if trans_member != 0 {
+                                transition_channel_data.push((frame_index, trans_cast_lib, trans_member));
+                            }
                         } else if channel_index == 1 {
                             // Channel 1 = Tempo
                             let tempo_data = TempoChannelData::read(&mut channel_reader)?;
@@ -992,6 +1005,7 @@ impl ScoreFrameData {
             sound_channel_data,
             tempo_channel_data,
             palette_channel_data,
+            transition_channel_data,
         })
     }
 

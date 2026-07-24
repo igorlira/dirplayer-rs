@@ -426,7 +426,18 @@ impl XtraSceneRenderer {
         // dolly-zoom) look at very distant features. A tighter far clips them —
         // the TV-screen moiré that prompted a tighter far was actually back-face
         // culling, not depth precision, so keep the original generous range.
-        let proj = perspective(frame.camera.fov.to_radians().max(0.1), aspect, 1.0, 200_000.0);
+        //
+        // Groove's `Perspective` is the HORIZONTAL field of view, not the
+        // vertical one. The engine builds a pinhole frustum from a single focal
+        // length — `tan(fov_x/2) = (width/2)/focal`, `tan(fov_y/2) =
+        // (height/2)/focal` — so the vertical FOV follows the width:height ratio.
+        // Feeding `fov` to a vertical-FOV projection made a wide window far too
+        // tall a view (Dora Soccer's follow-cam looked top-down/zoomed-out
+        // instead of over-the-shoulder). Convert the horizontal FOV to the
+        // equivalent vertical one for this aspect: fov_y = 2·atan(tan(fov_x/2)/aspect).
+        let fov_x = frame.camera.fov.to_radians().max(0.1);
+        let fov_y = 2.0 * ((fov_x * 0.5).tan() / aspect.max(1e-3)).atan();
+        let proj = perspective(fov_y, aspect, 1.0, 200_000.0);
         let view = look_at(frame.camera.pos, frame.camera.look_at, [0.0, 0.0, 1.0]);
         let view_proj = mat_mul(&proj, &view);
 
@@ -694,10 +705,18 @@ impl XtraSceneRenderer {
             if w <= 0 || h <= 0 {
                 continue;
             }
-            // Center-anchored stage-pixel rect → NDC (y flipped, top-left origin).
-            let (cx, cy) = (ov.loc[0] as f32, ov.loc[1] as f32);
-            let (left, right) = (cx - w as f32 / 2.0, cx + w as f32 / 2.0);
-            let (top, bottom) = (cy - h as f32 / 2.0, cy + h as f32 / 2.0);
+            // Reg-point-anchored stage-pixel rect → NDC (y flipped, top-left
+            // origin). The plugin places the overlay so its `regpoint` lands on
+            // `loc` (top-left = loc − regpoint); an un-set reg point arrives as
+            // `size/2`, reproducing the old centre anchor. This is what lets
+            // Dora Soccer's `huddy` bar (reg point at its bottom-centre) sit in
+            // the bottom tray instead of being pushed half off-screen.
+            let (lx, ly) = (
+                ov.loc[0] as f32 - ov.regpoint[0] as f32,
+                ov.loc[1] as f32 - ov.regpoint[1] as f32,
+            );
+            let (left, right) = (lx, lx + w as f32);
+            let (top, bottom) = (ly, ly + h as f32);
             let vw = viewport_w.max(1) as f32;
             let vh = viewport_h.max(1) as f32;
             let ndc_x = |x: f32| x / vw * 2.0 - 1.0;

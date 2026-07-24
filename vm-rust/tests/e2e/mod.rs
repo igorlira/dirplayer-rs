@@ -7,3 +7,4 @@ mod dirplayer_test_movies;
 mod misc;
 mod intel;
 mod havok_demo;
+mod gorillaz;

@@ -231,10 +231,80 @@ pub async fn player_call_datum_handler(
                         }
                     })
                 }
-                _ => Err(ScriptError::new_code(
-                    ScriptErrorCode::HandlerNotFound,
-                    format!("No handler {handler_name} for datum <_movie>"),
-                )),
+                // The Movie object's method surface mirrors Director's global
+                // command surface — `_movie.updateStage()` and `updateStage()`
+                // are the same call (Director 11.5 Scripting Dictionary shows
+                // both forms for updateStage, puppetSprite, stopEvent, preLoad,
+                // …). Rather than re-listing each one here, fall through to the
+                // built-in dispatcher; only a name it doesn't know is an error.
+                _ => {
+                    use crate::player::handlers::manager::BuiltInHandlerManager;
+                    if BuiltInHandlerManager::has_async_handler(handler_name) {
+                        Box::pin(BuiltInHandlerManager::call_async_handler(handler_name, &args))
+                            .await
+                    } else {
+                        // Keep reporting an unknown name as HandlerNotFound (with
+                        // the <_movie> wording) — callers use that code to decide
+                        // whether to keep searching; a genuine failure *inside* a
+                        // known handler must keep its own error.
+                        BuiltInHandlerManager::call_handler(handler_name, &args).map_err(|e| {
+                            if e.message.starts_with("No built-in handler:") {
+                                ScriptError::new_code(
+                                    ScriptErrorCode::HandlerNotFound,
+                                    format!("No handler {handler_name} for datum <_movie>"),
+                                )
+                            } else {
+                                e
+                            }
+                        })
+                    }
+                }
+            }
+        }
+        DatumType::StageRef => {
+            // `(the stage).PROP` and `(the stage).PROP[i]` compile to
+            // getProp/getPropRef/getAt on the Stage datum (e.g. the unicraft galaxy's
+            // `(the stage).rect[3] - (the stage).rect[1]`). Without a StageRef arm these
+            // fell to the `_ =>` default → VOID, so stageWidth came out 0 (title baked
+            // off-screen, and the mouse→rotation math divided by zero → endless spin).
+            // Resolve the property via get_stage_prop and index Rect/Point/List results.
+            match handler_name {
+                "getProp" | "getAt" | "getPropRef" if !args.is_empty() => {
+                    reserve_player_mut(|player| {
+                        use crate::director::lingo::datum::Datum;
+                        let prop_name = player.get_datum(&args[0]).string_value()?;
+                        let prop_datum = crate::player::stage::get_stage_prop(player, &prop_name)?;
+                        if args.len() > 1 {
+                            let index = player.get_datum(&args[1]).int_value()?;
+                            let idx = (index as usize).saturating_sub(1);
+                            match prop_datum {
+                                Datum::Rect(vals, _) => {
+                                    if idx < 4 { Ok(player.alloc_datum(Datum::Int(vals[idx] as i32))) }
+                                    else { Ok(DatumRef::Void) }
+                                }
+                                Datum::Point(vals, _) => {
+                                    if idx < 2 { Ok(player.alloc_datum(Datum::Int(vals[idx] as i32))) }
+                                    else { Ok(DatumRef::Void) }
+                                }
+                                Datum::List(_, items, _) => {
+                                    if idx < items.len() { Ok(items[idx].clone()) } else { Ok(DatumRef::Void) }
+                                }
+                                other => Ok(player.alloc_datum(other)),
+                            }
+                        } else {
+                            Ok(player.alloc_datum(prop_datum))
+                        }
+                    })
+                }
+                _ => {
+                    // Bare property/method access: try get_stage_prop, else VOID.
+                    reserve_player_mut(|player| {
+                        match crate::player::stage::get_stage_prop(player, handler_name) {
+                            Ok(d) => Ok(player.alloc_datum(d)),
+                            Err(_) => Ok(DatumRef::Void),
+                        }
+                    })
+                }
             }
         }
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),

@@ -69,6 +69,7 @@ struct Shader3d {
     u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
+    u_texture_unlit: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
     u_has_lightmap: Option<WebGlUniformLocation>,
     u_lightmap_intensity: Option<WebGlUniformLocation>,
@@ -106,6 +107,8 @@ struct Shader3d {
     u_light_atten: Option<WebGlUniformLocation>,
     u_light_dir: Option<WebGlUniformLocation>,
     u_light_spot_angle: Option<WebGlUniformLocation>,
+    u_light_spot_exp: Option<WebGlUniformLocation>,
+    u_light_specular: Option<WebGlUniformLocation>,
     u_camera_pos: Option<WebGlUniformLocation>,
     u_global_ambient: Option<WebGlUniformLocation>,
     u_fog_enabled: Option<WebGlUniformLocation>,
@@ -416,6 +419,7 @@ uniform float u_opacity;
 uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
+uniform int u_texture_unlit;   // 1 = #replace first layer: show texture as-is (unlit)
 uniform sampler2D u_lightmap_tex;
 uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
 uniform float u_lightmap_intensity;
@@ -443,6 +447,8 @@ uniform int u_light_type[8];
 uniform vec3 u_light_atten[8];   // (constant, linear, quadratic) per light
 uniform vec3 u_light_dir[8];     // direction for directional/spot lights
 uniform float u_light_spot_angle[8]; // spot cone angle (radians, 0 = not spot)
+uniform float u_light_spot_exp[8];   // spot falloff exponent (0 = uniform/hard edge, SpotDecay off)
+uniform float u_light_specular[8];   // 1 = light carries the IFX SPECULAR bit, else 0 (no highlight)
 uniform vec3 u_camera_pos;
 uniform vec3 u_global_ambient;
 
@@ -533,6 +539,12 @@ void main() {
     if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
     vec3 V = normalize(u_camera_pos - v_position);
+    // Director/IFX lighting is ONE-SIDED (max(0,N·L)) — surfaces facing away from a
+    // light fall into shadow, which is what carves the directional shading. Flip the
+    // shading normal to face the viewer so genuinely double-sided geometry still
+    // receives light without depending on winding (the projection Y-flip makes
+    // gl_FrontFacing unreliable).
+    vec3 Nl = (dot(N, V) < 0.0) ? -N : N;
 
     vec4 tex_sample = texture(u_diffuse_tex, v_texcoord);
 
@@ -547,6 +559,9 @@ void main() {
     if (u_has_texture > 0) {
         // IFX fixed-function lighting equation with UseDiffuse OFF
         vec3 lighting = u_emissive_color.rgb + u_global_ambient * u_ambient_color.rgb;
+        // Specular is a SEPARATE term added AFTER texture modulation (GL separate
+        // specular colour), so a textured surface can still show a highlight.
+        vec3 spec_accum = vec3(0.0);
 
         for (int i = 0; i < 8; i++) {
             if (i >= u_num_lights) break;
@@ -571,16 +586,28 @@ void main() {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
                         float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
-                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                        // IFX/OpenGL spot cone. When SpotDecay is ON the light carries a
+                        // GL_SPOT_EXPONENT (u_light_spot_exp = log10(.04)/log10(cos(outer)),
+                        // computed per light) so the beam is full at the centre and 0.04 at
+                        // the outer edge. When SpotDecay is OFF the exponent is 0 → pow()==1
+                        // → uniform intensity inside the cone with a hard cutoff, matching
+                        // Director/IFX. A tiny smoothstep only anti-aliases the rim.
+                        else atten *= pow(spot_cos, u_light_spot_exp[i]) * smoothstep(cone_cos, cone_cos + 0.02, spot_cos);
                     }
                 }
-                // Two-sided lighting: use abs(N·L) so back faces also receive light
-                float diff = abs(dot(N, L));
+                float diff = max(dot(Nl, L), 0.0);
                 // Toon shading: quantize NdotL into discrete steps
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
                 lighting += atten * diff * u_light_color[i] * u_diffuse_color.rgb;
+                // Specular highlight (Blinn N·H) from SPECULAR-flagged lights only,
+                // using the light's colour as its specular colour (CIFXLight).
+                if (u_shininess > 0.0 && diff > 0.0 && u_light_specular[i] > 0.0) {
+                    vec3 H = normalize(L + V);
+                    float sp = pow(max(dot(Nl, H), 0.0), u_shininess);
+                    spec_accum += u_light_color[i] * u_specular_color.rgb * sp * atten;
+                }
             }
         }
 
@@ -590,7 +617,12 @@ void main() {
         // are identity-white for normal meshes; extruded 3D text bakes its tunnel
         // shading here (gray side walls vs white front) so the glyphs read 3D.
         vec3 vcol_t = (u_has_vertex_color > 0) ? v_vertex_color.rgb : vec3(1.0);
-        vec3 final_color = tex_sample.rgb * lighting * vcol_t;
+        // #replace first layer (u_texture_unlit): the texture is shown as-is, not
+        // blended with the surface shading (Director: "prevents the texture from
+        // being blended with the color set by the shader's diffuse property"). Used
+        // by skybox/backdrop planes so the nebula shows at full brightness instead of
+        // being dimmed by the ambient-only lighting.
+        vec3 final_color = (u_texture_unlit > 0) ? tex_sample.rgb : tex_sample.rgb * lighting * vcol_t;
 
         // Apply second texture layer (shadow/lightmap) if present
         if (u_has_lightmap > 0) {
@@ -626,6 +658,10 @@ void main() {
                 final_color += l2_sample.rgb * l2_intensity;
             }
         }
+
+        // Add the specular highlight on top of the modulated texture (unless the
+        // surface is shown unlit / as-is).
+        if (u_texture_unlit == 0) final_color += spec_accum;
 
         frag_color = vec4(apply_fog(final_color), u_opacity * tex_sample.a);
         return;
@@ -663,20 +699,27 @@ void main() {
                         float spot_cos = dot(normalize(-light_dir), u_light_dir[i]);
                         float cone_cos = cos(u_light_spot_angle[i]);
                         if (spot_cos < cone_cos) atten = 0.0;
-                        else atten *= smoothstep(cone_cos, cone_cos + 0.1, spot_cos);
+                        // IFX/OpenGL spot cone. When SpotDecay is ON the light carries a
+                        // GL_SPOT_EXPONENT (u_light_spot_exp = log10(.04)/log10(cos(outer)),
+                        // computed per light) so the beam is full at the centre and 0.04 at
+                        // the outer edge. When SpotDecay is OFF the exponent is 0 → pow()==1
+                        // → uniform intensity inside the cone with a hard cutoff, matching
+                        // Director/IFX. A tiny smoothstep only anti-aliases the rim.
+                        else atten *= pow(spot_cos, u_light_spot_exp[i]) * smoothstep(cone_cos, cone_cos + 0.02, spot_cos);
                     }
                 }
 
-                // Two-sided lighting: use abs(N·L) so back faces also receive light
-                float diff = abs(dot(N, L));
+                float diff = max(dot(Nl, L), 0.0);
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
                 result += atten * u_light_color[i] * base_color * diff;
 
-                if (u_shininess > 0.0 && diff > 0.0) {
+                // Specular only from lights carrying the IFX SPECULAR bit; the light's
+                // specular colour IS its diffuse colour (u_light_color) per CIFXLight.
+                if (u_shininess > 0.0 && diff > 0.0 && u_light_specular[i] > 0.0) {
                     vec3 H = normalize(L + V);
-                    float spec = pow(max(dot(N, H), 0.0), u_shininess);
+                    float spec = pow(max(dot(Nl, H), 0.0), u_shininess);
                     result += u_light_color[i] * u_specular_color.rgb * spec * atten;
                 }
             }
@@ -733,6 +776,7 @@ void main() {
             u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
+            u_texture_unlit: u("u_texture_unlit"),
             u_lightmap_tex: u("u_lightmap_tex"),
             u_has_lightmap: u("u_has_lightmap"),
             u_lightmap_intensity: u("u_lightmap_intensity"),
@@ -759,6 +803,8 @@ void main() {
             u_light_atten: u("u_light_atten[0]"),
             u_light_dir: u("u_light_dir[0]"),
             u_light_spot_angle: u("u_light_spot_angle[0]"),
+            u_light_spot_exp: u("u_light_spot_exp[0]"),
+            u_light_specular: u("u_light_specular[0]"),
             u_camera_pos: u("u_camera_pos"),
             u_global_ambient: u("u_global_ambient"),
             u_fog_enabled: u("u_fog_enabled"),
@@ -1203,8 +1249,9 @@ void main() {
                 let (bi_opt, bw_opt) = if !mesh.bone_indices.is_empty() && !mesh.bone_weights.is_empty()
                     && mesh.bone_indices.len() == mesh.positions.len()
                 {
-                    bone_idx_packed = pack_bone_vec4_f32(&mesh.bone_indices);
-                    bone_wgt_packed = pack_bone_weights_vec4(&mesh.bone_weights);
+                    let (idx_p, wgt_p) = pack_bone_influences_sorted(&mesh.bone_indices, &mesh.bone_weights);
+                    bone_idx_packed = idx_p;
+                    bone_wgt_packed = wgt_p;
                     // Diagnostic: log bone data stats for first mesh with bones
                     {
                         use std::sync::Mutex; use std::collections::HashSet;
@@ -1332,7 +1379,7 @@ void main() {
 
         let mut texture_versions = HashMap::new();
         for (tex_name, image_data) in &scene.texture_images {
-            texture_versions.insert(tex_name.to_lowercase(), image_data.len() as u64);
+            texture_versions.insert(tex_name.to_lowercase(), texture_content_hash(image_data));
         }
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
@@ -1356,10 +1403,10 @@ void main() {
 
         for (tex_name, image_data) in &scene.texture_images {
             let lower = tex_name.to_lowercase();
-            let data_len = image_data.len() as u64;
+            let data_hash = texture_content_hash(image_data);
             let needs_upload = match gpu_data.texture_versions.get(&lower) {
                 None => true,
-                Some(&old_len) => old_len != data_len,
+                Some(&old_hash) => old_hash != data_hash,
             };
             if needs_upload {
                 let flip_v = lower.contains("skyline");
@@ -1371,7 +1418,7 @@ void main() {
                         gpu_data.alpha_textures.remove(&lower);
                     }
                     gpu_data.textures.insert(lower.clone(), tex);
-                    gpu_data.texture_versions.insert(lower, data_len);
+                    gpu_data.texture_versions.insert(lower, data_hash);
                 }
             }
         }
@@ -1984,26 +2031,29 @@ void main() {
                     }
                     // Check if this model is transparent
                     let opacity = self.get_model_opacity(scene, model_node, runtime_state);
-                    // One-time log for lightbox/water/black opacity
-                    if model_node.name.contains("lightbox") || model_node.name.contains("water")
-                        || model_node.name.contains("BLACK") || model_node.name.contains("BAR_")
-                    {
-                        use std::sync::Mutex;
-                        use std::collections::HashSet;
-                        static LOGGED_OP: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-                        if let Ok(mut guard) = LOGGED_OP.lock() {
-                            let set = guard.get_or_insert_with(HashSet::new);
-                            if set.insert(model_node.name.clone()) {
-                                log(&format!(
-                                    "[W3D-OPACITY] model=\"{}\" opacity={:.3} pass={}",
-                                    model_node.name, opacity, if opacity < 0.999 { "transparent" } else { "opaque" }
-                                ));
-                            }
-                        }
-                    }
-                    if opacity < 0.999 {
-                        // Genuinely translucent → defer to the transparent pass, sorted
-                        // by camera distance.
+                    // Translucent (blend<100) OR a script-marked `transparent` shader
+                    // (soft alpha blend, e.g. the galaxy glow plane at blend=100) →
+                    // transparent pass, sorted back-to-front. Without the transparent-shader
+                    // branch such a plane fell to the cutout pass and rendered as a hard
+                    // opaque disk instead of a soft glow.
+                    // Director gates transparency on shader.blend (default 100 = opaque)
+                    // and shader.transparent, NOT on the W3D material's opacity field. A model
+                    // is only actually see-through when the surface isn't an opaque textured
+                    // solid — so an OPAQUE diffuse texture forces the opaque pass regardless of
+                    // a low material opacity OR a `.transparent = 1` flag. This fixes two cases:
+                    //   * finalDrive `chassis` (material opacity 0.2, opaque camo) — was 20%
+                    //     see-through, showing the passengers through the car body.
+                    //   * LEGO SuperSonic — its shaders inherit Director's default
+                    //     `transparent = TRUE` (at blend=100 = opaque); tracking that flag
+                    //     dumped every opaque-textured prop into the depth-off transparent pass,
+                    //     so warehouse boxes/coils rendered as floating dark solids.
+                    // Genuine translucents (galaxy glow's alpha texture, plain-colour water)
+                    // have no opaque texture, so they stay in the transparent pass.
+                    let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
+                        || opacity < 0.999;
+                    let is_transparent = wants_transparent
+                        && !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state);
+                    if is_transparent {
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
@@ -2534,7 +2584,14 @@ void main() {
         };
         let res_info = scene.model_resources.get(resource);
 
-        let is_skybox = model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox");
+        // Rasterwerks tags its skybox nodes `SB_*` under a `*SkyBox*` parent; other
+        // movies just name a big camera-enclosing box "skybox" (unicraft clones one
+        // from a cast member and scales it ×1000). Both need the same treatment:
+        // render inside-out (no cull), camera-centered, past the normal far plane —
+        // otherwise the box's inner faces are culled/clipped and the starfield
+        // background is missing (only the foreground galaxy plane shows).
+        let is_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.contains("SkyBox"))
+            || model_node.name.to_ascii_lowercase().contains("skybox");
         let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
@@ -2589,7 +2646,10 @@ void main() {
                 sky_view[14] = 0.0;
                 gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &sky_view);
                 let near = projection_matrix[14] / (projection_matrix[10] - 1.0);
-                let far = 200000.0f32;
+                // Generous far: the box is camera-centered and drawn depth-masked, so
+                // precision is irrelevant; it only must not clip a large scaled skybox
+                // (Rasterwerks ≈32000; unicraft's is scaled ×1000 to hundreds of thousands).
+                let far = 8_000_000.0f32;
                 let nf = 1.0 / (near - far);
                 let mut sky_proj = *projection_matrix;
                 sky_proj[10] = (far + near) * nf;
@@ -2697,10 +2757,41 @@ void main() {
         mesh_idx: Option<usize>,
     ) -> Option<&'a String> {
         rs.node_shaders.get(node_name).and_then(|m| {
-            mesh_idx.and_then(|idx| m.get(&idx))
-                .or_else(|| m.get(&0))
-                .or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v))
+            match mesh_idx {
+                Some(idx) => m.get(&idx)
+                    // Whole-model fallback: a `model.shaderList = shader` assignment
+                    // (applied to every mesh) is stored as the SOLE override at index
+                    // 0. Only then does a mesh without its own entry inherit it. When
+                    // the script set specific indices (`shaderList[1]`, `shaderList[2]`,
+                    // …), an unset mesh keeps its DEFAULT resource shader — otherwise the
+                    // LEGO minifig's legs (mesh 2, no override) inherited the head shader
+                    // (mesh 0) and rendered as yellow skin instead of blue legs.
+                    .or_else(|| if m.len() == 1 { m.get(&0) } else { None }),
+                // Whole-model query (no mesh index): return a representative override —
+                // mesh 0, else the lowest index. Used by opacity / transparent-shader /
+                // material lookups that need the model's primary shader (e.g. unicraft's
+                // galaxy glow plane, whose `.transparent = 1` shader must still be found).
+                // The per-mesh render path passes Some(idx), so this can't re-leak the
+                // LEGO legs (that's guarded by the Some branch above).
+                None => m.get(&0).or_else(|| m.iter().min_by_key(|(k, _)| **k).map(|(_, v)| v)),
+            }
         })
+    }
+
+    /// True if the model's effective shader was explicitly marked `.transparent = 1`
+    /// by the script (tracked in runtime_state.transparent_shaders). Such a model
+    /// alpha-blends softly and belongs in the transparent pass even at full opacity.
+    fn model_uses_transparent_shader(
+        model_node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let rs = match runtime_state { Some(rs) => rs, None => return false };
+        if rs.transparent_shaders.is_empty() { return false; }
+        let name = Self::node_shader_override(rs, &model_node.name, None)
+            .cloned()
+            .unwrap_or_else(|| model_node.shader_name.clone());
+        if name.is_empty() { return false; }
+        rs.transparent_shaders.iter().any(|s| s.eq_ignore_ascii_case(&name))
     }
 
     fn get_model_opacity(
@@ -2772,6 +2863,43 @@ void main() {
 
     /// Check if a model's shader references any texture that has alpha data.
     /// Used to route such models to the transparent rendering pass.
+    /// True if the model is covered by a fully-OPAQUE diffuse texture (a bound texture
+    /// layer whose image has no alpha). Director gates transparency on shader.blend
+    /// (default 100 = opaque), NOT on the W3D material's opacity field — so a textured
+    /// solid like finalDrive's `chassis` (material opacity 0.2, opaque camo texture)
+    /// must render solid, not 20% see-through. A genuinely translucent surface is a
+    /// plain colour material or an alpha texture, which this returns false for.
+    fn model_has_opaque_texture(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return false };
+        let mut shader_names: Vec<String> = Vec::new();
+        if let Some(rs) = runtime_state {
+            if let Some(m) = rs.node_shaders.get(&model_node.name) { shader_names.extend(m.values().cloned()); }
+        }
+        if !model_node.shader_name.is_empty() { shader_names.push(model_node.shader_name.clone()); }
+        let resource = if !model_node.model_resource_name.is_empty() { &model_node.model_resource_name } else { &model_node.resource_name };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for b in &res_info.shader_bindings { for s in &b.mesh_bindings { shader_names.push(s.clone()); } }
+        }
+        for shader_name in &shader_names {
+            if let Some(sh) = Self::find_shader_ci(&scene.shaders, shader_name) {
+                for layer in &sh.texture_layers {
+                    let lname = layer.name.to_lowercase();
+                    // A loaded texture that is NOT flagged as carrying alpha = opaque cover.
+                    if gpu_data.textures.contains_key(&lname) && !gpu_data.alpha_textures.contains(&lname) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn model_has_alpha_texture(
         &self,
         scene: &W3dScene,
@@ -3487,11 +3615,9 @@ void main() {
                     continue;
                 }
 
-                // Blend mode mapping:
-                //   blend_func 0 = #multiply / GL_REPLACE (ambiguous)
-                //   blend_func 1 = #add / GL_ADD
-                //   blend_func 2 = #replace / GL_MODULATE
-                //   blend_func 3 = #blend / GL_DECAL
+                // IFX blend func (IFXEnums.h): 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
+                // 2 = IFX_MODULATE (out = tex * incoming), 3 = IFX_INTERPOLATE.
+                // Mapped to our extra-layer modes below (1 = multiply, 2 = add).
                 let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
                     // Lightmap-only meshes (empty textureList[1], lightmap in textureList[2])
                     // should shade as material color multiplied by light intensity.
@@ -3800,7 +3926,7 @@ void main() {
             .and_then(|s| Self::find_material_ci(&scene.materials, &s.material_name))
             .map(|m| m.opacity)
             .unwrap_or(1.0);
-        Self::apply_blend_mode(gl, opacity, first_blend_func, force_blend);
+        Self::apply_blend_mode(gl, shader, opacity, first_blend_func, force_blend);
     }
 
     /// Get the first texture layer's blend_func for a model node
@@ -3873,7 +3999,7 @@ void main() {
                 }
                 let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
+                Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -3908,8 +4034,13 @@ void main() {
             }
         }
 
+        // Per-mesh: query THIS mesh's override (not the whole model). Passing None here
+        // leaked mesh 0's shader onto every unset mesh — the LEGO minifig legs (mesh 2,
+        // no override) inherited the head shader (mesh 0) and rendered yellow. A single
+        // whole-model `shaderList = shader` is still honored: node_shader_override's
+        // Some(idx) branch returns mesh 0 when it's the sole override.
         let effective_shader_name = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, None))
+            .and_then(|rs| Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)))
             .cloned()
             .unwrap_or_else(|| model_node.shader_name.clone());
         if !effective_shader_name.is_empty() {
@@ -3974,7 +4105,7 @@ void main() {
                     .map(|l| l.blend_func)
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
-                Self::apply_blend_mode(gl, opacity, first_bf, force_blend);
+                Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return true;
             }
         }
@@ -4013,7 +4144,7 @@ void main() {
             } else {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
             }
-            Self::apply_blend_mode(gl, mat.opacity, best_blend_func, force_blend);
+            Self::apply_blend_mode(gl, shader, mat.opacity, best_blend_func, force_blend);
             return true;
         }
 
@@ -4025,15 +4156,26 @@ void main() {
         gl.uniform4f(shader.u_ambient_color.as_ref(), mat.ambient[0], mat.ambient[1], mat.ambient[2], mat.ambient[3]);
         gl.uniform4f(shader.u_specular_color.as_ref(), mat.specular[0], mat.specular[1], mat.specular[2], mat.specular[3]);
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
-        // IFX maps material reflectivity to shader shininess (scaled by 100)
-        let shininess = if mat.shininess > 0.0 { mat.shininess } else { mat.reflectivity * 100.0 };
-        gl.uniform1f(shader.u_shininess.as_ref(), shininess);
+        // IFX specular exponent: GL_SHININESS = material shininess (0..1) * 128
+        // (CIFXRenderDeviceOGL). Director's shader.shininess (0..100) is stored as the
+        // 0..1 value. reflectivity is a reflection/env weight, NOT a specular exponent,
+        // so it must not feed shininess.
+        gl.uniform1f(shader.u_shininess.as_ref(), mat.shininess * 128.0);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
 
     /// Set GL blend mode based on material opacity and shader blend function.
     /// `force_blend` = true when drawing in the transparent pass (models with alpha textures).
-    fn apply_blend_mode(gl: &WebGl2RenderingContext, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
+    fn apply_blend_mode(gl: &WebGl2RenderingContext, shader: &Shader3d, opacity: f32, first_layer_blend_func: u8, force_blend: bool) {
+        // IFX first-layer blend func: 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
+        // 2 = IFX_MODULATE (out = texture * lit color — the NORMAL lit case).
+        // Blend func alone never disables lighting: a full-bright element (skybox,
+        // galaxy backdrop) achieves that through an emissive material / bright ambient,
+        // not by mislabelling IFX_MODULATE as "#replace". Treating blend_func==2 as
+        // unlit flattened every ordinary textured model (e.g. the Dummy character,
+        // whose whole face is IFX_MODULATE), so `u_texture_unlit` stays off here.
+        let _ = first_layer_blend_func;
+        gl.uniform1i(shader.u_texture_unlit.as_ref(), 0);
         if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
@@ -4071,9 +4213,20 @@ void main() {
             _ => return false,
         };
 
+        // The biped mesh is bound to the MOTION's frame 0, not the skeleton HTree rest —
+        // so build inv_bind from the motion's first frame for it. (Other rigs bind to rest.)
+        let bind_to_motion_frame0 = resource_name.to_ascii_lowercase().contains("biped");
+
         // Compute inverse bind matrices fresh (bypass cache to ensure correct transpose)
         let inv_bind_fresh = {
-            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, None, 0.0);
+            let bind_motion = if bind_to_motion_frame0 {
+                let cmn = runtime_state.and_then(|rs| rs.bones_player(model_name))
+                    .filter(|b| b.current_motion.is_some())
+                    .and_then(|b| b.current_motion.as_deref())
+                    .or_else(|| runtime_state.and_then(|rs| rs.current_motion.as_deref()));
+                cmn.and_then(|name| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name)))
+            } else { None };
+            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, bind_motion, 0.0);
             rest.iter().map(|m| {
                 // Proper column-major affine inverse: R^-1 = R^T, t^-1 = -R^T * t
                 let (r00,r01,r02) = (m[0], m[4], m[8]);
@@ -4217,11 +4370,12 @@ void main() {
             for i in 0..bone_count {
                 let cur_rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
                 let prev_rel = mat4_multiply_col_major(&root_relinv, &prev_matrices[i]);
-                let cur = mat4_multiply_col_major(&cur_rel, &inv_bind[i]);
-                let prev = mat4_multiply_col_major(&prev_rel, &inv_bind[i]);
-                for j in 0..16 {
-                    skinning_matrices[i * 16 + j] = prev[j] + (cur[j] - prev[j]) * blend_weight;
-                }
+                // Blend the two posed bone transforms with proper rotation SLERP (not an
+                // element-wise matrix lerp, which collapses limbs mid-blend), then apply
+                // the shared inverse-bind after the blend.
+                let blended_rel = blend_bone_transform_trs(&prev_rel, &cur_rel, blend_weight);
+                let final_mat = mat4_multiply_col_major(&blended_rel, &inv_bind[i]);
+                skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
             }
         } else {
             for i in 0..bone_count {
@@ -4369,7 +4523,29 @@ void main() {
 
         let (fov, near, far, aspect) = if let Some(node) = view_node {
             let mut f = node.far_plane;
-            if f > 100000.0 || f <= 0.0 { f = 10000.0; }
+            // Director's default camera `yon` is effectively unbounded, but dirplayer
+            // stores a small default (10000) on empty 3D members and previously clamped
+            // any far > 100000 back down to 10000. Large-coordinate scenes (e.g. the
+            // unicraft galaxy — camera at ~180000 units, geometry at the origin) were
+            // then entirely far-clipped and rendered black (picking still worked because
+            // raycasts ignore the far plane). When the stored far is that default /
+            // invalid / over-large sentinel, fit it to the furthest geometry from the
+            // camera instead. Explicitly-set, in-range far values (e.g. gameplay `yon`)
+            // are left alone — no per-frame scan and no override.
+            let needs_fit = f <= 0.0 || f > 100000.0 || (f - 10000.0).abs() < 0.5;
+            if needs_fit {
+                let cam_world = self.accumulate_transform_with_state(scene, node, runtime_state);
+                let cp = [cam_world[12], cam_world[13], cam_world[14]];
+                let mut scene_far = 0.0f32;
+                for m in scene.nodes.iter().filter(|nn| nn.node_type == W3dNodeType::Model) {
+                    let wt = self.accumulate_transform_with_state(scene, m, runtime_state);
+                    let d = ((wt[12]-cp[0]).powi(2) + (wt[13]-cp[1]).powi(2) + (wt[14]-cp[2]).powi(2)).sqrt();
+                    if d > scene_far { scene_far = d; }
+                }
+                // Margin for object radius / geometry beyond node origin, floored so tiny
+                // scenes keep a sane far, capped so depth precision stays usable.
+                f = (scene_far * 1.5).clamp(10000.0, 4_000_000.0);
+            }
             let mut n = node.near_plane;
             if n <= 0.0 { n = 1.0; }
             // Director scales the projection plane to fit the SPRITE rect, so the
@@ -4417,16 +4593,26 @@ void main() {
         let mut attenuations = [0.0f32; 24]; // 8 * 3 (constant, linear, quadratic)
         let mut directions = [0.0f32; 24];   // 8 * 3 (direction for spot/directional)
         let mut spot_angles = [0.0f32; 8];   // cone angle in radians
+        let mut spot_exps = [0.0f32; 8];     // GL_SPOT_EXPONENT (0 = SpotDecay off, uniform)
+        let mut spec_masks = [0.0f32; 8];    // 1 = light has the SPECULAR attribute bit
         let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
         // dirplayer injects fallback default lights (Default*/UI*) so an unlit scene
         // is still visible. When the movie supplies its OWN directional/spot lighting
-        // (e.g. frog01's spot/spot2), those synthetic fallbacks flood the scene and
-        // wash out the intended mood — so suppress them in that case. Baked content
-        // lights (e.g. AmbientLightResource from the .w3d) are kept.
+        // (e.g. frog01's spot/spot2), the synthetic *directional* fallback floods the
+        // scene and washes out the intended mood — so suppress it in that case. Baked
+        // content lights (e.g. AmbientLightResource from the .w3d) are kept.
+        //
+        // The AMBIENT fallback (DefaultAmbient) is NOT suppressed: it stands in for
+        // Director's always-present default ambient in an empty 3D member, and movies
+        // configure it directly (e.g. `w.light(1).color = rgb(255,255,255)`) as the
+        // scene's base fill. Dropping it left ambient-lit scenes (unicraft's galaxy)
+        // fully black.
         let is_fallback_light = |name: &str| matches!(name,
             "DefaultAmbient" | "DefaultDirectional" | "UIAmbient" | "UIDirectional");
+        let is_fallback_directional = |name: &str| matches!(name,
+            "DefaultDirectional" | "UIDirectional");
         let has_movie_light = scene.lights.iter().any(|l|
             l.enabled && !is_fallback_light(&l.name)
             && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
@@ -4462,8 +4648,9 @@ void main() {
                 if !light.enabled {
                     continue;
                 }
-                // Suppress dirplayer's synthetic fallback lights when the movie lights itself.
-                if has_movie_light && is_fallback_light(&light.name) {
+                // Suppress only the synthetic fallback *directional* key when the movie
+                // lights itself; keep the ambient fallback as Director's base fill.
+                if has_movie_light && is_fallback_directional(&light.name) {
                     continue;
                 }
                 // Skip lights that have been removed from world
@@ -4517,16 +4704,29 @@ void main() {
 
                 // Spot angle (degrees → radians)
                 spot_angles[li] = if lt == 3 { light.spot_angle.to_radians() } else { 0.0 };
+                // SpotDecay ON → GL_SPOT_EXPONENT so the beam reaches 0.04 at the outer
+                // cone edge (exp = log10(.04)/log10(cos(outer))); OFF → 0 (uniform + hard
+                // cutoff). Clamp the log to avoid a blow-up for near-0° cones.
+                spot_exps[li] = if lt == 3 && light.spot_decay {
+                    let cone_cos = spot_angles[li].cos().min(0.9999).max(1e-4);
+                    (0.04f32.ln() / cone_cos.ln()).clamp(0.0, 128.0)
+                } else {
+                    0.0
+                };
 
                 if let Some(light_node) = scene.nodes.iter().find(|n| {
                     n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
                 }) {
                     let world_t = self.accumulate_transform_with_state(scene, light_node, runtime_state);
                     if lt == 1 {
-                        // Directional: direction = -Z axis of world transform
-                        positions[li * 3]     = -world_t[8];
-                        positions[li * 3 + 1] = -world_t[9];
-                        positions[li * 3 + 2] = -world_t[10];
+                        // Directional: the beam travels along the light's -Z (confirmed by
+                        // the spot cone, which uses -Z as its aim). The shader's L is the
+                        // direction *to* the light, i.e. the opposite = +Z. (The old code
+                        // used -Z here, which only looked right because diffuse used
+                        // abs(N·L); with one-sided max() the sign must be correct.)
+                        positions[li * 3]     = world_t[8];
+                        positions[li * 3 + 1] = world_t[9];
+                        positions[li * 3 + 2] = world_t[10];
                         directions[li * 3]     = -world_t[8];
                         directions[li * 3 + 1] = -world_t[9];
                         directions[li * 3 + 2] = -world_t[10];
@@ -4548,6 +4748,7 @@ void main() {
                     directions[li * 3 + 1] = -1.0;
                     directions[li * 3 + 2] = -0.7;
                 }
+                spec_masks[li] = if light.specular { 1.0 } else { 0.0 };
                 colors[li * 3] = light.color[0];
                 colors[li * 3 + 1] = light.color[1];
                 colors[li * 3 + 2] = light.color[2];
@@ -4564,6 +4765,8 @@ void main() {
         gl.uniform3fv_with_f32_array(shader.u_light_atten.as_ref(), &attenuations[..n * 3]);
         gl.uniform3fv_with_f32_array(shader.u_light_dir.as_ref(), &directions[..n * 3]);
         gl.uniform1fv_with_f32_array(shader.u_light_spot_angle.as_ref(), &spot_angles[..n]);
+        gl.uniform1fv_with_f32_array(shader.u_light_spot_exp.as_ref(), &spot_exps[..n]);
+        gl.uniform1fv_with_f32_array(shader.u_light_specular.as_ref(), &spec_masks[..n]);
         gl.uniform3f(shader.u_global_ambient.as_ref(), global_ambient[0], global_ambient[1], global_ambient[2]);
     }
 
@@ -4581,6 +4784,19 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
+/// Content fingerprint of a texture's raw bytes (FNV-1a). Used to decide when to
+/// re-upload: a Flash-as-texture frame can change its PIXELS while keeping the same
+/// byte length (a SWF that renders blank during load, then its real image at the same
+/// size), so a length-only check would freeze the texture on the blank frame.
+fn texture_content_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
     if data.len() < 4 { return None; }
 
@@ -4827,36 +5043,34 @@ fn decode_dxt1_block(block: &[u8], rgba: &mut [u8], start_x: u32, start_y: u32, 
 // ─── Bone data helpers ───
 
 /// Pack variable-length bone indices into fixed vec4 (as f32 for vertex attribute).
-fn pack_bone_vec4_f32(indices: &[Vec<u32>]) -> Vec<[f32; 4]> {
-    indices.iter().map(|v| {
-        let mut out = [0.0f32; 4];
-        for (i, &idx) in v.iter().take(4).enumerate() {
-            // Clamp to max bone uniform array size to prevent out-of-bounds GPU access
-            out[i] = (idx as f32).min(47.0);
+/// Pack per-vertex bone influences into fixed vec4 index + weight arrays. IFX keeps up
+/// to 6 influences SORTED BY MAGNITUDE; the GPU path caps at 4. The W3D decoder stores
+/// influences UNSORTED (bone[0] is the residual `1-Σothers`), so a naive take(4) can
+/// drop the HEAVIEST bones and pull a >4-influence vertex (spine/shoulder/hip) toward
+/// the wrong joints. So sort each vertex's (index, weight) pairs by weight descending,
+/// keep the 4 largest, then renormalize the survivors to sum 1.
+fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    let mut idx_out = Vec::with_capacity(indices.len());
+    let mut wgt_out = Vec::with_capacity(indices.len());
+    for (vi, idxs) in indices.iter().enumerate() {
+        let wts = weights.get(vi).map(|w| w.as_slice()).unwrap_or(&[]);
+        let mut pairs: Vec<(u32, f32)> = idxs.iter().enumerate()
+            .map(|(k, &b)| (b, wts.get(k).copied().unwrap_or(0.0).max(0.0)))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs.truncate(4);
+        let mut idx4 = [0.0f32; 4];
+        let mut wgt4 = [0.0f32; 4];
+        for (k, &(b, w)) in pairs.iter().enumerate() {
+            idx4[k] = (b as f32).min(47.0); // clamp to bone uniform array size
+            wgt4[k] = w;
         }
-        out
-    }).collect()
-}
-
-/// Pack variable-length bone weights into fixed vec4, normalized to sum to 1.
-fn pack_bone_weights_vec4(weights: &[Vec<f32>]) -> Vec<[f32; 4]> {
-    weights.iter().map(|v| {
-        let mut out = [0.0f32; 4];
-        for (i, &w) in v.iter().take(4).enumerate() {
-            out[i] = w.max(0.0); // clamp negatives to 0 (bad IQ can produce negative weights)
-        }
-        // Normalize so weights sum to 1.0
-        let sum: f32 = out.iter().sum();
-        if sum > 0.001 {
-            for w in out.iter_mut() {
-                *w /= sum;
-            }
-        } else {
-            // No weights — assign full weight to bone 0
-            out[0] = 1.0;
-        }
-        out
-    }).collect()
+        let sum: f32 = wgt4.iter().sum();
+        if sum > 0.001 { for w in wgt4.iter_mut() { *w /= sum; } } else { wgt4[0] = 1.0; }
+        idx_out.push(idx4);
+        wgt_out.push(wgt4);
+    }
+    (idx_out, wgt_out)
 }
 
 // ─── Matrix math helpers ───
@@ -5061,6 +5275,69 @@ fn generate_planar_uvs(positions: &[[f32; 3]]) -> Vec<[f32; 2]> {
 }
 
 /// Multiply two column-major 4x4 matrices: result = A * B
+/// Blend two column-major affine bone transforms by decomposing each into
+/// translation + rotation(quaternion) + scale, LERPing translation/scale and
+/// SLERPing rotation, then recomposing. A motion crossfade must interpolate real
+/// rotations — an element-wise matrix lerp of two rotation bases is non-orthonormal
+/// and collapses/skews limbs at mid-blend. Mirrors IFX IFXCharacter::BlendBoneNode
+/// (blend the bone transform, then build the matrix).
+fn blend_bone_transform_trs(a: &[f32; 16], b: &[f32; 16], t: f32) -> [f32; 16] {
+    fn decomp(m: &[f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+        let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+        let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+        let (ix, iy, iz) = (1.0 / sx.max(1e-8), 1.0 / sy.max(1e-8), 1.0 / sz.max(1e-8));
+        // normalized rotation columns → r_{row,col}
+        let (r00, r10, r20) = (m[0] * ix, m[1] * ix, m[2] * ix);
+        let (r01, r11, r21) = (m[4] * iy, m[5] * iy, m[6] * iy);
+        let (r02, r12, r22) = (m[8] * iz, m[9] * iz, m[10] * iz);
+        let tr = r00 + r11 + r22;
+        let q = if tr > 0.0 {
+            let s = 0.5 / (tr + 1.0).sqrt();
+            [(r21 - r12) * s, (r02 - r20) * s, (r10 - r01) * s, 0.25 / s]
+        } else if r00 > r11 && r00 > r22 {
+            let s = 2.0 * (1.0 + r00 - r11 - r22).sqrt();
+            [0.25 * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s]
+        } else if r11 > r22 {
+            let s = 2.0 * (1.0 + r11 - r00 - r22).sqrt();
+            [(r01 + r10) / s, 0.25 * s, (r12 + r21) / s, (r02 - r20) / s]
+        } else {
+            let s = 2.0 * (1.0 + r22 - r00 - r11).sqrt();
+            [(r02 + r20) / s, (r12 + r21) / s, 0.25 * s, (r10 - r01) / s]
+        };
+        ([m[12], m[13], m[14]], q, [sx, sy, sz])
+    }
+    let (ta, qa, sa) = decomp(a);
+    let (tb, qb, sb) = decomp(b);
+    // SLERP qa → qb (shortest arc)
+    let mut qb2 = qb;
+    let mut dot = qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3];
+    if dot < 0.0 { for k in 0..4 { qb2[k] = -qb2[k]; } dot = -dot; }
+    let q = if dot > 0.9995 {
+        let mut r = [0.0f32; 4];
+        for k in 0..4 { r[k] = qa[k] + (qb2[k] - qa[k]) * t; }
+        let n = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]).sqrt().max(1e-8);
+        [r[0] / n, r[1] / n, r[2] / n, r[3] / n]
+    } else {
+        let theta = dot.clamp(-1.0, 1.0).acos();
+        let st = theta.sin();
+        let (wa, wb) = (((1.0 - t) * theta).sin() / st, (t * theta).sin() / st);
+        [qa[0] * wa + qb2[0] * wb, qa[1] * wa + qb2[1] * wb, qa[2] * wa + qb2[2] * wb, qa[3] * wa + qb2[3] * wb]
+    };
+    let tr = [ta[0] + (tb[0] - ta[0]) * t, ta[1] + (tb[1] - ta[1]) * t, ta[2] + (tb[2] - ta[2]) * t];
+    let sc = [sa[0] + (sb[0] - sa[0]) * t, sa[1] + (sb[1] - sa[1]) * t, sa[2] + (sb[2] - sa[2]) * t];
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, xz, yz) = (x * y, x * z, y * z);
+    let (wx, wy, wz) = (w * x, w * y, w * z);
+    [
+        (1.0 - 2.0 * (yy + zz)) * sc[0], (2.0 * (xy + wz)) * sc[0], (2.0 * (xz - wy)) * sc[0], 0.0,
+        (2.0 * (xy - wz)) * sc[1], (1.0 - 2.0 * (xx + zz)) * sc[1], (2.0 * (yz + wx)) * sc[1], 0.0,
+        (2.0 * (xz + wy)) * sc[2], (2.0 * (yz - wx)) * sc[2], (1.0 - 2.0 * (xx + yy)) * sc[2], 0.0,
+        tr[0], tr[1], tr[2], 1.0,
+    ]
+}
+
 fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut r = [0.0f32; 16];
     for col in 0..4 {
