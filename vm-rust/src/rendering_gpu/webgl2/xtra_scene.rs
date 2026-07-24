@@ -694,10 +694,18 @@ impl XtraSceneRenderer {
             if w <= 0 || h <= 0 {
                 continue;
             }
-            // Center-anchored stage-pixel rect → NDC (y flipped, top-left origin).
-            let (cx, cy) = (ov.loc[0] as f32, ov.loc[1] as f32);
-            let (left, right) = (cx - w as f32 / 2.0, cx + w as f32 / 2.0);
-            let (top, bottom) = (cy - h as f32 / 2.0, cy + h as f32 / 2.0);
+            // Reg-point-anchored stage-pixel rect → NDC (y flipped, top-left
+            // origin). The plugin places the overlay so its `regpoint` lands on
+            // `loc` (top-left = loc − regpoint); an un-set reg point arrives as
+            // `size/2`, reproducing the old centre anchor. This is what lets
+            // Dora Soccer's `huddy` bar (reg point at its bottom-centre) sit in
+            // the bottom tray instead of being pushed half off-screen.
+            let (lx, ly) = (
+                ov.loc[0] as f32 - ov.regpoint[0] as f32,
+                ov.loc[1] as f32 - ov.regpoint[1] as f32,
+            );
+            let (left, right) = (lx, lx + w as f32);
+            let (top, bottom) = (ly, ly + h as f32);
             let vw = viewport_w.max(1) as f32;
             let vh = viewport_h.max(1) as f32;
             let ndc_x = |x: f32| x / vw * 2.0 - 1.0;
