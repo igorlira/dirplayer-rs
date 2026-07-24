@@ -426,7 +426,18 @@ impl XtraSceneRenderer {
         // dolly-zoom) look at very distant features. A tighter far clips them —
         // the TV-screen moiré that prompted a tighter far was actually back-face
         // culling, not depth precision, so keep the original generous range.
-        let proj = perspective(frame.camera.fov.to_radians().max(0.1), aspect, 1.0, 200_000.0);
+        //
+        // Groove's `Perspective` is the HORIZONTAL field of view, not the
+        // vertical one. The engine builds a pinhole frustum from a single focal
+        // length — `tan(fov_x/2) = (width/2)/focal`, `tan(fov_y/2) =
+        // (height/2)/focal` — so the vertical FOV follows the width:height ratio.
+        // Feeding `fov` to a vertical-FOV projection made a wide window far too
+        // tall a view (Dora Soccer's follow-cam looked top-down/zoomed-out
+        // instead of over-the-shoulder). Convert the horizontal FOV to the
+        // equivalent vertical one for this aspect: fov_y = 2·atan(tan(fov_x/2)/aspect).
+        let fov_x = frame.camera.fov.to_radians().max(0.1);
+        let fov_y = 2.0 * ((fov_x * 0.5).tan() / aspect.max(1e-3)).atan();
+        let proj = perspective(fov_y, aspect, 1.0, 200_000.0);
         let view = look_at(frame.camera.pos, frame.camera.look_at, [0.0, 0.0, 1.0]);
         let view_proj = mat_mul(&proj, &view);
 
