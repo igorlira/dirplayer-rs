@@ -1,5 +1,0 @@
-[movie]
-path = "dcr_groove/dora_soccer/doraRC7.dcr"
-
-[test]
-suite = "groove"

@@ -8,4 +8,3 @@ mod misc;
 mod intel;
 mod havok_demo;
 mod gorillaz;
-mod groove;
