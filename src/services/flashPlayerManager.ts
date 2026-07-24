@@ -1405,10 +1405,10 @@ function flushPendingGoto(spriteNum: number): void {
     try {
       switch (op.kind) {
         case 'goto':
-          applyGotoAndPin(instance, op.frame);
+          applyFrameSetting(instance, spriteNum, String(op.frame), true);
           break;
         case 'gotoLabel':
-          applyGotoLabelAndPin(instance, op.label);
+          applyFrameSetting(instance, spriteNum, op.label, false);
           break;
         case 'play':
           // Cancel any deferred gotoAndStop pin from a queued goto earlier in
@@ -1507,11 +1507,20 @@ function goToFrame(spriteNum: number, frameOrLabel: string): void {
 }
 
 /**
- * `the frame of sprite N = X` property setter — seek and STOP (Director's
- * frame setter is gotoAndStop-semantic). Called from WASM via
- * window.dirplayer_ruffleGoToFrameAndStop. Used for poster-frame Flash
- * sprites like storyscramble's tiles where the playhead must not advance
- * past the chosen frame.
+ * `the frame of sprite N = X` property setter. Director's Flash `frame` setter
+ * is a seek that PRESERVES the member's play intent (`pausedAtStart`):
+ *
+ *  - A static member (`pausedAtStart = true`, e.g. storyscramble's poster
+ *    tiles) pins at the chosen frame and must not advance — gotoAndStop.
+ *  - An animated member (`pausedAtStart = false`, the default) seeks and KEEPS
+ *    PLAYING; the SWF's own `stop()` actions decide where it rests. Dora
+ *    Soccer's title menu is such a member: on a replay it sets `frame = 233`
+ *    (a plain frame with no stop) and relies on the timeline playing forward to
+ *    the `stop()` at frame 239 — the difficulty-select screen where the buttons
+ *    arm. Pinning it at 233 left the four mode buttons dead after finishing a
+ *    level.
+ *
+ * Called from WASM via window.dirplayer_ruffleGoToFrameAndStop.
  */
 function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
   const key = instanceKey(spriteNum);
@@ -1525,13 +1534,59 @@ function goToFrameAndStop(spriteNum: number, frameOrLabel: string): void {
     } else {
       queueOp(spriteNum, { kind: 'gotoLabel', label: frameOrLabel });
     }
+    // Make the WASM frame loop WAIT for the instance before running more
+    // scripts, exactly like getVariable/callFunction/setVariable. Otherwise the
+    // movie keeps running while the Flash sprite is still loading and the queued
+    // frame set is applied out of order on ready — Dora Soccer's replay sets
+    // `sprite(1).frame = 233` on the just-recreated title menu instance and the
+    // difficulty screen ended up on the wrong frame. Blocking lets the seek land
+    // in sequence.
+    flashAccessBeforeReady = true;
     return;
   }
-  instance.stopped = true; // frame setter is gotoAndStop-semantic → stopped
-  if (isNumeric) {
-    applyGotoAndPin(instance, parseInt(trimmed, 10));
+  applyFrameSetting(instance, spriteNum, frameOrLabel, isNumeric);
+}
+
+/**
+ * Shared body of the `sprite.frame = X` setter — used both live
+ * (goToFrameAndStop) and when replaying a queued `goto`/`gotoLabel` that arrived
+ * before the Flash instance was ready (flushPendingGoto). A STATIC member
+ * (pausedAtStart=true) pins at the frame; an ANIMATED member (pausedAtStart
+ * =false) seeks and keeps playing so the SWF's own stop() actions decide where
+ * it rests. The queued path MUST route through here too — Dora Soccer's replay
+ * re-enters the menu frame, which recreates the title Flash instance, so
+ * `sprite(1).frame = 233` is queued and only applied on ready; pinning it there
+ * left the menu stuck at 233 instead of playing forward to the stop() at 239.
+ */
+function applyFrameSetting(
+  instance: FlashInstance,
+  spriteNum: number,
+  frameOrLabel: string,
+  isNumeric: boolean,
+): void {
+  const trimmed = frameOrLabel.trim();
+  if (instance.pausedAtStart) {
+    instance.stopped = true; // static member → pin at the frame
+    if (isNumeric) {
+      applyGotoAndPin(instance, parseInt(trimmed, 10));
+    } else {
+      applyGotoLabelAndPin(instance, frameOrLabel);
+    }
   } else {
-    applyGotoLabelAndPin(instance, frameOrLabel);
+    // Animated member → seek and keep playing. Resume like playFlash():
+    // Ruffle's root MovieClip may be sitting on an AS `stop()` (Dora's menu
+    // rests at the previous stop() before the game seeks it), and a bare
+    // GotoFrame(N,false) re-seats the playhead but the player-level paused flag
+    // can leave it frozen — so flip play() first, then GotoFrame to clear the
+    // MovieClip's own stopped flag and advance from N.
+    instance.stopped = false;
+    pinTarget.delete(spriteNum);
+    playerExec(instance, 'play');
+    if (isNumeric) {
+      applyGotoPlay(instance, parseInt(trimmed, 10));
+    } else {
+      applyGotoLabelPlay(instance, frameOrLabel);
+    }
   }
 }
 
