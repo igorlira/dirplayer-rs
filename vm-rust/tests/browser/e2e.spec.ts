@@ -148,6 +148,18 @@ test("browser e2e tests", async ({ page }) => {
     }
   );
 
+  // `E2E_CONSOLE=1` forwards the page console to the terminal (optionally
+  // filtered by a substring, e.g. `E2E_CONSOLE=PROBE`) — the only way to see
+  // `log_test_action` / diagnostic output from inside the wasm test.
+  const consoleFilter = process.env.E2E_CONSOLE;
+  if (consoleFilter) {
+    const needle = consoleFilter === "1" ? "" : consoleFilter;
+    page.on("console", (msg) => {
+      const text = msg.text();
+      if (!needle || text.includes(needle)) console.log(`[page] ${text}`);
+    });
+  }
+
   await page.goto("/index.html");
 
   // Stop waiting as soon as the harness finishes, a panic hook reports a

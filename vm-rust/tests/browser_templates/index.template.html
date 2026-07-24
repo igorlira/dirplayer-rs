@@ -208,6 +208,14 @@
       // loads, registry resolution, etc. all work normally in tests.
       const api = await import('./dirplayer-js-api.js');
       api.setVmModule(wasm);
+      // Prime the xtra registry from /assets/xtra-registry.json so movies
+      // that declare an external Xtra (Groove, BobbaXtra) get their wasm
+      // plugin auto-loaded, exactly like the dev host does. The harness
+      // calls `window.dirplayer_resolveAndLoadMovieXtras()` after each
+      // movie load.
+      api.setXtraHostBase(new URL('./assets/', document.baseURI).href);
+      await api.loadDefaultXtraRegistry();
+      window.dirplayer_resolveAndLoadMovieXtras = api.resolveAndLoadMovieXtras;
       statusLine('Module loaded. Running tests...');
 
       const testFilter = (window.__testFilter || '').trim().toLowerCase();

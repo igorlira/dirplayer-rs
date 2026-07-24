@@ -24,6 +24,18 @@ impl BrowserTestPlayer {
     /// setup) and by `load_movie()` (per-movie setup) so every movie load
     /// starts from a clean state — no leaked scopes, globals, timeouts, or
     /// cached sprite textures from a previously loaded movie.
+    /// Call the JS bridge's `resolveAndLoadMovieXtras()` (exposed on `window`
+    /// by the runner template) and await it. No-op when the hook is absent.
+    async fn resolve_movie_xtras() {
+        let Some(window) = web_sys::window() else { return };
+        let Ok(hook) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_resolveAndLoadMovieXtras")) else { return };
+        let Ok(func) = hook.dyn_into::<js_sys::Function>() else { return };
+        let Ok(ret) = func.call0(&window) else { return };
+        if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
+            let _ = JsFuture::from(promise).await;
+        }
+    }
+
     async fn reset_player() {
         // Preserve external_params across the reset. Tests set these via
         // `cfg.apply_external_params()` BEFORE calling `load_movie`, so a
@@ -232,6 +244,12 @@ impl TestHarness for BrowserTestPlayer {
             let player = crate::player::player_mut();
             let _ = player.load_movie_from_file(&full_url).await;
         }
+
+        // Resolve the movie's XTRl declarations against the registry and load
+        // the matching wasm plugins (Groove, BobbaXtra, …). The dev host does
+        // this in `LoadMovie`; without it a movie that needs an external Xtra
+        // dies on its first plugin call ("No built-in handler: ...").
+        Self::resolve_movie_xtras().await;
 
         // Initialize the renderer now that the stage size is known
         Self::ensure_renderer();

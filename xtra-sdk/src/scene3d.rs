@@ -104,7 +104,8 @@ pub struct DrawCmd {
 }
 
 /// A 2D screen-space bitmap overlay composited over (or under) the 3D scene
-/// (Groove `AddOverlay`). Center-anchored at `loc` in stage pixels; `size` `[0,0]`
+/// (Groove `AddOverlay`). Anchored so the overlay's `regpoint` lands on `loc`
+/// (screen top-left = `loc − regpoint`), both in stage pixels; `size` `[0,0]`
 /// means use the texture's native size. `blend` is 0..100 (→ alpha). `channel`
 /// is z-order: negative draws below the 3D scene, `>= 0` above it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +113,14 @@ pub struct OverlayCmd {
     pub tex_name: String,
     pub loc: [i32; 2],
     pub size: [i32; 2],
+    /// Reg point in the overlay's DISPLAY-space pixels: the screen top-left is
+    /// `loc − regpoint`. The plugin resolves the Groove default (an unset reg
+    /// point centers the sprite, so it sends `size/2`) — matching the engine,
+    /// whose `SetOverlayRegPoint` default is the native half-extent. `#[serde]`
+    /// defaults to `[0,0]` so an older wire stream (top-left anchored) still
+    /// deserializes.
+    #[serde(default)]
+    pub regpoint: [i32; 2],
     pub blend: f32,
     pub channel: i32,
     /// Transparency/blit mode, decided by the PLUGIN from the sprite's Groove
