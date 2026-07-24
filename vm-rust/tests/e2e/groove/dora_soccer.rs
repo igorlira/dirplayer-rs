@@ -70,3 +70,43 @@ browser_e2e_test!(test_dora_soccer_practice, |player| async move {
 
     Ok(())
 });
+
+browser_e2e_test!(test_dora_soccer_do_sets_behavior_props, |player| async move {
+    use vm_rust::director::static_datum::StaticDatum;
+    let cfg = TestConfig::from_toml(CONFIG);
+    cfg.apply_external_params();
+    let movie_path = player.asset_path(&cfg.movie.path);
+
+    player.load_movie(&movie_path).await;
+    player.init_movie().await;
+    player.step_frames(30).await;
+    let _ = player.eval("gamemode = 1").await;
+    let _ = player.eval("go(7)").await;
+    player.step_frames(20).await;
+
+    // Dora's beginSprite loads her animation clips onto the behavior's
+    // PROPERTIES via `do("stb = [1,103,115,1]")` etc. A `do`/eval bare-identifier
+    // assignment must target the receiver's property (Director scoping), not a
+    // global — otherwise `stb` stays VOID, `aframe = stb[2]` is 0, and Dora is
+    // frozen at animation frame 0. Assert the idle clip loaded onto her sprite.
+    let mut found = None;
+    for ch in 1..=24 {
+        if let Ok(StaticDatum::List(items)) = player.eval_datum(&format!("sprite({ch}).stb")).await {
+            found = Some(items);
+            break;
+        }
+    }
+    let stb = found.expect("Dora's `stb` clip property should be a populated list, not VOID");
+    assert_eq!(
+        stb,
+        vec![
+            StaticDatum::Int(1),
+            StaticDatum::Int(103),
+            StaticDatum::Int(115),
+            StaticDatum::Int(1)
+        ],
+        "the idle clip `do(\"stb = [1,103,115,1]\")` must land on the behavior property"
+    );
+
+    Ok(())
+});
