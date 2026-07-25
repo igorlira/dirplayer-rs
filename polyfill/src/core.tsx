@@ -6,6 +6,7 @@ import VMProvider from '../../src/components/VMProvider';
 import store from '../../src/store';
 import { Provider as StoreProvider } from 'react-redux';
 import { installShockwavePlugin } from './plugin-polyfill';
+import logoUrl from '../../src/assets/logo128.png';
 
 // Install the fake `Shockwave for Director` entry into navigator.plugins
 // at module load — BEFORE any page script runs detection. Page-level
@@ -60,6 +61,166 @@ function checkDirEmbed(element: HTMLEmbedElement): boolean {
   if (DIR_MIME_TYPES.includes(type)) return true;
   const src = element.src || element.getAttribute('src') || '';
   return !!src && hasDirExtension(src);
+}
+
+// Attributes stored on each player mount div for conflict-UI recovery and
+// cross-world render handoff (content script and page script run in separate
+// JS worlds and cannot share module-level variables — the DOM is the only
+// shared channel).
+const ATTR_MOUNT = 'data-dirplayer-mount';
+const ATTR_MOUNT_WIDTH = 'data-dirplayer-width';
+const ATTR_MOUNT_HEIGHT = 'data-dirplayer-height';
+const ATTR_MOUNT_SRC = 'data-dirplayer-src';
+const ATTR_MOUNT_PARAMS = 'data-dirplayer-params';
+const ATTR_MOUNT_GESTURES = 'data-dirplayer-gestures';
+
+// Dispatched (bubbling, cancelable) on a mount div by the polyfill world when
+// the user picks "Browser Extension" in the conflict UI. The extension world
+// listens on document and renders its own player into the mount, reading the
+// movie parameters from the ATTR_MOUNT_* attributes. It calls preventDefault()
+// to acknowledge — DOM events and defaultPrevented cross the world boundary,
+// module state does not.
+const EVENT_RENDER_AS_EXTENSION = 'dirplayer-render-as-extension';
+
+// Set in the polyfill world when a conflict with the extension is detected.
+let conflictPolyfillConfig: PolyfillConfig | null = null;
+// The user's pick. Applies to every player on the page, including embeds that
+// show up after the choice was made.
+let conflictChoice: 'extension' | 'polyfill' | null = null;
+// One resolver per conflict UI currently on screen; a single click resolves
+// them all so a multi-embed page doesn't ask the same question repeatedly.
+const pendingConflictResolvers: Array<(choice: 'extension' | 'polyfill') => void> = [];
+
+function resolveConflict(choice: 'extension' | 'polyfill') {
+  conflictChoice = choice;
+  console.log(`[DirPlayer] Conflict resolved: using ${choice === 'extension' ? 'browser extension' : 'web player'}`);
+  for (const resolve of pendingConflictResolvers.splice(0)) {
+    resolve(choice);
+  }
+}
+
+function isCompactHeight(height: string): boolean {
+  const h = parseFloat(height);
+  return !isNaN(h) && h < 200;
+}
+
+// Renders the conflict choice UI into a Shadow DOM root so the page's CSS
+// (e.g. `div { height: 100% }`) cannot affect our layout, and native event
+// listeners on shadow elements work without React's synthetic event system.
+function buildConflictShadowUI(
+  shadow: ShadowRoot,
+  height: string,
+  onChooseExtension: () => void,
+  onChoosePolyfill: () => void
+) {
+  const compact = isCompactHeight(height);
+  const logoSize = compact ? 18 : 26;
+
+  const style = document.createElement('style');
+  style.textContent = `
+    :host { display: block; width: 100%; height: 100%; background-color: #1a1a1a; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    .root {
+      width: 100%; height: 100%;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: #1a1a1a;
+      font-family: sans-serif;
+    }
+    .brand {
+      position: absolute;
+      top: ${compact ? '12px' : '28px'};
+      left: 0; right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: ${compact ? '6px' : '9px'};
+    }
+    .brand-logo { border-radius: ${compact ? '3px' : '5px'}; opacity: 0.5; display: block; }
+    .brand-name {
+      font-size: ${compact ? '11px' : '13px'};
+      font-weight: 600;
+      color: #505050;
+      letter-spacing: 0.01em;
+    }
+    .content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: ${compact ? '8px' : '16px'};
+      padding: ${compact ? '8px' : '24px'};
+      max-width: 100%;
+      text-align: center;
+    }
+    .title { font-size: ${compact ? '12px' : '18px'}; font-weight: bold; color: #fff; }
+    .desc { font-size: ${compact ? '10px' : '13px'}; color: #888; }
+    .buttons { display: flex; gap: ${compact ? '8px' : '12px'}; }
+    .btn {
+      padding: ${compact ? '6px 12px' : '10px 20px'};
+      font-size: ${compact ? '11px' : '13px'};
+      font-family: sans-serif;
+      font-weight: 600;
+      border-radius: 6px;
+      background: #2a2a2a;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+      line-height: 1;
+    }
+    .btn:hover { background: #3a3a3a; }
+    .btn-ext { color: #fff; border: 1px solid #404040; }
+    .btn-poly { color: #f5a623; border: 1px solid #f5a623; }
+  `;
+
+  const root = document.createElement('div');
+  root.className = 'root';
+
+  const brand = document.createElement('div');
+  brand.className = 'brand';
+  const logo = document.createElement('img');
+  logo.src = logoUrl;
+  logo.width = logoSize;
+  logo.height = logoSize;
+  logo.alt = '';
+  logo.className = 'brand-logo';
+  const brandName = document.createElement('span');
+  brandName.className = 'brand-name';
+  brandName.textContent = 'DirPlayer';
+  brand.append(logo, brandName);
+
+  const content = document.createElement('div');
+  content.className = 'content';
+
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = compact ? 'Choose player' : 'Multiple players detected';
+  content.appendChild(title);
+
+  if (!compact) {
+    const desc = document.createElement('div');
+    desc.className = 'desc';
+    desc.textContent = 'Both the browser extension and web polyfill are active. Choose which one to use:';
+    content.appendChild(desc);
+  }
+
+  const buttons = document.createElement('div');
+  buttons.className = 'buttons';
+
+  const extBtn = document.createElement('button');
+  extBtn.className = 'btn btn-ext';
+  extBtn.textContent = 'Browser Extension';
+  extBtn.addEventListener('click', onChooseExtension);
+
+  const polyBtn = document.createElement('button');
+  polyBtn.className = 'btn btn-poly';
+  polyBtn.textContent = 'Web Player';
+  polyBtn.addEventListener('click', onChoosePolyfill);
+
+  buttons.append(extBtn, polyBtn);
+  content.appendChild(buttons);
+  root.append(brand, content);
+  shadow.append(style, root);
 }
 
 const DATA_PARAM_PREFIX = 'data-sw-';
@@ -144,7 +305,12 @@ function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; para
   };
 }
 
-function renderPlayer(
+function normalizeCssSize(value: string): string {
+  const trimmed = value.trim();
+  return /^\d+(?:\.\d+)?$/.test(trimmed) ? `${trimmed}px` : trimmed;
+}
+
+function _renderPlayer(
   config: PolyfillConfig,
   mount: HTMLDivElement,
   width: string,
@@ -170,6 +336,129 @@ function renderPlayer(
       </StoreProvider>
     </React.StrictMode>
   );
+}
+
+// Asks the extension world to render its player into the mount. Returns after
+// dispatching; if no (current) extension acknowledged the event, falls back to
+// the polyfill player so the user isn't left with a dead mount.
+function renderViaExtension(
+  mount: HTMLDivElement,
+  width: string,
+  height: string,
+  src: string,
+  externalParams: Record<string, string>,
+  enableGestures?: boolean
+) {
+  const event = new Event(EVENT_RENDER_AS_EXTENSION, { bubbles: true, cancelable: true });
+  const unhandled = mount.dispatchEvent(event);
+  if (unhandled) {
+    console.warn('[DirPlayer] Extension did not answer the render handoff (outdated extension build?) — using web player instead');
+    _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+  }
+}
+
+// Renders conflict UI directly into a fresh mount div (for embeds not yet
+// processed by the extension when conflict was detected). Mirrors the way
+// EmbedPlayer presents its error overlay: an EmbedPlayer-style root box
+// (inline size, position:relative, in-flow) with an inset:0 shadow host
+// filling it. The mount itself is left unstyled — styling it changes how page
+// CSS lays it out (e.g. flex shells that absolutely-position the mount and
+// stretch its children), which is what caused the choice UI to sit in a
+// different box than the player it replaces.
+function renderConflictDirectly(
+  mount: HTMLDivElement,
+  width: string,
+  height: string,
+  src: string,
+  externalParams: Record<string, string>,
+  enableGestures?: boolean
+) {
+  const w = normalizeCssSize(width);
+  const h = normalizeCssSize(height);
+  const uiHost = document.createElement('div');
+  uiHost.style.cssText = `width:${w};height:${h};position:relative;background-color:#000;`;
+  const overlayHost = document.createElement('div');
+  overlayHost.style.cssText = 'position:absolute;inset:0;';
+  uiHost.appendChild(overlayHost);
+  mount.appendChild(uiHost);
+
+  pendingConflictResolvers.push((choice) => {
+    uiHost.remove();
+    if (choice === 'extension') {
+      renderViaExtension(mount, width, height, src, externalParams, enableGestures);
+    } else {
+      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+    }
+  });
+
+  buildConflictShadowUI(
+    overlayHost.attachShadow({ mode: 'open' }),
+    height,
+    () => resolveConflict('extension'),
+    () => resolveConflict('polyfill')
+  );
+}
+
+// Injects an absolute overlay over an already-rendered extension player mount.
+function injectConflictOverlay(
+  mount: HTMLDivElement,
+  width: string,
+  height: string,
+  src: string,
+  externalParams: Record<string, string>,
+  enableGestures?: boolean
+) {
+  // Save and restore position so we don't permanently change mount's layout
+  // context (which can shift absolutely-positioned page siblings like sizer imgs).
+  const savedPosition = mount.style.position;
+  mount.style.position = 'relative';
+
+  const w = normalizeCssSize(width);
+  const h = normalizeCssSize(height);
+  const uiHost = document.createElement('div');
+  uiHost.style.cssText = `position:absolute;top:0;left:0;width:${w};height:${h};z-index:9999;`;
+  mount.appendChild(uiHost);
+
+  pendingConflictResolvers.push((choice) => {
+    uiHost.remove();
+    mount.style.position = savedPosition;
+    if (choice === 'polyfill') {
+      // Clear the extension's DOM from the mount, then render polyfill player.
+      while (mount.firstChild) mount.removeChild(mount.firstChild);
+      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+    }
+    // choice === 'extension': the extension player is still rendered
+    // underneath — removing the overlay reveals it.
+  });
+
+  buildConflictShadowUI(
+    uiHost.attachShadow({ mode: 'open' }),
+    height,
+    () => resolveConflict('extension'),
+    () => resolveConflict('polyfill')
+  );
+}
+
+function renderPlayer(
+  config: PolyfillConfig,
+  mount: HTMLDivElement,
+  width: string,
+  height: string,
+  src: string,
+  externalParams: Record<string, string>,
+  enableGestures?: boolean
+) {
+  if (conflictPolyfillConfig && !conflictChoice) {
+    renderConflictDirectly(mount, width, height, src, externalParams, enableGestures);
+    return;
+  }
+  if (conflictChoice === 'extension') {
+    // The user already picked the extension — route embeds that appear after
+    // the choice straight to it instead of asking again.
+    renderViaExtension(mount, width, height, src, externalParams, enableGestures);
+    return;
+  }
+  _renderPlayer(config, mount, width, height, src, externalParams, enableGestures);
 }
 
 function resolveDimensionValue(
@@ -223,6 +512,12 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   } else {
     element.replaceWith(newElement);
   }
+  newElement.setAttribute(ATTR_MOUNT, 'true');
+  newElement.setAttribute(ATTR_MOUNT_WIDTH, size.width);
+  newElement.setAttribute(ATTR_MOUNT_HEIGHT, size.height);
+  newElement.setAttribute(ATTR_MOUNT_SRC, src);
+  newElement.setAttribute(ATTR_MOUNT_PARAMS, JSON.stringify(externalParams));
+  if (enableGestures) newElement.setAttribute(ATTR_MOUNT_GESTURES, 'true');
   renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
 }
 
@@ -242,6 +537,12 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
 
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
+  newElement.setAttribute(ATTR_MOUNT, 'true');
+  newElement.setAttribute(ATTR_MOUNT_WIDTH, size.width);
+  newElement.setAttribute(ATTR_MOUNT_HEIGHT, size.height);
+  newElement.setAttribute(ATTR_MOUNT_SRC, src);
+  newElement.setAttribute(ATTR_MOUNT_PARAMS, JSON.stringify(externalParams));
+  if (enableGestures) newElement.setAttribute(ATTR_MOUNT_GESTURES, 'true');
   renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
 }
 
@@ -343,16 +644,57 @@ function handleAddedNode(config: PolyfillConfig, node: Node) {
   }
 }
 
+// Registered once in the extension world so the polyfill world can hand a
+// mount over to it when the user picks "Browser Extension" in the conflict UI.
+let extensionRenderListenerInstalled = false;
+
+function installExtensionRenderListener(config: PolyfillConfig) {
+  if (extensionRenderListenerInstalled) return;
+  extensionRenderListenerInstalled = true;
+  document.addEventListener(EVENT_RENDER_AS_EXTENSION, (event) => {
+    const mount = event.target;
+    if (!(mount instanceof HTMLDivElement) || !mount.hasAttribute(ATTR_MOUNT)) return;
+    // Acknowledge across the world boundary: the dispatcher sees
+    // dispatchEvent() return false and knows the extension took the mount.
+    event.preventDefault();
+    const width = mount.getAttribute(ATTR_MOUNT_WIDTH) || '100%';
+    const height = mount.getAttribute(ATTR_MOUNT_HEIGHT) || '100%';
+    const src = mount.getAttribute(ATTR_MOUNT_SRC) || '';
+    const externalParams = JSON.parse(mount.getAttribute(ATTR_MOUNT_PARAMS) || '{}') as Record<string, string>;
+    const enableGestures = mount.hasAttribute(ATTR_MOUNT_GESTURES) || undefined;
+    console.log('[DirPlayer] Extension rendering mount handed over by conflict UI');
+    _renderPlayer(config, mount, width, height, src, externalParams, enableGestures);
+  }, true);
+}
+
 export function initPolyfill(config: PolyfillConfig, version: string, source: 'extension' | 'polyfill') {
   const root = document.documentElement;
 
-  // Already fully initialized — polyfill can always take over from the extension;
-  // anything else (e.g. extension arriving after polyfill) must yield.
+  // The extension world must be able to serve conflict handoffs regardless of
+  // how ownership negotiation below turns out.
+  if (source === 'extension') {
+    installExtensionRenderListener(config);
+  }
+
+  // Already fully initialized — detect extension/polyfill conflict and show
+  // the choice UI; anything else (two of the same source) must yield.
   if (root.hasAttribute(ATTR_INITIALIZED)) {
     if (source === 'polyfill' && root.getAttribute(ATTR_SOURCE) === 'extension') {
-      // Force takeover: clear the initialized flag and re-register as polyfill.
-      // The extension's MutationObserver will detect the source change and disconnect.
-      console.log(`[DirPlayer] Polyfill v${version} taking over from extension`);
+      console.log(`[DirPlayer] Conflict: polyfill v${version} vs extension — showing choice UI`);
+      conflictPolyfillConfig = config;
+
+      // Overlay already-rendered extension players with the choice UI.
+      for (const mount of Array.from(document.querySelectorAll<HTMLDivElement>(`[${ATTR_MOUNT}]`))) {
+        const mw = mount.getAttribute(ATTR_MOUNT_WIDTH) || '100%';
+        const mh = mount.getAttribute(ATTR_MOUNT_HEIGHT) || '100%';
+        const ms = mount.getAttribute(ATTR_MOUNT_SRC) || '';
+        const mp = JSON.parse(mount.getAttribute(ATTR_MOUNT_PARAMS) || '{}') as Record<string, string>;
+        const mg = mount.hasAttribute(ATTR_MOUNT_GESTURES) || undefined;
+        injectConflictOverlay(mount, mw, mh, ms, mp, mg);
+      }
+
+      // Kill extension ownership so its observer disconnects; fall through so
+      // the polyfill's scan handles any embeds the extension hadn't reached yet.
       root.removeAttribute(ATTR_INITIALIZED);
     } else {
       console.log(`[DirPlayer] Already initialized, skipping ${source} v${version}`);
