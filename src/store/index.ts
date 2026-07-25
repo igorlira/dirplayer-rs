@@ -7,6 +7,11 @@ const store = configureStore({
     vm: vmReducer,
     ui: uiReducer,
   },
+  // The polyfill/extension builds run inside arbitrary host pages, where
+  // window.__REDUX_DEVTOOLS_EXTENSION_COMPOSE__ may be defined by page
+  // scripts or other extensions — letting it wrap our store hands control to
+  // foreign (possibly broken) code during init. Only hook it up in dev.
+  devTools: process.env.NODE_ENV !== 'production',
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
