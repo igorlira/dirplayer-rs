@@ -123,25 +123,48 @@ jobs:
           CI: false
 
       - name: Package Electron App binaries
-        run: npx electron-builder ${{ matrix.build-args }}
+        # --publish never: electron-builder defaults to `onTagOrDraft` in CI and
+        # would otherwise upload its own raw-named artifacts (plus .blockmap and
+        # latest*.yml auto-update manifests) straight into the draft release,
+        # duplicating what Collect artifacts standardizes below. GITHUB_TOKEN is
+        # withheld from this step for the same reason.
+        run: npx electron-builder ${{ matrix.build-args }} --publish never
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: Collect artifacts
         run: |
+          set -euo pipefail
+          version=${{ steps.version.outputs.value }}
+          suffix=${{ matrix.artifact-suffix }}
           mkdir -p final-artifacts
-          # Standardize the standalone zip name when this leg produces one.
-          standalone_zip=$(find dist -maxdepth 1 -name "*.zip" | head -n 1)
-          if [ -n "$standalone_zip" ]; then
-            cp "$standalone_zip" "final-artifacts/dirplayer-standalone-${{ steps.version.outputs.value }}-${{ matrix.artifact-suffix }}.zip"
-          elif [[ "${{ matrix.build-args }}" == *zip* ]]; then
-            echo "Expected a standalone zip in dist/ but found none" >&2
-            exit 1
+
+          # Every release asset is renamed to
+          #   dirplayer-<kind>-<version>-<os>-<arch>.<ext>
+          # electron-builder's own names are both inconsistent and ambiguous
+          # across matrix legs — notably, each Windows leg emits
+          # "DirPlayer Setup <version>.exe", so the arm64 installer used to
+          # silently overwrite the x64 one when the release job flattened them.
+          collect() {
+            local pattern="$1" kind="$2" ext="$3" src
+            src=$(find dist -maxdepth 1 -name "$pattern" | head -n 1)
+            [ -n "$src" ] || return 1
+            cp "$src" "final-artifacts/dirplayer-$kind-$version-$suffix.$ext"
+          }
+
+          # A leg asked to build a zip must produce one; the other formats are
+          # matrix-dependent, so a miss there is expected rather than fatal.
+          if [[ "${{ matrix.build-args }}" == *zip* ]]; then
+            collect "*.zip" standalone zip || {
+              echo "::error::Expected a standalone zip in dist/ but found none"
+              exit 1
+            }
           fi
-          # Keep the remaining package formats under their original names.
-          find dist -maxdepth 1 \( -name "*.exe" -o -name "*.AppImage" \) -exec cp {} final-artifacts/ \;
+          collect "*.AppImage" standalone AppImage || true
+          collect "*.exe" installer exe || true
+
+          ls -la final-artifacts/
         shell: bash
 
       - name: Build Chrome Extension
@@ -172,6 +195,7 @@ jobs:
     needs: build-and-package
     if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
     runs-on: ubuntu-latest
+    environment: create-release
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -190,7 +214,10 @@ jobs:
       - name: Move files to flat directory
         run: |
           mkdir final-dist
-          find release-artifacts/ -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
+          # Match on the naming scheme rather than on extensions, so anything
+          # that isn't a deliberately-named release asset (blockmaps,
+          # auto-update manifests, raw electron-builder output) can't leak in.
+          find release-artifacts/ -type f -name "dirplayer-*" -exec cp {} final-dist/ \;
           ls -la final-dist/
         shell: bash
 

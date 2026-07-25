@@ -1,0 +1,159 @@
+name: Deploy Polyfill to CDN
+
+# Publishes the polyfill bundle that shipped with a GitHub Release to the CDN
+# bucket. It deliberately does NOT rebuild: `npm run build-all` compiles the
+# whole Ruffle workspace plus the vm-rust wasm, so a rebuild would take tens of
+# minutes and — more importantly — produce a bundle that isn't bit-identical to
+# the one attached to the release. The release asset is the source of truth.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to deploy, e.g. v0.7.0"
+        type: string
+        required: true
+      update_latest:
+        description: "Also move dirplayer-polyfill-latest.js and the shared root assets"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Publish polyfill bundle
+    runs-on: ubuntu-latest
+    # Gated on the `cdn` environment's required reviewers: the job queues and
+    # nothing runs (no AWS creds are exposed) until a reviewer approves.
+    environment: cdn
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.S3_REGION || 'us-east-1' }}
+      S3_BUCKET: ${{ vars.POLYFILL_S3_BUCKET || 'dirplayer-rs' }}
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      # A manual redeploy of an older tag shouldn't clobber `latest` or the
+      # shared root assets that pair with it.
+      UPDATE_LATEST: ${{ github.event_name != 'workflow_dispatch' || inputs.update_latest }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::error::No release tag to deploy"
+            exit 1
+          fi
+          # Normalize to a leading `v` — CDN keys are versioned as v0.7.0.
+          version="v${TAG#v}"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "Deploying $version (update_latest=$UPDATE_LATEST)"
+
+      - name: Download polyfill bundle from release
+        run: |
+          set -euo pipefail
+          mkdir -p release-asset
+          if ! gh release download "$TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --pattern "dirplayer-polyfill-*.zip" \
+                --dir release-asset; then
+            echo "::error::Could not download dirplayer-polyfill-*.zip from $TAG. Check the tag exists and the release has the polyfill asset attached."
+            exit 1
+          fi
+          ls -la release-asset/
+
+      - name: Deploy to CDN
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$S3_BUCKET" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "::error::AWS credentials or bucket not configured"
+            exit 1
+          fi
+
+          zip_path=$(find release-asset -type f -name "dirplayer-polyfill-*.zip" | head -n 1)
+          if [ -z "$zip_path" ]; then
+            echo "::error::No polyfill zip in the release assets for $TAG"
+            exit 1
+          fi
+
+          rm -rf polyfill-cdn && mkdir -p polyfill-cdn
+          unzip -q "$zip_path" -d polyfill-cdn
+
+          # Upload a tree, forcing the content types S3 guesses wrong. .wasm
+          # matters most: browsers refuse to instantiate a module that isn't
+          # served as application/wasm.
+          sync_tree() {
+            local src="$1" dest="$2" cache="$3"
+            aws s3 sync "$src" "$dest" --exclude "*" --include "*.wasm" \
+              --content-type "application/wasm" --cache-control "$cache"
+            aws s3 sync "$src" "$dest" --exclude "*" --include "*.js" \
+              --content-type "application/javascript; charset=utf-8" --cache-control "$cache"
+            aws s3 sync "$src" "$dest" --exclude "*" --include "*.json" \
+              --content-type "application/json; charset=utf-8" --cache-control "$cache"
+            aws s3 sync "$src" "$dest" \
+              --exclude "*.wasm" --exclude "*.js" --exclude "*.json" --cache-control "$cache"
+          }
+
+          immutable="public, max-age=31536000, immutable"
+          rolling="public, max-age=300"
+
+          # 1. Pinned, self-consistent copy of the whole bundle. The polyfill
+          #    resolves ruffle/ + xtras relative to its own script URL, so a
+          #    versioned directory keeps every past release loadable exactly
+          #    as it shipped, with no code changes.
+          sync_tree polyfill-cdn "s3://$S3_BUCKET/$VERSION/" "$immutable"
+
+          # 2. Flat root entry point for this version.
+          aws s3 cp polyfill-cdn/dirplayer-polyfill.js \
+            "s3://$S3_BUCKET/dirplayer-polyfill-$VERSION.js" \
+            --content-type "application/javascript; charset=utf-8" --cache-control "$immutable"
+
+          # 3. The moving parts. Every root-level bundle shares one set of
+          #    ancillary files, so those get overwritten by the newest release
+          #    — but never removed (sync runs without --delete, so ruffle's
+          #    content-hashed wasm from older releases stays resolvable).
+          #    Embedders who need exact pinning use $VERSION/.
+          if [ "$UPDATE_LATEST" = "true" ]; then
+            rm -rf polyfill-cdn-assets && cp -R polyfill-cdn polyfill-cdn-assets
+            rm polyfill-cdn-assets/dirplayer-polyfill.js
+            sync_tree polyfill-cdn-assets "s3://$S3_BUCKET/" "$rolling"
+
+            aws s3 cp polyfill-cdn/dirplayer-polyfill.js \
+              "s3://$S3_BUCKET/dirplayer-polyfill-latest.js" \
+              --content-type "application/javascript; charset=utf-8" --cache-control "$rolling"
+          else
+            echo "Skipping latest.js and shared root assets (update_latest=false)"
+          fi
+
+          base="https://${S3_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com"
+          {
+            echo "### Polyfill deployed — $VERSION"
+            echo ""
+            echo "- \`$base/dirplayer-polyfill-$VERSION.js\`"
+            echo "- \`$base/$VERSION/dirplayer-polyfill.js\` (pinned assets)"
+            if [ "$UPDATE_LATEST" = "true" ]; then
+              echo "- \`$base/dirplayer-polyfill-latest.js\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Invalidate CloudFront
+        if: ${{ vars.POLYFILL_CLOUDFRONT_ID != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$UPDATE_LATEST" != "true" ]; then
+            echo "Nothing mutable changed — skipping invalidation"
+            exit 0
+          fi
+          # Only the mutable keys — the versioned ones are new on every release.
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.POLYFILL_CLOUDFRONT_ID }}" \
+            --paths "/dirplayer-polyfill-latest.js" "/xtra-registry.json" "/ruffle/*" "/*_xtra.wasm"
