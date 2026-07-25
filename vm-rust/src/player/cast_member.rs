@@ -1253,6 +1253,12 @@ pub struct Shockwave3dRuntimeState {
     /// into an opaque white disk). Only script-set shaders are tracked, so parsed
     /// .w3d cutout foliage (frog01) is unaffected.
     pub transparent_shaders: std::collections::HashSet<String>,
+    /// Per-shader `renderStyle` (Director 11.5 Scripting Dictionary): the mesh
+    /// fill mode a model wearing this shader draws with. `0` = #fill (default,
+    /// absent), `1` = #wire, `2` = #point. Director realizes this with
+    /// `glPolygonMode`; WebGL2 has none, so the renderer emulates #wire as an
+    /// edge line list and #point as GL_POINTS. Keyed by authored shader name.
+    pub shader_render_style: std::collections::HashMap<String, u8>,
     /// Text3D model resources created by `someTextMember.extrude3d(thisScene)`,
     /// keyed by the resource name in this member's scene. Retains the source
     /// glyphs + extrude state so the resource's tunnelDepth/bevelType/bevelDepth/
@@ -1523,7 +1529,9 @@ pub struct SdsState {
 
 impl Default for SdsState {
     fn default() -> Self {
-        Self { depth: 1, tension: 0.0, error: 0.0, enabled: true }
+        // Director defaults: depth 1, tension 65 (internal surfaceTension 0.65).
+        // tension is Lingo's 0..100 scale.
+        Self { depth: 1, tension: 65.0, error: 0.0, enabled: true }
     }
 }
 

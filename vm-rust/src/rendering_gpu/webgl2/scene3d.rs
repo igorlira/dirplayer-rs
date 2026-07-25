@@ -45,6 +45,11 @@ struct MemberGpuData {
     scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
     /// Scene's mesh_content_version at last upload
     mesh_content_version: u64,
+    /// Signature of the `#sds` subdivision state (per-resource depth/tension/
+    /// enabled) folded in at upload. Changing `sds.depth`/`tension` at runtime
+    /// (the SubDivSurfaces slider) mutates only runtime_state, not the scene, so
+    /// this forces a GPU rebuild when the subdivided geometry must change.
+    sds_version: u64,
     /// Per-texture data length at upload time (for incremental re-upload detection)
     texture_versions: HashMap<String, u64>,
     /// Scene's texture_content_version at last check
@@ -383,6 +388,7 @@ void main() {
     }
     v_view_dist = -view_pos.z;
     gl_Position = u_projection * view_pos;
+    gl_PointSize = 2.0;  // for #point renderStyle (ignored when drawing tris/lines)
 }
 "#;
 
@@ -1154,11 +1160,18 @@ void main() {
         context: &WebGL2Context,
         key: (i32, i32),
         scene: &W3dScene,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
         let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
+        // Map each model resource to the active `#sds` subdivision applied to a
+        // model node using it: resource_name (lowercase) → (depth, tension).
+        // Only enabled modifiers with depth ≥ 1 subdivide.
+        let subdiv_map = Self::build_subdiv_map(scene, runtime_state);
+        let sds_version = Self::sds_signature(&subdiv_map);
         if let Some(existing) = self.member_data.get(&key) {
             if existing.scene_version == current_version
                 && existing.mesh_content_version == scene.mesh_content_version
+                && existing.sds_version == sds_version
             {
                 if existing.texture_content_version != scene.texture_content_version {
                     self.update_textures_incremental(context, key, scene);
@@ -1200,6 +1213,33 @@ void main() {
                 if mesh.positions.is_empty() || mesh.faces.is_empty() {
                     continue;
                 }
+                // `#sds` modifier: if a model node using this resource has an
+                // enabled subdivision modifier, replace the mesh with its
+                // butterfly-subdivided form before upload. Bone/lightmap/vertex-
+                // color attributes don't survive subdivision (SDS targets static
+                // models), so they're dropped for the subdivided copy.
+                let subdivided_mesh;
+                let mesh: &crate::director::chunks::w3d::types::ClodDecodedMesh =
+                    if let Some(&(depth, tension)) = subdiv_map.get(&name.to_lowercase()) {
+                        let uv0 = mesh.tex_coords.first().cloned().unwrap_or_default();
+                        let (p, n, u, f) = crate::director::chunks::w3d::subdivision::subdivide(
+                            &mesh.positions, &mesh.normals, &uv0, &mesh.faces, depth as u32, tension,
+                        );
+                        subdivided_mesh = crate::director::chunks::w3d::types::ClodDecodedMesh {
+                            name: mesh.name.clone(),
+                            positions: p,
+                            normals: n,
+                            tex_coords: if u.is_empty() { Vec::new() } else { vec![u] },
+                            faces: f,
+                            diffuse_colors: Vec::new(),
+                            specular_colors: Vec::new(),
+                            bone_indices: Vec::new(),
+                            bone_weights: Vec::new(),
+                        };
+                        &subdivided_mesh
+                    } else {
+                        mesh
+                    };
                 // Use decoded texcoords, or generate UVs based on resource UV generator mode
                 let uv_gen_mode = scene.model_resources.get(name.as_str())
                     .and_then(|r| r.uv_gen_mode);
@@ -1368,11 +1408,58 @@ void main() {
             mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
             scene_version: current_version,
             mesh_content_version: scene.mesh_content_version,
+            sds_version,
             texture_versions,
             texture_content_version: scene.texture_content_version,
             alpha_textures,
         });
         Ok(())
+    }
+
+    /// Build the resource→(depth, tension) map for active `#sds` modifiers. A
+    /// model node with an enabled SDS modifier (`sds.enabled`, `sds.depth ≥ 1`)
+    /// subdivides the mesh(es) of the resource it references. Keyed by lowercase
+    /// resource name to match the CLOD mesh group keys case-insensitively.
+    fn build_subdiv_map(
+        scene: &W3dScene,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> HashMap<String, (i32, f32)> {
+        let mut map = HashMap::new();
+        let rs = match runtime_state { Some(rs) => rs, None => return map };
+        if rs.sds_state.is_empty() { return map; }
+        for node in &scene.nodes {
+            if node.node_type != W3dNodeType::Model { continue; }
+            let sds = rs.sds_state.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&node.name))
+                .map(|(_, v)| v);
+            let sds = match sds { Some(s) if s.enabled && s.depth >= 1 => s, _ => continue };
+            let resource = if !node.model_resource_name.is_empty() {
+                &node.model_resource_name
+            } else {
+                &node.resource_name
+            };
+            if resource.is_empty() { continue; }
+            // Cap depth so a slider at max can't allocate an unbounded mesh
+            // (Director itself clamps via a triangle/vertex budget; 4 levels =
+            // ×256 faces is plenty for the readout range this movie uses).
+            let depth = sds.depth.min(4);
+            map.insert(resource.to_lowercase(), (depth, sds.tension));
+        }
+        map
+    }
+
+    /// Order-independent signature of the subdivision map, so a runtime
+    /// `sds.depth`/`tension` change invalidates the cached GPU mesh.
+    fn sds_signature(map: &HashMap<String, (i32, f32)>) -> u64 {
+        let mut sig: u64 = 1469598103934665603; // FNV offset basis
+        let mut entries: Vec<(&String, &(i32, f32))> = map.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, (depth, tension)) in entries {
+            for b in name.as_bytes() { sig = (sig ^ *b as u64).wrapping_mul(1099511628211); }
+            sig = (sig ^ *depth as u64).wrapping_mul(1099511628211);
+            sig = (sig ^ tension.to_bits() as u64).wrapping_mul(1099511628211);
+        }
+        sig
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
@@ -1428,7 +1515,7 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
         self.ensure_shader(context)?;
-        self.ensure_member_data(context, member_key, scene)?;
+        self.ensure_member_data(context, member_key, scene, runtime_state)?;
 
         let gl = context.gl();
         self.ensure_checker_texture(&gl);
@@ -1605,7 +1692,7 @@ void main() {
     ) -> Result<Option<&WebGlTexture>, JsValue> {
         self.ensure_shader(context)?;
         self.ensure_fbo(context, width, height)?;
-        self.ensure_member_data(context, member_key, scene)?;
+        self.ensure_member_data(context, member_key, scene, runtime_state)?;
         self.ensure_checker_texture(&context.gl());
         // Backdrops are drawn with the overlay quad later in this pass; ensure it
         // exists now while we still have &mut self (before the shader borrow).
@@ -2686,7 +2773,12 @@ void main() {
                     }
 
                     mesh_buf.bind(gl);
-                    mesh_buf.draw(gl);
+                    // renderStyle: #wire → edge lines, #point → points, else solid.
+                    match Self::mesh_render_style(scene, model_node, mesh_idx, runtime_state) {
+                        1 => mesh_buf.draw_wire(gl),
+                        2 => mesh_buf.draw_points(gl),
+                        _ => mesh_buf.draw(gl),
+                    }
                     mesh_buf.unbind(gl);
                 }
             } else {
@@ -2775,6 +2867,46 @@ void main() {
             .unwrap_or_else(|| model_node.shader_name.clone());
         if name.is_empty() { return false; }
         rs.transparent_shaders.iter().any(|s| s.eq_ignore_ascii_case(&name))
+    }
+
+    /// The `renderStyle` (0=#fill, 1=#wire, 2=#point) a given mesh of this model
+    /// draws with, resolved from the effective shader for `mesh_idx`. Mirrors the
+    /// shader resolution used for materials: per-mesh node override → whole-model
+    /// override → the node's authored shader name. Returns 0 (#fill) when nothing
+    /// set a non-fill style (the common case), so the solid path is unaffected.
+    fn mesh_render_style(
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        mesh_idx: usize,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> u8 {
+        let rs = match runtime_state { Some(rs) => rs, None => return 0 };
+        if rs.shader_render_style.is_empty() { return 0; }
+        let lookup = |name: &str| -> Option<u8> {
+            if name.is_empty() { return None; }
+            rs.shader_render_style.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| *v)
+        };
+        // Effective shader name for this mesh, most specific first.
+        let mut names: Vec<String> = Vec::new();
+        if let Some(n) = Self::node_shader_override(rs, &model_node.name, Some(mesh_idx)) { names.push(n.clone()); }
+        if let Some(n) = Self::node_shader_override(rs, &model_node.name, None) { names.push(n.clone()); }
+        if !model_node.shader_name.is_empty() { names.push(model_node.shader_name.clone()); }
+        let resource = if !model_node.model_resource_name.is_empty() {
+            &model_node.model_resource_name
+        } else {
+            &model_node.resource_name
+        };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for b in &res_info.shader_bindings {
+                for s in &b.mesh_bindings { names.push(s.clone()); }
+            }
+        }
+        for n in &names {
+            if let Some(st) = lookup(n) { return st; }
+        }
+        0
     }
 
     fn get_model_opacity(

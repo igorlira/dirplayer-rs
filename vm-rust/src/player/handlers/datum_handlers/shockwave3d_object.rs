@@ -1415,7 +1415,32 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
-                "shininess" | "flat" | "renderStyle" => {
+                "renderStyle" | "renderstyle" => {
+                    // shader.renderStyle = #fill | #wire | #point (Director 11.5
+                    // Scripting Dictionary). Director carries this as a per-material
+                    // fill mode (glPolygonMode); we store it per shader name and
+                    // the renderer emulates #wire/#point (WebGl2 has no
+                    // glPolygonMode). Only meaningful on shader objects.
+                    if s3d_ref.object_type == "shader" {
+                        let style_name = value.string_value().unwrap_or_default();
+                        let style = match style_name.trim_start_matches('#').to_ascii_lowercase().as_str() {
+                            "wire" => 1u8,
+                            "point" => 2u8,
+                            _ => 0u8, // #fill / anything else
+                        };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if style == 0 {
+                                    w3d.runtime_state.shader_render_style.remove(&s3d_ref.name);
+                                } else {
+                                    w3d.runtime_state.shader_render_style.insert(s3d_ref.name.clone(), style);
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                "shininess" | "flat" => {
                     // Accept these shader properties silently
                     Ok(())
                 },
@@ -3137,6 +3162,17 @@ impl Shockwave3dObjectDatumHandlers {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     w3d.runtime_state.lod_state.entry(s3d_ref.name.clone())
                                         .or_insert_with(crate::player::cast_member::LodState::default);
+                                }
+                            }
+                        } else if mod_name == "sds" {
+                            // Subdivision Surfaces modifier. Register default state
+                            // so `model.sds` resolves and the renderer subdivides
+                            // this model's mesh even before any sds.* is set.
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.sds_state.entry(s3d_ref.name.clone())
+                                        .or_insert_with(crate::player::cast_member::SdsState::default);
                                 }
                             }
                         } else if mod_name == "collision" {
@@ -5961,7 +5997,14 @@ impl Shockwave3dObjectDatumHandlers {
                 // Director default is 1 (transparency enabled)
                 Ok(player.alloc_datum(Datum::Int(1)))
             },
-            "renderStyle" => Ok(player.alloc_datum(Datum::Symbol("fill".to_string()))),
+            "renderStyle" => {
+                let style = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.shader_render_style.get(shader_name).copied())
+                    .unwrap_or(0);
+                let sym = match style { 1 => "wire", 2 => "point", _ => "fill" };
+                Ok(player.alloc_datum(Datum::Symbol(sym.to_string())))
+            },
             "flat" => Ok(player.alloc_datum(Datum::Int(0))),
             "useDiffuseWithTexture" => {
                 let val = shader.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
