@@ -1,7 +1,7 @@
 name: DirPlayer Release
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,38 +12,49 @@ jobs:
     name: Build (${{ matrix.os-name }} - ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false 
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             os-name: Windows
             arch: x64
-            build-args: --win --x64
+            # nsis installer (original artifact) + portable zip for the
+            # standardized dirplayer-standalone-* release artifact.
+            build-args: --win nsis zip --x64
+            artifact-suffix: windows-x64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: windows-latest
             os-name: Windows
             arch: arm64
             build-args: --win --arm64
+            artifact-suffix: windows-arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-windows.tar.gz
           - os: macos-latest
             os-name: macOS
             arch: x64
             build-args: --mac zip --x64
+            artifact-suffix: macos-x64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: macos-latest
             os-name: macOS
             arch: arm64
             build-args: --mac zip --arm64
+            artifact-suffix: macos-arm64
+            # The extension and polyfill zips are platform-independent, so
+            # package them on a single leg of the matrix.
+            package-web: true
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-macos.tar.gz
           - os: ubuntu-latest
             os-name: Linux
             arch: x64
             build-args: --linux AppImage --x64
+            artifact-suffix: linux-x64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
           - os: ubuntu-latest
             os-name: Linux
             arch: arm64
             build-args: --linux AppImage --arm64
+            artifact-suffix: linux-arm64
             binaryen-url: https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
 
     env:
@@ -100,6 +111,11 @@ jobs:
         run: npm ci
         shell: bash
 
+      - name: Read project version
+        id: version
+        run: echo "value=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+        shell: bash
+
       - name: Run Complete Master Build
         run: npm run build-all
         shell: bash
@@ -111,16 +127,44 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false 
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p final-artifacts
+          # Standardize the standalone zip name when this leg produces one.
+          standalone_zip=$(find dist -maxdepth 1 -name "*.zip" | head -n 1)
+          if [ -n "$standalone_zip" ]; then
+            cp "$standalone_zip" "final-artifacts/dirplayer-standalone-${{ steps.version.outputs.value }}-${{ matrix.artifact-suffix }}.zip"
+          elif [[ "${{ matrix.build-args }}" == *zip* ]]; then
+            echo "Expected a standalone zip in dist/ but found none" >&2
+            exit 1
+          fi
+          # Keep the remaining package formats under their original names.
+          find dist -maxdepth 1 \( -name "*.exe" -o -name "*.AppImage" \) -exec cp {} final-artifacts/ \;
+        shell: bash
+
+      - name: Build Chrome Extension
+        if: matrix.package-web
+        run: npm run build-extension
+        shell: bash
+        env:
+          CI: false
+
+      - name: Package Chrome Extension and Polyfill
+        if: matrix.package-web
+        run: |
+          version=${{ steps.version.outputs.value }}
+          # Exclude the dcr_* test movies that vite copies from public/.
+          (cd dist-extension && zip -r "../final-artifacts/dirplayer-chrome-extension-$version.zip" . -x "dcr_*")
+          (cd dist-polyfill && zip -r "../final-artifacts/dirplayer-polyfill-$version.zip" .)
+        shell: bash
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dirplayer-builds-${{ matrix.os-name }}-${{ matrix.arch }}
-          path: |
-            dist/*.exe
-            dist/*.zip
-            dist/*.AppImage
+          path: final-artifacts/*
           retention-days: 1
 
   create-release:
@@ -147,6 +191,7 @@ jobs:
         run: |
           mkdir final-dist
           find release-artifacts/ -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} final-dist/ \;
+          ls -la final-dist/
         shell: bash
 
       - name: Create GitHub Release Draft
