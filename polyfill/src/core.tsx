@@ -84,6 +84,9 @@ const EVENT_RENDER_AS_EXTENSION = 'dirplayer-render-as-extension';
 
 // Set in the polyfill world when a conflict with the extension is detected.
 let conflictPolyfillConfig: PolyfillConfig | null = null;
+// Versions of both contenders, shown on the choice buttons. Captured at
+// conflict-detection time (the extension's version is still on <html> then).
+let conflictVersions: { extension: string; polyfill: string } | null = null;
 // The user's pick. Applies to every player on the page, including embeds that
 // show up after the choice was made.
 let conflictChoice: 'extension' | 'polyfill' | null = null;
@@ -91,7 +94,13 @@ let conflictChoice: 'extension' | 'polyfill' | null = null;
 // them all so a multi-embed page doesn't ask the same question repeatedly.
 const pendingConflictResolvers: Array<(choice: 'extension' | 'polyfill') => void> = [];
 
+// The Web Player auto-selects after this long with no user choice.
+const CONFLICT_AUTO_SELECT_MS = 5000;
+
 function resolveConflict(choice: 'extension' | 'polyfill') {
+  // First resolution wins — a pending auto-select timer firing after the user
+  // clicked must not flip the choice for later embeds.
+  if (conflictChoice) return;
   conflictChoice = choice;
   console.log(`[DirPlayer] Conflict resolved: using ${choice === 'extension' ? 'browser extension' : 'web player'}`);
   for (const resolve of pendingConflictResolvers.splice(0)) {
@@ -158,7 +167,11 @@ function buildConflictShadowUI(
     .desc { font-size: ${compact ? '10px' : '13px'}; color: #888; }
     .buttons { display: flex; gap: ${compact ? '8px' : '12px'}; }
     .btn {
-      padding: ${compact ? '6px 12px' : '10px 20px'};
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: ${compact ? '2px' : '3px'};
+      padding: ${compact ? '5px 12px' : '8px 20px'};
       font-size: ${compact ? '11px' : '13px'};
       font-family: sans-serif;
       font-weight: 600;
@@ -167,10 +180,29 @@ function buildConflictShadowUI(
       cursor: pointer;
       letter-spacing: 0.01em;
       line-height: 1;
+      position: relative;
+      overflow: hidden;
     }
     .btn:hover { background: #3a3a3a; }
     .btn-ext { color: #fff; border: 1px solid #404040; }
     .btn-poly { color: #f5a623; border: 1px solid #f5a623; }
+    .btn-version {
+      font-size: ${compact ? '8px' : '10px'};
+      font-weight: 400;
+      opacity: 0.55;
+    }
+    .auto-timer {
+      position: absolute;
+      left: 0; bottom: 0;
+      height: 2px;
+      width: 100%;
+      background: #f5a623;
+      animation: countdown ${CONFLICT_AUTO_SELECT_MS}ms linear forwards;
+    }
+    @keyframes countdown {
+      from { width: 100%; }
+      to { width: 0; }
+    }
   `;
 
   const root = document.createElement('div');
@@ -207,15 +239,38 @@ function buildConflictShadowUI(
   const buttons = document.createElement('div');
   buttons.className = 'buttons';
 
-  const extBtn = document.createElement('button');
-  extBtn.className = 'btn btn-ext';
-  extBtn.textContent = 'Browser Extension';
-  extBtn.addEventListener('click', onChooseExtension);
+  const makeButton = (className: string, label: string, version: string | undefined) => {
+    const btn = document.createElement('button');
+    btn.className = `btn ${className}`;
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    btn.appendChild(labelEl);
+    if (version) {
+      const versionEl = document.createElement('span');
+      versionEl.className = 'btn-version';
+      versionEl.textContent = `v${version}`;
+      btn.appendChild(versionEl);
+    }
+    return btn;
+  };
 
-  const polyBtn = document.createElement('button');
-  polyBtn.className = 'btn btn-poly';
-  polyBtn.textContent = 'Web Player';
-  polyBtn.addEventListener('click', onChoosePolyfill);
+  const extBtn = makeButton('btn-ext', 'Browser Extension', conflictVersions?.extension);
+  const polyBtn = makeButton('btn-poly', 'Web Player', conflictVersions?.polyfill);
+
+  // Web Player auto-selects when the countdown bar runs out; any click cancels.
+  const timerBar = document.createElement('span');
+  timerBar.className = 'auto-timer';
+  polyBtn.appendChild(timerBar);
+  const autoSelectTimer = window.setTimeout(onChoosePolyfill, CONFLICT_AUTO_SELECT_MS);
+
+  extBtn.addEventListener('click', () => {
+    clearTimeout(autoSelectTimer);
+    onChooseExtension();
+  });
+  polyBtn.addEventListener('click', () => {
+    clearTimeout(autoSelectTimer);
+    onChoosePolyfill();
+  });
 
   buttons.append(extBtn, polyBtn);
   content.appendChild(buttons);
@@ -682,6 +737,12 @@ export function initPolyfill(config: PolyfillConfig, version: string, source: 'e
     if (source === 'polyfill' && root.getAttribute(ATTR_SOURCE) === 'extension') {
       console.log(`[DirPlayer] Conflict: polyfill v${version} vs extension — showing choice UI`);
       conflictPolyfillConfig = config;
+      // ATTR_VERSION still holds the extension's version here — the polyfill
+      // only overwrites it when it re-registers ownership below.
+      conflictVersions = {
+        extension: root.getAttribute(ATTR_VERSION) || '',
+        polyfill: version,
+      };
 
       // Overlay already-rendered extension players with the choice UI.
       for (const mount of Array.from(document.querySelectorAll<HTMLDivElement>(`[${ATTR_MOUNT}]`))) {
