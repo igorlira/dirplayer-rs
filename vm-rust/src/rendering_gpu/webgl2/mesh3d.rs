@@ -28,6 +28,14 @@ pub struct Mesh3dBuffers {
     #[allow(dead_code)]
     ibo: WebGlBuffer,
     pub index_count: i32,
+    /// Vertex count (for drawArrays in `#point` renderStyle).
+    pub vertex_count: i32,
+    /// Deduplicated triangle-edge indices (2 per edge), built at construction
+    /// so `#wire` renderStyle can draw the mesh as GL_LINES. Uploaded lazily on
+    /// first wireframe draw (most meshes never render wireframe), cached in
+    /// `line_ibo`. WebGL2 has no glPolygonMode, so wireframe = an edge line list.
+    line_index_data: Vec<u32>,
+    line_ibo: std::cell::RefCell<Option<WebGlBuffer>>,
     pub has_bones: bool,
     pub has_vertex_colors: bool,
     /// Whether the mesh has primary UVs uploaded. Meshes built via
@@ -246,6 +254,23 @@ impl Mesh3dBuffers {
 
         gl.bind_vertex_array(None);
 
+        // Deduplicated triangle-edge index list (2 indices per unique edge) for
+        // `#wire` renderStyle. Built on CPU here (faces are only available at
+        // construction); uploaded to the GPU lazily on the first wireframe draw.
+        let mut edge_set: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut line_index_data: Vec<u32> = Vec::new();
+        for f in faces {
+            for ei in 0..3 {
+                let a = f[ei];
+                let b = f[(ei + 1) % 3];
+                let key = if a < b { (a, b) } else { (b, a) };
+                if edge_set.insert(key) {
+                    line_index_data.push(a);
+                    line_index_data.push(b);
+                }
+            }
+        }
+
         Ok(Self {
             vao,
             vbo_positions,
@@ -256,6 +281,9 @@ impl Mesh3dBuffers {
             vbo_bone_weights,
             vbo_vertex_colors,
             ibo,
+            vertex_count: positions.len() as i32,
+            line_index_data,
+            line_ibo: std::cell::RefCell::new(None),
             has_texcoord: texcoords.is_some_and(|t| !t.is_empty()),
             has_texcoord2: texcoords2.is_some(),
             texcoord2_direct: false,
@@ -311,6 +339,51 @@ impl Mesh3dBuffers {
             WebGl2RenderingContext::UNSIGNED_INT,
             0,
         );
+    }
+
+    /// Draw the mesh as a wireframe (`shader.renderStyle = #wire`). WebGL2 has
+    /// no `glPolygonMode`, so the `GL_LINE` fill mode is emulated by drawing the
+    /// deduplicated triangle edges as `GL_LINES`. Call after `bind()`; this
+    /// swaps in the line index buffer and restores the triangle IBO after, so a
+    /// later `bind()` on the same VAO still finds `self.ibo`.
+    pub fn draw_wire(&self, gl: &WebGl2RenderingContext) {
+        if self.line_index_data.is_empty() {
+            return;
+        }
+        {
+            let mut cache = self.line_ibo.borrow_mut();
+            if cache.is_none() {
+                if let Some(buf) = gl.create_buffer() {
+                    gl.bind_buffer(WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER, Some(&buf));
+                    unsafe {
+                        let array = js_sys::Uint32Array::view(&self.line_index_data);
+                        gl.buffer_data_with_array_buffer_view(
+                            WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER,
+                            &array,
+                            WebGl2RenderingContext::STATIC_DRAW,
+                        );
+                    }
+                    *cache = Some(buf);
+                }
+            }
+            if let Some(buf) = cache.as_ref() {
+                gl.bind_buffer(WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER, Some(buf));
+            }
+        }
+        gl.draw_elements_with_i32(
+            WebGl2RenderingContext::LINES,
+            self.line_index_data.len() as i32,
+            WebGl2RenderingContext::UNSIGNED_INT,
+            0,
+        );
+        // Restore the triangle IBO on the VAO for subsequent solid draws.
+        gl.bind_buffer(WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER, Some(&self.ibo));
+    }
+
+    /// Draw the mesh vertices as points (`shader.renderStyle = #point`). Emulates
+    /// `glPolygonMode(GL_POINT)` (the vertex shader sets `gl_PointSize`).
+    pub fn draw_points(&self, gl: &WebGl2RenderingContext) {
+        gl.draw_arrays(WebGl2RenderingContext::POINTS, 0, self.vertex_count);
     }
 
     /// Unbind
