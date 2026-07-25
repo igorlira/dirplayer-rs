@@ -108,7 +108,6 @@ struct Shader3d {
     u_light_dir: Option<WebGlUniformLocation>,
     u_light_spot_angle: Option<WebGlUniformLocation>,
     u_light_spot_exp: Option<WebGlUniformLocation>,
-    u_light_specular: Option<WebGlUniformLocation>,
     u_camera_pos: Option<WebGlUniformLocation>,
     u_global_ambient: Option<WebGlUniformLocation>,
     u_fog_enabled: Option<WebGlUniformLocation>,
@@ -448,7 +447,6 @@ uniform vec3 u_light_atten[8];   // (constant, linear, quadratic) per light
 uniform vec3 u_light_dir[8];     // direction for directional/spot lights
 uniform float u_light_spot_angle[8]; // spot cone angle (radians, 0 = not spot)
 uniform float u_light_spot_exp[8];   // spot falloff exponent (0 = uniform/hard edge, SpotDecay off)
-uniform float u_light_specular[8];   // 1 = light carries the IFX SPECULAR bit, else 0 (no highlight)
 uniform vec3 u_camera_pos;
 uniform vec3 u_global_ambient;
 
@@ -559,9 +557,6 @@ void main() {
     if (u_has_texture > 0) {
         // IFX fixed-function lighting equation with UseDiffuse OFF
         vec3 lighting = u_emissive_color.rgb + u_global_ambient * u_ambient_color.rgb;
-        // Specular is a SEPARATE term added AFTER texture modulation (GL separate
-        // specular colour), so a textured surface can still show a highlight.
-        vec3 spec_accum = vec3(0.0);
 
         for (int i = 0; i < 8; i++) {
             if (i >= u_num_lights) break;
@@ -595,19 +590,13 @@ void main() {
                         else atten *= pow(spot_cos, u_light_spot_exp[i]) * smoothstep(cone_cos, cone_cos + 0.02, spot_cos);
                     }
                 }
+                // Two-sided lighting: use abs(N·L) so back faces also receive light
                 float diff = max(dot(Nl, L), 0.0);
                 // Toon shading: quantize NdotL into discrete steps
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
                 lighting += atten * diff * u_light_color[i] * u_diffuse_color.rgb;
-                // Specular highlight (Blinn N·H) from SPECULAR-flagged lights only,
-                // using the light's colour as its specular colour (CIFXLight).
-                if (u_shininess > 0.0 && diff > 0.0 && u_light_specular[i] > 0.0) {
-                    vec3 H = normalize(L + V);
-                    float sp = pow(max(dot(Nl, H), 0.0), u_shininess);
-                    spec_accum += u_light_color[i] * u_specular_color.rgb * sp * atten;
-                }
             }
         }
 
@@ -659,10 +648,6 @@ void main() {
             }
         }
 
-        // Add the specular highlight on top of the modulated texture (unless the
-        // surface is shown unlit / as-is).
-        if (u_texture_unlit == 0) final_color += spec_accum;
-
         frag_color = vec4(apply_fog(final_color), u_opacity * tex_sample.a);
         return;
     }
@@ -709,15 +694,14 @@ void main() {
                     }
                 }
 
+                // Two-sided lighting: use abs(N·L) so back faces also receive light
                 float diff = max(dot(Nl, L), 0.0);
                 if (u_shader_mode == 1 && u_toon_steps > 0.0) {
                     diff = floor(diff * u_toon_steps + 0.5) / u_toon_steps;
                 }
                 result += atten * u_light_color[i] * base_color * diff;
 
-                // Specular only from lights carrying the IFX SPECULAR bit; the light's
-                // specular colour IS its diffuse colour (u_light_color) per CIFXLight.
-                if (u_shininess > 0.0 && diff > 0.0 && u_light_specular[i] > 0.0) {
+                if (u_shininess > 0.0 && diff > 0.0) {
                     vec3 H = normalize(L + V);
                     float spec = pow(max(dot(Nl, H), 0.0), u_shininess);
                     result += u_light_color[i] * u_specular_color.rgb * spec * atten;
@@ -804,7 +788,6 @@ void main() {
             u_light_dir: u("u_light_dir[0]"),
             u_light_spot_angle: u("u_light_spot_angle[0]"),
             u_light_spot_exp: u("u_light_spot_exp[0]"),
-            u_light_specular: u("u_light_specular[0]"),
             u_camera_pos: u("u_camera_pos"),
             u_global_ambient: u("u_global_ambient"),
             u_fog_enabled: u("u_fog_enabled"),
@@ -1379,7 +1362,7 @@ void main() {
 
         let mut texture_versions = HashMap::new();
         for (tex_name, image_data) in &scene.texture_images {
-            texture_versions.insert(tex_name.to_lowercase(), texture_content_hash(image_data));
+            texture_versions.insert(tex_name.to_lowercase(), image_data.len() as u64);
         }
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
@@ -1403,10 +1386,10 @@ void main() {
 
         for (tex_name, image_data) in &scene.texture_images {
             let lower = tex_name.to_lowercase();
-            let data_hash = texture_content_hash(image_data);
+            let data_len = image_data.len() as u64;
             let needs_upload = match gpu_data.texture_versions.get(&lower) {
                 None => true,
-                Some(&old_hash) => old_hash != data_hash,
+                Some(&old_len) => old_len != data_len,
             };
             if needs_upload {
                 let flip_v = lower.contains("skyline");
@@ -1418,7 +1401,7 @@ void main() {
                         gpu_data.alpha_textures.remove(&lower);
                     }
                     gpu_data.textures.insert(lower.clone(), tex);
-                    gpu_data.texture_versions.insert(lower, data_hash);
+                    gpu_data.texture_versions.insert(lower, data_len);
                 }
             }
         }
@@ -4156,11 +4139,9 @@ void main() {
         gl.uniform4f(shader.u_ambient_color.as_ref(), mat.ambient[0], mat.ambient[1], mat.ambient[2], mat.ambient[3]);
         gl.uniform4f(shader.u_specular_color.as_ref(), mat.specular[0], mat.specular[1], mat.specular[2], mat.specular[3]);
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
-        // IFX specular exponent: GL_SHININESS = material shininess (0..1) * 128
-        // (CIFXRenderDeviceOGL). Director's shader.shininess (0..100) is stored as the
-        // 0..1 value. reflectivity is a reflection/env weight, NOT a specular exponent,
-        // so it must not feed shininess.
-        gl.uniform1f(shader.u_shininess.as_ref(), mat.shininess * 128.0);
+        // IFX maps material reflectivity to shader shininess (scaled by 100)
+        let shininess = if mat.shininess > 0.0 { mat.shininess } else { mat.reflectivity * 100.0 };
+        gl.uniform1f(shader.u_shininess.as_ref(), shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
 
@@ -4594,7 +4575,6 @@ void main() {
         let mut directions = [0.0f32; 24];   // 8 * 3 (direction for spot/directional)
         let mut spot_angles = [0.0f32; 8];   // cone angle in radians
         let mut spot_exps = [0.0f32; 8];     // GL_SPOT_EXPONENT (0 = SpotDecay off, uniform)
-        let mut spec_masks = [0.0f32; 8];    // 1 = light has the SPECULAR attribute bit
         let mut global_ambient = [0.0f32, 0.0, 0.0];
         let mut num_lights = 0i32;
 
@@ -4748,7 +4728,6 @@ void main() {
                     directions[li * 3 + 1] = -1.0;
                     directions[li * 3 + 2] = -0.7;
                 }
-                spec_masks[li] = if light.specular { 1.0 } else { 0.0 };
                 colors[li * 3] = light.color[0];
                 colors[li * 3 + 1] = light.color[1];
                 colors[li * 3 + 2] = light.color[2];
@@ -4766,7 +4745,6 @@ void main() {
         gl.uniform3fv_with_f32_array(shader.u_light_dir.as_ref(), &directions[..n * 3]);
         gl.uniform1fv_with_f32_array(shader.u_light_spot_angle.as_ref(), &spot_angles[..n]);
         gl.uniform1fv_with_f32_array(shader.u_light_spot_exp.as_ref(), &spot_exps[..n]);
-        gl.uniform1fv_with_f32_array(shader.u_light_specular.as_ref(), &spec_masks[..n]);
         gl.uniform3f(shader.u_global_ambient.as_ref(), global_ambient[0], global_ambient[1], global_ambient[2]);
     }
 
@@ -4784,19 +4762,6 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
-/// Content fingerprint of a texture's raw bytes (FNV-1a). Used to decide when to
-/// re-upload: a Flash-as-texture frame can change its PIXELS while keeping the same
-/// byte length (a SWF that renders blank during load, then its real image at the same
-/// size), so a length-only check would freeze the texture on the blank frame.
-fn texture_content_hash(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
 fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
     if data.len() < 4 { return None; }
 
