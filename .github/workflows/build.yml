@@ -129,6 +129,13 @@ jobs:
     if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Read project version
+        id: version
+        run: echo "value=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -145,8 +152,8 @@ jobs:
       - name: Create GitHub Release Draft
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.6.0-master-build
-          name: "DirPlayer v0.6.0 Master Release"
+          tag_name: v${{ steps.version.outputs.value }}
+          name: "DirPlayer v${{ steps.version.outputs.value }}"
           draft: true
           files: final-dist/*
         env:
