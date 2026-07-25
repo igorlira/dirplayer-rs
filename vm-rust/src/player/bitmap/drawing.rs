@@ -2219,35 +2219,66 @@ impl Bitmap {
         let has_skew_flip = is_skew_flip(params.skew);
 
         // Fast path — copy a 32-bit RGBA source into an 8-bit GRAYSCALE destination
-        // (Director's text→alpha-mask→texture HUD pattern: `grayImage.copyPixels(textImage)`
-        // then `rgba.setAlpha(grayImage)`). The grayscale value must be the SOURCE ALPHA
-        // (0=transparent..255=opaque). Routing this through the colour path matched the
-        // reversed Mac grayscale CLUT (white glyph → index 0), so setAlpha turned the
-        // glyphs transparent and left the fill opaque (LEGO SuperSonic HUD digits invisible
-        // / white-blocked). Plain copy ink, no rotation/skew.
+        // for Director's text→alpha-mask→texture HUD pattern
+        // (`grayImage.copyPixels(textImage)` then `rgba.setAlpha(grayImage)`): the
+        // grayscale value is written as the SOURCE ALPHA (0=transparent..255=opaque).
+        // Routing that through the colour path matched the reversed Mac grayscale CLUT
+        // (white glyph → index 0), so setAlpha turned the glyphs transparent and left
+        // the fill opaque (LEGO SuperSonic HUD digits invisible / white-blocked).
+        //
+        // This ONLY applies when the source actually carries transparency (a glyph
+        // coverage / extractAlpha mask). A fully OPAQUE 32-bit source — e.g. the Habbo
+        // camera capturing `(the stage).image` into an 8-bit #grayscale photo — has
+        // alpha 255 everywhere, so writing alpha would make the whole image 255 (a
+        // blank photo). For an opaque source we fall through to the colour path, which
+        // maps each pixel to the nearest grayscale index — what real Director does for
+        // an opaque 32→8 grayscale copy (and what makes the camera photo render).
         if ink == 0 && !has_sprite_rotation && !has_skew_flip
             && self.bit_depth == 8
             && matches!(self.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
             && src.bit_depth == 32
         {
             let dw = self.width as usize;
-            for dy in min_dst_y..max_dst_y {
+            // Map a destination pixel back to its source pixel index (respecting flip
+            // and scale), or None if it samples outside the source.
+            let src_index = |dx: i32, dy: i32| -> Option<usize> {
+                let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
+                let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
+                let sx = (src_left_f + rel_x * scale_x).floor() as i32;
+                let sy = (src_top_f + rel_y * scale_y).floor() as i32;
+                if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { return None; }
+                Some(((sy as usize) * src.width as usize + sx as usize) * 4)
+            };
+            // Only take the alpha-mask fast path if the copied source region has any
+            // transparency; an opaque source belongs on the colour (nearest-index) path.
+            let mut src_has_alpha = false;
+            'scan: for dy in min_dst_y..max_dst_y {
                 if dy < 0 || dy >= self.height as i32 { continue; }
                 for dx in min_dst_x..max_dst_x {
                     if dx < 0 || dx >= self.width as i32 { continue; }
-                    let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
-                    let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
-                    let sx = (src_left_f + rel_x * scale_x).floor() as i32;
-                    let sy = (src_top_f + rel_y * scale_y).floor() as i32;
-                    if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { continue; }
-                    let si = ((sy as usize) * src.width as usize + sx as usize) * 4 + 3;
-                    if si < src.data.len() {
-                        self.data[(dy as usize) * dw + dx as usize] = src.data[si];
+                    if let Some(si) = src_index(dx, dy) {
+                        if si + 3 < src.data.len() && src.data[si + 3] < 255 {
+                            src_has_alpha = true;
+                            break 'scan;
+                        }
                     }
                 }
             }
-            self.matte = None;
-            return;
+            if src_has_alpha {
+                for dy in min_dst_y..max_dst_y {
+                    if dy < 0 || dy >= self.height as i32 { continue; }
+                    for dx in min_dst_x..max_dst_x {
+                        if dx < 0 || dx >= self.width as i32 { continue; }
+                        if let Some(si) = src_index(dx, dy) {
+                            if si + 3 < src.data.len() {
+                                self.data[(dy as usize) * dw + dx as usize] = src.data[si + 3];
+                            }
+                        }
+                    }
+                }
+                self.matte = None;
+                return;
+            }
         }
 
         // ----------------------------------------------------------
