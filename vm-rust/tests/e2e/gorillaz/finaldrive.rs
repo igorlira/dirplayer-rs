@@ -21,9 +21,14 @@ browser_e2e_test!(test_finaldrive_traction, |player| async move {
     player.click_sprite(sprite().number(8)).await?;
 
     // Let the car spawn, fall and settle on its wheels.
-    player.step_frames(220).await;
+    player.step_frames(400).await;
+
+    player.key_down(" ", 32).await;
+    player.step_frames(500).await;
 
     snapshots.verify("in_game", player.snapshot_stage())?;
+
+    player.key_up(" ", 32).await;
 
     Ok(())
 });
