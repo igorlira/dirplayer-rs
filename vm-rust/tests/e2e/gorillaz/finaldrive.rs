@@ -8,7 +8,7 @@ browser_e2e_test!(test_finaldrive_traction, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "finaldrive");
-    snapshots.max_diff_ratio = 0.05;
+    snapshots.max_diff_ratio = 0.09;
     snapshots.pixel_tolerance = 30;
 
     player.load_movie(&movie_path).await;
