@@ -1225,7 +1225,29 @@ impl TypeHandlers {
         // that mis-spell an xtra name surface the error from `new()`
         // instead, with a clearer "Xtra X not found" message.
         reserve_player_mut(|player| {
-            let xtra_name = player.get_datum(&args[0]).string_value()?;
+            // `xtra(xtraNameOrNum)` takes "a string that specifies the name of
+            // the Xtra to return, or an integer that specifies the index
+            // position of the Xtra to return" (Director 11.5 Scripting
+            // Dictionary, `xtra()`). The index form is 1-based and is what
+            // `repeat with i = 1 to the number of xtras` walks; without it the
+            // integer would fall through to string_value() below and yield a
+            // bogus Xtra literally named "3".
+            let arg = player.get_datum(&args[0]).clone();
+            if matches!(arg, Datum::Int(_) | Datum::Float(_)) {
+                let index = arg.int_value()?;
+                let names = crate::player::xtra::manager::get_registered_xtra_names();
+                if index < 1 || index as usize > names.len() {
+                    // "A reference to an empty object is returned if the
+                    // specified Xtra is not found" — VOID is that empty
+                    // reference here, so `xtra(999).name` reads as VOID
+                    // rather than raising mid-loop.
+                    return Ok(player.alloc_datum(Datum::Void));
+                }
+                let name = names[(index - 1) as usize].clone();
+                return Ok(player.alloc_datum(Datum::Xtra(name)));
+            }
+
+            let xtra_name = arg.string_value()?;
             let xtra_name = xtra_name.trim().replace(".x32", "");
 
             // Validate xtra name format: [a-zA-Z0-9_-](\.x32)?

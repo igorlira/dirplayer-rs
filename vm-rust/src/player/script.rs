@@ -1142,6 +1142,23 @@ pub fn get_obj_prop(
         Datum::PhysXObjectRef(_) => {
             crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::get_prop(obj_ref, &prop_name)
         }
+        // `xtra(i).name` — the classic feature-detect idiom, paired with
+        // `the number of xtras`. NOTE: the Director 11.5 Scripting Dictionary
+        // documents `xtra()` and the `xtraList` properties but has no entry
+        // for a `name` property on an Xtra reference (it survives from the
+        // D6/D7 `the name of xtra n` form), so this contract is INFERRED from
+        // calling movies, not specified. The value matches the `#name` key
+        // that `_player.xtraList` / `the xtraList` report for the same Xtra.
+        Datum::Xtra(xtra_name) => {
+            if prop_name.eq_ignore_ascii_case("name") {
+                Ok(player.alloc_datum(Datum::String(xtra_name)))
+            } else {
+                Err(ScriptError::new(format!(
+                    "Unknown xtra prop {} on xtra \"{}\"",
+                    prop_name, xtra_name
+                )))
+            }
+        }
         _ => {
             if prop_name == "ilk" {
                 let ilk = TypeUtils::get_datum_ilk(&obj_clone)?;

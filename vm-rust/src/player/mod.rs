@@ -2952,6 +2952,16 @@ impl DirPlayer {
                     .map(|cast_lib| cast_lib.members.len() as i32)
                     .sum(),
             )),
+            // `the number of xtras` — Director 11.5 Scripting Dictionary:
+            // "returns the number of scripting Xtra extensions available to
+            // the movie". Read-only. Movies pair it with `xtra(i).name` to
+            // feature-detect an Xtra before `new(xtra "...")` (Hey Arnold!'s
+            // enhancerXtra probes for "enhancer" this way). The count must
+            // therefore agree with what `xtra(i)` indexes and with the
+            // `xtraList` properties — all three read the same registry.
+            "number of xtras" => Ok(Datum::Int(
+                xtra::manager::get_registered_xtra_names().len() as i32,
+            )),
             _ => Err(ScriptError::new(format!(
                 "Unknown anim2 prop {}",
                 prop_name
