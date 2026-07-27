@@ -200,25 +200,62 @@ async function syncCorsRule(): Promise<void> {
   const dnr = getDnr();
   if (!dnr?.updateSessionRules) return;
   const tabIds = [...corsTabs];
+
+  const action = {
+    type: 'modifyHeaders',
+    responseHeaders: [
+      { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
+    ],
+  };
+  const baseCondition = {
+    urlFilter: '*',
+    resourceTypes: ['media', 'object', 'xmlhttprequest', 'other', 'sub_frame'],
+    tabIds,
+  };
+
+  // Only touch responses that DON'T already carry an Access-Control-Allow-Origin
+  // header. A request's credentials mode is invisible to us — declarativeNetRequest
+  // has no condition for it, and MV3 removed blocking webRequest — but skipping
+  // responses that already answered the CORS question gets the same protection
+  // where it matters: the failure mode is us OVERWRITING a server's correct
+  // `Access-Control-Allow-Origin: <origin>` with `*`, which the spec forbids for
+  // a credentialed request. YouTube's videoplayback responses carry that header,
+  // so this alone would have prevented the breakage.
+  //
+  // Responses with no such header are ones the page could not read anyway, so
+  // setting the wildcard there can only help (a credentialed request to such a
+  // server was already blocked, header or not).
+  //
+  // `excludedResponseHeaders` needs Chrome 128+; older Chrome and Firefox reject
+  // the rule outright, so fall back to the tab-scoped rule alone.
+  const strictRule = {
+    id: CORS_DNR_RULE_ID,
+    priority: 1,
+    action,
+    condition: {
+      ...baseCondition,
+      excludedResponseHeaders: [{ header: 'access-control-allow-origin' }],
+    },
+  };
+  const fallbackRule = { id: CORS_DNR_RULE_ID, priority: 1, action, condition: baseCondition };
+
+  if (tabIds.length === 0) {
+    try {
+      await dnr.updateSessionRules({ removeRuleIds: [CORS_DNR_RULE_ID], addRules: [] });
+    } catch (e) {
+      console.warn('[DirPlayer] failed to clear CORS DNR rule:', e);
+    }
+    return;
+  }
+
   try {
-    await dnr.updateSessionRules({
-      removeRuleIds: [CORS_DNR_RULE_ID],
-      addRules: tabIds.length === 0 ? [] : [{
-        id: CORS_DNR_RULE_ID,
-        priority: 1,
-        action: {
-          type: 'modifyHeaders',
-          responseHeaders: [
-            { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
-          ],
-        },
-        condition: {
-          urlFilter: '*',
-          resourceTypes: ['media', 'object', 'xmlhttprequest', 'other', 'sub_frame'],
-          tabIds,
-        },
-      }],
-    });
+    await dnr.updateSessionRules({ removeRuleIds: [CORS_DNR_RULE_ID], addRules: [strictRule] });
+    return;
+  } catch {
+    /* excludedResponseHeaders unsupported — fall through */
+  }
+  try {
+    await dnr.updateSessionRules({ removeRuleIds: [CORS_DNR_RULE_ID], addRules: [fallbackRule] });
   } catch (e) {
     console.warn('[DirPlayer] failed to sync CORS DNR rule:', e);
   }
