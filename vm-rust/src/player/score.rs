@@ -1320,11 +1320,72 @@ impl Score {
         // Lingo-driven motion) when the current frame's delta names a
         // different, non-empty member for an already-entered, non-puppet sprite.
         //
-        // Restricted to D6 (==600): D7+ (e.g. dir_version 700, raw 1406) carry
-        // per-frame member changes inside the keyframe-bearing 52+ byte spans
-        // we now parse, so applying this delta-based swap there double-updates
-        // and fights the span data. Only D6 lacks those member keyframes.
-        if dir_version == 600 {
+        // Applies to D6 and later (>= 600). This was briefly restricted to
+        // D6-only on the theory that D7+ carry per-frame member changes inside
+        // the keyframe-bearing 52+ byte spans, making the delta swap a
+        // double-update. That premise doesn't hold: `ChannelKeyframes`
+        // (score_keyframes.rs) models blend/rotation/skew/path/size/fore+back
+        // colour — there is no member channel, so nothing else ever applies a
+        // mid-span member change and the swap has nothing to fight.
+        //
+        // monsterattack (D8, raw 1600) is the case that proves it: sprite
+        // channel 1 has ONE span covering frames 1..2, and the member changes
+        // *inside* that span — frame 1 is the CN-logo preloader (1:54), frame
+        // 2 is the Gamecard (2:2) whose "start" label the frame-2 Streaming
+        // behavior drives. Gated to D6 the swap never ran, so frame 2 kept
+        // rendering the preloader, no Ruffle instance was ever created for the
+        // Gamecard, and the movie sat on frame 2 forever (its only exit is a
+        // mouseDown over the ButtonMask sprite that likewise never appeared).
+        //
+        // CRITICAL: the trigger is a change in what the SCORE authors between
+        // consecutive entries for the channel — NOT a difference from the
+        // sprite's current member. Those are not the same thing once Lingo is
+        // involved, and using the latter makes the score re-assert its authored
+        // member over every Lingo `sprite(N).member = …` on every frame.
+        //
+        // monsterattack shows both halves. Sprite 1 frames 1..2: the score
+        // authors 1:54 then 2:2 inside one span — an authored change, so it
+        // must apply, or frame 2 keeps rendering the preloader and the movie
+        // never leaves the start screen. Sprite 5 on the Main frame: the score
+        // authors 2:7 (dino) on every frame, and Player Parent's `on new` does
+        // `sprite(pChnl).member = pName` to swap in the level's enemy. Keyed off
+        // the sprite's current member, this fired every frame and put the dino
+        // straight back — so beating level 1 still faced you with the dino.
+        // Keyed off the authored value, there is no change between frames and
+        // Lingo's assignment stands.
+        if dir_version >= 600 {
+            // Latest member this channel was authored with strictly before
+            // `frame_idx`. Entries are delta-compressed, so an entry existing at
+            // this frame only means *something* changed — often position, not
+            // the member.
+            //
+            // Scoped to the sprite's CURRENT span. Entries belonging to other
+            // spans on the same channel describe a different sprite lifetime —
+            // counting one of those as "the previous value" makes a re-entered
+            // span look like an authored change and re-asserts on every frame,
+            // which is precisely what was clobbering the enemy swap.
+            let prev_authored = |channel_number: u32, channel_idx: u16, frame_idx: u32| -> Option<(u16, u16)> {
+                let span_start = self
+                    .sprite_spans
+                    .iter()
+                    .filter(|s| {
+                        s.channel_number == channel_number
+                            && s.start_frame <= frame_idx + 1
+                            && frame_idx + 1 <= s.end_frame
+                    })
+                    .map(|s| s.start_frame)
+                    .max()?;
+                self.channel_initialization_data
+                    .iter()
+                    .filter(|(f, ch, d)| {
+                        *ch == channel_idx
+                            && *f < frame_idx
+                            && f + 1 >= span_start
+                            && d.cast_member != 0
+                    })
+                    .max_by_key(|(f, _, _)| *f)
+                    .map(|(_, _, d)| (d.cast_lib, d.cast_member))
+            };
             let member_updates: Vec<(i16, CastMemberRef)> = self.channel_initialization_data
                 .iter()
                 .filter_map(|(frame_idx, channel_idx, data)| {
@@ -1339,6 +1400,14 @@ impl Score {
                     let sprite = self.get_sprite(sprite_num)?;
                     if !sprite.entered || sprite.puppet {
                         return None;
+                    }
+                    // Only an authored change reasserts. No earlier entry means
+                    // the channel is appearing for the first time here, which
+                    // span-entry already covers — nothing to re-apply.
+                    match prev_authored(channel_number, *channel_idx, *frame_idx) {
+                        Some(prev) if prev == (data.cast_lib, data.cast_member) => return None,
+                        None => return None,
+                        _ => {}
                     }
                     let resolved_cast_lib = if data.cast_lib == 65535 && matches!(score_ref, ScoreRef::Stage) {
                         1
