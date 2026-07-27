@@ -80,6 +80,18 @@ function flashManager() {
   }
   return _flashManagerPromise;
 }
+
+// Install the bridge globals EAGERLY rather than on the first Flash member.
+// The dev app does this from callbacks.ts at startup; deferring it until the
+// lazy bundle import resolves is too late, because a movie can call a Flash
+// sprite method during the init sequence. monsterattack's `on streamStatus`
+// (dispatched from run_movie_init_sequence) does `sprite(2).gotoFrame(pct)`,
+// and the wasm extern then hit an undefined `dirplayer_ruffleGoToFrame` —
+// an uncaught ReferenceError that aborted init, so no sprite ever entered
+// and the playhead never left frame 1. Kicking the import off here closes
+// that window. Bundle-missing still degrades to no-ops via the catch above.
+flashManager();
+
 export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame) {
   const copy = new Uint8Array(swfData);
   flashManager().then(m => {
