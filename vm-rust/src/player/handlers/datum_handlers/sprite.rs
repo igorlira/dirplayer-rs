@@ -1134,7 +1134,49 @@ impl SpriteDatumHandlers {
                     Ok(player.alloc_datum(Datum::Point([local_x as f64, local_y as f64], 0)))
                 })
             }
-            "telltarget" | "findlabel" | "flashtostage" | "stagetoflash" => {
+            // `sprite(N).findLabel(whichLabelName)` — "returns the frame
+            // number (within the Flash movie) that is associated with the
+            // label name requested. A 0 is returned if the label doesn't
+            // exist, or if that portion of the Flash movie has not yet been
+            // streamed in" (Director 11.5 Scripting Dictionary, findLabel()).
+            //
+            // Resolved from the member's SWF bytes, not from Ruffle: frame
+            // labels are static SWF content, so this answers correctly even
+            // before the Ruffle instance has loaded (and the legacy Flash
+            // Player JS API exposes no label lookup to ask in the first
+            // place). Movies drive whole animation state machines off this —
+            // monsterattack stores `#start: findLabel("AttackT"), #end:
+            // findLabel("AttackT.end")` and then steps `sprite.frame = start
+            // + counter` — so returning VOID here stalls them outright.
+            "findlabel" => {
+                let label = reserve_player_ref(|player| {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "findLabel requires a label name".to_string(),
+                        ));
+                    }
+                    player.get_datum(&args[0]).string_value()
+                })?;
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let frame = player
+                        .movie
+                        .score
+                        .get_sprite(sprite_num)
+                        .and_then(|s| s.member.as_ref())
+                        .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+                        .and_then(|m| m.member_type.as_flash())
+                        .map(|flash| {
+                            crate::player::cast_member::CastMember::find_swf_frame_label(
+                                &flash.data,
+                                &label,
+                            )
+                        })
+                        .unwrap_or(0);
+                    Ok(player.alloc_datum(Datum::Int(frame as i32)))
+                })
+            }
+            "telltarget" | "flashtostage" | "stagetoflash" => {
                 warn!("Flash sprite method '{}' called but not yet implemented", handler_name);
                 Ok(DatumRef::Void)
             }

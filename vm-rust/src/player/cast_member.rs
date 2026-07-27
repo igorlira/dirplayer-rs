@@ -3823,6 +3823,116 @@ impl CastMember {
         Some(u16::from_le_bytes([data[fc_off], data[fc_off + 1]]))
     }
 
+    /// Parse the SWF root timeline's FrameLabel tags into `(label, frame)`
+    /// pairs, with 1-based frame numbers — the data behind Director's Flash
+    /// `sprite(N).findLabel(name)`.
+    ///
+    /// Read from the SWF bytes rather than queried from Ruffle for the same
+    /// reason as `parse_swf_frame_count`: labels are static SWF content, so
+    /// the bytes are authoritative and available immediately, whereas the
+    /// Ruffle instance returns nothing until it has loaded. The legacy Flash
+    /// Player JS API exposes no label lookup at all, so there is nothing to
+    /// ask even once it is ready.
+    ///
+    /// Walk: after the 8-byte prefix comes RECT (variable), u16 FrameRate,
+    /// u16 FrameCount, then the tag stream. FrameLabel (43) names the frame
+    /// currently being built; ShowFrame (1) commits it and advances the
+    /// counter. Nested timelines (DefineSprite, 39) carry their own
+    /// ShowFrame/FrameLabel tags inside their tag body — we skip whole tag
+    /// bodies, so those correctly do not affect root frame numbering.
+    pub fn parse_swf_frame_labels(data: &[u8]) -> Vec<(String, u32)> {
+        if data.len() < 9 {
+            return Vec::new();
+        }
+        // Both FWS and CWS/ZWS put the compressed/uncompressed remainder at
+        // offset 8, starting at RECT. Normalise to "body starts at RECT".
+        let decompressed;
+        let body: &[u8] = match &data[0..3] {
+            b"FWS" => &data[8..],
+            b"CWS" => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                let mut dec = flate2::read::ZlibDecoder::new(&data[8..]);
+                if dec.read_to_end(&mut out).is_err() || out.is_empty() {
+                    return Vec::new();
+                }
+                decompressed = out;
+                &decompressed
+            }
+            // ZWS is LZMA — no LZMA decoder is linked in, so treat as no
+            // labels rather than pulling in a dependency for a format no
+            // Director-era SWF uses (LZMA arrived in SWF 13 / Flash 11).
+            _ => return Vec::new(),
+        };
+
+        if body.is_empty() {
+            return Vec::new();
+        }
+        let nbits = (body[0] >> 3) as usize;
+        let rect_bytes = (5 + nbits * 4 + 7) / 8;
+        // rect, then FrameRate (2) + FrameCount (2)
+        let mut pos = rect_bytes + 4;
+
+        let mut labels = Vec::new();
+        let mut frame: u32 = 1;
+        while pos + 2 <= body.len() {
+            let tag_header = u16::from_le_bytes([body[pos], body[pos + 1]]);
+            pos += 2;
+            let code = tag_header >> 6;
+            let mut len = (tag_header & 0x3F) as usize;
+            if len == 0x3F {
+                if pos + 4 > body.len() {
+                    break;
+                }
+                len = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]])
+                    as usize;
+                pos += 4;
+            }
+            if pos + len > body.len() {
+                break;
+            }
+            match code {
+                0 => break,  // End
+                1 => frame += 1, // ShowFrame
+                43 => {
+                    // FrameLabel: null-terminated string, optionally followed
+                    // by a named-anchor flag byte (SWF 6+) we don't need.
+                    let raw = &body[pos..pos + len];
+                    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                    let name = String::from_utf8_lossy(&raw[..end]).into_owned();
+                    if !name.is_empty() {
+                        labels.push((name, frame));
+                    }
+                }
+                _ => {}
+            }
+            pos += len;
+        }
+        labels
+    }
+
+    /// Look up a single frame label, matching Director's `findLabel()`:
+    /// "returns the frame number (within the Flash movie) that is associated
+    /// with the label name requested. A 0 is returned if the label doesn't
+    /// exist, or if that portion of the Flash movie has not yet been streamed
+    /// in" (Director 11.5 Scripting Dictionary, `findLabel()`). Note the
+    /// sentinel is 0, never VOID — callers do arithmetic on the result
+    /// (`sprite.frame = start + counter`), so a non-numeric miss would poison
+    /// the expression.
+    ///
+    /// Matching is case-insensitive. The dictionary doesn't state this, but
+    /// it is required by shipping content: monsterattack asks for
+    /// `findLabel("Intro")` while its character SWFs store the label as
+    /// `intro`, and the same movie's hardcoded fallback frame numbers confirm
+    /// the lookup is expected to succeed.
+    pub fn find_swf_frame_label(data: &[u8], label: &str) -> u32 {
+        Self::parse_swf_frame_labels(data)
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(label))
+            .map(|(_, frame)| frame)
+            .unwrap_or(0)
+    }
+
     /// Resolve a Flash member's registration point, matching Director's
     /// `member.regPoint`:
     /// - `centerRegPoint == true` → the CENTER of the member rect. Director
