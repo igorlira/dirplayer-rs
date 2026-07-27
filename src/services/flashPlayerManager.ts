@@ -1056,6 +1056,13 @@ function startFrameCapture(key: string): void {
   const TEX_CAPTURE_INTERVAL = 10; // every Nth RAF
   const TEX_CAPTURE_LIMIT = 10;    // ~10 captures (~1.7s) then stop
 
+  // Scratch canvas reused across captures for THIS instance. It used to be
+  // allocated per capture — one `document.createElement('canvas')` per sprite
+  // per rAF — which showed up as steady GC pressure in a profile.
+  let scratch: HTMLCanvasElement | null = null;
+  let scratchCtx: CanvasRenderingContext2D | null = null;
+  let lastCaptureMs = 0;
+
   function captureFrame() {
     const inst = instances.get(key);
     if (!inst || !inst.canvas) return;
@@ -1063,7 +1070,30 @@ function startFrameCapture(key: string): void {
     rafCount++;
     // On-stage sprites capture every frame (they animate). Off-screen
     // textures only capture on the throttled interval.
-    const doCapture = !isOffscreenTexture || (rafCount % TEX_CAPTURE_INTERVAL === 0);
+    let doCapture = !isOffscreenTexture || (rafCount % TEX_CAPTURE_INTERVAL === 0);
+
+    // Pace on-stage captures to the movie tempo. Each capture is a full
+    // GPU→CPU `getImageData` readback, and the stage only consumes a new
+    // bitmap when it redraws — so capturing at rAF (60/s) for a 12fps movie
+    // did 5x the work for no visible gain. With several on-stage Flash sprites
+    // that dominated the main thread: a profile of monsterattack showed
+    // getImageData at 52% self time and this function at 58% total, starving
+    // both timers AND rAF (the movie dropped from 12fps to ~5fps, worst while
+    // a key was held because input dispatch competed for what was left).
+    if (doCapture && !isOffscreenTexture) {
+      const tempo = Number((window as any).__dirplayerFrameTempo) || 0;
+      if (tempo > 0) {
+        // Allow a little headroom so we don't systematically miss the stage's
+        // redraw by a fraction of an interval.
+        const minInterval = (1000 / tempo) * 0.8;
+        const now = performance.now();
+        if (now - lastCaptureMs < minInterval) {
+          doCapture = false;
+        } else {
+          lastCaptureMs = now;
+        }
+      }
+    }
 
     if (doCapture) {
       try {
@@ -1072,13 +1102,21 @@ function startFrameCapture(key: string): void {
         const height = canvas.height;
 
         if (width > 0 && height > 0) {
-          const offscreen = document.createElement('canvas');
-          offscreen.width = width;
-          offscreen.height = height;
-          const offCtx = offscreen.getContext('2d');
-          if (offCtx) {
-            offCtx.drawImage(canvas, 0, 0);
-            const imageData = offCtx.getImageData(0, 0, width, height);
+          if (!scratch || scratch.width !== width || scratch.height !== height) {
+            scratch = document.createElement('canvas');
+            scratch.width = width;
+            scratch.height = height;
+            scratchCtx = scratch.getContext('2d', { willReadFrequently: true });
+          }
+          if (scratchCtx) {
+            // MUST clear: the scratch canvas is reused across captures, so
+            // without this the previous frame shows through wherever the new
+            // one is transparent and the sprite smears like Director's trails
+            // ink. The old code allocated a fresh (transparent) canvas each
+            // time, which cleared implicitly.
+            scratchCtx.clearRect(0, 0, width, height);
+            scratchCtx.drawImage(canvas, 0, 0);
+            const imageData = scratchCtx.getImageData(0, 0, width, height);
             update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
           }
         }

@@ -1272,6 +1272,17 @@ impl DirPlayer {
         
         // Cache the tempo for this frame
         self.current_frame_tempo = self.movie.get_effective_tempo();
+
+        // Publish it for the JS side. flashPlayerManager's Ruffle frame capture
+        // paces itself to this: capturing faster than the stage redraws is pure
+        // waste, and each capture is a full GPU→CPU `getImageData` readback.
+        if let Some(window) = web_sys::window() {
+            let _ = js_sys::Reflect::set(
+                &window,
+                &wasm_bindgen::JsValue::from_str("__dirplayerFrameTempo"),
+                &wasm_bindgen::JsValue::from_f64(self.current_frame_tempo as f64),
+            );
+        }
         
         // If the player isn't playing yet (i.e., during initial load),
         // reset the entered flags so that beginSprite will be called again
