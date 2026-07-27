@@ -121,6 +121,7 @@ interface CorsFetchRequest {
 
 chrome.runtime.onMessage.addListener((msg: CorsFetchRequest, _sender, sendResponse) => {
   if (!msg || msg.type !== 'dirplayer-cors-fetch') return; // not ours — let others handle
+  void _sender;
   (async () => {
     try {
       const body = msg.body
@@ -160,23 +161,49 @@ chrome.runtime.onMessage.addListener((msg: CorsFetchRequest, _sender, sendRespon
 // (Neopets' swf.neopets.com dgs_include_v2.swf / game SWFs) are CORS-blocked.
 // Rather than monkey-patching the page's window.fetch (which reads as page
 // tampering to store reviewers), add the CORS response header declaratively via
-// declarativeNetRequest — an inspectable, Google-endorsed API. The rule is
-// scoped to the media/plugin/fetch resource types an emulator actually loads,
-// not arbitrary API traffic. Content-script (isolated-world) fetches keep going
-// through the background message proxy above; this rule is what unblocks the
-// main-world Ruffle player. `Access-Control-Allow-Origin: *` is safe here
-// because these are un-credentialed asset GETs.
+// declarativeNetRequest — an inspectable, Google-endorsed API. Content-script
+// (isolated-world) fetches keep going through the background message proxy
+// above; this rule is what unblocks the main-world Ruffle player.
+//
+// CRITICAL: the rule is scoped to tabs that have actually mounted a DirPlayer
+// player. It used to be installed globally over `urlFilter: '*'`, which
+// rewrote `Access-Control-Allow-Origin` on every matching response in every
+// tab. That breaks any site whose own requests are credentialed: the CORS spec
+// forbids the wildcard when a request's credentials mode is `include`, so
+// overwriting a site's correct `Access-Control-Allow-Origin: <origin>` with `*`
+// turns a working response into a blocked one. YouTube was the reported
+// casualty — its `videoplayback` fetches are credentialed, so videos loaded
+// forever until the extension was disabled:
+//
+//   The value of the 'Access-Control-Allow-Origin' header in the response must
+//   not be the wildcard '*' when the request's credentials mode is 'include'.
+//
+// Tab scoping means a page with no Shockwave content is never touched.
 const CORS_DNR_RULE_ID = 2001;
 
-async function ensureCorsRules(): Promise<void> {
-  const dnr = (chrome as unknown as { declarativeNetRequest?: {
-    updateDynamicRules?: (opts: unknown) => Promise<void>;
-  } }).declarativeNetRequest;
-  if (!dnr?.updateDynamicRules) return;
+/** Tabs with at least one mounted player. */
+const corsTabs = new Set<number>();
+
+interface DnrApi {
+  updateDynamicRules?: (opts: unknown) => Promise<void>;
+  updateSessionRules?: (opts: unknown) => Promise<void>;
+}
+function getDnr(): DnrApi | undefined {
+  return (chrome as unknown as { declarativeNetRequest?: DnrApi }).declarativeNetRequest;
+}
+
+/**
+ * Rebuild the session rule from `corsTabs`. Session rules (unlike dynamic ones)
+ * are torn down with the browser session and support `condition.tabIds`.
+ */
+async function syncCorsRule(): Promise<void> {
+  const dnr = getDnr();
+  if (!dnr?.updateSessionRules) return;
+  const tabIds = [...corsTabs];
   try {
-    await dnr.updateDynamicRules({
+    await dnr.updateSessionRules({
       removeRuleIds: [CORS_DNR_RULE_ID],
-      addRules: [{
+      addRules: tabIds.length === 0 ? [] : [{
         id: CORS_DNR_RULE_ID,
         priority: 1,
         action: {
@@ -188,20 +215,66 @@ async function ensureCorsRules(): Promise<void> {
         condition: {
           urlFilter: '*',
           resourceTypes: ['media', 'object', 'xmlhttprequest', 'other', 'sub_frame'],
+          tabIds,
         },
       }],
     });
   } catch (e) {
-    console.warn('[DirPlayer] failed to install CORS DNR rule:', e);
+    console.warn('[DirPlayer] failed to sync CORS DNR rule:', e);
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => { void ensureRegistered(); void ensureCorsRules(); });
-chrome.runtime.onStartup.addListener(() => { void ensureRegistered(); void ensureCorsRules(); });
+/**
+ * Drop the pre-existing GLOBAL dynamic rule. Dynamic rules persist across
+ * extension updates, so without this an upgraded install would keep rewriting
+ * headers browser-wide even though nothing adds that rule any more.
+ */
+async function removeLegacyGlobalCorsRule(): Promise<void> {
+  const dnr = getDnr();
+  if (!dnr?.updateDynamicRules) return;
+  try {
+    await dnr.updateDynamicRules({ removeRuleIds: [CORS_DNR_RULE_ID], addRules: [] });
+  } catch (e) {
+    console.warn('[DirPlayer] failed to remove legacy CORS DNR rule:', e);
+  }
+}
+
+// A player mounted in this tab — from here on its cross-origin asset loads need
+// the CORS header. Sent by the content script on first mount (see
+// polyfill/src/core.tsx renderPlayer).
+chrome.runtime.onMessage.addListener((msg: { type?: string }, sender, sendResponse) => {
+  if (!msg || msg.type !== 'dirplayer-player-mounted') return;
+  const tabId = sender.tab?.id;
+  if (typeof tabId === 'number' && !corsTabs.has(tabId)) {
+    corsTabs.add(tabId);
+    void syncCorsRule();
+  }
+  sendResponse({ ok: true });
+  return true;
+});
+
+function forgetTab(tabId: number): void {
+  if (corsTabs.delete(tabId)) void syncCorsRule();
+}
+chrome.tabs?.onRemoved?.addListener((tabId) => forgetTab(tabId));
+// A tab navigating away is no longer running a player until it says so again;
+// the content script re-activates per document.
+chrome.tabs?.onUpdated?.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading') forgetTab(tabId);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void ensureRegistered();
+  void removeLegacyGlobalCorsRule();
+});
+chrome.runtime.onStartup.addListener(() => {
+  void ensureRegistered();
+  void removeLegacyGlobalCorsRule();
+});
 // Also register on service-worker activation in case the listeners above
 // missed (e.g. extension was loaded mid-session via reload).
 void ensureRegistered();
-void ensureCorsRules();
+void removeLegacyGlobalCorsRule();
 
 // Note: the chrome-extension URL needed by Ruffle's chunk loader gets
 // stamped onto `<html data-dirplayer-ruffle-url="...">` by an isolated-

@@ -365,6 +365,32 @@ function normalizeCssSize(value: string): string {
   return /^\d+(?:\.\d+)?$/.test(trimmed) ? `${trimmed}px` : trimmed;
 }
 
+/**
+ * Tell the extension's service worker that this tab is actually running a
+ * player, so it can scope its CORS response-header rule to this tab.
+ *
+ * That rule sets `Access-Control-Allow-Origin: *`, which is only safe for the
+ * un-credentialed asset GETs an emulator makes — applied browser-wide it breaks
+ * any site whose own requests are credentialed (the spec forbids the wildcard
+ * when credentials mode is `include`). So the worker installs it only for tabs
+ * that report a mount here.
+ *
+ * No-ops outside the extension: `chrome.runtime` is undefined in the page-loaded
+ * polyfill build, which has no such rule to begin with.
+ */
+function notifyPlayerMounted(): void {
+  try {
+    const runtime = (globalThis as { chrome?: { runtime?: { sendMessage?: (m: unknown) => unknown; id?: string } } })
+      .chrome?.runtime;
+    if (!runtime?.id || !runtime.sendMessage) return;
+    // Fire-and-forget; a rejected promise here (no receiver) must not surface.
+    void Promise.resolve(runtime.sendMessage({ type: 'dirplayer-player-mounted' }))
+      .catch(() => {});
+  } catch {
+    /* not in an extension context */
+  }
+}
+
 function _renderPlayer(
   config: PolyfillConfig,
   mount: HTMLDivElement,
@@ -374,6 +400,7 @@ function _renderPlayer(
   externalParams: Record<string, string>,
   enableGestures?: boolean
 ) {
+  notifyPlayerMounted();
   const root = ReactDOM.createRoot(mount);
   root.render(
     <React.StrictMode>
