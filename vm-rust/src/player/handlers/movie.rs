@@ -248,13 +248,28 @@ impl MovieHandlers {
                         // stay on the current frame rather than erroring.
                         Some(dest_frame.unwrap_or(current))
                     } else {
-                        player
-                            .movie
-                            .score
-                            .frame_labels
-                            .iter()
-                            .find(|fl| fl.label.eq_ignore_ascii_case(&s))
-                            .map(|fl| fl.frame_num as u32)
+                        // An unknown label is a no-op in Director — the playhead
+                        // simply stays put; it is not an error. Same rule as the
+                        // missing-marker case just above.
+                        //
+                        // Movies rely on this. snowcraft installs a debug
+                        // `keyDownScript` that does `go("level" && the key)`
+                        // whenever `integer(the key + 1) < 11`, and a non-numeric
+                        // key coerces to 1 — so every arrow key, letter or
+                        // modifier press builds a garbage label like
+                        // "level <arrow char>". Raising a ScriptError there
+                        // aborted the handler and surfaced an error for what
+                        // Director treats as an ordinary miss.
+                        Some(
+                            player
+                                .movie
+                                .score
+                                .frame_labels
+                                .iter()
+                                .find(|fl| fl.label.eq_ignore_ascii_case(&s))
+                                .map(|fl| fl.frame_num as u32)
+                                .unwrap_or(player.movie.current_frame),
+                        )
                     }
                 }
 
