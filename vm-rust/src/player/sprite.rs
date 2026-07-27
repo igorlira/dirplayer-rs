@@ -175,12 +175,25 @@ impl Sprite {
     /// and the sprite is visible, blend=0 is treated as 100 (fully opaque).
     /// The stored blend value stays unchanged for Lingo property reads.
     #[inline]
+    /// The blend percentage to render with.
+    ///
+    /// This used to rewrite a score blend of 0 to 100 whenever a script had
+    /// touched `.visible` and hadn't set `.blend` — a guess dating from when
+    /// the score blend byte was read raw, where a 0 was usually a parse
+    /// artefact rather than an authored value. `convert_raw_blend` later
+    /// gained the authoritative gate (score byte 22 bit 0x10 — blend is only
+    /// meaningful when that flag is set, else the byte is a junk default and
+    /// the sprite is opaque), so a 0 arriving here is now genuinely authored
+    /// and must be honoured.
+    ///
+    /// The guess also over-fired: `sprite(N).visible = 1` sets
+    /// `has_visible_mod`, so any blanket visibility loop opted a sprite in.
+    /// monsterattack's Streaming behavior does exactly that
+    /// (`repeat with i = 1 to 40: sprite(i).visible = 1`), which resurrected
+    /// its ButtonMask — an invisible click target authored at blend 0 — into
+    /// a solid black box over the game card.
     pub fn effective_blend(&self) -> i32 {
-        if self.has_visible_mod && self.visible && self.blend == 0 && !self.has_blend_mod {
-            100
-        } else {
-            self.blend
-        }
+        self.blend
     }
 
     /// Check if this sprite has a skew flip transform
