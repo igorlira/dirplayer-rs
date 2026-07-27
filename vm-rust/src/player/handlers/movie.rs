@@ -1124,7 +1124,32 @@ impl MovieHandlers {
         // execute_frame_update()'s is_in_frame_update guard blocks the recursive
         // updateStage() that fires from inside prepareFrame.
         let run_frame_anim = reserve_player_mut(|player| {
-            if !player.command_handler_yielding || player.is_in_frame_update {
+            if player.is_in_frame_update {
+                return false;
+            }
+            // Two kinds of busy-wait block the main frame loop, and both need
+            // the frame update run from here instead:
+            //
+            //  - keyboard (`command_handler_yielding`, set for keyDown)
+            //  - mouse: `repeat while the stillDown` inside an `on mouseDown`,
+            //    which runs under in_mouse_command with the frame loop skipping
+            //    updates for as long as the button is held.
+            //
+            // snowcraft's throw is the mouse case: you press a kid, hold to
+            // charge the power meter, and drag to aim, all inside that loop.
+            // Shockwave keeps the rest of the playfield animating while you
+            // hold — the other kids walk and duck, snowballs already in flight
+            // keep travelling — because that motion is driven by `prepareFrame`
+            // behaviors. Without this the whole game froze the instant you
+            // grabbed a snowball and only resumed on release.
+            //
+            // execute_frame_update dispatches stepFrame/prepareFrame and
+            // renders; it does NOT advance the playhead, so this animates the
+            // current frame without letting the movie run on behind the
+            // blocked handler.
+            let in_busy_wait = player.command_handler_yielding
+                || (player.in_mouse_command && player.movie.mouse_down);
+            if !in_busy_wait {
                 return false;
             }
             let now = js_sys::Date::now();
