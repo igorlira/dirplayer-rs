@@ -84,20 +84,40 @@ fn get_text_member_line_height(text_data: &TextMember) -> u16 {
 }
 
 impl CastMemberRefHandlers {
+    /// Encode `(cast_lib, member)` as Director's single-integer member number —
+    /// "a unique identifier for the cast member that is a single integer
+    /// describing its location in and position in the cast library"
+    /// (Director 11.5 Scripting Dictionary, `number (Member)`).
+    ///
+    /// The cast index is encoded ZERO-based, so members of the first cast
+    /// library encode to their bare position. That is what Director reports for
+    /// a single-cast movie, and it is what keeps `member(x).number` comparable
+    /// with `the memberNum of sprite N` — `memberNum` is the member's "position
+    /// in its cast library" (spec) and so is always bare. Movies compare the two
+    /// directly: snowcraft gates its whole snowball pool on
+    ///
+    ///   if the memberNum of sprite n = the number of member "nothing" then
+    ///
+    /// With a one-based encoding the internal cast contributed 0x10000, so 67
+    /// was compared against 65603, the pool never reported a free slot, and
+    /// throwing a snowball did nothing — the thrower stuck on "R cock" forever.
+    ///
+    /// Multi-cast movies still get distinct values (cast 2 -> 0x10000 + n).
     pub fn get_cast_slot_number(cast_lib: u32, cast_member: u32) -> u32 {
-        (cast_lib << 16) | (cast_member & 0xFFFF)
+        cast_lib.saturating_sub(1) << 16 | (cast_member & 0xFFFF)
     }
 
     pub fn member_ref_from_slot_number(slot_number: u32) -> CastMemberRef {
-        let cast_lib = (slot_number >> 16) as i32;
+        let cast_lib = (slot_number >> 16) as i32 + 1;
         let cast_member = (slot_number & 0xFFFF) as i32;
-        // A "slot number" encodes (cast_lib << 16) | member. A bare member
-        // number (high 16 bits zero, e.g. `the castNum of sprite = 10` in a
-        // Director-4 movie, or `member N` with no cast lib) therefore has
-        // cast_lib 0 — which is not a valid 1-indexed cast and would fail to
-        // resolve (find_member_by_slot_number rejects cast_lib <= 0). Treat it
-        // as the default/internal cast (1). slot 0 stays the null ref [0,0].
-        let cast_lib = if cast_lib == 0 && cast_member != 0 { 1 } else { cast_lib };
+        // Zero-based cast encoding makes a bare member number (high 16 bits
+        // zero — `the castNum of sprite = 10` in a Director-4 movie, or
+        // `member N` with no cast lib) decode to cast 1 by construction, which
+        // is the default/internal cast those forms mean. slot 0 stays the null
+        // ref [0, 0].
+        if slot_number == 0 {
+            return CastMemberRef { cast_lib: 0, cast_member: 0 };
+        }
         CastMemberRef { cast_lib, cast_member }
     }
 
