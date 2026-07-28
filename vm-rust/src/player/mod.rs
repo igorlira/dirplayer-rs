@@ -220,6 +220,24 @@ pub struct PlayerVMExecutionItem {
 /// Scopes are pre-allocated `Scope` structs, so headroom is cheap.
 pub const MAX_STACK_SIZE: usize = 512;
 
+/// One entry of the `tell <target> … end tell` stack.
+///
+/// A `tell` re-points two different things at the target, and which one applies
+/// depends on the target's kind, so both are resolved up front when the block is
+/// entered:
+///   * `nested_player` — a `#movie` sprite hosts its own sub-player, and the
+///     enclosed `tellcall`s dispatch into it (the loader→game command bridge).
+///   * `film_loop` — a film-loop sprite carries its own playhead, and the
+///     enclosed score reads (`the frame`, `the lastFrame`) resolve against that
+///     film loop's internal score rather than the movie's.
+/// Both are `None` for an unsupported/self target, in which case everything runs
+/// against this player as if the `tell` weren't there.
+#[derive(Clone, Default)]
+pub struct TellTarget {
+    pub nested_player: Option<usize>,
+    pub film_loop: Option<CastMemberRef>,
+}
+
 pub struct DirPlayer {
     pub net_manager: NetManager,
     pub movie: Movie,
@@ -331,12 +349,9 @@ pub struct DirPlayer {
     pub is_in_frame_update: bool,
     pub is_dispatching_events: bool, // Prevents re-entrant event dispatch
     pub is_in_send_all_sprites: bool, // Prevents re-entrant sendAllSprites calls
-    /// `tell <target> … end tell` stack. Each entry is the target a `tellcall`
-    /// should dispatch to: `Some(nested_player_id)` when the target is a `#movie`
-    /// sprite (the loader→game command bridge — DGS `on keyIsDown` does
-    /// `tell sprite(spShk) \n sendAllSprites(#keyWasPressed, k) \n end tell`),
-    /// or `None` for an unsupported/self target (tellcall runs on this player).
-    pub tell_target_stack: Vec<Option<usize>>,
+    /// `tell <target> … end tell` stack — see [`TellTarget`]. A Vec so `tell`
+    /// blocks can nest; only the innermost entry is consulted.
+    pub tell_target_stack: Vec<TellTarget>,
     pub system_start_time: chrono::DateTime<chrono::Local>, // For ticks & milliSeconds (system uptime)
     pub handler_stack_depth: usize,
     pub in_frame_script: bool,
@@ -2401,6 +2416,13 @@ impl DirPlayer {
             .map(|(_, v)| v.clone())
     }
 
+    /// The film loop the innermost active `tell` block targets, if any.
+    fn tell_film_loop(&self) -> Option<CastMemberRef> {
+        self.tell_target_stack
+            .last()
+            .and_then(|t| t.film_loop.clone())
+    }
+
     fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
         match_ci!(prop, {
             "datumStats" => {
@@ -2783,6 +2805,44 @@ impl DirPlayer {
                 } else {
                     let datum = self.movie.get_prop(prop)?;
                     Ok(self.alloc_datum(datum))
+                }
+            },
+            // Score reads inside a `tell <film loop sprite>` block resolve
+            // against that film loop's own playhead, not the movie's. A film
+            // loop runs an independent score, and this is the idiom scripts use
+            // to notice one has played out:
+            //   tell msgSprite
+            //     f = the frame
+            //   end tell
+            //   tell msgSprite
+            //     e = the lastFrame
+            //   end tell
+            //   if f = e then <clear the message>
+            // Read against the movie those two are unrelated to the animation
+            // and never coincide, so the sprite is never cleared.
+            "frame" | "lastFrame" => {
+                let value = self.tell_film_loop().and_then(|member_ref| {
+                    self.movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .and_then(|m| match &m.member_type {
+                            CastMemberType::FilmLoop(film_loop) => {
+                                Some(if prop.eq_ignore_ascii_case("frame") {
+                                    film_loop.current_frame.max(1)
+                                } else {
+                                    film_loop.score.frame_count.unwrap_or(1).max(1)
+                                })
+                            }
+                            _ => None,
+                        })
+                });
+                match value {
+                    Some(v) => Ok(self.alloc_datum(Datum::Int(v as i32))),
+                    // Outside a film-loop `tell`, these are ordinary movie props.
+                    None => {
+                        let datum = self.movie.get_prop(prop)?;
+                        Ok(self.alloc_datum(datum))
+                    }
                 }
             },
             "stageleft" | "stagetop" | "stageright" | "stagebottom" => {

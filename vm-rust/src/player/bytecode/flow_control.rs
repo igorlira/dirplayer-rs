@@ -69,9 +69,10 @@ impl FlowControlBytecodeHandler {
         return Ok(result_ctx);
     }
 
-    /// `tell <target>` — pop the target and record which context the enclosed
-    /// `tellcall`s dispatch to. `tell sprite(#movieSprite)` targets that nested
-    /// sub-player (the loader→game command bridge); other targets run on THIS
+    /// `tell <target>` — pop the target and record what the enclosed statements
+    /// re-point at. `tell sprite(#movieSprite)` targets that nested sub-player
+    /// (the loader→game command bridge); `tell sprite(<film loop>)` re-points
+    /// score reads at the film loop's own playhead; other targets run on THIS
     /// player. Stack is a Vec so `tell` blocks can nest.
     pub fn start_tell(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
@@ -80,17 +81,35 @@ impl FlowControlBytecodeHandler {
                 ScriptError::new("starttell: operand stack is empty".to_string())
             })?;
             let target = player.get_datum(&target_ref).clone();
-            let nested = match target {
+            // Resolve the target to the member it is showing; a sprite tells
+            // through to its member, a member ref is already one.
+            let member_ref = match target {
                 Datum::SpriteRef(n) => player
                     .movie
                     .score
                     .get_sprite(n as i16)
-                    .and_then(|s| s.member.clone())
-                    .and_then(|m| crate::player::nested_player_id(&m)),
-                Datum::CastMember(ref m) => crate::player::nested_player_id(m),
+                    .and_then(|s| s.member.clone()),
+                Datum::CastMember(m) => Some(m),
                 _ => None,
             };
-            player.tell_target_stack.push(nested);
+            let tell_target = match member_ref {
+                Some(m) => crate::player::TellTarget {
+                    nested_player: crate::player::nested_player_id(&m),
+                    film_loop: player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&m)
+                        .filter(|member| {
+                            matches!(
+                                member.member_type,
+                                crate::player::cast_member::CastMemberType::FilmLoop(_)
+                            )
+                        })
+                        .map(|_| m),
+                },
+                None => crate::player::TellTarget::default(),
+            };
+            player.tell_target_stack.push(tell_target);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -131,7 +150,7 @@ impl FlowControlBytecodeHandler {
                     name
                 )));
             };
-            let target = player.tell_target_stack.last().copied().flatten();
+            let target = player.tell_target_stack.last().and_then(|t| t.nested_player);
             (name, args, is_no_ret, target)
         };
 

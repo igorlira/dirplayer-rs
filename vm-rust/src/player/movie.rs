@@ -212,6 +212,10 @@ impl Movie {
                 Ok(Datum::String(formatted))
             },
             "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            // Movie property, read-only: the number of the last frame in the movie.
+            // A score always has at least frame 1, so fall back to 1 rather than 0
+            // when the frame count couldn't be determined.
+            "lastFrame" => Ok(Datum::Int(self.score.frame_count.unwrap_or(1).max(1) as i32)),
             "moviePath" => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
