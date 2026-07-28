@@ -3327,8 +3327,14 @@ impl DirPlayer {
                             let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
 
                             let next = current + 1;
-                            let should_loop = (film_loop.info.loops & 0x20) == 0;
-                            
+                            // `info.loops` is already the DECODED flag (1 = loop,
+                            // 0 = play once and hold on the last frame) — see
+                            // FilmLoopInfo::from, which does `1 - (flags >> 5 & 1)`.
+                            // Re-testing it as the raw 0x20 bit is always false, so
+                            // every film loop looped regardless of its member flag
+                            // and one-shot intro/outro animations never finished.
+                            let should_loop = film_loop.info.loops != 0;
+
                             let new_frame = if next > frame_count {
                                 if should_loop { 1 } else { frame_count }
                             } else {
@@ -3397,7 +3403,8 @@ impl DirPlayer {
                     film_loop.current_frame += 1;
 
                     if film_loop.current_frame > frame_count {
-                        let should_loop = (film_loop.info.loops & 0x20) == 0;
+                        // Decoded flag, not a bitmask — see update_filmloop_frames.
+                        let should_loop = film_loop.info.loops != 0;
 
                         if should_loop {
                             film_loop.current_frame = 1;

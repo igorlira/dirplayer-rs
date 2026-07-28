@@ -1365,6 +1365,19 @@ fn render_filmloop_from_channel_data(
                 // 255 is treated as default/opaque (same as shape/vector paths)
                 let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
 
+                // blend 0 is fully transparent — Director draws nothing at all.
+                // We must skip rather than draw-with-zero-alpha, because the
+                // filmloop offscreen is 32-bit and `set_pixel_fast` hardcodes
+                // alpha to 0xFF: a zero-alpha blend resolves to the destination
+                // colour (the cleared RGBA(0,0,0,0) → black) and then stamps it
+                // OPAQUE. mission_popup_anim_in has exactly this shape — a
+                // full-size blend-0 layer on every frame — so the whole 519x290
+                // offscreen turned into an opaque black rectangle that survived
+                // the ink shader's `src.a < 0.01` discard and covered the popup.
+                if blend <= 0 {
+                    continue;
+                }
+
                 // Only use matte mask for inks that support it:
                 // - Ink 0 (copy): for trimWhiteSpace edge transparency (indexed and 16-bit)
                 // - Ink 8 (matte): always uses matte (indexed AND 16-bit; 32-bit
