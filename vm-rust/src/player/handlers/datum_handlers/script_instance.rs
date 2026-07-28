@@ -183,7 +183,9 @@ impl ScriptInstanceUtils {
                 let value_datum = player.get_datum(value).to_owned();
                 match value_datum {
                     Datum::Void => {
-                        // FIXME: Setting ancestor to void seems to be a no-op.
+                        // No-op — see the matching arm in script.rs::script_set_prop.
+                        // Habbo v7's Thread Manager assigns VOID mid-chain and
+                        // relies on the previously-set ancestor surviving.
                         Ok(())
                     }
                     Datum::ScriptInstanceRef(ancestor_instance_id) => {

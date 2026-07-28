@@ -303,16 +303,44 @@ pub fn script_set_prop(
     // Try to set the property on the current instance
     let result = {
         if prop_name == "ancestor" {
-            let ancestor_id = player
-                .allocator
-                .get_datum(value_ref)
-                .to_script_instance_ref()?
-                .clone();
-            let script_instance = player
-                .allocator
-                .get_script_instance_mut(&script_instance_ref);
-            script_instance.ancestor = Some(ancestor_id);
-            Ok(())
+            // Mirrors the `obj.ancestor = …` path in ScriptInstanceDatumHandlers.
+            match player.allocator.get_datum(value_ref).to_owned() {
+                // `ancestor = VOID` is a NO-OP: Director's ancestor property only
+                // accepts an object, and assigning VOID neither detaches the
+                // current one nor errors.
+                //
+                // Both halves matter. Erroring aborts the caller — battleready's
+                // `class_Animation_Looped.destroy` ends with `ancestor = VOID`, so
+                // the whole teardown died there. But actually DETACHING breaks
+                // Habbo v7: `Thread Manager Class.buildThreadObj` wires the chain
+                // with `tTemp` starting at VOID —
+                //   tBase[#ancestor] = tThreadObj      -- link to the thread object
+                //   repeat with tClass in tClassList   -- tBase is element 1
+                //     tObject[#ancestor] = tTemp       -- VOID on the first pass!
+                //     tTemp = tObject
+                // — so a detaching VOID wipes the link that was just made and
+                // `me.getInterface()` (defined on Thread Instance Class) becomes
+                // unreachable from every component built on that thread.
+                Datum::Void => Ok(()),
+                Datum::ScriptInstanceRef(ancestor_id) => {
+                    let script_instance = player
+                        .allocator
+                        .get_script_instance_mut(&script_instance_ref);
+                    script_instance.ancestor = Some(ancestor_id);
+                    Ok(())
+                }
+                // Non-instance ancestors (e.g. a TimeoutInstance) live in the
+                // properties map so calls can still be delegated to them.
+                _ => {
+                    let script_instance = player
+                        .allocator
+                        .get_script_instance_mut(&script_instance_ref);
+                    script_instance
+                        .properties
+                        .insert(CiString::from("ancestor"), value_ref.clone());
+                    Ok(())
+                }
+            }
         } else {
             let script_instance = player
                 .allocator
