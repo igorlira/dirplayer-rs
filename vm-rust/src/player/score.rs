@@ -4642,7 +4642,20 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                         .map(|(w, h)| w > 0 && h > 0
                             && sprite.width == w * 2 && sprite.height == h * 2)
                         .unwrap_or(false);
-                    if !sprite_is_doubled {
+                    // A stretched sprite OWNS its size, so a member swap
+                    // re-skins it without resizing. `the stretch of sprite` is
+                    // the authoritative flag: the width/height setters above set
+                    // it on any manual resize (and the score's ink bit 0x80 sets
+                    // it for authored sprites), which is the same rule
+                    // reset_for_member_change already applies to explicit
+                    // fore/bgColor. battleready's class_Shadow builds its sprite
+                    // in exactly that order:
+                    //   me.setSize(width)              -- sets width/height
+                    //   me.visSprite.member = shadow_round
+                    // and never re-sizes afterwards, so snapping to the bitmap's
+                    // intrinsic size here made every character's shadow render at
+                    // the artwork's native size.
+                    if !sprite_is_doubled && sprite.stretch == 0 {
                         if let Some((w, h)) = intrinsic_size {
                             if w > 0 && h > 0 {
                                 sprite.width = w;
