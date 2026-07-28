@@ -44,6 +44,7 @@ impl RectDatumHandlers {
             "intersect" => Self::intersect(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             "offset" => Self::offset(datum, args),
+            "inflate" => Self::inflate(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for rect"
             ))),
@@ -70,6 +71,37 @@ impl RectDatumHandlers {
                 vals[2] + dx as f64,
                 vals[3] + dy as f64,
             ], 0)))
+        })
+    }
+
+    /// `rect.inflate(widthChange, heightChange)` / `inflate(rect, w, h)`.
+    ///
+    /// Expands (or contracts, for negative arguments) the rectangle about its
+    /// centre: the change is applied to *both* opposing sides, so the result is
+    /// 2*w wider and 2*h taller than the original and keeps the same centre
+    /// point. Dropped from the 11.5 dictionary but still a live Lingo function
+    /// — semantics are the Director 8 Lingo Dictionary's:
+    ///   put inflate(rect(100, 150, 200, 250), 10, 20)
+    ///   -- rect(90, 130, 210, 270)
+    pub fn inflate(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() < 2 {
+                return Err(ScriptError::new(
+                    "inflate requires 2 arguments".to_string(),
+                ));
+            }
+            let (vals, _flags) = player.get_datum(datum).to_rect_inline()?;
+            let dw = player.get_datum(&args[0]).to_float()? as f64;
+            let dh = player.get_datum(&args[1]).to_float()? as f64;
+
+            let result = Datum::build_rect(
+                &Datum::from_f64(vals[0] - dw),
+                &Datum::from_f64(vals[1] - dh),
+                &Datum::from_f64(vals[2] + dw),
+                &Datum::from_f64(vals[3] + dh),
+            )?;
+
+            Ok(player.alloc_datum(result))
         })
     }
 

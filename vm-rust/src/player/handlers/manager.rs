@@ -9,6 +9,7 @@ use super::{
         player_call_datum_handler,
         point::PointDatumHandlers,
         prop_list::PropListDatumHandlers,
+        rect::RectDatumHandlers,
         script_instance::{ScriptInstanceDatumHandlers, ScriptInstanceUtils},
         sound_channel::SoundChannelDatumHandlers,
     },
@@ -1250,6 +1251,10 @@ impl BuiltInHandlerManager {
             "gotonetmovie" => MovieHandlers::go_to_net_movie(args),
             "pass" => MovieHandlers::pass(args),
             "union" => TypeHandlers::union(args),
+            // inflate(rect, w, h) — the top-level form of rect.inflate(w, h).
+            "inflate" if !args.is_empty() => {
+                RectDatumHandlers::inflate(&args[0], &args[1..].to_vec())
+            }
             "bitxor" => TypeHandlers::bit_xor(args),
             "power" => TypeHandlers::power(args),
             "add" => TypeHandlers::add(args),
