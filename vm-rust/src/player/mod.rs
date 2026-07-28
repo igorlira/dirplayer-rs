@@ -851,9 +851,31 @@ impl DirPlayer {
                 .get_sprite(cn)
                 .map(|s| s.flash_prev_frame)
                 .unwrap_or(0);
-            let wrapped = prev >= 1 && cur < prev;
+            // Ruffle loops a stop-less SWF from the LAST frame back to 1, so a
+            // genuine wrap always STARTS near the end of the timeline. A Lingo
+            // seek jumps backwards too, but from an arbitrary frame — the
+            // mission popup's `goToFrame("diamondhead")` lands on frame 1 from
+            // wherever the SWF autoplayed to during load. Reading that as
+            // end-of-timeline yanks the sprite to its final frame and kills the
+            // animation the script just cued up. Requiring `prev` to be in the
+            // tail keeps the real overshoot case working: we sample once per
+            // Director frame while the SWF runs faster, so the exact last frame
+            // is often skipped and only the wrap is observable.
+            let tail = (total / 8).max(4);
+            let wrapped = prev >= 1 && cur < prev && prev >= total - tail;
             if cur >= total || wrapped {
                 let _ = ruffle_goto_frame_and_stop(cn as i32, &total.to_string());
+                // …and actually HALT it. `goToFrameAndStop` carries the
+                // `sprite.frame = N` SETTER semantics: it only pins when the
+                // member is `pausedAtStart`. For an animated member (the usual
+                // case, and what `loop = false` members are) it seeks and KEEPS
+                // PLAYING — so the SWF ran on past the last frame, wrapped,
+                // tripped this check again and re-parked, forever. battleready's
+                // 70-frame intro_anim did that 672 times, blinking black on
+                // every re-seek. Halting the root timeline is what `loop = false`
+                // actually means, and it latches the `ruffle_is_playing` gate
+                // above so this runs once instead of every frame.
+                ruffle_stop(cn as i32);
             }
             self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
         }
@@ -4763,6 +4785,10 @@ extern "C" {
     fn ruffle_get_current_frame(sprite_num: i32) -> Result<i32, wasm_bindgen::JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop", catch)]
     fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str) -> Result<(), wasm_bindgen::JsValue>;
+    /// Halt the root timeline. The seek above only PINS for `pausedAtStart`
+    /// members, so the park needs this to actually stop an animated one.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
+    fn ruffle_stop(sprite_num: i32);
 }
 /// Execute one complete frame cycle: run frame scripts, then advance to the next frame.
 /// Returns (is_playing, is_script_paused) so callers can check if the movie is still running.
