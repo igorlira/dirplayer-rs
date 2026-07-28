@@ -337,14 +337,28 @@ impl PropListDatumHandlers {
                                 Ok(DatumRef::Void)
                             }
                             Datum::PropList(..) => {
-                                // Property is a PropList, set the property in that PropList
+                                // Property is a PropList. An INTEGER subscript is
+                                // POSITIONAL in Director (`setAt`), exactly as it
+                                // is for the plain-List arm above — only a
+                                // non-integer subscript is a property key. Going
+                                // straight to set_prop treated the index as a key
+                                // and APPENDED a new integer-keyed pair instead of
+                                // updating the slot:
+                                //   g.missionCompleted[g.levelID - 1] = 1
+                                //     → [.. #CHAR_WILDMUTT: 0, 3: 1, 1: 1]  (count 12)
+                                // which then double-counted on read, because
+                                // PropListUtils::get_prop tries the key first and
+                                // falls back to positional — so each completed
+                                // mission scored once via its bogus key and once
+                                // via its position (2 missions → a HUD "4 / 10").
+                                // set_at does the Int/positional split and still
+                                // routes non-integer keys to set_prop.
                                 let formatted_key = format_datum(index_ref, &player);
-                                PropListUtils::set_prop(
+                                PropListUtils::set_at(
+                                    player,
                                     &list_ref,
                                     index_ref,
                                     value_ref,
-                                    player,
-                                    false,
                                     &formatted_key,
                                 )?;
                                 Ok(DatumRef::Void)
