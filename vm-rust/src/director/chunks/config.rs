@@ -47,6 +47,12 @@ pub struct ConfigChunk {
     /* 60 */ pub field29: u32,
     /* 64 */ pub checksum: u32,
     /* 68 */ pub remnants: Vec<u8>,
+
+    /// Movie default palette from the cast/VWCF config (ScummVM `_defaultPalette`).
+    /// `member > 0` => custom palette cast member (in `default_palette_castlib`);
+    /// `member < 0` => built-in palette id; `member == 0` => unset.
+    pub default_palette_castlib: i16,
+    pub default_palette_member: i16,
 }
 
 impl ConfigChunk {
@@ -113,6 +119,32 @@ impl ConfigChunk {
         let checksum = reader.read_u32().unwrap();
         let remnants = reader.read_bytes(len as usize - reader.pos).unwrap();
 
+        // Movie default palette, parsed per ScummVM `Cast::loadConfig`. `remnants`
+        // begins at config offset 68 (just past the checksum). For Director 5+ the
+        // layout is field30(2), defPaletteNum(2), chunkBaseNum(4),
+        // defaultPalette.castLib(2), defaultPalette.member(2); for Director 4 it is
+        // field30(2) then defaultPalette.member(2). Built-in palette ids in this
+        // header start at 0 and go negative, so `member <= 0` is decremented by 1.
+        let rd_i16_be = |b: &[u8], off: usize| -> i16 {
+            if b.len() >= off + 2 { i16::from_be_bytes([b[off], b[off + 1]]) } else { 0 }
+        };
+        let mut default_palette_castlib: i16 = 0;
+        let mut default_palette_member: i16 = 0;
+        if raw_version >= 0x4B1 {
+            // Director 5+
+            default_palette_castlib = rd_i16_be(remnants, 8);
+            default_palette_member = rd_i16_be(remnants, 10);
+            if default_palette_member <= 0 { default_palette_member -= 1; }
+        } else if raw_version >= 0x45B {
+            // Director 4
+            default_palette_member = rd_i16_be(remnants, 2);
+            if default_palette_member <= 0 {
+                default_palette_member -= 1;
+            } else {
+                default_palette_castlib = 1; // DEFAULT_CAST_LIB
+            }
+        }
+
         let config = ConfigChunk {
             len: len,
             file_version: file_version,
@@ -150,6 +182,8 @@ impl ConfigChunk {
             field29: field29,
             checksum: checksum,
             remnants: remnants.to_vec(),
+            default_palette_castlib,
+            default_palette_member,
         };
 
         let computed_checksum = config.compute_checksum(dir_endian);
