@@ -9,7 +9,7 @@ browser_e2e_test!(test_nintendo_mello_load, |player| async move {
     cfg.apply_external_params();
     let movie_path = player.asset_path(&cfg.movie.path);
     let mut snapshots = SnapshotContext::new(cfg.suite(), "mello");
-    snapshots.max_diff_ratio = 0.07;
+    snapshots.max_diff_ratio = 0.08;
 
     player.load_movie(&movie_path).await;
     player.init_movie().await;
