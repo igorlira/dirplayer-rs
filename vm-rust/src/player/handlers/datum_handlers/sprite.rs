@@ -465,12 +465,18 @@ impl SpriteDatumHandlers {
                         Err(_) => {}
                     }
 
-                    // Fall back to sprite's script instance properties
+                    // Fall back to sprite's script instance properties. Same
+                    // rule as `sprite_get_prop`: resolve through
+                    // get_sprite_script_instance_ids so behaviours attached at
+                    // runtime via `scriptInstanceList.add/addAt` are included —
+                    // the sprite's internal Vec holds only score-authored ones.
                     let sprite = player.movie.score.get_sprite(sprite_num);
                     if sprite.is_none() {
                         return Ok(DatumRef::Void);
                     }
-                    let instance_refs = sprite.unwrap().script_instance_list.clone();
+                    let fallback = sprite.unwrap().script_instance_list.clone();
+                    let instance_refs =
+                        player.get_sprite_script_instance_ids(sprite_num, fallback.as_slice());
                     for instance_ref in instance_refs {
                         if let Ok(result) = script_get_prop(player, &instance_ref, &prop_name) {
                             return Ok(result);

@@ -3914,8 +3914,32 @@ pub fn sprite_get_prop(
         }
         prop_name => {
             let datum_ref = sprite.and_then(|sprite| {
+                let fallback = sprite.script_instance_list.clone();
                 reserve_player_mut(|player| {
-                    sprite.script_instance_list.iter().find_map(|behavior| {
+                    // Resolve through get_sprite_script_instance_ids, NOT the
+                    // sprite's internal Vec. A behaviour attached at runtime
+                    // with `sprite(N).scriptInstanceList.add/addAt(...)` only
+                    // ever lands in the cached Datum::List; the internal Vec
+                    // holds score-authored behaviours alone. Walking the Vec
+                    // therefore makes a runtime-added behaviour's properties
+                    // invisible to `sprite(N).someProp`.
+                    //
+                    // Merlin's Revenge spawns every character that way —
+                    // `objectDude.makeObject` calls SpriteAttachBehaviour,
+                    // which does `scriptInstanceList.addAt(pos, new(script …))`
+                    // — and each character behaviour names itself with a `pIam`
+                    // property. `ActBeginObject` then opens with
+                    //   p = spr[spr.pIam]
+                    // so `spr.pIam` came back VOID, `p` came back VOID, and the
+                    // handler ran to completion having done nothing: no team
+                    // join, `w.mode` left at #none, `Active` left at 0. Every
+                    // enemy stayed inert and rendered as its placeholder member
+                    // (a filled rect in the character's authored colour — the
+                    // black squares), while the score-authored player sprite
+                    // worked fine.
+                    let instances =
+                        player.get_sprite_script_instance_ids(sprite_id, fallback.as_slice());
+                    instances.iter().find_map(|behavior| {
                         script_get_prop_opt(player, behavior, &prop_name.to_string())
                     })
                 })
