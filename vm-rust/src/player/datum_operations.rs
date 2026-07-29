@@ -208,6 +208,41 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
+        // Director applies a scalar element-wise across a list, the same way it
+        // does for a rect ("If you add a single value to a rectangle, Lingo …
+        // adds it to each element in the rectangle" — 11.5 Scripting Dictionary,
+        // rect() entry) and the way multiply_datums already handles
+        // `list * scalar`. Scripts lean on this where a slot may hold either a
+        // vector-ish list or a plain 0: Heatwave Racing interpolates a tilt
+        // vector across four trackmap cells with
+        //   gtv = g1[3] * g1p + g2[3] * g2p + g3[3] * g3p + g4[3] * g4p
+        // where a missing cell falls back to [0,0,0,0], so that cell's `g[3]` is
+        // the integer 0 while the others are 3-element lists. Erroring on the
+        // mixed add aborted the handler; the script's own
+        // `if gtv = 0 then gtv = [0,0,0]` shows a scalar result is expected when
+        // every cell is missing.
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = right.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let sum = add_datums(item_datum, scalar.clone(), player)?;
+                ref_list.push_back(player.alloc_datum(sum));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
+        (Datum::Int(_) | Datum::Float(_), Datum::List(_, list, _)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = left.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let sum = add_datums(scalar.clone(), item_datum, player)?;
+                ref_list.push_back(player.alloc_datum(sum));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
         (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
             let intersection_count = min(list_a.len(), list_b.len());
             let mut result = VecDeque::with_capacity(intersection_count);
