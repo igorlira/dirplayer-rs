@@ -328,7 +328,10 @@ pub struct DirPlayer {
     pub keyboard_manager: KeyboardManager,
     pub float_precision: u8,
     pub last_handler_result: DatumRef,
-    pub hovered_sprite: Option<i16>,
+    /// Sprites the pointer is currently within, front-most first. Rollover
+    /// events are per-sprite (see `get_sprites_at`), so this has to be a set
+    /// rather than just the front-most sprite.
+    pub hovered_sprites: Vec<i16>,
     pub picking_mode: bool,
     pub allocator: DatumAllocator,
     pub dir_cache: HashMap<Box<str>, DirectorFile>,
@@ -599,7 +602,7 @@ impl DirPlayer {
             ime_composition: None,
             float_precision: 4,
             last_handler_result: DatumRef::Void,
-            hovered_sprite: None,
+            hovered_sprites: Vec::new(),
             picking_mode: false,
             allocator: DatumAllocator::default(),
             dir_cache: HashMap::new(),

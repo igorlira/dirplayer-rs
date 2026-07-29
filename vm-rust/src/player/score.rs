@@ -5462,6 +5462,35 @@ pub fn sprite_has_handler(player: &DirPlayer, sprite: &Sprite, names: &[&str]) -
     false
 }
 
+/// Every sprite whose active area contains the point, front-most first.
+///
+/// mouseEnter / mouseWithin / mouseLeave are per-sprite rollover events, not
+/// click events: the Scripting Dictionary defines each as running "when the
+/// mouse pointer ... the active area OF THE SPRITE", and rollOver(n) tests one
+/// nominated sprite with no reference to z-order. So a sprite in front does not
+/// consume them for the sprites behind it.
+///
+/// Merlin's Revenge stacks exactly that: the Start button is sprite 65
+/// ("startbutt", carrying bButt / bTransCol / bSpriteParams) with sprite 66
+/// ("start_butt", the label artwork, ink 36 and no behaviours at all) drawn on
+/// top and 1px larger on every side. Delivering rollover only to the front-most
+/// sprite handed every event to 66, which ignores them, so bButt never armed
+/// itself and the button was dead.
+pub fn get_sprites_at(player: &DirPlayer, x: i32, y: i32) -> Vec<u32> {
+    player
+        .movie
+        .score
+        .get_sorted_channels(player.movie.current_frame)
+        .iter()
+        .rev()
+        .filter(|channel| {
+            concrete_sprite_hit_test(player, &channel.sprite, x, y)
+                && !is_click_transparent_sprite(player, &channel.sprite)
+        })
+        .map(|channel| channel.sprite.number as u32)
+        .collect()
+}
+
 pub fn get_sprite_at(player: &DirPlayer, x: i32, y: i32, scripted: bool) -> Option<u32> {
     for channel in player.movie.score.get_sorted_channels(player.movie.current_frame).iter().rev() {
         if concrete_sprite_hit_test(player, &channel.sprite, x, y)

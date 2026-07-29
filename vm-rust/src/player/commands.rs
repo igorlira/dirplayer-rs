@@ -29,7 +29,10 @@ use super::{
     handlers::datum_handlers::player_call_datum_handler,
     player_alloc_datum, player_call_script_handler, player_dispatch_global_event,
     player_is_playing, reserve_player_mut, reserve_player_ref,
-    score::{concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at},
+    score::{
+        concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at, get_sprites_at,
+        sprite_has_handler,
+    },
     script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
@@ -984,7 +987,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
-            let (sprite_num, hovered_sprite) = reserve_player_mut(|player| {
+            reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
 
                 // Drag moveable sprites (use click_on_sprite, not mouse_down_sprite,
@@ -1030,58 +1033,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     }
                 }
 
-                let hovered_sprite = player.hovered_sprite;
-                let sprite_num = get_sprite_at(player, x, y, false);
-                // Always update hovered_sprite — set to Some(N) when the
-                // cursor is over a sprite, clear to None when it's not.
-                // Without the None case, a tile we hovered last would
-                // stay marked as hovered forever and never receive its
-                // mouseLeave event (storyscramble's BS65 #highlight
-                // would then be permanently stuck on the last tile that
-                // got the cursor — visible as a "perma highlight" gray
-                // mask on whichever tile the cursor exited from when
-                // moving off all tiles).
-                player.hovered_sprite = sprite_num.map(|n| n as i16);
-                (sprite_num, hovered_sprite)
             });
-            let prev_hover = hovered_sprite.unwrap_or(-1);
-            match sprite_num {
-                Some(sprite_num) => {
-                    if prev_hover != sprite_num as i16 {
-                        if prev_hover != -1 {
-                            player_dispatch_event_to_sprite(
-                                &"mouseLeave".to_string(),
-                                &vec![],
-                                prev_hover as u16,
-                            )
-                        }
-                        player_dispatch_event_to_sprite(
-                            &"mouseEnter".to_string(),
-                            &vec![],
-                            sprite_num as u16,
-                        );
-                    } else {
-                        player_dispatch_event_to_sprite(
-                            &"mouseWithin".to_string(),
-                            &vec![],
-                            sprite_num as u16,
-                        );
-                    }
-                }
-                None => {
-                    // Cursor moved off all sprites. Fire mouseLeave on
-                    // whatever sprite we were previously hovering so
-                    // behaviours can react (BS65 unHighlight, custom
-                    // tooltip teardown, etc.).
-                    if prev_hover != -1 {
-                        player_dispatch_event_to_sprite(
-                            &"mouseLeave".to_string(),
-                            &vec![],
-                            prev_hover as u16,
-                        )
-                    }
-                }
-            }
+            // The pointer moved, so re-evaluate which sprites it is inside.
+            // (The same pass also runs once per frame — mouseWithin is sent
+            // every frame the pointer stays inside, not only when it moves.)
+            crate::player::events::dispatch_rollover_events();
         }
         PlayerVMCommand::RightMouseDown((x, y)) => {
             if !player_is_playing().await {

@@ -93,6 +93,72 @@ pub fn player_dispatch_event_to_sprite(
 /// Returns true when a behavior called `stopEvent()`, so the caller can also
 /// skip the rest of the hierarchy it owns (the cast member script and the
 /// primary event handler live in `commands.rs`, outside this dispatch).
+/// Re-evaluate which sprites the pointer is inside and fire the rollover
+/// events. Called on every pointer move AND once per frame: `on mouseWithin`
+/// "contains statements that run when the mouse is within the active area of
+/// the sprite" (Director 11.5 Scripting Dictionary), which Director keeps
+/// sending each frame the pointer stays there — it is not a movement event.
+///
+/// Merlin's Revenge needs both halves. Its button behaviour arms itself from
+/// mouseEnter/mouseWithin and then polls the movie's own mouse object from
+/// inside mouseWithin:
+///   on mouseWithin me
+///     if p.clickposs then
+///       if g.mouse.mouse.click then p.master.buttClicked(p.action)
+/// so with mouseWithin only on movement, a click on a stationary cursor was
+/// never seen.
+///
+/// The hovered set is narrowed to sprites that can actually respond, plus the
+/// front-most one whatever it is. Dispatching to a sprite with no matching
+/// behaviour falls through to the frame and movie scripts, so sending to every
+/// overlapping sprite would invoke a movie-level `on mouseWithin` once per
+/// layer; keeping the front-most as the sole fall-through preserves exactly one
+/// invocation.
+pub fn dispatch_rollover_events() {
+    let (now_hovered, prev_hovered) = reserve_player_mut(|player| {
+        let (x, y) = player.mouse_loc;
+        let prev_hovered = std::mem::take(&mut player.hovered_sprites);
+        let now_hovered: Vec<i16> = crate::player::score::get_sprites_at(player, x, y)
+            .iter()
+            .enumerate()
+            .filter(|(idx, num)| {
+                *idx == 0
+                    || player
+                        .movie
+                        .score
+                        .get_sprite(**num as i16)
+                        .map(|sprite| {
+                            crate::player::score::sprite_has_handler(
+                                player,
+                                sprite,
+                                &["mouseEnter", "mouseWithin", "mouseLeave"],
+                            )
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|(_, num)| *num as i16)
+            .collect();
+        player.hovered_sprites = now_hovered.clone();
+        (now_hovered, prev_hovered)
+    });
+
+    // Leaving is reported before entering, so a behaviour that tears down on
+    // mouseLeave can't clobber the state a freshly entered sprite just set.
+    for sprite_num in &prev_hovered {
+        if !now_hovered.contains(sprite_num) {
+            player_dispatch_event_to_sprite(&"mouseLeave".to_string(), &vec![], *sprite_num as u16);
+        }
+    }
+    for sprite_num in &now_hovered {
+        let handler = if prev_hovered.contains(sprite_num) {
+            "mouseWithin"
+        } else {
+            "mouseEnter"
+        };
+        player_dispatch_event_to_sprite(&handler.to_string(), &vec![], *sprite_num as u16);
+    }
+}
+
 pub async fn player_dispatch_event_to_sprite_targeted(
     handler_name: &str,
     args: &Vec<DatumRef>,

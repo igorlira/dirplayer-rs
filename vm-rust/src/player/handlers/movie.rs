@@ -1058,6 +1058,13 @@ impl MovieHandlers {
             player.in_prepare_frame = true;
         });
 
+        // mouseEnter/mouseWithin/mouseLeave are per-frame rollover events, not
+        // movement events — Director keeps sending mouseWithin every frame the
+        // pointer stays inside a sprite's active area. Re-evaluate the hovered
+        // set here so a behaviour polling from mouseWithin runs even while the
+        // cursor is still.
+        crate::player::events::dispatch_rollover_events();
+
         // Relay prepareFrame to timeout targets
         dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
 
