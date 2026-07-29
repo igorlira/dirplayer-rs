@@ -4306,6 +4306,28 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
     if !in_range {
         return Ok(());
     }
+    // Assigning VOID to an appearance property leaves it alone. VOID is not a
+    // value any of these can hold, and Director neither raises nor coerces it
+    // to zero — Merlin's Revenge proves both halves. Its bSpriteParams mirrors
+    // a cached list onto the sprite every frame:
+    //   p.spr.blend = p.a.blend
+    //   p.spr.color = p.a.color
+    // and for characters both cache entries end up VOID (written by handlers
+    // like bFlashHit03old's `sp.c.chr.colour.duplicate()`). Raising killed the
+    // handler on `color`; coercing `blend` to 0 would instead make every one of
+    // those characters invisible. The game plays fine in Shockwave, so Director
+    // must be discarding the write.
+    //
+    // Inferred from the movie, not from the Scripting Dictionary, which does
+    // not say what these setters do with VOID.
+    if matches!(value, Datum::Void)
+        && matches!(
+            prop_name,
+            "color" | "bgColor" | "bgcolor" | "backColor" | "blend"
+        )
+    {
+        return Ok(());
+    }
     if sprite_set_prop_is_noop(sprite_id, prop_name, &value)? {
         return Ok(());
     }
