@@ -7241,7 +7241,47 @@ fn get_or_init_node_transform(
     node_name: &str,
 ) -> [f32; 16] {
     let key = canonical_node_key(player, member_ref, node_name);
-    let current = get_node_transform(player, member_ref, &key);
+
+    // Prefer the node's PERSISTENT transform datum when one exists. It is the
+    // live value: a script mutating `model.transform.<prop>` writes there, and
+    // node_transforms only catches up at the next sync_persistent_transforms
+    // (once per rendered frame). Reading the stale cache here meant a setter
+    // that rebuilds the matrix — `worldPosition` does exactly that — wrote the
+    // pre-mutation rotation straight back over the datum via
+    // set_node_transform. Heatwave Racing drives every car with
+    //   my.transform.rotation = vector(0, 0, 180 + car_angle)
+    //   my.transform.rotate(my.worldPosition, tiltvector, -tiltangle)
+    //   my.worldPosition = carmodelposition
+    // in that order, so each frame's heading was discarded by the following
+    // position write and the cars slid around the track without ever turning.
+    let persistent = {
+        let datum_ref = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)
+            .and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| {
+                w3d.runtime_state
+                    .node_transform_datums
+                    .get(&key)
+                    .or_else(|| {
+                        w3d.runtime_state
+                            .node_transform_datums
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                            .map(|(_, v)| v)
+                    })
+            })
+            .cloned();
+        datum_ref.and_then(|r| match player.get_datum(&r) {
+            Datum::Transform3d(m64) => {
+                let m32: [f32; 16] = m64.map(|v| v as f32);
+                if m32.iter().all(|v| v.is_finite()) { Some(m32) } else { None }
+            }
+            _ => None,
+        })
+    };
+    let current = persistent.unwrap_or_else(|| get_node_transform(player, member_ref, &key));
 
     // Ensure it's in the runtime overrides
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
