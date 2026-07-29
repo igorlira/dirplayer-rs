@@ -310,6 +310,22 @@ impl Movie {
             "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
             "maxInteger" => Ok(Datum::Int(i32::MAX)),
             "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            // Memory-reporting companions to `the memorySize`, in bytes.
+            //   freeBytes  — total free memory, not necessarily contiguous
+            //   freeBlock  — the largest free CONTIGUOUS block
+            // (Director 11.5 Scripting Dictionary, pp. 364-365.) Movies use
+            // these to gate on minimum requirements — Heatwave Racing's
+            // `getspec` frame script does
+            //   tmemfree = the freeBytes / 1024 / 1024
+            // — so returning nothing aborts the handler. There is no such
+            // budget in a browser: the WASM heap grows on demand and no API
+            // exposes a figure comparable to a Director partition. Report a
+            // plausible amount of the 256 MB we claim for memorySize, with
+            // freeBlock <= freeBytes as the spec requires ("differs from
+            // freeBlock in that it reports ALL free memory"), so requirement
+            // checks pass instead of failing on a fabricated shortage.
+            "freeBytes" => Ok(Datum::Int(192 * 1024 * 1024)),
+            "freeBlock" => Ok(Datum::Int(128 * 1024 * 1024)),
             // `_system.colorDepth` — monitor color depth (Director 11.5
             // Scripting Dictionary, valid values 1/2/4/8/16/32). The web
             // canvas is true-color, so report 32. Setting it is a no-op
