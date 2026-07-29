@@ -3349,7 +3349,7 @@ impl WebGL2Renderer {
         );
 
         // Build colorize parameters if colorize is active
-        // - For 1-bit bitmaps with ink 0 or 36: ALWAYS apply foreColor/bgColor
+        // - For 1-bit bitmaps with ink 0, 1 or 36: ALWAYS apply foreColor/bgColor
         //   (Director behavior - 1-bit bitmaps always use sprite colors)
         // - For 2-8 bit indexed bitmaps: only colorize if has_fore_color or has_back_color is set via Lingo
         // - For 32-bit bitmaps with ink 0, 8, 9: general colorize (requires has_fore_color or has_back_color)
@@ -3358,12 +3358,25 @@ impl WebGL2Renderer {
         let is_indexed = bitmap_bit_depth >= 1 && bitmap_bit_depth <= 8;
         let is_ink36_indexed = is_indexed && ink == 36;
 
-        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || ink == 36) {
-            // 1-bit bitmaps: apply foreColor/bgColor, but only when the sprite
-            // has explicitly set them OR the values differ from Director defaults
-            // (foreColor=black, bgColor=white). Otherwise the bitmap renders with
-            // its natural colors. Without this guard, a default-black foreColor
-            // would tint the bitmap solidly when it shouldn't be tinted at all.
+        let colorize_params = if bitmap_bit_depth == 1 && (ink == 0 || ink == 1 || ink == 36) {
+            // Ink 1 (Transparent) colorizes a 1-bit bitmap exactly as Copy and
+            // Background Transparent do — a 1-bit image carries coverage, not
+            // colour, so its two indices only mean anything once the sprite's
+            // fore/bgColor are substituted in. The CPU renderer already treats
+            // every ink this way (drawing.rs: index 0 transparent, index 1 drawn
+            // in the resolved foreColor); leaving ink 1 out here made the two
+            // renderers disagree.
+            //
+            // Merlin's Revenge draws its spell blast this way — 1-bit artwork
+            // (decoded into an 8-bit buffer, so `member.depth` reports 8 while
+            // `original_bit_depth` stays 1), ink 1, sprite.color rgb(245,195,5),
+            // palette systemWin. With no colorize params the raw indices went to
+            // the shader, and systemWin maps index 255 to BLACK — a correctly
+            // shaped, completely black blast.
+            //
+            // The apply_fg/apply_bg guards below still hold, so a sprite sitting
+            // on Director's defaults (foreColor black, bgColor white) is not
+            // tinted; only an explicitly set or non-default colour is.
             let apply_fg = has_fore_color || fg_color_rgb != (0, 0, 0);
             let apply_bg = has_back_color || bg_color_rgb != (255, 255, 255);
             Some((
@@ -4430,6 +4443,20 @@ impl WebGL2Renderer {
         //   regardless of has_fore_color flag - this is Director behavior.
         // Note: Ink 40 does NOT use colorization - it only uses color-key transparency
         let allow_colorize = match (bitmap.original_bit_depth, ink as u32) {
+            // 1-bit: EVERY ink. A 1-bit image stores coverage, not colour, so
+            // its two indices only mean something once fore/bgColor are
+            // substituted in. drawing.rs doesn't list this because its 1-bit
+            // case is handled in a separate branch that runs BEFORE
+            // `allows_colorize` and applies foreColor unconditionally; WebGL2
+            // has no such branch, so the permission has to be granted here or
+            // the two renderers disagree.
+            //
+            // Merlin's Revenge's spell blast is 1-bit artwork drawn with ink 1
+            // (Transparent) and sprite.color rgb(245,195,5). Without this the
+            // colorize params were built and then discarded at the apply site,
+            // the raw indices reached the shader, and systemWin maps index 255
+            // to black — a correctly shaped, entirely black blast.
+            (1, _) => true,
             (32, 0) => true,                    // 32-bit ink 0: grayscale remap
             (32, 8) | (32, 9) => true,          // 32-bit ink 8/9: foreColor only
             (32, 36) => true,                   // 32-bit ink 36: foreColor MULTIPLICATIVE tint
@@ -4951,7 +4978,7 @@ impl WebGL2Renderer {
 
                         // ---------- 1-BIT BITMAPS ----------
                         1 => {
-                            // For 1-bit bitmaps with ink 0 or 36:
+                            // For 1-bit bitmaps with ink 0, 1 or 36:
                             // - foreground (index 255, bit=1)
                             // - background (index 0, bit=0) 
                             // Note: 1-bit bitmaps store indices as 0 and 255 (not 0 and 1)
