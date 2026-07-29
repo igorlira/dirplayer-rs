@@ -5369,7 +5369,26 @@ fn is_click_transparent_sprite(player: &DirPlayer, sprite: &Sprite) -> bool {
 }
 
 fn sprite_has_mouse_handler(player: &DirPlayer, sprite: &Sprite) -> bool {
-    sprite_has_handler(player, sprite, &["mouseDown", "mouseUp", "mouseUpOutSide"])
+    // Rollover handlers count as much as click handlers. A behaviour can drive
+    // a button entirely from mouseEnter/mouseWithin/mouseLeave without ever
+    // declaring mouseDown or mouseUp — Merlin's Revenge's bButt does exactly
+    // that, arming itself on enter and polling the movie's own mouse object
+    // from within. Listing only the click handlers made every one of its text
+    // buttons ("Start Game", "Replay Sequence", …) click-transparent under the
+    // non-editable-text rule below, so the hit test skipped them entirely:
+    // `the rollOver` reported 0 with the cursor sitting inside the button.
+    sprite_has_handler(
+        player,
+        sprite,
+        &[
+            "mouseDown",
+            "mouseUp",
+            "mouseUpOutSide",
+            "mouseEnter",
+            "mouseWithin",
+            "mouseLeave",
+        ],
+    )
 }
 
 /// Returns true when any behaviour on `sprite` (sprite-attached, Lingo-added,
