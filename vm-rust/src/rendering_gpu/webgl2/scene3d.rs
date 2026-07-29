@@ -2787,8 +2787,26 @@ void main() {
                     .and_then(|rs| rs.node_visibility.get(&model_node.name))
                     .copied()
                     .unwrap_or(1); // no entry = default #front
-                if mode == 2 || mode == 3 {
-                    // #back or #both — disable culling (show both sides)
+                if mode == 2 {
+                    // #back — draw ONLY back faces, i.e. cull the front ones.
+                    // This is not the same as #both: treating it as "disable
+                    // culling" makes a #back model fully opaque from outside,
+                    // which breaks the standard cartoon-outline trick — a
+                    // slightly scaled-up black clone of a model drawn #back so
+                    // only its far side shows as a rim. Heatwave Racing builds
+                    // exactly that per car:
+                    //   blackbodymodel = model("<car> body").cloneDeep(...)
+                    //   blackbodymodel.shaderList[n] = <solid black shader>
+                    //   blackbodymodel.visibility = #back
+                    //   blackbodymodel.transform.scale = vector(bbsc,bbsc,bbsc)
+                    // With culling off, that black shell covered the textured
+                    // livery and every car rendered as a black silhouette.
+                    // Note this renderer's global default is cull_face(FRONT)
+                    // for #front, so #back is its opposite: BACK.
+                    gl.enable(WebGl2RenderingContext::CULL_FACE);
+                    gl.cull_face(WebGl2RenderingContext::BACK);
+                } else if mode == 3 {
+                    // #both — genuinely show both sides.
                     gl.disable(WebGl2RenderingContext::CULL_FACE);
                 }
                 mode
