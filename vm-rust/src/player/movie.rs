@@ -291,6 +291,23 @@ impl Movie {
             // button / `the traceScript` (Director 11.5 Scripting Dictionary).
             "trace" | "traceScript" => Ok(datum_bool(self.trace_script)),
             "activeWindow" => Ok(Datum::Stage),
+            // `the frontWindow` — "indicates which movie in a window (MIAW) is
+            // currently frontmost on the screen… When the Stage is frontmost,
+            // frontWindow is the Stage" (Director 11.5 Scripting Dictionary,
+            // Player property, read-only). It returns VOID only when a media
+            // editor or floating palette is frontmost, neither of which exists
+            // outside the authoring environment. dirplayer has no MIAW support,
+            // so the Stage is always frontmost — same reasoning as
+            // `the activeWindow` above.
+            //
+            // Merlin's Revenge gates all mouse input on it: its `on int`
+            // handler does
+            //   clickedWindow = (the windowList).getPos(the frontWindow)
+            //   if clickedWindow = winnum then Active = 1
+            // and with an empty windowList both sides are 0, so the click is
+            // accepted. Erroring here aborted the handler and the game took no
+            // input at all.
+            "frontWindow" => Ok(Datum::Stage),
             // `the windowList` is the Player property listing all open
             // movie-in-a-window (MIAW) windows (Director 11.5 Scripting
             // Dictionary). dirplayer has no MIAW support, so it's always empty —

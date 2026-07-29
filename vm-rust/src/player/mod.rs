@@ -2910,7 +2910,16 @@ impl DirPlayer {
             "altDown" => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
             "keyCode" => Ok(self.alloc_datum(Datum::Int(self.keyboard_manager.key_code() as i32))),
             "key" => Ok(self.alloc_datum(Datum::String(self.keyboard_manager.key()))),
-            _ => Err(ScriptError::new(format!("Unknown player prop {}", prop))),
+            // Several documented Player properties (frontWindow, activeWindow,
+            // windowList, memorySize, …) are served from Movie::get_prop, which
+            // is where `the <name>` resolves. Fall through so the equivalent
+            // `_player.<name>` form reaches the same getter instead of erroring
+            // — the Scripting Dictionary gives `_player.frontWindow` as the
+            // primary syntax for exactly these.
+            _ => {
+                let datum = self.movie.get_prop(prop)?;
+                Ok(self.alloc_datum(datum))
+            }
         }
     }
 
