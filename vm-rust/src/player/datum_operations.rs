@@ -254,6 +254,29 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
+        // Two property lists combine value-by-value, keeping the LEFT list's
+        // property names — the same positional, shared-prefix rule as the
+        // linear-list arm directly above. The Scripting Dictionary documents
+        // arithmetic for rect() and point() but is silent on lists, so this
+        // mirrors the linear case rather than matching keys up; in practice both
+        // operands come from one template and their key order agrees.
+        //
+        // Merlin's Revenge 2 sums two speed tables when a character morphs:
+        //   p.w.movSpeeds = p.w.movSpeeds + pmt.info.speeds
+        // where each is [#norm: .., #easy: .., #hard: .., #web: .., #nav: ..].
+        (Datum::PropList(pairs_a, _), Datum::PropList(pairs_b, _)) => {
+            let count = min(pairs_a.len(), pairs_b.len());
+            let mut result = VecDeque::with_capacity(count);
+            for i in 0..count {
+                let key = pairs_a[i].0.clone();
+                let a = player.get_datum(&pairs_a[i].1).clone();
+                let b = player.get_datum(&pairs_b[i].1).clone();
+                let value = add_datums(a, b, player)?;
+                let value_ref = player.alloc_datum(value);
+                result.push_back((key, value_ref));
+            }
+            Ok(Datum::PropList(result, false))
+        }
         (Datum::String(s), Datum::List(_, list, _)) => {
             let formatted = list
                 .iter()
@@ -453,6 +476,27 @@ pub fn subtract_datums(
                 result.push_back(player.alloc_datum(result_datum));
             }
             Ok(Datum::List(DatumType::List, result, false))
+        }
+        // Two property lists combine value-by-value, keeping the LEFT list's
+        // property names — the same positional, shared-prefix rule as the
+        // linear-list arm directly above. The Scripting Dictionary documents
+        // arithmetic for rect() and point() but is silent on lists, so this
+        // mirrors the linear case rather than matching keys up; in practice both
+        // operands come from one template and their key order agrees.
+        //
+        // Included so subtraction stays symmetric with addition.
+        (Datum::PropList(pairs_a, _), Datum::PropList(pairs_b, _)) => {
+            let count = min(pairs_a.len(), pairs_b.len());
+            let mut result = VecDeque::with_capacity(count);
+            for i in 0..count {
+                let key = pairs_a[i].0.clone();
+                let a = player.get_datum(&pairs_a[i].1).clone();
+                let b = player.get_datum(&pairs_b[i].1).clone();
+                let value = subtract_datums(a, b, player)?;
+                let value_ref = player.alloc_datum(value);
+                result.push_back((key, value_ref));
+            }
+            Ok(Datum::PropList(result, false))
         }
         (Datum::Point(a, af), Datum::Point(b, bf)) => {
             let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x - y);
