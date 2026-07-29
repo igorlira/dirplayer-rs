@@ -254,24 +254,6 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
-        (Datum::List(_, list, _), Datum::Int(i)) => {
-            let mut result_refs = VecDeque::new();
-            for r in list {
-                let datum = player.get_datum(r);
-                let result_datum = match datum {
-                    Datum::Int(n) => Datum::Int(n + i),
-                    Datum::Float(n) => Datum::Float(n + *i as f64),
-                    _ => {
-                        return Err(ScriptError::new(format!(
-                            "Invalid list element for add_datums: {}",
-                            r
-                        )))
-                    }
-                };
-                result_refs.push_back(player.alloc_datum(result_datum));
-            }
-            Ok(Datum::List(DatumType::List, result_refs, false))
-        }
         (Datum::String(s), Datum::List(_, list, _)) => {
             let formatted = list
                 .iter()
@@ -302,8 +284,23 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             let (vals, flags) = inline_binop_2(av, af, *b, *bf, |x, y| x + y);
             Ok(Datum::Point(vals, flags))
         }
+        // Scalar spreads across every component — see the note on the matching
+        // `subtract_datums` arms. Addition already had `point + int`; the float
+        // and reversed forms were missing.
         (Datum::Point(a, af), Datum::Int(b)) => {
             let (vals, flags) = inline_scalar_2(*a, *af, *b as f64, false, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
+        }
+        (Datum::Point(a, af), Datum::Float(b)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *b, true, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
+        }
+        (Datum::Int(a), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *a as f64, false, |x, y| x + y);
+            Ok(Datum::Point(vals, flags))
+        }
+        (Datum::Float(a), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *a, true, |x, y| x + y);
             Ok(Datum::Point(vals, flags))
         }
         (Datum::ColorRef(a), Datum::ColorRef(b)) => match (a, b) {
@@ -473,6 +470,27 @@ pub fn subtract_datums(
         }
         (Datum::Int(a), Datum::Point(b, bf)) => {
             let (vals, flags) = inline_scalar_2(*b, *bf, *a as f64, false, |b, a| a - b);
+            Ok(Datum::Point(vals, flags))
+        }
+        (Datum::Float(a), Datum::Point(b, bf)) => {
+            let (vals, flags) = inline_scalar_2(*b, *bf, *a, true, |b, a| a - b);
+            Ok(Datum::Point(vals, flags))
+        }
+        // A scalar spreads across every component, the same rule the Scripting
+        // Dictionary states for rectangles ("If you add a single value to a
+        // rectangle, Lingo... adds it to each element in the rectangle") and the
+        // same one the Rect arms above and multiply/divide already follow. Only
+        // the REVERSED form (`scalar - point`) existed here, so the far more
+        // common `point - scalar` raised "Invalid operands".
+        //
+        // Merlin's Revenge 2 converts a 1-based grid cell to a 0-based offset
+        // with `maploc = point(c, r) - 1` while drawing the minimap.
+        (Datum::Point(a, af), Datum::Int(b)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *b as f64, false, |x, y| x - y);
+            Ok(Datum::Point(vals, flags))
+        }
+        (Datum::Point(a, af), Datum::Float(b)) => {
+            let (vals, flags) = inline_scalar_2(*a, *af, *b, true, |x, y| x - y);
             Ok(Datum::Point(vals, flags))
         }
         (Datum::ColorRef(a), Datum::ColorRef(b)) => match (a, b) {
