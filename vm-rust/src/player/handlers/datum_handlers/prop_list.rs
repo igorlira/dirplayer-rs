@@ -1047,9 +1047,26 @@ impl PropListDatumHandlers {
 
                             items[actual_index].clone()
                         }
-                        // Nested PropList: use second arg as key for the inner PropList
+                        // Nested PropList: an INTEGER subscript is POSITIONAL,
+                        // like the plain-List arm above and like the matching
+                        // write path (`setProp` → `PropListUtils::set_at`).
+                        // Only a non-integer subscript is a property key, which
+                        // is what `get_at` splits on.
+                        //
+                        // Reading it as a key made `p.list[i]` VOID for every
+                        // integer i, since the keys are symbols. Merlin's
+                        // Revenge expands its animation frame ranges with
+                        //   repeat while an <= numanims
+                        //     nextan = p.anims[an].sequence
+                        //     if ilk(nextan, #list) and nextan.count = 3 then
+                        //       ListInterpret(nextan)     -- [2, #til, 9] -> [2..9]
+                        // so `nextan` was VOID, `ilk` failed, and no sequence was
+                        // ever expanded. The player then animated frame 2, then
+                        // `#til` — `member(#til, N)` is not a member, so the
+                        // sprite blanked for a frame every walk cycle: the
+                        // blinking wizard.
                         Datum::PropList(inner_pairs, _) => {
-                            PropListUtils::get_by_key(&inner_pairs, index_ref, &player.allocator)?
+                            PropListUtils::get_at(&inner_pairs, index_ref, &player.allocator)?
                         }
                         // Point: index 1 = locH (x), index 2 = locV (y)
                         Datum::Point(vals, flags) => {
