@@ -390,6 +390,35 @@ pub fn datum_equals_member(
 }
 
 #[allow(dead_code)]
+/// Order a string against a number.
+///
+/// Director reads the string as a number when it can — `"10" > 9` is TRUE, so
+/// this cannot be a plain text comparison. When the string is not numeric it
+/// falls back to comparing text, with the number rendered as its string form;
+/// `"none" > 0` is then TRUE because 'n' sorts after '0'.
+///
+/// Both halves are load-bearing. Symbols compare as their names, so this is
+/// also the rule for `symbol > number`, and Merlin's Revenge depends on it:
+///
+///   squadNum = teamInfo.squadNum          -- #none when the object has no slot
+///   objs = p.teams[teamNum][objectType]   -- []
+///   numObjs = objs.count                  -- 0
+///   if not (squadNum > numObjs) then
+///     objToDel = objs[squadNum]           -- only reached if #none <= 0
+///
+/// Treating the non-numeric string as 0 made `#none > 0` false, so the guard
+/// let through `objs[#none]` on an empty list and every character teardown
+/// (leaveTeam) died with an index error.
+fn string_number_ordering(text: &str, number: f64, number_text: &str) -> std::cmp::Ordering {
+    if let Ok(value) = text.trim().parse::<f64>() {
+        return value
+            .partial_cmp(&number)
+            .unwrap_or(std::cmp::Ordering::Equal);
+    }
+    text.to_ascii_lowercase()
+        .cmp(&number_text.to_ascii_lowercase())
+}
+
 pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
     // See `datum_less_than`: a string chunk compares by its resolved text, and
     // a sprite reference compares by its sprite (channel) number.
@@ -417,31 +446,34 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         (Datum::Int(left), Datum::Int(right)) => Ok(*left > *right),
         (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) > *right),
         (Datum::Int(left), Datum::Void) => Ok(*left > 0),
-        (Datum::Int(left), Datum::String(right)) => {
-            if let Ok(right_number) = right.parse::<i32>() {
-                Ok(*left > right_number)
-            } else {
-                Ok(right.is_empty())
-            }
-        }
-        
+        (Datum::Int(left), Datum::String(right)) => Ok(string_number_ordering(
+            right,
+            *left as f64,
+            &left.to_string(),
+        )
+        .is_lt()),
+
         // Float comparisons
         (Datum::Float(left), Datum::Int(right)) => Ok(*left > (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left > *right),
         (Datum::Float(left), Datum::Void) => Ok(*left > 0.0),
+        (Datum::Float(left), Datum::String(right)) => {
+            Ok(string_number_ordering(right, *left, &left.to_string()).is_lt())
+        }
         
         // Void comparisons - Void is never > any number
         (Datum::Void, Datum::Int(_)) => Ok(false),
         (Datum::Void, Datum::Float(_)) => Ok(false),
         
-        // String vs number: Director coerces strings to numbers (empty string = 0)
-        (Datum::String(left), Datum::Int(right)) => {
-            let left_number = left.parse::<i32>().unwrap_or(0);
-            Ok(left_number > *right)
-        }
+        // String vs number — see `string_number_ordering`.
+        (Datum::String(left), Datum::Int(right)) => Ok(string_number_ordering(
+            left,
+            *right as f64,
+            &right.to_string(),
+        )
+        .is_gt()),
         (Datum::String(left), Datum::Float(right)) => {
-            let left_number = left.parse::<f64>().unwrap_or(0.0);
-            Ok(left_number > *right)
+            Ok(string_number_ordering(left, *right, &right.to_string()).is_gt())
         }
 
         // Point comparisons
@@ -540,18 +572,20 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         (Datum::Int(left), Datum::Int(right)) => Ok(*left < *right),
         (Datum::Int(left), Datum::Float(right)) => Ok((*left as f64) < *right),
         (Datum::Int(left), Datum::Void) => Ok(*left < 0),
-        (Datum::Int(left), Datum::String(right)) => {
-            if let Ok(right_number) = right.parse::<i32>() {
-                Ok(*left < right_number)
-            } else {
-                Ok(!right.is_empty())
-            }
-        }
-        
+        (Datum::Int(left), Datum::String(right)) => Ok(string_number_ordering(
+            right,
+            *left as f64,
+            &left.to_string(),
+        )
+        .is_gt()),
+
         // Float comparisons
         (Datum::Float(left), Datum::Int(right)) => Ok(*left < (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Ok(*left < *right),
         (Datum::Float(left), Datum::Void) => Ok(*left < 0.0),
+        (Datum::Float(left), Datum::String(right)) => {
+            Ok(string_number_ordering(right, *left, &left.to_string()).is_gt())
+        }
         
         // Void comparisons - Void is always < any number
         (Datum::Void, Datum::Int(_)) => Ok(true),
@@ -575,14 +609,15 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             Ok(*n < (vals[0] as i32) || *n < (vals[1] as i32))
         }
 
-        // String vs number: Director coerces strings to numbers (empty string = 0)
-        (Datum::String(left), Datum::Int(right)) => {
-            let left_number = left.parse::<i32>().unwrap_or(0);
-            Ok(left_number < *right)
-        }
+        // String vs number — see `string_number_ordering`.
+        (Datum::String(left), Datum::Int(right)) => Ok(string_number_ordering(
+            left,
+            *right as f64,
+            &right.to_string(),
+        )
+        .is_lt()),
         (Datum::String(left), Datum::Float(right)) => {
-            let left_number = left.parse::<f64>().unwrap_or(0.0);
-            Ok(left_number < *right)
+            Ok(string_number_ordering(left, *right, &right.to_string()).is_lt())
         }
 
         // String / Symbol comparisons — Director compares case-insensitively
