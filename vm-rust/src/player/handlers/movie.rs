@@ -2,7 +2,7 @@ use log::{debug, warn, error};
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
+        cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF},
         datum_formatting::format_datum, ScriptInstanceRef, Score,
         reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
         player_call_script_handler,
@@ -99,6 +99,24 @@ impl MovieHandlers {
                             cast_lib: cast_num,
                             cast_member: member_num,
                         })))
+                    } else if member_num == 0 {
+                        // `member(0, 0)` is Director's NULL member reference —
+                        // the value an EMPTY sprite channel reports for its
+                        // member — so it must equal NULL_CAST_MEMBER_REF, not
+                        // the invalid (-1, -1) sentinel. Scripts scan the score
+                        // with exactly this comparison, and returning the
+                        // invalid ref makes every empty channel look occupied.
+                        //
+                        // Merlin's Revenge 3 snapshots a screen with
+                        //   repeat with i = 1 to the lastChannel
+                        //     if sprite(i).member <> member(0, 0) then
+                        //       ... thelist.append(nMark)
+                        // With lastChannel at 1005 that produced ~1005 marks
+                        // instead of a few dozen, and drawing the screen then
+                        // requested 1010 sprites from a 999-sprite pool,
+                        // exhausting it on the first screen. Everything
+                        // downstream got VOID for its sprite.
+                        Ok(player.alloc_datum(Datum::CastMember(NULL_CAST_MEMBER_REF)))
                     } else {
                         Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF)))
                     }
