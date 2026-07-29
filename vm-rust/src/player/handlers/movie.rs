@@ -843,8 +843,17 @@ impl MovieHandlers {
         })
     }
 
+    /// `stopEvent()` — Director 11.5 Scripting Dictionary, Movie method:
+    /// "prevents scripts from passing an event message to subsequent locations
+    /// in the message hierarchy… Neither subsequent scripts nor other behaviors
+    /// on the sprite receive the event if it is stopped in this manner."
+    ///
+    /// The event-dispatch loops read (and clear) this flag; see
+    /// `player_invoke_event_to_instances` / `player_invoke_static_event`.
     pub fn stop_event(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // TODO stop event
+        reserve_player_mut(|player| {
+            player.event_stopped = true;
+        });
         Ok(DatumRef::Void)
     }
 

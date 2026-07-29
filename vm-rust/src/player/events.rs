@@ -90,11 +90,14 @@ pub fn player_dispatch_event_to_sprite(
     .unwrap();
 }
 
+/// Returns true when a behavior called `stopEvent()`, so the caller can also
+/// skip the rest of the hierarchy it owns (the cast member script and the
+/// primary event handler live in `commands.rs`, outside this dispatch).
 pub async fn player_dispatch_event_to_sprite_targeted(
     handler_name: &str,
     args: &Vec<DatumRef>,
     sprite_num: u16,
-) {
+) -> bool {
     let instance_ids = reserve_player_mut(|player| {
         // Check the cache first — it may contain extra instances added
         // via scriptInstanceList.add() (e.g. goal parent scripts).
@@ -109,7 +112,7 @@ pub async fn player_dispatch_event_to_sprite_targeted(
         })
     });
     let Some(instance_ids) = instance_ids else {
-        return;
+        return false;
     };
 
     player_wait_available().await;
@@ -128,11 +131,18 @@ pub async fn player_dispatch_event_to_sprite_targeted(
     // loader stalled. And with multiple behaviors it fired the static scripts
     // once per non-handling behavior. `player_invoke_targeted_event` with the
     // full instance list does the right thing in both cases.
-    let _ = player_invoke_targeted_event(
+    //
+    // The `stopEvent()` scope is opened here rather than delegated to
+    // `player_invoke_targeted_event` so the flag can be read back out before
+    // it's restored, and reported to the caller.
+    let prev_stopped =
+        reserve_player_mut(|player| std::mem::replace(&mut player.event_stopped, false));
+    let _ = player_invoke_targeted_event_inner(
         handler_name,
         args,
         Some(&instance_ids),
     ).await;
+    reserve_player_mut(|player| std::mem::replace(&mut player.event_stopped, prev_stopped))
 }
 
 pub async fn player_invoke_event_to_instances(
@@ -165,6 +175,16 @@ pub async fn player_invoke_event_to_instances(
                     // receive the event. `pass` only controls propagation
                     // beyond behaviors to cast member/frame/movie scripts.
                 }
+                // `stopEvent()` DOES break: the Scripting Dictionary is
+                // explicit that "neither subsequent scripts nor other
+                // behaviors on the sprite receive the event". Heatwave
+                // Racing's "main menu scroll bhv" relies on this — clicking
+                // an off-centre menu entry scrolls the carousel and calls
+                // stopEvent() so the "Jump to Marker Button" behavior on the
+                // same sprite does NOT navigate.
+                if reserve_player_ref(|player| player.event_stopped) {
+                    return Ok(true);
+                }
             }
             Err(err) => {
                 if err.code != ScriptErrorCode::Abort {
@@ -188,7 +208,38 @@ pub async fn player_invoke_event_to_instances(
     Ok(handled)
 }
 
+/// Run one event dispatch with a fresh `stopEvent()` scope.
+///
+/// `stopEvent()` "applies only to the current event being handled" (Director
+/// 11.5 Scripting Dictionary), so each dispatch starts with the flag clear and
+/// restores whatever the enclosing dispatch had — otherwise a `sendSprite()`
+/// made from inside a stopped handler would clear the outer event's flag and
+/// let the rest of the hierarchy run after all.
+async fn with_event_scope<F, T>(f: F) -> Result<T, ScriptError>
+where
+    F: std::future::Future<Output = Result<T, ScriptError>>,
+{
+    let prev_stopped =
+        reserve_player_mut(|player| std::mem::replace(&mut player.event_stopped, false));
+    let result = f.await;
+    reserve_player_mut(|player| player.event_stopped = prev_stopped);
+    result
+}
+
 pub async fn player_invoke_targeted_event(
+    handler_name: &str,
+    args: &Vec<DatumRef>,
+    instance_refs: Option<&Vec<ScriptInstanceRef>>,
+) -> Result<DatumRef, ScriptError> {
+    with_event_scope(player_invoke_targeted_event_inner(
+        handler_name,
+        args,
+        instance_refs,
+    ))
+    .await
+}
+
+async fn player_invoke_targeted_event_inner(
     handler_name: &str,
     args: &Vec<DatumRef>,
     instance_refs: Option<&Vec<ScriptInstanceRef>>,
@@ -206,6 +257,13 @@ pub async fn player_invoke_targeted_event(
 }
 
 pub async fn player_invoke_frame_and_movie_scripts(
+    handler_name: &str,
+    args: &Vec<DatumRef>,
+) -> Result<DatumRef, ScriptError> {
+    with_event_scope(player_invoke_frame_and_movie_scripts_inner(handler_name, args)).await
+}
+
+async fn player_invoke_frame_and_movie_scripts_inner(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {
@@ -275,7 +333,7 @@ pub async fn player_invoke_frame_and_movie_scripts(
         }
         let result = result?;
 
-        if !result.passed {
+        if !result.passed || reserve_player_ref(|player| player.event_stopped) {
             break;
         }
     }
@@ -362,7 +420,7 @@ pub async fn player_invoke_static_event(
         });
         let result = call_result?;
 
-        if !result.passed {
+        if !result.passed || reserve_player_ref(|player| player.event_stopped) {
             handled = true;
             break;
         }
@@ -371,6 +429,13 @@ pub async fn player_invoke_static_event(
 }
 
 pub async fn player_invoke_global_event(
+    handler_name: &str,
+    args: &Vec<DatumRef>,
+) -> Result<DatumRef, ScriptError> {
+    with_event_scope(player_invoke_global_event_inner(handler_name, args)).await
+}
+
+async fn player_invoke_global_event_inner(
     handler_name: &str,
     args: &Vec<DatumRef>,
 ) -> Result<DatumRef, ScriptError> {

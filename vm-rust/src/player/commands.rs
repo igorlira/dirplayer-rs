@@ -664,8 +664,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 None
             });
 
+            // A behavior that calls stopEvent() also blocks the cast member
+            // script — the message hierarchy stops there (Director 11.5
+            // Scripting Dictionary, `stopEvent()`).
+            let mut event_stopped = false;
             if let Some(sprite_num) = sprite_with_behaviors {
-                player_dispatch_event_to_sprite_targeted(
+                event_stopped = player_dispatch_event_to_sprite_targeted(
                     &"mouseDown".to_string(),
                     &vec![],
                     sprite_num,
@@ -679,7 +683,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             // Execute cast member script if it exists
             let cast_member_script_call = reserve_player_mut(|player| {
-                if player.mouse_down_sprite <= 0 {
+                if event_stopped || player.mouse_down_sprite <= 0 {
                     return None;
                 }
 
@@ -872,10 +876,11 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
 
             // Dispatch to the sprite that originally received mouseDown,
             // or fall through to frame/movie scripts if no sprite was involved.
+            let mut event_stopped = false;
             let dispatched_to_sprite = if let Some((_, _, sprite_num)) = result.as_ref() {
                 debug!("[mouseUp] dispatching to sprite#{} (event={})", sprite_num, event_name);
                 if *sprite_num > 0 {
-                    player_dispatch_event_to_sprite_targeted(
+                    event_stopped = player_dispatch_event_to_sprite_targeted(
                         &event_name.to_string(),
                         &vec![],
                         *sprite_num as u16,
@@ -900,7 +905,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // consistent with Director behavior
             let cast_member_script_call = reserve_player_mut(|player| {
                 let sprite_num_to_notify = result.as_ref().map(|r| r.2).unwrap_or(-1);
-                if sprite_num_to_notify <= 0 {
+                // stopEvent() in a behavior halts the hierarchy here too.
+                if event_stopped || sprite_num_to_notify <= 0 {
                     return None;
                 }
 

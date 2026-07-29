@@ -416,6 +416,13 @@ pub struct DirPlayer {
     pub in_prepare_frame: bool,
     pub in_step_frame: bool,
     pub in_event_dispatch: bool,
+    /// Set by `stopEvent()` (Director 11.5 Scripting Dictionary, Movie method):
+    /// "prevents scripts from passing an event message to subsequent locations
+    /// in the message hierarchy… Neither subsequent scripts nor other behaviors
+    /// on the sprite receive the event if it is stopped in this manner."
+    /// Scoped to the event currently being dispatched — the dispatch entry
+    /// points save/restore it so a nested `sendSprite` can't leak the flag.
+    pub event_stopped: bool,
     pub command_handler_yielding: bool, // Pauses frame loop when a command handler (keyDown) needs updateStage to yield
     /// Frame/movie-script handlers currently executing via player_invoke_static_event,
     /// as (script member, handler name). Guards against a static-event handler
@@ -628,6 +635,7 @@ impl DirPlayer {
             in_prepare_frame: false,
             in_step_frame: false,
             in_event_dispatch: false,
+            event_stopped: false,
             command_handler_yielding: false,
             active_static_event_handlers: Vec::new(),
             last_kb_loop_frame_ms: 0.0,
