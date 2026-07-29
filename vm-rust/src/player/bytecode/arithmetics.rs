@@ -4,7 +4,7 @@ use crate::{
     player::{
         datum_formatting::format_datum,
         datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
-        reserve_player_mut, HandlerExecutionResult, ScriptError,
+        reserve_player_mut, DatumRef, DirPlayer, HandlerExecutionResult, ScriptError,
     },
 };
 
@@ -61,12 +61,24 @@ impl ArithmeticsBytecodeHandler {
         }
     }
 
-    fn safe_mod_float(left: f64, right: f64) -> f64 {
-        if right == 0.0 {
-            0.0
-        } else {
-            left % right
-        }
+    /// Director's `mod` is integer-only: "performs the arithmetic modulus
+    /// operation on two integer expressions… The resulting value of the entire
+    /// expression is the integer remainder of the division" (11.5 Scripting
+    /// Dictionary, `mod`). A float operand is coerced the same way `integer()`
+    /// coerces one — by ROUNDING to the nearest whole number, not truncating.
+    ///
+    /// Returning a float remainder instead silently broke Heatwave Racing's
+    /// terrain lookup. It picks the heightmap cell with
+    /// `gx = integer(integer(pX) + tracksizex/2) / stepsizex + 1` (rounded) but
+    /// the interpolation weight with
+    /// `subx = (pX + tracksizex/2) mod stepsizex / float(stepsizey)`. At
+    /// pX = 2789.8 the rounded index lands on the NEXT cell while an unrounded
+    /// remainder still reports 99.8% across the previous one, so the sample
+    /// jumped a whole cell ahead: ground 126.8 instead of 114.6 (the mesh is at
+    /// 114.7). That 12-unit step fed `zm = min(8, z - lz)` and launched the car
+    /// into the air. Rounding both makes the two agree.
+    fn to_mod_int(value: f64) -> i32 {
+        value.round() as i32
     }
 
     pub fn mod_handler(
@@ -79,8 +91,24 @@ impl ArithmeticsBytecodeHandler {
                 let left = scope.stack.pop().unwrap();
                 (left, right)
             };
-            let right = player.get_datum(&right);
-            let left = player.get_datum(&left);
+            let result = Self::modulo_datums(&left, &right, player)?;
+            let result_id = player.alloc_datum(result);
+            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            scope.stack.push(result_id);
+            Ok(HandlerExecutionResult::Advance)
+        })
+    }
+
+    /// `left mod right`, shared by the bytecode handler and the message-window
+    /// evaluator so both report the same thing.
+    pub fn modulo_datums(
+        left: &DatumRef,
+        right: &DatumRef,
+        player: &mut DirPlayer,
+    ) -> Result<Datum, ScriptError> {
+        {
+            let right = player.get_datum(right);
+            let left = player.get_datum(left);
 
             // Treat Void as 0 (Director behavior)
             let left = match left {
@@ -97,21 +125,24 @@ impl ArithmeticsBytecodeHandler {
                     Datum::Int(Self::safe_mod_int(*left, *right))
                 }
                 (Datum::Int(left), Datum::Float(right)) => {
-                    Datum::Float(Self::safe_mod_float(*left as f64, *right))
+                    Datum::Int(Self::safe_mod_int(*left, Self::to_mod_int(*right)))
                 }
                 (Datum::Float(left), Datum::Int(right)) => {
-                    Datum::Float(Self::safe_mod_float(*left, *right as f64))
+                    Datum::Int(Self::safe_mod_int(Self::to_mod_int(*left), *right))
                 }
                 (Datum::Float(left), Datum::Float(right)) => {
-                    Datum::Float(Self::safe_mod_float(*left, *right))
+                    Datum::Int(Self::safe_mod_int(
+                        Self::to_mod_int(*left),
+                        Self::to_mod_int(*right),
+                    ))
                 }
                 (Datum::List(_, list, _), Datum::Float(right)) => {
                     let mut new_list = vec![];
                     for item in list {
                         let item_datum = player.get_datum(item);
                         let result_datum = match item_datum {
-              Datum::Int(n) => Datum::Int(Self::safe_mod_float(*n as f64, *right) as i32),
-              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right) as i32),
+              Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, Self::to_mod_int(*right))),
+              Datum::Float(n) => Datum::Int(Self::safe_mod_int(Self::to_mod_int(*n), Self::to_mod_int(*right))),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
                         new_list.push(result_datum);
@@ -128,7 +159,7 @@ impl ArithmeticsBytecodeHandler {
                         let item_datum = player.get_datum(item);
                         let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, *right)),
-              Datum::Float(n) => Datum::Int(Self::safe_mod_float(*n, *right as f64) as i32),
+              Datum::Float(n) => Datum::Int(Self::safe_mod_int(Self::to_mod_int(*n), *right)),
               _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
             };
                         new_list.push(result_datum);
@@ -147,11 +178,8 @@ impl ArithmeticsBytecodeHandler {
                     )))
                 }
             };
-            let result_id = player.alloc_datum(result);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(result_id);
-            Ok(HandlerExecutionResult::Advance)
-        })
+            Ok(result)
+        }
     }
 
     pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {

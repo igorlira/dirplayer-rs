@@ -1782,6 +1782,12 @@ impl TypeHandlers {
             // `atan` (RE: `atan(a1,a2) = atan2(a2,a1)`) that movies call to aim one
             // object at another (e.g. BioBoxing's `atan(dx, dy)` enemy heading).
             // Built-ins resolve before xtra commands, so handle the 2-arg form here.
+            //
+            // Heatwave Racing (a plain Director movie, no Groove) also relies on
+            // the 2-arg form: its car physics computes the downhill push angle as
+            // `atan(tiltvector.y, tiltvector.x)`. Restricting this to single-arg
+            // per the Scripting Dictionary was tried and made the cars far worse
+            // (they slid off the banking and stalled), so atan2 stays unconditional.
             let result = if args.len() >= 2 {
                 a0.atan2(num(&args[1])?)
             } else {
