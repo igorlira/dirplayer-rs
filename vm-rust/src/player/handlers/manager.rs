@@ -1197,7 +1197,20 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "pause"  => Ok(DatumRef::Void),
+            // `pause` halts the playhead on the current frame; `continue`
+            // resumes it. Both are Director 6-era playback commands, dropped
+            // from the 11.5 Scripting Dictionary in favour of go/updateStage,
+            // but still live in the runtime and still emitted by movies of that
+            // vintage. `pause` is already a no-op here, so `continue` has
+            // nothing to resume and is one too — the pair has to agree, or a
+            // movie that calls only `continue` errors while one that calls both
+            // does not.
+            //
+            // Merlin's Revenge 3 calls it defensively before skipping a loop
+            // iteration (`continue()` then `next repeat` in
+            // collectionsMaster.initCollections), where it is a no-op in
+            // Director as well since nothing paused the playhead.
+            "pause" | "continue" => Ok(DatumRef::Void),
             "cursor" => TypeHandlers::cursor(args),
             "externalparamcount" => MovieHandlers::external_param_count(args),
             "externalparamname" => MovieHandlers::external_param_name(args),
