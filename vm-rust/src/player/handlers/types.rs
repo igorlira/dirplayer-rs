@@ -151,6 +151,41 @@ impl TypeUtils {
 
                 player.alloc_datum(Datum::inline_component_to_datum(vals[idx], Datum::inline_is_float(*flags, idx)))
             }
+            // `sprite(N)[#foo]` is the bracket form of `sprite(N).foo`, and
+            // Director resolves an unknown sprite property against the
+            // properties of the sprite's behaviours (which `sprite_get_prop`
+            // already does). Merlin's Revenge leans on it hard: every character
+            // behaviour declares `pIam` naming its own state property, and the
+            // shared movement code reaches it with
+            //   p.spr[p.spr.pIam].w.runspeed
+            //   if p.spr[#pIam] <> VOID then
+            // so a symbol subscript on a sprite has to route to the same getter
+            // instead of being treated as a list index.
+            Datum::SpriteRef(sprite_number) => {
+                let sprite_number = *sprite_number;
+                let prop_name = match prop_key {
+                    Datum::Symbol(name) => name.clone(),
+                    Datum::String(name) => name.clone(),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Cannot index sprite {} with {}",
+                            sprite_number, formatted_key
+                        )))
+                    }
+                };
+                let result = crate::player::score::sprite_get_prop(
+                    player,
+                    sprite_number,
+                    &prop_name,
+                )?;
+                // sprite_get_prop caches the behaviour's own DatumRef when the
+                // property lives on one, so in-place mutation still reaches the
+                // instance's storage rather than a clone.
+                return Ok(player
+                    .last_sprite_prop_ref
+                    .take()
+                    .unwrap_or_else(|| player.alloc_datum(result)));
+            }
             Datum::ScriptInstanceRef(instance_ref) => {
                 // Numeric index
                 if let Ok(index) = prop_key.int_value() {

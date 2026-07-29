@@ -1718,6 +1718,34 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                             Ok(player.alloc_datum(Datum::String(ch)))
                         }
                     }
+                    // `sprite(N)[#foo]` — the bracket form of `sprite(N).foo`,
+                    // which Director resolves against the sprite's behaviour
+                    // properties. The bytecode paths already do this (see
+                    // TypeUtils::get_sub_prop and the getPropRef handler); the
+                    // message window needs it too so these expressions can be
+                    // inspected, e.g. Merlin's Revenge's `p.spr[#pIam]`.
+                    Datum::SpriteRef(sprite_number) => {
+                        let sprite_number = *sprite_number;
+                        let prop_name = match index_datum {
+                            Datum::Symbol(name) | Datum::String(name) => name.clone(),
+                            other => {
+                                return Err(ScriptError::new(format!(
+                                    "Cannot index sprite {} with {}",
+                                    sprite_number,
+                                    other.type_str()
+                                )))
+                            }
+                        };
+                        let result = crate::player::score::sprite_get_prop(
+                            player,
+                            sprite_number,
+                            &prop_name,
+                        )?;
+                        Ok(player
+                            .last_sprite_prop_ref
+                            .take()
+                            .unwrap_or_else(|| player.alloc_datum(result)))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Cannot index non-list type: {:?}",
                         list_datum.type_enum()

@@ -1092,6 +1092,39 @@ impl PropListDatumHandlers {
                                 )));
                             }
                         }
+                        // Sprite: `p.spr[#foo]` is the bracket form of
+                        // `sprite(N).foo`, and Director resolves an unknown
+                        // sprite property against the properties of the
+                        // sprite's behaviours. Merlin's Revenge's shared
+                        // movement code does `p.spr[p.spr.pIam].w.runspeed`,
+                        // where every character behaviour sets `pIam` to a
+                        // symbol naming its own state property.
+                        Datum::SpriteRef(sprite_number) => {
+                            let sprite_number = *sprite_number;
+                            let prop_name = match player.get_datum(index_ref) {
+                                Datum::Symbol(name) => name.clone(),
+                                Datum::String(name) => name.clone(),
+                                other => {
+                                    return Err(ScriptError::new(format!(
+                                        "Cannot index sprite {} with {}",
+                                        sprite_number,
+                                        other.type_str()
+                                    )))
+                                }
+                            };
+                            let result = crate::player::score::sprite_get_prop(
+                                player,
+                                sprite_number,
+                                &prop_name,
+                            )?;
+                            // Keep the behaviour's own DatumRef when there is
+                            // one, so in-place mutation still lands on the
+                            // instance's storage rather than on a clone.
+                            player
+                                .last_sprite_prop_ref
+                                .take()
+                                .unwrap_or_else(|| player.alloc_datum(result))
+                        }
                         _ => return Err(ScriptError::new(
                             "Second argument to getPropRef requires first property to be a list or propList"
                                 .to_string(),
