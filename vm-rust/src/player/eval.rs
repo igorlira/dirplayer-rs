@@ -53,6 +53,7 @@ pub enum LingoExpr {
     Subtract(Box<LingoExpr>, Box<LingoExpr>),
     Multiply(Box<LingoExpr>, Box<LingoExpr>),
     Divide(Box<LingoExpr>, Box<LingoExpr>),
+    Modulo(Box<LingoExpr>, Box<LingoExpr>),
     Join(Box<LingoExpr>, Box<LingoExpr>),
     JoinPad(Box<LingoExpr>, Box<LingoExpr>),
     And(Box<LingoExpr>, Box<LingoExpr>),
@@ -660,6 +661,11 @@ fn parse_lingo_expr_runtime(
                 let left = lhs?;
                 let right = rhs?;
                 Ok(LingoExpr::Divide(Box::new(left), Box::new(right)))
+            }
+            Rule::mod_op => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Modulo(Box::new(left), Box::new(right)))
             }
             Rule::join => {
                 let left = lhs?;
@@ -2023,6 +2029,15 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(result))
             })
         }
+        LingoExpr::Modulo(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
+            reserve_player_mut(|player| {
+                let result = crate::player::bytecode::arithmetics::ArithmeticsBytecodeHandler
+                    ::modulo_datums(&left, &right, player)?;
+                Ok(player.alloc_datum(result))
+            })
+        }
         LingoExpr::Join(lhs, rhs) => {
             let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
             let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
@@ -2452,8 +2467,9 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
             | Op::infix(Rule::join_pad, Assoc::Left))         // && padded concat
         .op(Op::infix(Rule::add, Assoc::Left)                 // +, -
             | Op::infix(Rule::subtract, Assoc::Left))
-        .op(Op::infix(Rule::multiply, Assoc::Left)            // *, /
-            | Op::infix(Rule::divide, Assoc::Left))
+        .op(Op::infix(Rule::multiply, Assoc::Left)            // *, /, mod
+            | Op::infix(Rule::divide, Assoc::Left)
+            | Op::infix(Rule::mod_op, Assoc::Left))
         .op(Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
             | Op::postfix(Rule::list_index))                  // and [index]
 }

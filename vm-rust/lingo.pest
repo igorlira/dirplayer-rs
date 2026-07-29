@@ -225,6 +225,8 @@ add        =  { "+" }
 subtract   =  { "-" }
 multiply   =  { "*" }
 divide     =  { "/" }
+// Word operator: must not swallow the start of an identifier (`modelCount`).
+mod_op     = @{ ^"mod" ~ !(alpha | digit | "_") }
 join       =  { "&" }
 join_pad   =  { "&&" }
 bin_op     = _{
@@ -241,6 +243,7 @@ bin_op     = _{
   | subtract
   | multiply
   | divide
+  | mod_op
   | join_pad
   | join
 }
