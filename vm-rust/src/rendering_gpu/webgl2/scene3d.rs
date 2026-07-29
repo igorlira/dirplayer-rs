@@ -5034,8 +5034,19 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
                         let mut alpha = Vec::new();
                         let mut dec = flate2::read::ZlibDecoder::new(&tail[12..12 + alen]);
                         if dec.read_to_end(&mut alpha).is_ok() && alpha.len() >= (w * h) as usize {
-                            for i in 0..(w * h) as usize {
-                                rgba[i * 4 + 3] = alpha[i];
+                            // The alpha block is stored BOTTOM-UP relative to the
+                            // JPEG's top-down rows, so it has to be flipped before
+                            // it's married to the colour. Applied row-for-row it
+                            // lines the mask up with the mirror image of the
+                            // artwork: Heatwave Racing's palm trees kept the
+                            // sky-blue background between their fronds and cut
+                            // holes out of the foliage instead.
+                            let (wu, hu) = (w as usize, h as usize);
+                            for y in 0..hu {
+                                let src = (hu - 1 - y) * wu;
+                                for x in 0..wu {
+                                    rgba[(y * wu + x) * 4 + 3] = alpha[src + x];
+                                }
                             }
                         }
                     }
