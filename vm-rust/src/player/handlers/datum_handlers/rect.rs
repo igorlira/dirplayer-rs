@@ -45,6 +45,9 @@ impl RectDatumHandlers {
             "duplicate" => Self::duplicate(datum, args),
             "offset" => Self::offset(datum, args),
             "inflate" => Self::inflate(datum, args),
+            // Same list-like addressing as a point (see PointDatumHandlers),
+            // four elements here: left, top, right, bottom.
+            "count" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(4)))),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for rect"
             ))),

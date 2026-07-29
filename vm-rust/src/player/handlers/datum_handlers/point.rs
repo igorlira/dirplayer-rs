@@ -17,6 +17,14 @@ impl PointDatumHandlers {
             "setAt" => Self::set_at(datum, args),
             "inside" => Self::inside(datum, args),
             "duplicate" => Self::duplicate(datum, args),
+            // A point is addressable like a two-element linear list —
+            // `point[1]` / `point[2]` read and write it, and `duplicate()`
+            // already works — so `count` answers 2. Generic list helpers get
+            // handed points all the time: Merlin's Revenge routes a sprite
+            // location through `ListInteger(alist)`, which does
+            // `alist.duplicate().count()` before rounding each element, and
+            // erroring here killed the handler that positions map tiles.
+            "count" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(2)))),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for point"
             ))),
