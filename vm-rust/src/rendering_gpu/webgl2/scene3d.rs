@@ -964,7 +964,21 @@ void main() {
         // (e.g. the faucet's translucent pink/red water turned into an opaque white
         // jet); alpha blending keeps them translucent and colored like Shockwave.
         gl.enable(WebGl2RenderingContext::BLEND);
-        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        gl.blend_func_separate(
+            WebGl2RenderingContext::SRC_ALPHA,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+            // Alpha must accumulate COVERAGE, not be blended with the same
+            // factors as colour. With blend_func the alpha channel gets
+            // dst.a = src.a*src.a + dst.a*(1-src.a), so a translucent draw over
+            // an opaque background LOWERS its alpha (0.3 over 1.0 -> 0.79).
+            // For a directToStage 3D sprite that layer is then composited over
+            // the 2D sprites, so every dust particle punched a hole through the
+            // scene and revealed the 2D sprites behind it — Heatwave Racing's
+            // loading text/bar (channels 51-53, live on the same frame as the
+            // race) bled through wherever dust was drawn.
+            WebGl2RenderingContext::ONE,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+        );
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.depth_mask(false); // Don't write to depth buffer
 
@@ -2158,7 +2172,21 @@ void main() {
                     transparent_nodes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     gl.depth_mask(false); // Disable depth writes for transparent objects
                     gl.enable(WebGl2RenderingContext::BLEND);
-                    gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+                    gl.blend_func_separate(
+                        WebGl2RenderingContext::SRC_ALPHA,
+                        WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+                        // Alpha must accumulate COVERAGE, not be blended with the same
+                        // factors as colour. With blend_func the alpha channel gets
+                        // dst.a = src.a*src.a + dst.a*(1-src.a), so a translucent draw over
+                        // an opaque background LOWERS its alpha (0.3 over 1.0 -> 0.79).
+                        // For a directToStage 3D sprite that layer is then composited over
+                        // the 2D sprites, so every dust particle punched a hole through the
+                        // scene and revealed the 2D sprites behind it — Heatwave Racing's
+                        // loading text/bar (channels 51-53, live on the same frame as the
+                        // race) bled through wherever dust was drawn.
+                        WebGl2RenderingContext::ONE,
+                        WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+                    );
 
                     for (model_node, _dist) in &transparent_nodes {
                         self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, true);
@@ -2256,7 +2284,21 @@ void main() {
         gl.disable(WebGl2RenderingContext::DEPTH_TEST);
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.enable(WebGl2RenderingContext::BLEND);
-        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        gl.blend_func_separate(
+            WebGl2RenderingContext::SRC_ALPHA,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+            // Alpha must accumulate COVERAGE, not be blended with the same
+            // factors as colour. With blend_func the alpha channel gets
+            // dst.a = src.a*src.a + dst.a*(1-src.a), so a translucent draw over
+            // an opaque background LOWERS its alpha (0.3 over 1.0 -> 0.79).
+            // For a directToStage 3D sprite that layer is then composited over
+            // the 2D sprites, so every dust particle punched a hole through the
+            // scene and revealed the 2D sprites behind it — Heatwave Racing's
+            // loading text/bar (channels 51-53, live on the same frame as the
+            // race) bled through wherever dust was drawn.
+            WebGl2RenderingContext::ONE,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+        );
 
         let w = width as f32;
         let h = height as f32;
@@ -2413,7 +2455,21 @@ void main() {
         gl.depth_mask(false);
         gl.disable(WebGl2RenderingContext::CULL_FACE);
         gl.enable(WebGl2RenderingContext::BLEND);
-        gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+        gl.blend_func_separate(
+            WebGl2RenderingContext::SRC_ALPHA,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+            // Alpha must accumulate COVERAGE, not be blended with the same
+            // factors as colour. With blend_func the alpha channel gets
+            // dst.a = src.a*src.a + dst.a*(1-src.a), so a translucent draw over
+            // an opaque background LOWERS its alpha (0.3 over 1.0 -> 0.79).
+            // For a directToStage 3D sprite that layer is then composited over
+            // the 2D sprites, so every dust particle punched a hole through the
+            // scene and revealed the 2D sprites behind it — Heatwave Racing's
+            // loading text/bar (channels 51-53, live on the same frame as the
+            // race) bled through wherever dust was drawn.
+            WebGl2RenderingContext::ONE,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+        );
 
         let w = width as f32;
         let h = height as f32;
@@ -4292,11 +4348,33 @@ void main() {
         if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
-                // #add — additive blending (for glow/lightbox effects)
-                gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE);
+                // #add — additive blending (for glow/lightbox effects).
+                // Alpha uses ONE/ONE so coverage only ever accumulates; see the
+                // blend_func_separate calls above for why the alpha channel must
+                // not share the colour factors.
+                gl.blend_func_separate(
+                    WebGl2RenderingContext::SRC_ALPHA,
+                    WebGl2RenderingContext::ONE,
+                    WebGl2RenderingContext::ONE,
+                    WebGl2RenderingContext::ONE,
+                );
             } else {
                 // #multiply / default — standard alpha blending
-                gl.blend_func(WebGl2RenderingContext::SRC_ALPHA, WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA);
+                gl.blend_func_separate(
+                    WebGl2RenderingContext::SRC_ALPHA,
+                    WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+                    // Alpha must accumulate COVERAGE, not be blended with the same
+                    // factors as colour. With blend_func the alpha channel gets
+                    // dst.a = src.a*src.a + dst.a*(1-src.a), so a translucent draw over
+                    // an opaque background LOWERS its alpha (0.3 over 1.0 -> 0.79).
+                    // For a directToStage 3D sprite that layer is then composited over
+                    // the 2D sprites, so every dust particle punched a hole through the
+                    // scene and revealed the 2D sprites behind it — Heatwave Racing's
+                    // loading text/bar (channels 51-53, live on the same frame as the
+                    // race) bled through wherever dust was drawn.
+                    WebGl2RenderingContext::ONE,
+                    WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
+                );
             }
         } else {
             gl.disable(WebGl2RenderingContext::BLEND);
