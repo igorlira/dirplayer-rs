@@ -87,6 +87,11 @@ sprite_ref = { &reserved_keyword ~ ^"sprite" ~ term_arg }
 // Field references: "field 5" or "field "myField""
 field_ref = { &reserved_keyword ~ ^"field" ~ term_arg }
 
+// `script "name"` — Director's space-separated form, as used by the canonical
+// child-object idiom `new(script "parentScriptName", ...)`. The parenthesised
+// `script("name")` also matches here, because term_arg accepts a parens_expr.
+script_ref = { ^"script" ~ !(alpha | digit | "_") ~ term_arg }
+
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
 chunk_type = { &reserved_keyword ~ (^"char" | ^"word" | ^"line" | ^"item") }
 chunk_range = { ^"to" ~ expr }
@@ -121,7 +126,7 @@ ge_op = { ">=" }
 // Property name after dot - can be any identifier including reserved keywords
 prop_name  =  { ident }
 
-primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | handler_call | the_chunk_count | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
+primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | script_ref | handler_call | the_chunk_count | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 

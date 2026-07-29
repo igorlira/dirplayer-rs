@@ -709,3 +709,30 @@ fn test_put_after_word() {
         )
     );
 }
+/// `script "name"` — Director's space-separated form. The canonical
+/// child-object idiom is `new(script "parentScriptName", ...)` (Scripting
+/// Dictionary, `new()`), which `do()` hands to this parser verbatim.
+#[test]
+fn test_script_ref_space_separated() {
+    for src in [
+        "script \"LicenceHeader\"",
+        "new(script \"LicenceHeader\")",
+        "new (script \"LicenceHeader\")",
+        "g[#LicenceHeader] = new (script \"LicenceHeader\")",
+        "new(script \"Animal\", 2)",
+    ] {
+        let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, src.to_string());
+        assert!(result.is_ok(), "failed to parse {src}: {:?}", result.err());
+    }
+}
+
+/// The parenthesised form keeps working, and `script` stays usable as an
+/// ordinary identifier — it is deliberately NOT a reserved keyword, so
+/// `the script` and a variable called `script` still parse.
+#[test]
+fn test_script_ref_does_not_reserve_the_word() {
+    for src in ["script(\"LicenceHeader\")", "the script", "script"] {
+        let result = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, src.to_string());
+        assert!(result.is_ok(), "failed to parse {src}: {:?}", result.err());
+    }
+}

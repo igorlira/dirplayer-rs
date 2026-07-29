@@ -849,6 +849,14 @@ pub fn parse_lingo_rule_runtime(
             let field_arg_expr = parse_lingo_expr_runtime(field_arg_pair.into_inner(), pratt)?;
             Ok(LingoExpr::HandlerCall("field".to_string(), vec![field_arg_expr]))
         }
+        // `script "name"` / `script("name")` — the space-separated form is what
+        // the documented child-object idiom uses: `new(script "parentName", ..)`.
+        Rule::script_ref => {
+            let mut inner = pair.into_inner();
+            let script_arg_pair = inner.next().ok_or_else(|| ScriptError::new("Expected script name or number".to_string()))?;
+            let script_arg_expr = parse_lingo_expr_runtime(script_arg_pair.into_inner(), pratt)?;
+            Ok(LingoExpr::HandlerCall("script".to_string(), vec![script_arg_expr]))
+        }
         Rule::sprite_of_expr => {
             let mut inner = pair.into_inner();
             let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
