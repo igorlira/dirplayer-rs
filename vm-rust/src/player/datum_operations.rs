@@ -110,7 +110,38 @@ fn list_to_rect_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([
     Ok((vals, flags))
 }
 
+/// A symbol takes part in arithmetic as its name, exactly as it does in a
+/// comparison (see `compare.rs::datum_greater_than`, where symbols are
+/// pre-converted to strings). Non-numeric text then coerces to 0, which is how
+/// every arithmetic function below already treats strings.
+///
+/// The Director 11.5 Scripting Dictionary defines `-` (and `+`, `*`, `/`) only
+/// over "numerical expressions" and says nothing about symbols, so the rule is
+/// inferred from Director's general permissiveness with non-numeric operands —
+/// it doesn't raise, it coerces. Merlin's Revenge 3 needs it in a generic
+/// helper that diffs two values of unknown type:
+///
+///   on VarDiff var1, var2
+///     diff = max(var1, var2) - min(var1, var2)
+///
+/// called with `0` and `#none`. `max()` "works with ASCII characters, similar
+/// to the way < and > operators work with strings" (dictionary, `max()`), and
+/// `#none > 0` is true, so max returns the symbol and min the integer, leaving
+/// `#none - 0` to evaluate.
+fn symbol_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
+    match datum {
+        Datum::Symbol(name) => Some(Datum::String(name.clone())),
+        _ => None,
+    }
+}
+
 pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
+    if let Some(left) = symbol_as_arithmetic_operand(&left) {
+        return add_datums(left, right, player);
+    }
+    if let Some(right) = symbol_as_arithmetic_operand(&right) {
+        return add_datums(left, right, player);
+    }
     match (&left, &right) {
         (Datum::Void, some) => Ok(some.clone()),
         (some, Datum::Void) => Ok(some.clone()),
@@ -381,6 +412,13 @@ pub fn subtract_datums(
     right: Datum,
     player: &mut DirPlayer,
 ) -> Result<Datum, ScriptError> {
+    // See `symbol_as_arithmetic_operand`.
+    if let Some(left) = symbol_as_arithmetic_operand(&left) {
+        return subtract_datums(left, right, player);
+    }
+    if let Some(right) = symbol_as_arithmetic_operand(&right) {
+        return subtract_datums(left, right, player);
+    }
     match (&left, &right) {
         (Datum::Void, Datum::Void) => Ok(Datum::Int(0)),
         (Datum::Void, Datum::Int(r)) => Ok(Datum::Int(-r)),
@@ -553,6 +591,12 @@ pub fn subtract_datums(
                 a, b
             ))),
         },
+        // Unlike `+`, `-` has no string meaning, so two strings subtract
+        // numerically with the same non-numeric-is-0 coercion as the arms
+        // below. Reached by `#a - #b` via `symbol_as_arithmetic_operand`.
+        (Datum::String(left), Datum::String(right)) => Ok(Datum::Float(
+            left.parse::<f64>().unwrap_or(0.0) - right.parse::<f64>().unwrap_or(0.0),
+        )),
         (Datum::String(left), Datum::Int(right)) => {
             let left_float = left.parse::<f64>().unwrap_or(0.0);
             Ok(Datum::Float(left_float - (*right as f64)))
@@ -604,6 +648,9 @@ pub fn multiply_datums(
 ) -> Result<Datum, ScriptError> {
     let left = player.get_datum(&left_ref).clone();
     let right = player.get_datum(&right_ref).clone();
+    // See `symbol_as_arithmetic_operand`.
+    let left = symbol_as_arithmetic_operand(&left).unwrap_or(left);
+    let right = symbol_as_arithmetic_operand(&right).unwrap_or(right);
 
     let result = match (&left, &right) {
         (Datum::Void, Datum::Void) => Datum::Int(0),
@@ -844,6 +891,9 @@ pub fn divide_datums(
 ) -> Result<Datum, ScriptError> {
     let left = player.get_datum(&left).clone();
     let right = player.get_datum(&right).clone();
+    // See `symbol_as_arithmetic_operand`.
+    let left = symbol_as_arithmetic_operand(&left).unwrap_or(left);
+    let right = symbol_as_arithmetic_operand(&right).unwrap_or(right);
 
     let result = match (&left, &right) {
         (Datum::Void, _) => Datum::Int(0),
