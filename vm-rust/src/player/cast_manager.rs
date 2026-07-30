@@ -17,6 +17,7 @@ use crate::{
 };
 
 use crate::player::FontManager;
+use crate::player::ci_string::{CiStr, CiString};
 use crate::player::font::FontRef;
 
 use super::{
@@ -33,6 +34,16 @@ use super::{
 pub struct CastManager {
     pub casts: Vec<CastLib>,
     pub movie_script_cache: RefCell<Option<Vec<Rc<Script>>>>,
+    /// Handler name → index into `movie_script_cache`, so resolving a global
+    /// handler is one hash lookup instead of a linear walk that hashes the
+    /// name once per movie script. Merlin's Revenge 3 carries ~100 movie
+    /// scripts (its `general_functions` cast is one handler per script) and
+    /// calls global helpers dozens of times per enemy per frame, which put
+    /// `Script::get_own_handler` at the top of the profile at 8.2% self time.
+    ///
+    /// First script wins, exactly like the sequential search it replaces.
+    /// Built with `movie_script_cache` and cleared with it.
+    pub movie_script_handler_index: RefCell<Option<FxHashMap<CiString, usize>>>,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
@@ -57,6 +68,7 @@ impl CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
+            movie_script_handler_index: RefCell::new(None),
             member_name_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
@@ -651,6 +663,29 @@ impl CastManager {
     pub fn clear_movie_script_cache(&mut self) {
         let mut cache = self.movie_script_cache.borrow_mut();
         *cache = None;
+        // The index holds positions into the cache, so it must die with it.
+        self.movie_script_handler_index.replace(None);
+    }
+
+    /// The movie script that defines `handler_name`, via the handler index.
+    /// Equivalent to walking `get_movie_scripts()` in order and taking the
+    /// first script whose `get_own_handler` matches.
+    pub fn find_movie_script_with_handler(&self, handler_name: &str) -> Option<Rc<Script>> {
+        let scripts = self.get_movie_scripts();
+        let scripts = scripts.as_ref()?;
+        if self.movie_script_handler_index.borrow().is_none() {
+            let mut index: FxHashMap<CiString, usize> = FxHashMap::default();
+            for (idx, script) in scripts.iter().enumerate() {
+                for name in script.handlers.keys() {
+                    // First definition wins — `or_insert`, never overwrite.
+                    index.entry(name.clone()).or_insert(idx);
+                }
+            }
+            self.movie_script_handler_index.replace(Some(index));
+        }
+        let index = self.movie_script_handler_index.borrow();
+        let idx = *index.as_ref()?.get(CiStr::new(handler_name))?;
+        scripts.get(idx).cloned()
     }
 
     pub fn invalidate_member_name_cache(&self) {
@@ -663,8 +698,6 @@ impl CastManager {
             for cast in &self.casts {
                 for script_rc in cast.scripts.values() {
                     if let ScriptType::Movie = script_rc.script_type {
-                        let handler_names: Vec<String> = script_rc.handlers.iter()
-                            .map(|(name, _)| name.to_string()).collect();
                         result.push(script_rc.clone());
                     }
                 }

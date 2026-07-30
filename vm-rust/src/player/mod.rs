@@ -3553,15 +3553,57 @@ pub async fn player_call_global_handler(
             receiver_handler = ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
 
             if receiver_handler.is_none() {
-                receiver_handler =
-                    get_active_static_script_refs(&player.movie, &player.get_hydrated_globals())
-                        .iter()
-                        .find_map(|script_ref| {
-                            let script = player.movie.cast_manager.get_script_by_ref(script_ref);
-                            script
+                // Same search order as `get_active_static_script_refs`: movie
+                // scripts, then the frame script, then any global holding a
+                // script reference — but without materialising it.
+                //
+                // This runs on EVERY global handler call, including the ones
+                // that end up in a builtin (builtins are checked last, below),
+                // so this movie hits it thousands of times a frame. Building a
+                // hydrated-globals FxHashMap plus a ~100-entry Vec of cloned
+                // member refs, then resolving each ref back to its script, was
+                // ~20% of total runtime in the profile: HashMap::extend 5.6%,
+                // malloc 4.2%, hash_one 2.0%, get_script_by_ref 3.6%, on top of
+                // get_own_handler's 8.2%.
+                receiver_handler = player
+                    .movie
+                    .cast_manager
+                    .find_movie_script_with_handler(handler_name)
+                    .and_then(|script| script.get_own_handler_ref(&handler_name))
+                    .map(|handler_pair| (None, handler_pair));
+
+                if receiver_handler.is_none() {
+                    if let Some(frame_script) = player
+                        .movie
+                        .score
+                        .get_script_in_frame(player.movie.current_frame)
+                    {
+                        let script_ref = CastMemberRef {
+                            cast_lib: frame_script.cast_lib.into(),
+                            cast_member: frame_script.cast_member.into(),
+                        };
+                        receiver_handler = player
+                            .movie
+                            .cast_manager
+                            .get_script_by_ref(&script_ref)
+                            .and_then(|x| x.get_own_handler_ref(&handler_name))
+                            .map(|handler_pair| (None, handler_pair));
+                    }
+                }
+
+                if receiver_handler.is_none() {
+                    receiver_handler = player.globals.values().find_map(|datum_ref| {
+                        match player.get_datum(datum_ref) {
+                            Datum::VarRef(VarRef::Script(script_ref)) => player
+                                .movie
+                                .cast_manager
+                                .get_script_by_ref(script_ref)
                                 .and_then(|x| x.get_own_handler_ref(&handler_name))
-                                .map(|handler_pair| (None, handler_pair))
-                        });
+                                .map(|handler_pair| (None, handler_pair)),
+                            _ => None,
+                        }
+                    });
+                }
             }
 
             if receiver_handler.is_none() {
