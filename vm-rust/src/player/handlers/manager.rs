@@ -1701,6 +1701,7 @@ impl BuiltInHandlerManager {
             "sort" => TypeHandlers::sort(args),
             "intersect" => TypeHandlers::intersect(args),
             "inflate" => TypeHandlers::inflate(args),
+            "map" => TypeHandlers::map(args),
             "pointtochar" => TypeHandlers::point_to_char(args),
             "scrollbyline" => TypeHandlers::scroll_by_line(args),
             "scrollbypage" => TypeHandlers::scroll_by_page(args),

@@ -1615,6 +1615,87 @@ impl TypeHandlers {
         })
     }
 
+    /// `map(targetRect, sourceRect, destinationRect)` or
+    /// `map(targetPoint, sourceRect, destinationRect)` — "positions and sizes a
+    /// rectangle or point based on the relationship of a source rectangle to a
+    /// target rectangle. The relationship of the targetRect to the sourceRect
+    /// governs the relationship of the result of the function to the
+    /// destinationRect" (Director 11.5 Scripting Dictionary, `map()`).
+    ///
+    /// So each component is rescaled proportionally out of the source rect and
+    /// into the destination rect. All three arguments are documented as
+    /// Required.
+    ///
+    /// The dictionary doesn't state the numeric type of the result. Director's
+    /// rects and points hold floats, but `map()` predates that, so we keep the
+    /// result integral unless one of the inputs was itself fractional — that
+    /// promotion rule is inferred, not specified. A degenerate source axis
+    /// (zero width or height) would divide by zero; we fall back to a scale of
+    /// 1 on that axis, which is also inferred.
+    pub fn map(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if args.len() != 3 {
+                return Err(ScriptError::new(
+                    "map requires 3 arguments (targetRect/targetPoint, sourceRect, destinationRect)"
+                        .to_string(),
+                ));
+            }
+
+            let (src, src_flags) = player.get_datum(&args[1]).to_rect_inline()?;
+            let (dst, dst_flags) = player.get_datum(&args[2]).to_rect_inline()?;
+
+            let scale = |s_lo: f64, s_hi: f64, d_lo: f64, d_hi: f64| {
+                let span = s_hi - s_lo;
+                if span == 0.0 { 1.0 } else { (d_hi - d_lo) / span }
+            };
+            let sx = scale(src[0], src[2], dst[0], dst[2]);
+            let sy = scale(src[1], src[3], dst[1], dst[3]);
+            let map_x = |x: f64| dst[0] + (x - src[0]) * sx;
+            let map_y = |y: f64| dst[1] + (y - src[1]) * sy;
+
+            let target = player.get_datum(&args[0]);
+            let (mapped, target_flags, is_rect): (Vec<f64>, u8, bool) = match target {
+                Datum::Rect(vals, flags) => (
+                    vec![map_x(vals[0]), map_y(vals[1]), map_x(vals[2]), map_y(vals[3])],
+                    *flags,
+                    true,
+                ),
+                Datum::Point(vals, flags) => {
+                    (vec![map_x(vals[0]), map_y(vals[1])], *flags, false)
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "map expects a rect or a point as its first argument".to_string(),
+                    ))
+                }
+            };
+
+            // Any fractional input keeps the result fractional; otherwise round
+            // back to whole numbers (Director coerces floats to ints by
+            // rounding, not truncating).
+            let fractional = target_flags != 0 || src_flags != 0 || dst_flags != 0;
+            let component = |v: f64| if fractional { v } else { v.round() };
+
+            let datum = if is_rect {
+                let flags = if fractional { 0b1111 } else { 0 };
+                Datum::Rect(
+                    [
+                        component(mapped[0]),
+                        component(mapped[1]),
+                        component(mapped[2]),
+                        component(mapped[3]),
+                    ],
+                    flags,
+                )
+            } else {
+                let flags = if fractional { 0b11 } else { 0 };
+                Datum::Point([component(mapped[0]), component(mapped[1])], flags)
+            };
+
+            Ok(player.alloc_datum(datum))
+        })
+    }
+
     /// `inflate(rect, widthChange, heightChange)` — expands (or, with
     /// negatives, shrinks) a rect by `widthChange` on the left and right and
     /// `heightChange` on the top and bottom: left/top decrease, right/bottom
