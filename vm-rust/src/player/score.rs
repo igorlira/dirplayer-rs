@@ -792,10 +792,34 @@ impl Score {
                         //    every animation frame at once. It needs `visible=0`
                         //    preserved.
                         // Clearing the lifecycle satisfies the first; preserving
-                        // the visual state satisfies the second.
+                        // `visible` satisfies the second.
+                        //
+                        // The MEMBER is dropped either way, though. Neither case
+                        // above needs it kept — it survived only because reset()
+                        // does both things at once. Director's rule has no
+                        // visibility exception: "if a sprite channel is not a
+                        // puppet, any changes that script makes to a sprite last
+                        // for the life of the current sprite only"
+                        // (11.5 Scripting Dictionary, puppetSprite()), so once
+                        // the span ends the channel reverts to what the Score
+                        // says, which for a channel with no span here is empty.
+                        //
+                        // Merlin's Revenge 3 depends on it. Its score parks a
+                        // 999-sprite pool of "dot" placeholders on frames 1-28
+                        // only, and spriteMaster stamps `member("dot","gfx")`
+                        // back into each channel as it frees it. screenMaster
+                        // then calls hideAll2DSprites() -- visible = 0 on all
+                        // 1005 channels -- before walking the screens, so every
+                        // channel took THIS branch on leaving frame 28 and kept
+                        // its dot forever. getMarks scans with
+                        //   if sprite(i).member <> member(0, 0)
+                        // and so saw 1005 occupied channels instead of a few
+                        // dozen; drawing one screen then asked for 1010 sprites
+                        // from the 999 pool and exhausted it.
                         sprite.script_instance_list.clear();
                         sprite.entered = false;
                         sprite.exited = false;
+                        sprite.member = None;
                         true
                     }
                 };

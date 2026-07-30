@@ -99,13 +99,16 @@ impl MovieHandlers {
                             cast_lib: cast_num,
                             cast_member: member_num,
                         })))
-                    } else if member_num == 0 {
-                        // `member(0, 0)` is Director's NULL member reference —
-                        // the value an EMPTY sprite channel reports for its
-                        // member — so it must equal NULL_CAST_MEMBER_REF, not
-                        // the invalid (-1, -1) sentinel. Scripts scan the score
-                        // with exactly this comparison, and returning the
-                        // invalid ref makes every empty channel look occupied.
+                    } else if member_num == 0 && cast_num == 0 {
+                        // `member(0, 0)` — BOTH args zero — is Director's NULL
+                        // member reference; every other non-positive form keeps
+                        // the invalid sentinel it had before, so the
+                        // getDynamicSlot pattern above is untouched.
+                        //
+                        // It is the value an EMPTY sprite channel reports for
+                        // its member, so it must equal NULL_CAST_MEMBER_REF.
+                        // Returning the invalid sentinel made every empty
+                        // channel look occupied to the standard score scan.
                         //
                         // Merlin's Revenge 3 snapshots a screen with
                         //   repeat with i = 1 to the lastChannel

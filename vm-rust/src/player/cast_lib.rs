@@ -624,6 +624,18 @@ pub fn cast_member_ref(cast_lib: i32, cast_member: i32) -> CastMemberRef {
 
 impl CastMemberRef {
     pub fn is_valid(&self) -> bool {
+        // The NULL ref (0, 0) is "no member" — it is what an EMPTY sprite
+        // channel reports and what `member(0, 0)` builds — so it is not a valid
+        // member any more than the INVALID (-1, -1) sentinel is. Without this,
+        // a channel cleared with `sprite.member = member(0, 0)` still counted
+        // as occupied: it kept hit-testing, so an invisible cleared overlay
+        // swallowed clicks meant for the sprite beneath it (LEGO Supersonic's
+        // menu stopped responding).
+        if self.cast_lib == NULL_CAST_MEMBER_REF.cast_lib
+            && self.cast_member == NULL_CAST_MEMBER_REF.cast_member
+        {
+            return false;
+        }
         self.cast_lib != INVALID_CAST_MEMBER_REF.cast_lib
             && self.cast_member != INVALID_CAST_MEMBER_REF.cast_member
     }
