@@ -1528,6 +1528,25 @@ impl WebGL2Renderer {
                 None => return,
             };
 
+            let rect = get_concrete_sprite_rect(player, sprite);
+
+            // Cull off-screen sprites HERE, before the per-sprite clones below.
+            // Sprite-pool movies park every free sprite off-stage — Merlin's
+            // Revenge 3 holds a 999-sprite pool whose `freeSprite` puts each one
+            // at (-1, -1) at 1x1 — so in the common case this returns for ~1000
+            // channels a frame and the clones would be pure waste. (The same
+            // test ran a few lines further down before, after the clones.)
+            {
+                let (stage_w, stage_h) = self.size;
+                if rect.right <= 0
+                    || rect.bottom <= 0
+                    || rect.left >= stage_w as i32
+                    || rect.top >= stage_h as i32
+                {
+                    return;
+                }
+            }
+
             let w3d_cam = sprite.w3d_camera.clone();
             let w3d_extra_cams = sprite.w3d_cameras.clone();
             if w3d_cam.is_some() || !w3d_extra_cams.is_empty() {
@@ -1536,7 +1555,6 @@ impl WebGL2Renderer {
                     channel_num, w3d_cam, w3d_extra_cams
                 );
             }
-            let rect = get_concrete_sprite_rect(player, sprite);
             (
                 member_ref,
                 rect,
@@ -1559,15 +1577,7 @@ impl WebGL2Renderer {
             )
         };
 
-        // Off-screen sprite culling: skip sprites entirely outside the viewport
-        {
-            let (stage_w, stage_h) = self.size;
-            if sprite_rect.right <= 0 || sprite_rect.bottom <= 0
-                || sprite_rect.left >= stage_w as i32 || sprite_rect.top >= stage_h as i32
-            {
-                return;
-            }
-        }
+        // (Off-screen culling now happens above, before the per-sprite clones.)
 
         // Sprite-level `blend` on Flash members is ignored by Shockwave
         // regardless of directToStage — Director's D8-era Flash sprite
