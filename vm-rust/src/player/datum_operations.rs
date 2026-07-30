@@ -838,6 +838,31 @@ pub fn multiply_datums(
             }
             Datum::List(DatumType::List, ref_list, false)
         }
+        // PropList * scalar — element-wise over the VALUES, keys preserved,
+        // recursing into nested lists exactly like the List arms above (Director
+        // applies the operation through the structure; see the rect note in the
+        // dictionary, "adds it to each element in the rectangle" — the same rule
+        // as the `list * scalar` behaviour this mirrors).
+        //
+        // Merlin's Revenge 3's modResidents scales a whole Counter struct:
+        //   productionTime = pCurrentGroupSize * timeToBuildSingle
+        // with pCurrentGroupSize = [#theCount: 5, #tim: [0, 5], #inc: -1,
+        // #fin: 0, #looped: 0]. The nested `#tim` list is why the recursion
+        // matters — a flat numeric-only pass would reject it.
+        (Datum::PropList(pairs, _), Datum::Int(_) | Datum::Float(_)) => {
+            let pair_refs: Vec<(DatumRef, DatumRef)> = pairs.iter().cloned().collect();
+            let mut result_pairs = VecDeque::new();
+            for (key_ref, value_ref) in &pair_refs {
+                let scaled = multiply_datums(value_ref.clone(), right_ref.clone(), player)?;
+                let scaled_ref = player.alloc_datum(scaled);
+                result_pairs.push_back((key_ref.clone(), scaled_ref));
+            }
+            Datum::PropList(result_pairs, false)
+        }
+        (Datum::Int(_) | Datum::Float(_), Datum::PropList(..)) => {
+            multiply_datums(right_ref.clone(), left_ref.clone(), player)?
+        }
+
         // scalar * List — Director's element-wise multiply is commutative, so
         // reuse the List * scalar arms above rather than keeping a second, subtly
         // different copy. These were previously limited to 2-element lists, so a
