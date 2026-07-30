@@ -670,14 +670,24 @@ impl BuiltInHandlerManager {
             let handler_name = handler_name.string_value()?;
 
             let (instance_ids, list_count) = match receiver_clone {
+                // A LIST receiver is the lenient form: "the message is sent to
+                // each item in the list in turn; if the handler is not defined
+                // in the ancestor script, no alert is generated" (Director 11.5
+                // Scripting Dictionary, `call`) — only the single-instance form
+                // raises. So an item that can't receive a message at all is
+                // skipped, not an error. Merlin's Revenge 3 keeps unused room
+                // layers as `#none`:
+                //
+                //   pTileLayers -- [#backgroundPassive: <objTileLayer>,
+                //                   #actors: #none, ...]
+                //   call(#finish, pTileLayers)
                 Datum::PropList(prop_list, ..) => {
                     let mut instance_ids = vec![];
                     let count = prop_list.len();
                     for (_, value_ref) in prop_list {
-                        if player.get_datum(&value_ref).is_void() {
-                            continue;
+                        if let Ok(ids) = get_datum_script_instance_ids(&value_ref, player) {
+                            instance_ids.extend(ids);
                         }
-                        instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
                     (Ok(Some(instance_ids)), count)
                 }
@@ -685,10 +695,9 @@ impl BuiltInHandlerManager {
                     let mut instance_ids = vec![];
                     let count = list.len();
                     for value_ref in list {
-                        if player.get_datum(&value_ref).is_void() {
-                            continue;
+                        if let Ok(ids) = get_datum_script_instance_ids(&value_ref, player) {
+                            instance_ids.extend(ids);
                         }
-                        instance_ids.extend(get_datum_script_instance_ids(&value_ref, player)?);
                     }
                     (Ok(Some(instance_ids)), count)
                 }
