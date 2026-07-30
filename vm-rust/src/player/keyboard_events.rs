@@ -599,7 +599,26 @@ pub(crate) fn apply_text_insertion(
     *sel_anchor = *sel_start;
 }
 
+/// `stopEvent()` "applies only to the current event being handled" (Director
+/// 11.5 Scripting Dictionary), so a key event starts with the flag clear and
+/// puts back whatever was there when it finishes.
+///
+/// Without the scope the flag leaked from one keystroke to the next and killed
+/// typing outright. Coke Studios' chatinput behavior ends `on keyDown` with
+/// stopEvent() when the key is RETURN (after sending the line and blanking the
+/// field); every later keystroke then saw the stale flag, counted as handled,
+/// and skipped the default text insertion — so the player could send exactly
+/// one chat message and then the input was dead.
+///
+/// The scope belongs here rather than in `player_invoke_event_to_instances`:
+/// `player_dispatch_event_to_sprite_targeted` deliberately reads the flag back
+/// out after dispatching so mouseDown can skip the cast-member script when a
+/// behavior stopped the event, and clearing it deeper would break that.
 pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptError> {
+    crate::player::events::with_event_scope(player_key_down_inner(key, code)).await
+}
+
+async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, ScriptError> {
     if !player_is_playing().await {
         return Ok(DatumRef::Void);
     }
@@ -718,7 +737,13 @@ pub async fn player_key_down(key: String, code: u16) -> Result<DatumRef, ScriptE
     Ok(DatumRef::Void)
 }
 
+/// Same fresh `stopEvent()` scope as `player_key_down` — a keyUp handler that
+/// stops the event must not silence the next one either.
 pub async fn player_key_up(key: String, code: u16) -> Result<DatumRef, ScriptError> {
+    crate::player::events::with_event_scope(player_key_up_inner(key, code)).await
+}
+
+async fn player_key_up_inner(key: String, code: u16) -> Result<DatumRef, ScriptError> {
     if !player_is_playing().await {
         return Ok(DatumRef::Void);
     }

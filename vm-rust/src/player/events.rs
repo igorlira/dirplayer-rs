@@ -281,7 +281,7 @@ pub async fn player_invoke_event_to_instances(
 /// restores whatever the enclosing dispatch had — otherwise a `sendSprite()`
 /// made from inside a stopped handler would clear the outer event's flag and
 /// let the rest of the hierarchy run after all.
-async fn with_event_scope<F, T>(f: F) -> Result<T, ScriptError>
+pub(crate) async fn with_event_scope<F, T>(f: F) -> Result<T, ScriptError>
 where
     F: std::future::Future<Output = Result<T, ScriptError>>,
 {
