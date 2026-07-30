@@ -4347,9 +4347,28 @@ impl WebGL2Renderer {
                 // In both cases, disable shader color-key by setting tolerance to 0.
                 // For 16-bit and 32-bit: use small tolerance for floating-point RGB comparison.
                 let is_indexed_ink40 = bitmap_bit_depth >= 2 && bitmap_bit_depth <= 8 && (ink == 37 || ink == 39 || ink == 40);
+                // Colorize is baked INTO the texture, so the texel no longer
+                // holds the source colour the key was meant to test — and the
+                // key was already applied, against the original pixels, when
+                // that alpha was baked (`bitmap_to_rgba` computes alpha from
+                // `(r, g, b)` before colorizing). Running it again on the
+                // colorized texel double-keys: any pixel the tint happens to
+                // land ON the key colour gets discarded.
+                //
+                // Merlin's Revenge 3 hits this with its white HUD counters —
+                // `objDisplayCounter` defaults to `i[#colour] = rgb(255,255,255)`
+                // and the pooled sprites carry bgColor white, so every glyph
+                // colorized to white matched the key and vanished. The coloured
+                // potion counters were unaffected (red is not white), which is
+                // why only the white ones stayed missing.
+                //
+                // 1-bit and indexed ink 37/39/40 already disable the key for
+                // exactly this reason: their transparency is baked too.
+                let colorize_baked =
+                    matches!(colorize_params, Some((has_f, has_b, ..)) if has_f || has_b);
                 // 16-bit bitmaps need higher tolerance due to RGB565 quantization:
                 // max error is ~4/255 ≈ 0.016, so use 0.02 to cover rounding
-                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 {
+                let tolerance = if bitmap_bit_depth == 1 || is_indexed_ink40 || colorize_baked {
                     0.0
                 } else if bitmap_bit_depth == 16 {
                     0.02
@@ -4941,7 +4960,7 @@ impl WebGL2Renderer {
                             let min_c = r.min(g).min(b);
                             let near_grayscale = max_c.saturating_sub(min_c) <= 16;
 
-                            if ink == 36 && has_fore {
+                            if ink == 36 && has_fore && !near_grayscale {
                                 // Ink 36 (BgTransparent) on a 32-bit bitmap
                                 // with explicit foreColor: multiplicative
                                 // tint. Director's CS private-studio
@@ -4954,12 +4973,42 @@ impl WebGL2Renderer {
                                 // pink shape's blue channel to zero and
                                 // produces the orange/brown that then
                                 // alpha-blends onto the floor at blend %.
+                                //
+                                // Only for COLORED source pixels. A multiply
+                                // can never lift black off black — black *
+                                // anything is black — so a grayscale source
+                                // has to take the fg→bg remap below instead.
+                                // Merlin's Revenge 3 builds its HUD digits as
+                                // a runtime `image(w, h, 32)` (objTileSet
+                                // copies 1-bit glyph tiles in with copyPixels
+                                // ink 0, giving black glyphs on white), drops
+                                // it on a pooled sprite that spriteMaster
+                                // fixes at ink 36 / bgColor white, and tints
+                                // it with `sprite.color = rgb(255, 0, 0)`.
+                                // Multiplied, every glyph stayed black on a
+                                // black HUD strip — the potion counters were
+                                // laid out and drawn, just invisible.
+                                //
+                                // The bitmap's palette can't make this call:
+                                // `vector_shape.rs` rasterizes shapes with
+                                // the built-in GrayScale palette, so the CS
+                                // floor claims to be grayscale as well. The
+                                // pixels tell the truth — a pink gradient is
+                                // not near-grayscale, glyph art is.
                                 (
                                     ((r as u16 * fg_rgb.0 as u16) / 255) as u8,
                                     ((g as u16 * fg_rgb.1 as u16) / 255) as u8,
                                     ((b as u16 * fg_rgb.2 as u16) / 255) as u8,
                                 )
-                            } else if near_grayscale && (has_fore || has_back) && use_back_color {
+                            } else if near_grayscale
+                                && (has_fore || has_back)
+                                // Ink 36 has no `use_back_color` entry (its
+                                // bg is the color-key, not a ramp endpoint),
+                                // so admit it explicitly; eff_bg then
+                                // defaults to white, which the ink-36
+                                // color-key drops to transparent anyway.
+                                && (use_back_color || (ink == 36 && has_fore))
+                            {
                                 let eff_fg = if has_fore { fg_rgb } else { (0u8, 0u8, 0u8) };
                                 let eff_bg = if has_back { bg_rgb } else { (255u8, 255u8, 255u8) };
                                 let t = gray as f32 / 255.0;
