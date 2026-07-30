@@ -2489,7 +2489,18 @@ impl BuiltInHandlerManager {
             // were the visible failures; multi-digit ones (arrows) happened to
             // round-trip through the number-parse branch.
             if let crate::director::lingo::datum::Datum::Int(code) = arg_datum {
-                let code = *code;
+                // Director truncates the key code to its low byte. Mac virtual
+                // key codes span 0-127 (the arrows are 123-126), so the low
+                // byte IS the whole code space and 256 means code 0 — the `a`
+                // key. The dictionary doesn't document the truncation; it's
+                // inferred from Merlin's Revenge 3, whose #wasd binding stores
+                // `#left: 256` and moves left in Director. The movie's own
+                // key-config code treats 0 as "unassigned", so `a` needed a
+                // non-zero stand-in.
+                //
+                // Masking can only change values >= 256, which no real key code
+                // reaches, so nothing that matches today stops matching.
+                let code = *code & 0xFF;
                 // An ASCII letter code (A-Z/a-z) maps through the char table;
                 // any other integer is used as the SW key code verbatim.
                 let key_code = if (65..=90).contains(&code) || (97..=122).contains(&code) {
@@ -2544,7 +2555,7 @@ impl BuiltInHandlerManager {
                     }
                 } else {
                     // Try to parse as number string (like "123")
-                    if let Ok(code) = key_str.parse::<i32>() {
+                    if let Ok(code) = key_str.parse::<i32>().map(|c| c & 0xFF) {
                         // Check if it's an ASCII letter code that needs mapping
                         let mapped_code = if (65..=90).contains(&code) || (97..=122).contains(&code)
                         {
