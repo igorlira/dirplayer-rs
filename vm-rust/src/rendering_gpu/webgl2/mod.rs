@@ -4437,6 +4437,9 @@ impl WebGL2Renderer {
     /// Colorize parameters: (has_fore, has_back, fg_r, fg_g, fg_b, bg_r, bg_g, bg_b)
     /// sprite_bg_color: The sprite's bgColor, used for ink 8 matte computation on indexed bitmaps
     /// mask_bitmap: For ink 9 (Mask), the next cast member's bitmap used as grayscale alpha mask
+    /// mask_offset: For ink 9, `mask_reg_point - source_reg_point` — Director aligns
+    /// the mask to the source by registration point, not by origin, and the two
+    /// bitmaps are often different sizes
     /// is_flash_bitmap: True when this bitmap is a Ruffle captureFrame buffer
     /// (sourced from a Flash sprite via wmode='transparent'). Such bitmaps
     /// have their transparency authoritatively encoded in the alpha channel;
@@ -4451,6 +4454,7 @@ impl WebGL2Renderer {
         colorize: Option<(bool, bool, u8, u8, u8, u8, u8, u8)>,
         sprite_bg_color: Option<(u8, u8, u8)>,
         mask_bitmap: Option<&Bitmap>,
+        mask_offset: (i32, i32),
         is_flash_bitmap: bool,
     ) -> Vec<u8> {
         let width = bitmap.width as usize;
@@ -4819,12 +4823,36 @@ impl WebGL2Renderer {
                 // Black=opaque(255), white=transparent(0), grays=partial
                 let ink9_mask_alpha: Option<u8> = if ink == 9 {
                     if let Some(ref mask_bmp) = mask_bitmap {
-                        let mx = (x as u16).min(mask_bmp.width.saturating_sub(1));
-                        let my = (y as u16).min(mask_bmp.height.saturating_sub(1));
-                        let (mr, mg, mb) = mask_bmp.get_pixel_color(palettes, mx, my);
-                        // Grayscale luminance → invert: black(0)=opaque(255), white(255)=transparent(0)
-                        let gray = ((mr as u16 + mg as u16 + mb as u16) / 3) as u8;
-                        Some(255 - gray)
+                        // Director aligns the mask to the source by their
+                        // REGISTRATION POINTS, and the two are routinely
+                        // different sizes (Candystand Miniature Golf's
+                        // "(SAVER MODELORANGE)" frames are a 191x139 source
+                        // paired with a 29x44 mask). `mask_offset` is
+                        // mask_reg - src_reg, matching the CPU renderer's
+                        // `ink9_mask_offset`; source pixels whose mask sample
+                        // falls outside the mask are NOT covered by it and so
+                        // are transparent.
+                        //
+                        // Clamping the sample into the mask instead (the old
+                        // behaviour) smeared the mask's right/bottom edge pixel
+                        // across every source pixel beyond the mask's extent,
+                        // painting an opaque bar the full width of the source
+                        // wherever that edge happened to be black.
+                        let mx_signed = x as i32 + mask_offset.0;
+                        let my_signed = y as i32 + mask_offset.1;
+                        if mx_signed < 0
+                            || my_signed < 0
+                            || mx_signed >= mask_bmp.width as i32
+                            || my_signed >= mask_bmp.height as i32
+                        {
+                            Some(0)
+                        } else {
+                            let (mr, mg, mb) =
+                                mask_bmp.get_pixel_color(palettes, mx_signed as u16, my_signed as u16);
+                            // Grayscale luminance → invert: black(0)=opaque(255), white(255)=transparent(0)
+                            let gray = ((mr as u16 + mg as u16 + mb as u16) / 3) as u8;
+                            Some(255 - gray)
+                        }
                     } else {
                         None
                     }
@@ -5434,13 +5462,33 @@ impl WebGL2Renderer {
         // Only log on the very first frame for any new texture
         let _is_first_creation = self.frame_count == 1 && !self.texture_cache.has(&cache_key);
 
-        // For ink 9 (Mask), find the mask bitmap: the next cast member (member+1)
-        let mask_bitmap_ref = if ink == 9 {
+        // For ink 9 (Mask), find the mask bitmap: the next cast member (member+1),
+        // together with the registration-point delta Director aligns it by.
+        let (mask_bitmap_ref, mask_offset) = if ink == 9 {
+            let src_reg = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+                .and_then(|m| match &m.member_type {
+                    CastMemberType::Bitmap(bm) => {
+                        Some((bm.reg_point.0 as i32, bm.reg_point.1 as i32))
+                    }
+                    _ => None,
+                })
+                .unwrap_or((0, 0));
             let mask_member_ref = CastMemberRef {
                 cast_lib: member_ref.cast_lib,
                 cast_member: member_ref.cast_member + 1,
             };
-            player.movie.cast_manager.find_member_by_ref(&mask_member_ref)
+            let mask_member = player.movie.cast_manager.find_member_by_ref(&mask_member_ref);
+            let mask_reg = match mask_member.as_ref().map(|m| &m.member_type) {
+                Some(CastMemberType::Bitmap(bm)) => {
+                    (bm.reg_point.0 as i32, bm.reg_point.1 as i32)
+                }
+                // No mask member: the offset is unused, but keep it neutral.
+                _ => src_reg,
+            };
+            let bmp = mask_member
                 .and_then(|m| {
                     if let CastMemberType::Bitmap(bm) = &m.member_type {
                         Some(bm.image_ref)
@@ -5449,12 +5497,13 @@ impl WebGL2Renderer {
                     }
                 })
                 .and_then(|img_ref| player.bitmap_manager.get_bitmap(img_ref))
-                .map(|b| b.clone())
+                .map(|b| b.clone());
+            (bmp, (mask_reg.0 - src_reg.0, mask_reg.1 - src_reg.1))
         } else {
-            None
+            (None, (0, 0))
         };
 
-        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), is_flash_bitmap);
+        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), mask_offset, is_flash_bitmap);
 
         // Validate data size
         let expected_size = (width * height * 4) as usize;

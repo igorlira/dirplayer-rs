@@ -810,7 +810,7 @@ fn resolve_bitmap_rgba(player: &DirPlayer, name: &str) -> Option<(usize, usize, 
     };
     let bitmap = player.bitmap_manager.get_bitmap(bref)?;
     let palettes = player.movie.cast_manager.palettes();
-    let rgba = super::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, false);
+    let rgba = super::WebGL2Renderer::bitmap_to_rgba(bitmap, &palettes, 0, None, None, None, (0, 0), false);
     Some((bitmap.width as usize, bitmap.height as usize, rgba))
 }
 
