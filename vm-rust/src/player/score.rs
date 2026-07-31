@@ -3561,6 +3561,25 @@ pub fn sprite_get_prop(
         "spriteNum" | "spriteNumber" => Ok(Datum::Int(
             sprite.map_or(sprite_id as i32, |x| x.number as i32),
         )),
+        // Sprite-scoped form of rollOver(): "indicates whether the pointer
+        // (cursor) is currently over the bounding rectangle of a specified
+        // sprite (TRUE or 1) or not (FALSE or 0)" (Director 11.5 Scripting
+        // Dictionary, `rollOver()`). The dictionary only documents the movie
+        // method `_movie.rollOver(intSpriteNum)`; the property spelling is
+        // undocumented but is what NabiscoWorld Mini Mini-Golf's menu polls —
+        //
+        //   if sprite(spr).rollover or sprite(spr + 1).rollover then
+        //     ... if the mouseDown then goHole(hol)
+        //
+        // so every hole button was inert. Unknown sprite props fall through to
+        // VOID (they may be behavior properties), which reads as FALSE, so the
+        // failure was silent.
+        "rollover" | "rollOver" => {
+            let hit = sprite.map_or(false, |sprite| {
+                concrete_sprite_hit_test(player, sprite, player.mouse_loc.0, player.mouse_loc.1)
+            });
+            Ok(Datum::Int(if hit { 1 } else { 0 }))
+        }
         "loc" => {
             let sprite = get_sprite_in_context(player, sprite_id);
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
