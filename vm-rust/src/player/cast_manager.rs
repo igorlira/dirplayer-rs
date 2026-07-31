@@ -90,18 +90,30 @@ impl CastManager {
         let mut casts: Vec<CastLib> = Vec::new();
         for index in 0..dir.cast_entries.len() {
             let cast_entry = &dir.cast_entries[index];
-            let cast_def = dir.casts.iter().find(|cast| cast.id == cast_entry.id);
+            // A cast is external if it has a file_path in the MCsL entry.
+            let is_external = !cast_entry.file_path.is_empty();
+            // Only an INTERNAL entry can be satisfied by a cast def parsed out
+            // of this file. An external entry's members live in its own .cct,
+            // and `read_casts` deliberately skips the CAS* lookup for those —
+            // but the MCsL `id` is only unique within the file that owns the
+            // cast, so an external entry routinely repeats the internal cast's
+            // id (Candystand Miniature Golf: both "Internal" and "Holes" are
+            // id=1024). Matching by id alone then hands the external castLib
+            // the INTERNAL cast's members and marks it Loaded, so `preload_casts`
+            // never fetches the .cct — castLib 2 ends up a duplicate of
+            // castLib 1 (every hole card but the first stuck on "Loading",
+            // because the movie type-checks hole assets against castLib 2).
+            let cast_def = if is_external {
+                None
+            } else {
+                dir.casts.iter().find(|cast| cast.id == cast_entry.id)
+            };
             debug!(
                 "MCsL entry {}: name='{}' file_path='{}' id={} min={} max={} preload={} has_cast_def={}",
                 index, cast_entry.name, cast_entry.file_path, cast_entry.id,
                 cast_entry.min_member, cast_entry.max_member, cast_entry.preload_settings,
                 cast_def.is_some()
             );
-
-            // A cast is external if it has a file_path in the MCsL entry,
-            // regardless of whether we found a CAS* chunk (which may come
-            // from a fallback lookup in the same .cct file).
-            let is_external = !cast_entry.file_path.is_empty();
 
             let mut cast = CastLib {
                 name: cast_entry.name.to_owned(),
