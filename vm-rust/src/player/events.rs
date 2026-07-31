@@ -1723,6 +1723,48 @@ pub async fn dispatch_event_endsprite_for_score(score_ref: ScoreRef, sprite_nums
     });
 }
 
+/// Resolve the handler a sprite's CAST MEMBER script defines for `handler_name`.
+///
+/// Director's message order sends an event to a sprite's behaviors first and
+/// then "to a script attached to the cast member assigned to the sprite"
+/// (11.5 Scripting Dictionary, Messages), before frame and movie scripts. Mouse
+/// events already walk that step in `commands.rs`; this is the same lookup for
+/// the frame events, which a member script receives just as a behavior does.
+///
+/// Mirrors the mouse path: the member's own `member_script_ref` first, then a
+/// behavior script attached via `script_id` (those live in the cast's lctx
+/// rather than as Script-type members, so `get_script_by_ref` misses them).
+fn get_member_script_handler(
+    player: &mut crate::player::DirPlayer,
+    sprite_num: i16,
+    handler_name: &str,
+) -> Option<crate::player::script::ScriptHandlerRef> {
+    let member_ref = player
+        .movie
+        .score
+        .get_sprite(sprite_num)
+        .and_then(|sprite| sprite.member.clone())?;
+    let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+
+    if let Some(script_ref) = member.get_member_script_ref() {
+        if let Some(script) = player.movie.cast_manager.get_script_by_ref(script_ref) {
+            if let Some(handler) = script.get_own_handler_ref(handler_name) {
+                return Some(handler);
+            }
+        }
+    }
+
+    let script_id = member.get_script_id()?;
+    let script = {
+        let cast_lib = player
+            .movie
+            .cast_manager
+            .get_cast_mut(member_ref.cast_lib as u32);
+        cast_lib.get_behavior_script_from_lctx(script_id)
+    }?;
+    script.get_own_handler_ref(handler_name)
+}
+
 pub async fn dispatch_event_to_all_behaviors(
     handler_name: &str,
     args: &Vec<DatumRef>,
@@ -1755,10 +1797,10 @@ pub async fn dispatch_event_to_all_behaviors(
     }
     // Include ScoreRef to track which score context each sprite belongs to
     let (sprite_behaviors, _frame_behaviors) = reserve_player_mut(|player| {
-        let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>)> = Vec::new();
+        let mut sprites: Vec<(ScoreRef, usize, Vec<ScriptInstanceRef>, Option<crate::player::script::ScriptHandlerRef>)> = Vec::new();
         let mut frames = Vec::new();
 
-        for channel_number in player.active_stage_behavior_channels() {
+        for channel_number in player.active_stage_message_channels() {
             let Some((number, entered, puppet, fallback)) = player
                 .movie
                 .score
@@ -1782,12 +1824,22 @@ pub async fn dispatch_event_to_all_behaviors(
 
             let behaviors =
                 player.get_sprite_script_instance_ids(number as i16, fallback.as_slice());
-            if behaviors.is_empty() {
+
+            // A sprite with no behaviors may still carry a cast member script,
+            // which is the next receiver in Director's message order — so the
+            // channel can't be skipped on an empty behavior list alone.
+            let member_handler = if number > 0 {
+                get_member_script_handler(player, number as i16, handler_name)
+            } else {
+                None
+            };
+
+            if behaviors.is_empty() && member_handler.is_none() {
                 continue;
             }
 
             if number > 0 {
-                sprites.push((ScoreRef::Stage, number, behaviors));
+                sprites.push((ScoreRef::Stage, number, behaviors, member_handler));
             } else if number == 0 {
                 frames.push((number, behaviors));  // Store tuple with channel number
             }
@@ -1818,7 +1870,7 @@ pub async fn dispatch_event_to_all_behaviors(
                 }
                 let behaviors = channel.sprite.script_instance_list.clone();
                 if channel.number > 0 {
-                    sprites.push((ScoreRef::FilmLoop(member_ref.clone()), channel.number, behaviors));
+                    sprites.push((ScoreRef::FilmLoop(member_ref.clone()), channel.number, behaviors, None));
                 }
             }
         }
@@ -1827,7 +1879,7 @@ pub async fn dispatch_event_to_all_behaviors(
     });
     // Dispatch to sprite behaviors first (channel order)
     // Set the score context before invoking each event so sprite property access works correctly
-    for (score_ref, sprite_number, behaviors) in sprite_behaviors {
+    for (score_ref, sprite_number, behaviors, member_handler) in sprite_behaviors {
         // Set the score context for this sprite's behaviors
         reserve_player_mut(|player| {
             player.current_score_context = score_ref.clone();
@@ -1863,6 +1915,37 @@ pub async fn dispatch_event_to_all_behaviors(
                 }
                 web_sys::console::error_1(
                     &format!("Error in {} for sprite {} behavior '{}': {}", handler_name, sprite_number, ascii_safe(&script_name.to_string()), err.message).into()
+                );
+                reserve_player_mut(|player| {
+                    player.on_script_error(&err);
+                });
+            }
+        }
+
+        // Then the sprite's cast member script — next in Director's message
+        // order, after the behaviors and before the frame/movie scripts below.
+        if let Some(handler) = member_handler {
+            reserve_player_mut(|player| {
+                player.member_script_sprite_num = sprite_number as i16;
+            });
+            let result = player_call_script_handler(None, handler, args).await;
+            reserve_player_mut(|player| {
+                player.member_script_sprite_num = 0;
+            });
+            if let Err(err) = result {
+                if err.code == ScriptErrorCode::Abort {
+                    reserve_player_mut(|player| {
+                        player.is_dispatching_events = false;
+                        player.current_score_context = ScoreRef::Stage;
+                    });
+                    return;
+                }
+                web_sys::console::error_1(
+                    &format!(
+                        "Error in {} for sprite {} member script: {}",
+                        handler_name, sprite_number, err.message
+                    )
+                    .into(),
                 );
                 reserve_player_mut(|player| {
                     player.on_script_error(&err);

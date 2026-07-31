@@ -305,6 +305,15 @@ pub struct DirPlayer {
     pub drag_offset: (i32, i32),
     pub trails_bitmap: Option<bitmap::bitmap::Bitmap>,
     pub click_on_sprite: i16,
+    /// Sprite whose CAST MEMBER script is currently executing. A member script
+    /// is not a behavior — it runs with no receiver instance — so
+    /// `the currentSpriteNum` has no `spriteNum` property to read and would
+    /// otherwise report 0. Director still answers with the sprite the message
+    /// was sent to, which member scripts rely on to identify themselves
+    /// (Lifesavers Pineapple Treasure Hunt gives every walkable terrain member
+    /// an `on prepareFrame addPlatform()` script, and `addPlatform` bails out
+    /// on `the currentSpriteNum = 0`). Set around member-script dispatch only.
+    pub member_script_sprite_num: i16,
     /// Queue of pending `on cuePassed` events that `SoundChannel::update`
     /// has detected but not yet dispatched. The frame loop drains this
     /// after `tick_sound_manager` (`SoundChannel::update` runs synchronously
@@ -503,6 +512,12 @@ pub struct DirPlayer {
     pub script_instance_list_ids_cache: FxHashMap<i16, (u64, Vec<ScriptInstanceRef>)>,
     /// Cached stage channels with active behaviors for the current frame.
     pub active_stage_behavior_channels_cache: Option<(u32, u64, Vec<usize>)>,
+    /// Channels that can RECEIVE a message this frame: those with behaviors
+    /// (the behavior cache above) plus those whose cast member carries a
+    /// script. Director sends an event to a sprite's behaviors and then to its
+    /// cast member script, so a sprite with only the latter is still a
+    /// receiver — it just isn't a "behavior channel".
+    pub active_stage_message_channels_cache: Option<(u32, u64, Vec<usize>)>,
     /// Cached visible filmloop members currently present on the stage for a frame.
     pub active_stage_filmloop_members_cache: Option<(u32, u64, Vec<CastMemberRef>)>,
     /// Set by `sprite_get_prop` when a property returns a pre-allocated DatumRef
@@ -615,6 +630,7 @@ impl DirPlayer {
             date_objects: HashMap::new(),
             math_objects: HashMap::new(),
             click_on_sprite: 0,
+            member_script_sprite_num: 0,
             pending_cue_events: Vec::new(),
             audio_sync_anchor: None,
             enable_stream_status_handler: false,
@@ -675,6 +691,7 @@ impl DirPlayer {
             script_instance_list_generation: FxHashMap::default(),
             script_instance_list_ids_cache: FxHashMap::default(),
             active_stage_behavior_channels_cache: None,
+            active_stage_message_channels_cache: None,
             active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
             virtual_scripts: FxHashMap::default(),
@@ -1884,6 +1901,7 @@ impl DirPlayer {
         self.behavior_channel_cache_generation =
             self.behavior_channel_cache_generation.wrapping_add(1);
         self.active_stage_behavior_channels_cache = None;
+        self.active_stage_message_channels_cache = None;
     }
 
     pub fn invalidate_active_stage_filmloop_cache(&mut self) {
@@ -1999,6 +2017,42 @@ impl DirPlayer {
             .collect();
 
         self.active_stage_behavior_channels_cache =
+            Some((frame_num, generation, channels.clone()));
+        channels
+    }
+
+    /// Channels that can receive an event this frame — behaviors OR a cast
+    /// member script. `active_stage_behavior_channels` deliberately keeps only
+    /// the former (behavior instantiation and beginSprite work off it), but
+    /// event dispatch must also reach a sprite whose only handler lives on its
+    /// cast member: Lifesavers Pineapple Treasure Hunt puts
+    /// `on prepareFrame addPlatform()` on every walkable terrain MEMBER and
+    /// attaches no behaviors at all, so filtering on behaviors alone dropped
+    /// every collision surface in the game and the player fell through the
+    /// world.
+    pub fn active_stage_message_channels(&mut self) -> Vec<usize> {
+        let frame_num = self.movie.current_frame;
+        let generation = self.behavior_channel_cache_generation;
+
+        if let Some((cached_frame, cached_generation, channels)) =
+            &self.active_stage_message_channels_cache
+        {
+            if *cached_frame == frame_num && *cached_generation == generation {
+                return channels.clone();
+            }
+        }
+
+        let channels: Vec<usize> = self
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter(|channel| channel.sprite.entered || channel.sprite.puppet)
+            .filter(|channel| crate::player::score::is_active_sprite(self, &channel.sprite))
+            .map(|channel| channel.number)
+            .collect();
+
+        self.active_stage_message_channels_cache =
             Some((frame_num, generation, channels.clone()));
         channels
     }
@@ -2644,6 +2698,12 @@ impl DirPlayer {
                             }
                         }
                     }
+                }
+
+                // A cast member script runs with no receiver, so fall back to
+                // the sprite the message was dispatched to.
+                if self.member_script_sprite_num != 0 {
+                    return Ok(self.alloc_datum(Datum::Int(self.member_script_sprite_num as i32)));
                 }
 
                 // Default: return 0 when no sprite context is available
