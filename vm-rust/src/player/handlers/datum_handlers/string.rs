@@ -372,7 +372,46 @@ fn trim_unbalanced_brackets(input: &str) -> String {
 /// until one parses) don't dump a pest parse error to the console.
 pub fn normalise_lingo_expr_for_value(input: &str) -> String {
     let cleaned = strip_lingo_comments(input);
+    let cleaned = strip_line_continuations(&cleaned);
     trim_unbalanced_brackets(cleaned.trim())
+}
+
+/// Drop Lingo's `\` line-continuation markers (outside quoted strings) before
+/// the expression reaches the grammar.
+///
+/// A literal stored in a text member is normally authored across several lines
+/// with `\` continuations. Scripts that parse such a member usually strip the
+/// RETURNs first, which welds each `\` onto its neighbours — NabiscoWorld Mini
+/// Mini-Golf's `castlist` member is
+///
+///   [\<CR>#script,#script,...,#bitmap\<CR>]
+///
+/// and `objTextData.init` does `StringEliminateChars(text, RETURN)` then
+/// `.value`, so the grammar was handed `[\#script,...,#bitmap\]` and failed at
+/// column 2. `.value` reports a parse failure by returning the raw string, so
+/// the movie silently got a string where it expected a 1018-element list.
+///
+/// Backslashes inside quoted strings are preserved — Director strings hold
+/// Windows paths like "C:\dir\file".
+fn strip_line_continuations(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            in_string = !in_string;
+            result.push(ch);
+        } else if ch == '\\' && !in_string {
+            // The continuation eats an immediately following newline too, so a
+            // not-yet-stripped `\<CR>` doesn't leave a stray line break behind.
+            if matches!(chars.peek(), Some('\r') | Some('\n')) {
+                chars.next();
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// Strip Lingo `--` comments from a string, respecting quoted strings.
