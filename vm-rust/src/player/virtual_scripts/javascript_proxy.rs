@@ -25,10 +25,10 @@ impl VirtualScriptHandler for JavascriptProxy {
                     Ok(Some(datum))
                 } else {
                     // Called on the class or as a global — create a new instance
-                    let script_ref = player
-                        .movie
-                        .cast_manager
-                        .find_member_ref_by_name(&"JavaScriptProxy".to_string())
+                    // Virtual scripts have no CastMember, so resolve through the
+                    // registry rather than the movie's cast (see
+                    // `VirtualScriptRegistry::register`).
+                    let script_ref = VirtualScriptRegistry::find_by_name(player, "JavaScriptProxy")
                         .ok_or_else(|| ScriptError::new("JavaScriptProxy script not found".to_string()))?;
                     let (_instance_ref, datum_ref) =
                         VirtualScriptRegistry::create_instance(player, &script_ref);

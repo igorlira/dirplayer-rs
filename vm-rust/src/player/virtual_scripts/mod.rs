@@ -103,8 +103,26 @@ impl VirtualScriptRegistry {
         handler: Rc<dyn VirtualScriptHandler>,
     ) -> CastMemberRef {
         let script_type = handler.script_type();
+        // Key the script OUTSIDE the cast-member number space, and don't give
+        // it a CastMember at all — a virtual script is player machinery and
+        // must be invisible to the movie's own view of its cast.
+        //
+        // Both Nabisco World mini-golf titles audit their entire cast against a
+        // `castmems` list of expected member types before they will show a
+        // hole's menu thumbnail, and `the type of member N` reports #empty for
+        // an unused slot. Occupying ANY slot in the audited range breaks that:
+        // filling the first interior gap put a #script at member 26 of Mini
+        // Mini-Golf (whose cast fills 1..25), and appending after the last
+        // authored slot merely moved the problem into Mini-Golf's 523..528,
+        // since its hole 1 spans 1..528 while its cast ends at 522.
+        //
+        // 1000000+ is the offset this file's sibling already uses for the same
+        // reason (`get_behavior_script_from_lctx`: "avoid collision with cast
+        // member numbers"). `get_script_for_member` looks in `scripts` before
+        // `members`, so resolution is unaffected, and `the number of
+        // castMembers` (max member id) no longer moves.
+        let member_number = 2_000_000 + player.virtual_scripts.len() as u32;
         let cast = &mut player.movie.cast_manager.casts[0]; // cast_lib 1
-        let member_number = cast.first_free_member_id();
         let member_ref = cast_member_ref(cast.number as i32, member_number as i32);
 
         // Create a stub Script with no bytecode
@@ -124,24 +142,10 @@ impl VirtualScriptRegistry {
             properties: RefCell::new(FxHashMap::default()),
         };
 
-        // Create a CastMember so find_member_by_name works
-        let cast_member = CastMember {
-            number: member_number,
-            name: name.to_string(),
-            comments: "".to_string(),
-            member_type: CastMemberType::Script(ScriptMember {
-                script_id: 0,
-                script_type,
-                name: name.to_string(),
-            }),
-            color: ColorRef::Rgb(0, 0, 0),
-            bg_color: ColorRef::Rgb(255, 255, 255),
-            reg_point: (0, 0),
-        };
-
-        // Insert directly (bypass insert_member which requires lctx for scripts)
+        // Insert directly (bypass insert_member which requires lctx for
+        // scripts). No CastMember: see the note on `member_number` above —
+        // `find_by_name` resolves virtual scripts instead.
         cast.scripts.insert(member_number, Rc::new(script));
-        cast.members.insert(member_number, cast_member);
 
         // Store the virtual handler
         player.virtual_scripts.insert(member_ref.clone(), handler);
@@ -150,6 +154,25 @@ impl VirtualScriptRegistry {
         player.movie.cast_manager.clear_movie_script_cache();
 
         member_ref
+    }
+
+    /// Resolve a registered virtual script by name.
+    ///
+    /// Virtual scripts deliberately have no CastMember (see `register`), so
+    /// `find_member_ref_by_name` can't see them — look them up through the
+    /// registry instead.
+    pub fn find_by_name(player: &DirPlayer, name: &str) -> Option<CastMemberRef> {
+        player
+            .virtual_scripts
+            .keys()
+            .find(|member_ref| {
+                player
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(member_ref)
+                    .map_or(false, |script| script.name.eq_ignore_ascii_case(name))
+            })
+            .cloned()
     }
 
     /// Attach a virtual handler to an existing script for partial overrides.
