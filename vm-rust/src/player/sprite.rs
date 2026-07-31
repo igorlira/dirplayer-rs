@@ -265,22 +265,30 @@ impl Sprite {
         self.flip_h = false;
         self.flip_v = false;
         self.rotation = 0.0;
-        // Only reset fore/bg color when they weren't explicitly set by Lingo.
-        // Coke Studios' backpack does
-        //   sprite.bgColor = myColor
-        //   sprite.ink = 41
-        //   sprite.member = member(...)
-        // — the member assignment triggered an unconditional reset that wiped
-        // the just-authored bgColor, so ink-41 (Darken) had nothing to multiply
-        // against and every separator icon rendered un-tinted. Director keeps
-        // explicit colour properties across member swaps; only score-default
-        // colours should fall back to the placeholder values here.
-        if !self.has_back_color {
-            self.bg_color = ColorRef::PaletteIndex(0);
-        }
-        if !self.has_fore_color {
-            self.color = ColorRef::PaletteIndex(255);
-        }
+        // Colours are NOT reset here. Director keeps a sprite's foreColor and
+        // backColor across a member swap — "if a sprite channel is not a
+        // puppet, any changes that script makes to a sprite last for the life
+        // of the current sprite only" (11.5 Scripting Dictionary,
+        // puppetSprite()); a member assignment is not the end of that life,
+        // and for a puppet the properties persist until script changes them.
+        //
+        // This used to fall back to the placeholder colours whenever
+        // `has_back_color` / `has_fore_color` was clear. That flag only tracks
+        // colours set from LINGO, so a colour the SCORE authored looked
+        // identical to one never set at all, and every member swap wiped it:
+        //
+        //   Candystand Miniature Golf's hole-18 billboard is an ink-36 sprite
+        //   whose score record carries backColor 2 — magenta in the bitmap's
+        //   web216 palette, the chroma key for its three animation frames. It
+        //   drew correctly on the frame it entered, then the hole code stamped
+        //   the next frame's member in, `bg_color` fell back to palette index 0
+        //   (white), the colour key stopped matching anything, and the magenta
+        //   surround rendered opaque for the rest of the hole.
+        //
+        // It also left the sprite internally inconsistent: `bg_color` (the
+        // ColorRef the renderer keys on) was reset while `back_color` (the
+        // integer `the backColor` returns) was not, so Lingo reported 2 while
+        // the renderer used 0. Anything that resets one must reset both.
     }
 
     pub fn reset(&mut self) {
