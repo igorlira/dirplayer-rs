@@ -21,6 +21,13 @@ pub struct Scope {
     pub return_value: DatumRef,
     pub stack: Vec<DatumRef>,
     pub passed: bool,
+    /// Set by the `pass` command: "The pass command branches to the next
+    /// location as soon as the command runs. Any Lingo that follows the pass
+    /// command in the handler does not run." (Director 11.5 Scripting
+    /// Dictionary, `pass`). The bytecode loop ends the handler when it sees
+    /// this, which `passed` alone must not do — `passed` is also propagated up
+    /// from a nested call to drive event propagation.
+    pub stop_requested: bool,
     pub generation: u64,
     /// Cached handler-level instance for get_prop/set_prop (avoids ancestor chain walk per access)
     pub cached_handler_instance: Option<ScriptInstanceRef>,
@@ -53,6 +60,7 @@ impl Scope {
             return_value: DatumRef::Void,
             stack: vec![],
             passed: false,
+            stop_requested: false,
             generation: 0,
             cached_handler_instance: None,
         }
@@ -70,5 +78,6 @@ impl Scope {
         self.return_value = DatumRef::Void;
         self.stack.clear();
         self.passed = false;
+        self.stop_requested = false;
     }
 }

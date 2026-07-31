@@ -4299,6 +4299,18 @@ pub async fn player_call_script_handler_raw_args(
 
         // end_profiling(profile_token);
 
+        // `pass` ends the current handler as soon as it runs — see
+        // `MovieHandlers::pass`. Checked here (rather than inside the builtin)
+        // because a builtin returns a value and can't signal Stop itself.
+        if !should_return {
+            should_return = reserve_player_ref(|player| {
+                player
+                    .scopes
+                    .get(scope_ref)
+                    .map_or(false, |scope| scope.stop_requested)
+            });
+        }
+
         if should_return {
             break;
         }

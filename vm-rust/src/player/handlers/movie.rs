@@ -974,11 +974,30 @@ impl MovieHandlers {
         })
     }
 
+    /// `pass` — "passes an event message to the next location in the message
+    /// hierarchy and enables execution of more than one handler for a given
+    /// event ... The pass command branches to the next location AS SOON AS THE
+    /// COMMAND RUNS. Any Lingo that follows the pass command in the handler
+    /// does not run." (Director 11.5 Scripting Dictionary, `pass`).
+    ///
+    /// The second half matters as much as the first: movies use `pass` as an
+    /// early exit. NabiscoWorld Mini-Golf guards its per-frame hole logic with
+    ///
+    ///   on enterFrame
+    ///     if voidp(ballState) then
+    ///       pass()
+    ///     end if
+    ///     gameLogic()
+    ///
+    /// and gameLogic opens with `getAt(ballState, player)`. Setting the flag
+    /// without stopping the handler ran gameLogic anyway and raised on exactly
+    /// the VOID the guard existed to avoid.
     pub fn pass(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let scope_ref = player.current_scope_ref();
             let scope = player.scopes.get_mut(scope_ref).unwrap();
             scope.passed = true;
+            scope.stop_requested = true;
             Ok(DatumRef::Void)
         })
     }
