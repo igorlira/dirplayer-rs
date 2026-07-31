@@ -884,7 +884,26 @@ impl Score {
             let sprite_num = span.channel_number as i16;
             let sprite: &mut Sprite = self.get_sprite_mut(sprite_num);
             sprite.entered = true;
-            let is_sprite = span.channel_number > 0;
+            // A puppeted channel is controlled by Lingo, and the Score must not
+            // write over it — the same rule the D5 per-frame delta update below
+            // already applies (`!sprite.entered || sprite.puppet`). Only the
+            // PROPERTIES are skipped; the sprite still enters its span and still
+            // gets its behaviors, so beginSprite fires as usual.
+            //
+            // The initial-load sequence makes this reachable on frame 1:
+            // `begin_all_sprites` runs once while the movie loads (clearing
+            // `entered` again because the player isn't playing yet), then
+            // `prepareMovie` runs, then `begin_all_sprites` runs a SECOND time —
+            // so every frame-1 span re-enters and re-initialises after
+            // prepareMovie has already had its say.
+            //
+            // Lifesavers Pineapple Treasure Hunt parks its "CLICK HERE TO BEGIN"
+            // splash (sprite 139) off-stage at locH 4214 in the Score and reveals
+            // it from prepareMovie: `puppetAll()` puppets sprites 1-150, then
+            // `show(139)` subtracts 4000 to bring it on-stage. The second
+            // begin_all_sprites put locH straight back to 4214 and the splash
+            // never appeared — the game started with no title card.
+            let is_sprite = span.channel_number > 0 && !sprite.puppet;
             if is_sprite {
                 // Log spriteListIdx values for D6+ behavior debugging
                 let sprite_list_idx = data.sprite_list_idx();
