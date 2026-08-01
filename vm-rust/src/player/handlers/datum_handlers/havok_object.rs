@@ -335,6 +335,23 @@ impl HavokObjectDatumHandlers {
         Ok(())
     }
 
+    /// Read a vector argument for the applyForce/applyImpulse/applyTorque
+    /// family, returning None when it isn't one.
+    ///
+    /// INFERRED from shipping movies, not from the Havok Xtra docs: the Xtra
+    /// ignores such a call rather than raising, because a Lingo error would
+    /// abort the handler and the movies plainly kept running. Age of Speed 2's
+    /// `Game.UpdateGravity` applies `lVehicle.getGravity()` to every player's
+    /// chassis each frame, but `pGravity` is only assigned inside the VEHICLE's
+    /// own `Update` — so on the frames before a vehicle has updated once it is
+    /// VOID, and erroring there killed the frame that would have set it.
+    fn vector_arg(player: &crate::player::DirPlayer, arg: Option<&DatumRef>) -> Option<[f64; 3]> {
+        match arg.map(|a| player.get_datum(a)) {
+            Some(Datum::Vector(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
     fn call_rigid_body(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
@@ -344,7 +361,7 @@ impl HavokObjectDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "applyForce" | "applyforce" => {
-                let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(force) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -374,8 +391,8 @@ impl HavokObjectDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "applyForceAtPoint" | "applyforceatpoint" => {
-                let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(force) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
+                let Some(point) = Self::vector_arg(player, args.get(1)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -411,7 +428,7 @@ impl HavokObjectDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "applyImpulse" | "applyimpulse" => {
-                let impulse = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(impulse) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -432,8 +449,8 @@ impl HavokObjectDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "applyImpulseAtPoint" | "applyimpulseatpoint" => {
-                let impulse = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                let point = match player.get_datum(&args[1]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(impulse) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
+                let Some(point) = Self::vector_arg(player, args.get(1)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -468,7 +485,7 @@ impl HavokObjectDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "applyTorque" | "applytorque" => {
-                let torque = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(torque) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -500,7 +517,7 @@ impl HavokObjectDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "applyAngularImpulse" | "applyangularimpulse" => {
-                let impulse = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                let Some(impulse) = Self::vector_arg(player, args.get(0)) else { return Ok(DatumRef::Void) };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
