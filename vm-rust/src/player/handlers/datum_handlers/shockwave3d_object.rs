@@ -1226,7 +1226,25 @@ impl Shockwave3dObjectDatumHandlers {
                         };
                         // Update persistent textureList first (prevents sync from overwriting)
                         if let Some(list_ref) = list_ref {
-                            let new_val = player.alloc_datum(Datum::String(tex_name.clone()));
+                            // Store a texture OBJECT, not its name: "When tested,
+                            // this property returns a linear list of texture
+                            // objects" (Director 11.5 Scripting Dictionary,
+                            // `textureList`). Storing the bare name meant a later
+                            // read handed back a string, and any property access on
+                            // it failed — Age of Speed 2 walks every shader with
+                            //   lTexture = lShaderRef.textureList[lj]
+                            //   lTexture.renderFormat = kFormat
+                            // and died on `set_obj_prop was passed an invalid datum:
+                            // "as2_sparkles"`. `sync_shader_texture_lists` already
+                            // reads either form, so the scene still resolves it.
+                            let new_val = player.alloc_datum(Datum::Shockwave3dObjectRef(
+                                crate::director::lingo::datum::Shockwave3dObjectRef {
+                                    cast_lib: member_ref.cast_lib,
+                                    cast_member: member_ref.cast_member,
+                                    object_type: "texture".to_string(),
+                                    name: tex_name.clone(),
+                                },
+                            ));
                             if let Datum::List(_, items, _) = player.get_datum_mut(&list_ref) {
                                 if !items.is_empty() {
                                     items[0] = new_val;
