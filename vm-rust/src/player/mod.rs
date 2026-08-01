@@ -3058,7 +3058,17 @@ impl DirPlayer {
                 self.movie.debug_playback_enabled = v;
                 Ok(())
             }
-            _ => Err(ScriptError::new(format!("Cannot set player prop {}", prop))),
+            // Mirror of `get_player_prop`'s fallthrough: several documented
+            // Player properties are served by Movie::set_prop, which is where
+            // `the <name> = …` resolves. Without this the `_player.<name> = …`
+            // form — the Scripting Dictionary's primary syntax for them —
+            // errored while `the <name> = …` worked (Age of Speed 2's Input
+            // Manager sets `_player.emulateMultibuttonMouse`).
+            _ => {
+                let value = self.get_datum(value).clone();
+                let datums = &self.allocator;
+                self.movie.set_prop(prop, value, datums)
+            }
         }
     }
 

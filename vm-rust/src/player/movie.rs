@@ -53,6 +53,15 @@ pub struct Movie {
     pub trace_script: bool,
     pub trace_log_file: String,
     pub debug_playback_enabled: bool,
+    /// `_player.emulateMultibuttonMouse` — "determines whether a movie
+    /// interprets a mouse click with the Control key pressed on the Mac the
+    /// same as a right mouse click in Windows (TRUE) or not (FALSE, default).
+    /// Read/write." (Director 11.5 Scripting Dictionary.) It gates nothing
+    /// off the Mac: `rightMouseDown` / `rightMouseUp` already fire from a real
+    /// right button everywhere else, and the docs are explicit that the flag
+    /// only decides whether Ctrl+click ALSO raises them on the Mac. Stored for
+    /// round-trip read/write, like `edit_shortcuts_enabled`.
+    pub emulate_multibutton_mouse: bool,
     /// `the editShortCutsEnabled` — when FALSE, the player disables built-in
     /// cut/copy/paste keyboard shortcuts. Web player has no native edit menu,
     /// so this is stored for round-trip read/write but has no side effect.
@@ -122,6 +131,7 @@ impl Movie {
             trace_script: false,
             trace_log_file: String::new(),
             debug_playback_enabled: false,
+            emulate_multibutton_mouse: false,
             edit_shortcuts_enabled: true,
             enable_flash_lingo: false,
             mouse_down: false,
@@ -415,6 +425,7 @@ impl Movie {
                 Ok(Datum::String(s))
             },
             "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
+            "emulateMultibuttonMouse" => Ok(datum_bool(self.emulate_multibutton_mouse)),
             "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
             "enableFlashLingo" => Ok(datum_bool(self.enable_flash_lingo)),
             // No-op system prop: nothing to preload-abort in dirplayer.
@@ -449,6 +460,10 @@ impl Movie {
             },
             "debugPlaybackEnabled" => {
                 self.debug_playback_enabled = value.int_value()? != 0;
+                Ok(())
+            },
+            "emulateMultibuttonMouse" => {
+                self.emulate_multibutton_mouse = value.int_value()? != 0;
                 Ok(())
             },
             "editShortCutsEnabled" => {
