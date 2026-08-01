@@ -758,10 +758,16 @@ export function initPolyfill(config: PolyfillConfig, version: string, source: 'e
     installExtensionRenderListener(config);
   }
 
+  // Set when this call found the OTHER source already in charge. The user is
+  // asked which engine to use, so version priority no longer applies — see the
+  // negotiation below.
+  let conflictDetected = false;
+
   // Already fully initialized — detect extension/polyfill conflict and show
   // the choice UI; anything else (two of the same source) must yield.
   if (root.hasAttribute(ATTR_INITIALIZED)) {
     if (source === 'polyfill' && root.getAttribute(ATTR_SOURCE) === 'extension') {
+      conflictDetected = true;
       console.log(`[DirPlayer] Conflict: polyfill v${version} vs extension — showing choice UI`);
       conflictPolyfillConfig = config;
       // ATTR_VERSION still holds the extension's version here — the polyfill
@@ -793,7 +799,21 @@ export function initPolyfill(config: PolyfillConfig, version: string, source: 'e
   const existingVersion = root.getAttribute(ATTR_VERSION);
   const existingSource = root.getAttribute(ATTR_SOURCE);
 
-  if (existingVersion && existingSource) {
+  // Version priority settles a race between two of the SAME source (two
+  // polyfill builds on one page, say). It must not apply once a conflict has
+  // been detected: a site that wires up the polyfill while the user has the
+  // extension installed always gets the choice UI, whichever build is newer.
+  //
+  // Deferring here used to leave that UI orphaned. The conflict branch above
+  // injects the overlay and clears ATTR_INITIALIZED, then fell through to this
+  // negotiation — so an older polyfill returned before claiming ownership,
+  // skipping both the MutationObserver and scanExisting. Embeds already on the
+  // page had the choice UI, but any embed added afterwards was rendered
+  // straight by the extension's still-live observer with no ask, and the
+  // polyfill never scanned the ones the extension hadn't reached. Whether the
+  // page asked at all came down to which side happened to have the higher
+  // version number.
+  if (!conflictDetected && existingVersion && existingSource) {
     const cmp = compareSemver(version, existingVersion);
     // New candidate wins if: higher version, or same version and source is polyfill
     const newWins = cmp > 0 || (cmp === 0 && source === 'polyfill');
