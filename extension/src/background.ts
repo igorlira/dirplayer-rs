@@ -65,7 +65,10 @@ async function ensureRegistered(): Promise<void> {
   ) {
     scripts.push({
       id: POLYFILL_SCRIPT_ID,
-      js: [POLYFILL_SCRIPT_FILE],
+      // The fetch bridge rides along in the same MAIN-world registration: it
+      // lets the isolated-world player borrow the page's `fetch`, which archive
+      // front-ends replace to serve content under its original URL.
+      js: [POLYFILL_SCRIPT_FILE, 'dirplayer-fetch-bridge.js'],
       matches: ['<all_urls>'],
       runAt: 'document_start',
       allFrames: true,

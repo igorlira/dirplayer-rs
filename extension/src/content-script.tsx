@@ -1,4 +1,5 @@
 import { initPolyfill, PolyfillConfig } from '../../polyfill/src/core';
+import { installPageFetchBridge } from './page-fetch';
 import { loadDefaultXtraRegistry, setXtraHostBase } from 'dirplayer-js-api';
 // Note: the Shockwave plugin polyfill (MAIN world) and the Ruffle fork
 // bundle (ISOLATED world, same as us) are registered by the service
@@ -41,6 +42,10 @@ setXtraHostBase(chrome.runtime.getURL(''));
 // init. Movies that load after the JSON arrives pick up its entries;
 // the convention fallback covers anything not pinned in the JSON.
 loadDefaultXtraRegistry();
+
+// Borrow the page's `fetch` when it has one of its own. Must be installed
+// before the player exists, since the movie load is the first thing through it.
+installPageFetchBridge();
 
 // Initialize the polyfill with extension version for priority negotiation
 const version = chrome.runtime.getManifest().version;

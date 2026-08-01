@@ -34,6 +34,7 @@
       "charmap-system.png",
       "dirplayer-shockwave-polyfill.js",
       "dirplayer-ruffle-bridge-host.js",
+      "dirplayer-fetch-bridge.js",
       "dirplayer-pre-init.js",
       "ruffle/*",
       "xtra-registry.json",
