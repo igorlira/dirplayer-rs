@@ -658,7 +658,32 @@ impl MovieHandlers {
 
     pub fn sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let sprite_number = player.get_datum(&args[0]).int_value()?;
+            // "nameOrNum Required. A string or integer that specifies the name
+            // or index position of the sprite." (Director 11.5 Scripting
+            // Dictionary, `sprite()`). A string names a span — the Property
+            // Inspector's sprite name, stored in the score alongside the
+            // span's behaviors.
+            //
+            // Without this a name fell through to `int_value()`, whose String
+            // arm is `s.parse().unwrap_or(0)`, so every named lookup silently
+            // became sprite 0 — no error, just a reference to nothing. Age of
+            // Speed 2 builds its whole menu through
+            // `script("OffGame").new(8, 6, 15, "off_game_sprite", 10)` and then
+            // `getVariable(sprite(pFlashSprite), "_level0", 0)`, so the Flash
+            // handle came back VOID, `StartOffGame` was never delivered to the
+            // SWF, and the movie sat on its menu frame with a blank stage.
+            let datum = player.get_datum(&args[0]);
+            if let Datum::String(name) = datum {
+                let name = name.clone();
+                if let Some(number) = player.movie.score.find_sprite_number_by_name(&name) {
+                    return Ok(player.alloc_datum(Datum::SpriteRef(number)));
+                }
+                // Documented miss behaviour: scriptExecutionStyle 10 (the
+                // default for D10+ movies, which is where named sprites appear)
+                // returns VOID; style 9 returns sprite 1.
+                return Ok(DatumRef::Void);
+            }
+            let sprite_number = datum.int_value()?;
             Ok(player.alloc_datum(Datum::SpriteRef(sprite_number as i16)))
         })
     }

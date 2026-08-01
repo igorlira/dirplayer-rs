@@ -879,8 +879,22 @@ impl Score {
         // Get dir_version for blend conversion (D8+ uses inverted 0-255 scale for all sprites)
         let dir_version = reserve_player_ref(|player| player.movie.dir_version);
 
+        // The authored sprite name, for `sprite("someName")`. Resolved up front
+        // because the loop below holds a mutable borrow of the channel while
+        // `sprite_details` lives on the same Score.
+        let span_names: Vec<String> = span_init_data
+            .iter()
+            .map(|(_, _, data)| {
+                let idx = data.sprite_list_idx();
+                self.sprite_details
+                    .get(&idx)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+
         // Initialize sprite properties (member, position, etc.)
-        for (span, channel_index, data) in span_init_data.iter() {
+        for (i, (span, channel_index, data)) in span_init_data.iter().enumerate() {
             let sprite_num = span.channel_number as i16;
             let sprite: &mut Sprite = self.get_sprite_mut(sprite_num);
             sprite.entered = true;
@@ -903,6 +917,15 @@ impl Score {
             // `show(139)` subtracts 4000 to bring it on-stage. The second
             // begin_all_sprites put locH straight back to 4214 and the splash
             // never appeared — the game started with no title card.
+            // The name identifies the channel rather than describing how it
+            // looks, so it is restored even for a puppet — `sprite("name")`
+            // must keep resolving once a script puppets the channel.
+            if let Some(name) = span_names.get(i) {
+                if !name.is_empty() {
+                    sprite.name = name.clone();
+                }
+            }
+
             let is_sprite = span.channel_number > 0 && !sprite.puppet;
             if is_sprite {
                 // Log spriteListIdx values for D6+ behavior debugging
@@ -2976,6 +2999,20 @@ impl Score {
 
         self.invalidate_render_channel_cache();
         JsApi::dispatch_score_changed();
+    }
+
+    /// Channel whose sprite carries `name`, for `sprite("someName")`.
+    /// Director's sprite names are authored per span; matching is
+    /// case-insensitive like the rest of Lingo's name lookups, and the
+    /// lowest-numbered channel wins when a name repeats.
+    pub fn find_sprite_number_by_name(&self, name: &str) -> Option<i16> {
+        self.channels
+            .iter()
+            .find(|channel| {
+                !channel.sprite.name.is_empty()
+                    && channel.sprite.name.eq_ignore_ascii_case(name)
+            })
+            .map(|channel| channel.sprite.number as i16)
     }
 
     #[allow(dead_code)]

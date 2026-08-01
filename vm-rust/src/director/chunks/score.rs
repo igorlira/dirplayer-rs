@@ -1284,6 +1284,11 @@ pub struct SpriteBehavior {
 #[derive(Clone, Debug, Default)]
 pub struct SpriteDetailInfo {
     pub behaviors: Vec<SpriteBehavior>,
+    /// The sprite's authored name — Director's Property Inspector "name" field
+    /// for a sprite span, which `sprite("someName")` resolves against. Stored
+    /// NUL-terminated in `entries[spriteListIdx + 2]`, one slot past the
+    /// behavior list. Empty when the span was never named.
+    pub name: String,
 }
 
 #[derive(Clone)]
@@ -1434,13 +1439,48 @@ impl ScoreChunk {
         let mut details = std::collections::HashMap::new();
         let mut behavior_count = 0;
 
-        // For spriteListIdx = N, behaviors are at entries[N+1].
-        // We try every possible N and parse entries[N+1] as behavior data.
+        // For spriteListIdx = N, behaviors are at entries[N+1] and the sprite's
+        // name at entries[N+2] — the score allots three consecutive slots per
+        // span. We try every possible N and parse those two slots.
         for idx in 1..entries.len().saturating_sub(1) {
             let behavior_data = &entries[idx + 1];
 
+            // The name is independent of the behaviors: a span can be named
+            // with no behavior attached (Age of Speed 2's "off_game_sprite"
+            // has an empty behavior slot), so read it before the behavior
+            // shape check can `continue` past it.
+            //
+            // Only read it when entries[idx] is itself a span record. Every
+            // index is tried here, so without that check any entry that merely
+            // happens to sit two slots after another — a behavior's initializer
+            // proplist, say — would be mistaken for a name. A span record is
+            // the fixed 40-byte FrameIntervalPrimary header plus its trailing
+            // keyframe indices.
+            let looks_like_span = entries
+                .get(idx)
+                .map_or(false, |e| e.len() >= 40 && (e.len() - 40) % 4 == 0);
+            let name = if looks_like_span {
+                entries
+                    .get(idx + 2)
+                    .map(|raw| {
+                        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                        // Sprite names are authored text — same Mac Roman
+                        // encoding as the rest of the score's strings.
+                        crate::io::encoding::decode_macroman(&raw[..end])
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             // Behaviors are 8 bytes each, need at least one
             if behavior_data.len() < 8 || behavior_data.len() % 8 != 0 {
+                if !name.is_empty() {
+                    details.insert(
+                        idx as u32,
+                        SpriteDetailInfo { behaviors: Vec::new(), name },
+                    );
+                }
                 continue;
             }
 
@@ -1448,6 +1488,7 @@ impl ScoreChunk {
             reader.set_endian(Endian::Big);
 
             let mut info = SpriteDetailInfo::default();
+            info.name = name;
             while reader.pos + 8 <= behavior_data.len() {
                 let cast_lib = match reader.read_u16() {
                     Ok(v) => v,
@@ -1507,15 +1548,15 @@ impl ScoreChunk {
                 }
             }
 
-            if !info.behaviors.is_empty() {
+            if !info.behaviors.is_empty() || !info.name.is_empty() {
                 behavior_count += info.behaviors.len();
                 if details.len() < 30 {
                     let behavior_strs: Vec<String> = info.behaviors.iter()
                         .map(|b| if b.cast_lib == 65535 { format!("(-1)/{}", b.cast_member) } else { format!("{}/{}", b.cast_lib, b.cast_member) })
                         .collect();
                     log::debug!(
-                        "sprite_details: spriteListIdx {} -> {} behaviors [{}]",
-                        idx, info.behaviors.len(), behavior_strs.join(", ")
+                        "sprite_details: spriteListIdx {} -> {} behaviors [{}] name={:?}",
+                        idx, info.behaviors.len(), behavior_strs.join(", "), info.name
                     );
                 }
                 details.insert(idx as u32, info);
