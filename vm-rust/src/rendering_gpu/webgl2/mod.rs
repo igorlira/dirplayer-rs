@@ -3475,6 +3475,11 @@ impl WebGL2Renderer {
                 | TextureSource::ButtonBitmap { .. }
         );
 
+        // Native size of the source texture, when it comes from a bitmap member.
+        // Used below to decide whether this draw is minifying enough to warrant
+        // averaged (mipmapped) sampling instead of point sampling.
+        let mut tex_source_size: Option<(u32, u32)> = None;
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -3485,7 +3490,10 @@ impl WebGL2Renderer {
                 };
 
                 match self.get_or_create_texture(player, &member_ref, image_ref, ink, colorize_params, sprite_bg_for_matte, is_flash) {
-                    Some((tex, _w, _h)) => tex,
+                    Some((tex, w, h)) => {
+                        tex_source_size = Some((w, h));
+                        tex
+                    }
                     None => return,
                 }
             }
@@ -4257,6 +4265,27 @@ impl WebGL2Renderer {
         if let Some(ref loc) = u_texture {
             gl.uniform1i(Some(loc), 0);
         }
+
+        // Director area-averages a bitmap it shrinks; point-sampling a big
+        // dithered 8-bit source into a small sprite rect samples isolated dither
+        // pixels and destroys the tone (NabiscoWorld Mini-Golf's 624x350 hole art
+        // in a 111x71 menu card read as washed out next to Shockwave Player).
+        // Only switch to mipmapped minification once the sprite is meaningfully
+        // smaller than its source; at or above native size MAG_FILTER (NEAREST)
+        // applies and every other movie stays pixel-exact.
+        let minifies = tex_source_size.map_or(false, |(sw, sh)| {
+            let (dw, dh) = (sprite_rect.width() as f32, sprite_rect.height() as f32);
+            dw > 0.0 && dh > 0.0 && (sw as f32 / dw > 1.2 || sh as f32 / dh > 1.2)
+        });
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+            if minifies {
+                WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32
+            } else {
+                WebGl2RenderingContext::NEAREST as i32
+            },
+        );
 
         // Set sprite rect uniform (x, y, width, height)
         if let Some(ref loc) = u_sprite_rect {
