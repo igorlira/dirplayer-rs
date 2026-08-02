@@ -5,3 +5,4 @@ mod johnny;
 mod blackstreet_pinball;
 mod infestation;
 mod fifteen_love;
+mod agent_freeride;

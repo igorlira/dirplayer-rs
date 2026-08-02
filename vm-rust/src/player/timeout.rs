@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{director::lingo::datum::TimeoutRef, js_api::JsApi};
+use crate::{director::lingo::datum::TimeoutRef, js_api::JsApi, player::symbols::symbol::Symbol};
 
 use super::DatumRef;
 
@@ -11,7 +11,7 @@ pub struct TimeoutManager {
 pub struct Timeout {
     pub name: TimeoutRef,
     pub period: u32,
-    pub handler: String,
+    pub handler: Symbol,
     pub target_ref: DatumRef,
     pub is_scheduled: bool,
     /// Wall-clock timestamp (ms) when this timeout should next fire.

@@ -4,14 +4,15 @@ use log::{debug, warn};
 use wasm_bindgen::JsCast;
 
 use crate::{
+    console_warn,
     director::lingo::datum::Datum,
     player::{
         cast_lib::CastMemberRef,
         cast_member::{CastMemberType, Shockwave3dMember, Text3dSource, Text3dState},
         reserve_player_mut, reserve_player_ref,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
         DatumRef, DirPlayer, ScriptError,
     },
-    console_warn,
 };
 
 const W3D_HANDLER_LOG: bool = false;
@@ -136,7 +137,7 @@ impl Shockwave3dMemberHandlers {
         })
     }
 
-    fn native_text_alignment(alignment: &str) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
+    fn native_text_alignment(alignment: BuiltInSymbol) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
         match alignment.to_ascii_lowercase().as_str() {
@@ -258,7 +259,7 @@ impl Shockwave3dMemberHandlers {
             Self::xmed_cell_height_to_point_size(source.font_size as i32, font_face) as u16
         };
         let scaled_spans = Self::scale_native_spans(&corrected_spans, supersample, corrected_font_size);
-        let alignment = Self::native_text_alignment(&source.alignment);
+        let alignment = Self::native_text_alignment(source.alignment);
         let scaled_tab_stops: Vec<crate::player::cast_member::TabStop> = source
             .tab_stops
             .iter()
@@ -327,7 +328,7 @@ impl Shockwave3dMemberHandlers {
                 state.bevel_type,
                 state.smoothness,
             );
-            scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+            scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
             scene.mesh_content_version += 1;
         }
     }
@@ -385,7 +386,7 @@ impl Shockwave3dMemberHandlers {
             return None;
         }
         let mut mesh = crate::director::chunks::w3d::types::ClodDecodedMesh::default();
-        mesh.name = "Text".to_string();
+        mesh.name = Symbol::from_str(&"Text".to_string());
         mesh.positions = positions;
         mesh.normals = normals;
         mesh.faces = faces;
@@ -394,14 +395,14 @@ impl Shockwave3dMemberHandlers {
 
     /// Re-extrude an extrude3d resource (keyed by `resname`) into `member`'s
     /// scene from the retained source + state.
-    pub(crate) fn rebuild_extruded_text(player: &mut DirPlayer, member_ref: &CastMemberRef, resname: &str) {
+    pub(crate) fn rebuild_extruded_text(player: &mut DirPlayer, member_ref: &CastMemberRef, resname: Symbol) {
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if let Some((source, state)) = w3d.runtime_state.text3d_resources.get(resname).cloned() {
+                if let Some((source, state)) = w3d.runtime_state.text3d_resources.get(&resname).cloned() {
                     if let Some(mut mesh) = Self::build_text3d_mesh(&source, &state) {
-                        mesh.name = resname.to_string();
+                        mesh.name = resname;
                         if let Some(scene) = w3d.scene_mut() {
-                            scene.clod_meshes.insert(resname.to_string(), vec![mesh]);
+                            scene.clod_meshes.insert(resname, vec![mesh]);
                             scene.mesh_content_version += 1;
                         }
                     }
@@ -417,14 +418,14 @@ impl Shockwave3dMemberHandlers {
     pub(crate) fn set_extruded_text_param(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
-        resname: &str,
+        resname: Symbol,
         prop: &str,
         value: &Datum,
     ) -> bool {
         let mut found = false;
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if let Some((_src, state)) = w3d.runtime_state.text3d_resources.get_mut(resname) {
+                if let Some((_src, state)) = w3d.runtime_state.text3d_resources.get_mut(&resname) {
                     found = true;
                     match prop.to_ascii_lowercase().as_str() {
                         "tunneldepth" => {
@@ -467,7 +468,7 @@ impl Shockwave3dMemberHandlers {
         let new_depth = new_depth.max(1.0);
         let scale = new_depth / old_depth;
 
-        if let Some(meshes) = scene.clod_meshes.get_mut("Text") {
+        if let Some(meshes) = scene.clod_meshes.get_mut(&Symbol::builtin(BuiltInSymbol::Text)) {
             for mesh in meshes.iter_mut() {
                 for pos in mesh.positions.iter_mut() {
                     pos[2] *= scale;
@@ -488,7 +489,7 @@ impl Shockwave3dMemberHandlers {
         let any = display_face == -1 || (display_face & 7) != 0;
         runtime_state
             .node_visibility
-            .insert("Text".to_string(), if any { 3u8 } else { 0u8 });
+            .insert(Symbol::from_str(&"Text".to_string()), if any { 3u8 } else { 0u8 });
     }
 
     /// Lazily initialize the embedded 3D world for text members.
@@ -650,7 +651,7 @@ impl Shockwave3dMemberHandlers {
                     );
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
-                            scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+                            scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
                             scene.mesh_content_version += 1;
                         }
                     }
@@ -675,23 +676,23 @@ impl Shockwave3dMemberHandlers {
                             tex_data.extend_from_slice(&tex_w.to_le_bytes());
                             tex_data.extend_from_slice(&tex_h.to_le_bytes());
                             tex_data.extend_from_slice(tex_rgba);
-                            scene.texture_images.insert("TextBitmap".to_string(), tex_data);
-                            if !scene.texture_infos.iter().any(|t| t.name == "TextBitmap") {
+                            scene.texture_images.insert(Symbol::from_str("TextBitmap"), tex_data);
+                            if !scene.texture_infos.iter().any(|t| t.name == Symbol::from_str("TextBitmap")) {
                                 scene.texture_infos.push(W3dTextureInfo {
-                                    name: "TextBitmap".to_string(),
+                                    name: Symbol::from_str("TextBitmap"),
                                     render_format: 0, mip_mode: 0, mag_filter: 0, image_type: 0,
                                 });
                             }
                             if let Some(shader) = scene.shaders.first_mut() {
-                                if !shader.texture_layers.iter().any(|l| l.name == "TextBitmap") {
+                                if !shader.texture_layers.iter().any(|l| l.name == Symbol::from_str("TextBitmap")) {
                                     shader.texture_layers.push(W3dTextureLayer {
-                                        name: "TextBitmap".to_string(),
+                                        name: Symbol::from_str("TextBitmap"),
                                         ..Default::default()
                                     });
                                 }
                             }
                         }
-                        scene.clod_meshes.insert("Text".to_string(), vec![mesh]);
+                        scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
                         scene.mesh_content_version += 1;
                     }
                 }
@@ -737,7 +738,7 @@ impl Shockwave3dMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         Self::ensure_text3d(player, cast_member_ref);
         // Clone info and scene data upfront to avoid borrow conflicts with player.alloc_datum
@@ -754,54 +755,56 @@ impl Shockwave3dMemberHandlers {
 
         use crate::director::chunks::w3d::types::W3dNodeType;
 
-        match prop {
+        let prop_builtin = prop.into_builtin_or_error()?;
+        match prop_builtin {
             // ─── Member-level properties ───
-            "directToStage" => Ok(Datum::Int(if info.direct_to_stage { 1 } else { 0 })),
-            "preLoad" | "preload" => Ok(Datum::Int(if info.preload { 1 } else { 0 })),
-            "duration" => Ok(Datum::Int(info.duration as i32)),
+            BuiltInSymbol::DirectToStage => Ok(Datum::Int(if info.direct_to_stage { 1 } else { 0 })),
+            BuiltInSymbol::Preload => Ok(Datum::Int(if info.preload { 1 } else { 0 })),
+            BuiltInSymbol::Duration => Ok(Datum::Int(info.duration as i32)),
 
-            "regPoint" => {
+            BuiltInSymbol::RegPoint => {
                 Ok(Datum::Point([info.reg_point.0 as f64, info.reg_point.1 as f64], 0))
             }
-            "rect" => {
+            BuiltInSymbol::Rect => {
                 let r = info.default_rect;
                 Ok(Datum::Rect([r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64], 0))
             }
-            "width" => Ok(Datum::Int(info.default_rect.2 - info.default_rect.0)),
-            "height" => Ok(Datum::Int(info.default_rect.3 - info.default_rect.1)),
+            BuiltInSymbol::Width => Ok(Datum::Int(info.default_rect.2 - info.default_rect.0)),
+            BuiltInSymbol::Height => Ok(Datum::Int(info.default_rect.3 - info.default_rect.1)),
 
             // ─── Scene collection properties ───
             // These return lists of Shockwave3dObjectRefs, supporting .count and [index]
-            "model" | "modelCount" | "modelResource" | "modelResourceCount"
-            | "shader" | "shaderCount" | "texture" | "textureCount"
-            | "light" | "lightCount" | "camera" | "cameraCount"
-            | "group" | "groupCount" | "motion" | "motionCount" => {
+            BuiltInSymbol::Model | BuiltInSymbol::ModelCount | BuiltInSymbol::ModelResource | BuiltInSymbol::ModelResourceCount
+            | BuiltInSymbol::Shader | BuiltInSymbol::ShaderCount | BuiltInSymbol::Texture | BuiltInSymbol::TextureCount
+            | BuiltInSymbol::Light | BuiltInSymbol::LightCount | BuiltInSymbol::Camera | BuiltInSymbol::CameraCount
+            | BuiltInSymbol::Group | BuiltInSymbol::GroupCount | BuiltInSymbol::Motion | BuiltInSymbol::MotionCount => {
                 use crate::director::lingo::datum::{Shockwave3dObjectRef, DatumType};
-                let collection = prop.trim_end_matches("Count");
-                let names: Vec<String> = if let Some(scene) = &scene_data {
+                let prop_str = prop_builtin.as_str();
+                let collection = Symbol::from_str(prop_str.trim_end_matches("Count")).into_builtin();
+                let names: Vec<Symbol> = if let Some(scene) = &scene_data {
                     match collection {
-                        "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).map(|n| n.name.clone()).collect(),
-                        "modelResource" => scene.model_resources.keys().cloned().collect(),
-                        "shader" => scene.shaders.iter().map(|s| s.name.clone()).collect(),
-                        "texture" => scene.texture_images.keys().cloned().collect(),
-                        "light" => scene.lights.iter().map(|l| l.name.clone()).collect(),
-                        "camera" => {
+                        Some(BuiltInSymbol::Model) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).map(|n| n.name).collect(),
+                        Some(BuiltInSymbol::ModelResource) => scene.model_resources.keys().copied().collect(),
+                        Some(BuiltInSymbol::Shader) => scene.shaders.iter().map(|s| s.name).collect(),
+                        Some(BuiltInSymbol::Texture) => scene.texture_images.keys().copied().collect(),
+                        Some(BuiltInSymbol::Light) => scene.lights.iter().map(|l| l.name).collect(),
+                        Some(BuiltInSymbol::Camera) => {
                             let mut cams = Vec::new();
-                            if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("defaultview")) {
-                                cams.push(dv.name.clone());
+                            if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)) {
+                                cams.push(dv.name);
                             }
                             for n in &scene.nodes {
-                                if n.node_type == W3dNodeType::View && !n.name.eq_ignore_ascii_case("defaultview") {
-                                    cams.push(n.name.clone());
+                                if n.node_type == W3dNodeType::View && n.name != Symbol::builtin(BuiltInSymbol::DefaultView) {
+                                    cams.push(n.name);
                                 }
                             }
                             cams
                         }
-                        "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
-                        "motion" => {
+                        Some(BuiltInSymbol::Group) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
+                        Some(BuiltInSymbol::Motion) => {
                             // Default motion at index 1, then authored motions (see DEFAULT_MOTION_NAME).
-                            let mut v = vec![DEFAULT_MOTION_NAME.to_string()];
-                            v.extend(scene.motions.iter().map(|m| m.name.clone()));
+                            let mut v = vec![Symbol::from_str(DEFAULT_MOTION_NAME)];
+                            v.extend(scene.motions.iter().map(|m| m.name));
                             v
                         }
                         _ => vec![],
@@ -810,7 +813,7 @@ impl Shockwave3dMemberHandlers {
                     vec![]
                 };
                 // If prop ends with "Count", return just the count
-                if prop.ends_with("Count") {
+                if prop_str.ends_with("Count") {
                     return Ok(Datum::Int(names.len() as i32));
                 }
                 // Return a list of Shockwave3dObjectRefs
@@ -818,21 +821,21 @@ impl Shockwave3dMemberHandlers {
                     player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib: cast_member_ref.cast_lib,
                         cast_member: cast_member_ref.cast_member,
-                        object_type: collection.to_string(),
-                        name: name.clone(),
+                        object_type: collection.unwrap(),
+                        name: *name,
                     }))
                 }).collect();
                 Ok(Datum::List(DatumType::List, items, false))
             }
 
             // ─── State ───
-            "state" => Ok(Datum::Int(4)), // 4 = loaded
-            "percentStreamed" => Ok(Datum::Int(100)),
-            "animationEnabled" => Ok(Datum::Int(if info.animation_enabled { 1 } else { 0 })),
-            "loop" => Ok(Datum::Int(if info.loops { 1 } else { 0 })),
+            BuiltInSymbol::State => Ok(Datum::Int(4)), // 4 = loaded
+            BuiltInSymbol::PercentStreamed => Ok(Datum::Int(100)),
+            BuiltInSymbol::AnimationEnabled => Ok(Datum::Int(if info.animation_enabled { 1 } else { 0 })),
+            BuiltInSymbol::Loop => Ok(Datum::Int(if info.loops { 1 } else { 0 })),
 
             // ─── Rendering ───
-            "image" => {
+            BuiltInSymbol::Image => {
                 // Force a sync of runtime shader-list mutations into scene data
                 // before reading. Per-frame draw_frame() does this, but world.image
                 // is often called inside a Lingo handler that just modified
@@ -885,37 +888,37 @@ impl Shockwave3dMemberHandlers {
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
                 Ok(Datum::BitmapRef(bitmap_ref))
             }
-            "backgroundColor" => {
+            BuiltInSymbol::BackgroundColor => {
                 Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(50, 50, 50)))
             }
-            "ambientColor" => {
+            BuiltInSymbol::AmbientColor => {
                 Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(25, 25, 25)))
             }
-            "renderer" | "rendererDeviceList" => Ok(Datum::Symbol("openGL".to_string())),
-            "colorBufferDepth" => Ok(Datum::Int(32)),
-            "depthBufferDepth" => Ok(Datum::Int(24)),
-            "antiAliasingEnabled" => Ok(Datum::Int(0)),
-            "streamSize" => Ok(Datum::Int(0)),
+            BuiltInSymbol::Renderer | BuiltInSymbol::RendererDeviceList => Ok(Datum::Symbol(BuiltInSymbol::OpenGL.into())),
+            BuiltInSymbol::ColorBufferDepth => Ok(Datum::Int(32)),
+            BuiltInSymbol::DepthBufferDepth => Ok(Datum::Int(24)),
+            BuiltInSymbol::AntiAliasingEnabled => Ok(Datum::Int(0)),
+            BuiltInSymbol::StreamSize => Ok(Datum::Int(0)),
             // Text3D properties (stub values after Text→Shockwave3d conversion)
-            "smoothness" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.smoothness as i32).unwrap_or(10))),
-            "tunnelDepth" | "tunneldepth" => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.tunnel_depth as f64).unwrap_or(10.0))),
-            "bevelDepth" | "beveldepth" => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.bevel_depth as f64).unwrap_or(1.0))),
-            "bevelType" | "beveltype" => Ok(Datum::Symbol(match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
-                1 => "miter".to_string(),
-                2 => "round".to_string(),
-                _ => "none".to_string(),
+            BuiltInSymbol::Smoothness => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.smoothness as i32).unwrap_or(10))),
+            BuiltInSymbol::TunnelDepth => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.tunnel_depth as f64).unwrap_or(10.0))),
+            BuiltInSymbol::BevelDepth => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.bevel_depth as f64).unwrap_or(1.0))),
+            BuiltInSymbol::BevelType => Ok(Datum::Symbol(match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
+                1 => BuiltInSymbol::Miter.into(),
+                2 => BuiltInSymbol::Round.into(),
+                _ => BuiltInSymbol::None.into(),
             })),
-            "displayFace" | "displayface" => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1))),
-            "displayMode" | "displaymode" => Ok(Datum::Symbol(if text3d_state.as_ref().map(|s| s.display_mode).unwrap_or(1) == 1 {
-                "mode3d".to_string()
+            BuiltInSymbol::DisplayFace => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1))),
+            BuiltInSymbol::DisplayMode => Ok(Datum::Symbol(if text3d_state.as_ref().map(|s| s.display_mode).unwrap_or(1) == 1 {
+                BuiltInSymbol::Mode3d.into()
             } else {
-                "normal".to_string()
+                BuiltInSymbol::Normal.into()
             })),
-            "diffuseColor" | "diffusecolor" => {
+            BuiltInSymbol::DiffuseColor => {
                 let (r, g, b) = text3d_state.as_ref().map(|s| s.diffuse_color).unwrap_or((0, 0, 0));
                 Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)))
             }
-            "directionalPreset" | "directionalpreset" => {
+            BuiltInSymbol::DirectionalPreset => {
                 // Read current preset from runtime state (default 2 = #topCenter)
                 let preset = {
                     let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref);
@@ -923,22 +926,22 @@ impl Shockwave3dMemberHandlers {
                         .map(|w3d| w3d.runtime_state.directional_preset)
                         .unwrap_or(2)
                 };
-                let symbol = match preset {
-                    1 => "topLeft",
-                    2 => "topCenter",
-                    3 => "topRight",
-                    4 => "middleLeft",
-                    5 => "middleCenter",
-                    6 => "middleRight",
-                    7 => "bottomLeft",
-                    8 => "bottomCenter",
-                    9 => "bottomRight",
-                    _ => "None",
+                let symbol: Symbol = match preset {
+                    1 => BuiltInSymbol::TopLeft.into(),
+                    2 => BuiltInSymbol::TopCenter.into(),
+                    3 => BuiltInSymbol::TopRight.into(),
+                    4 => BuiltInSymbol::MiddleLeft.into(),
+                    5 => BuiltInSymbol::MiddleCenter.into(),
+                    6 => BuiltInSymbol::MiddleRight.into(),
+                    7 => BuiltInSymbol::BottomLeft.into(),
+                    8 => BuiltInSymbol::BottomCenter.into(),
+                    9 => BuiltInSymbol::BottomRight.into(),
+                    _ => BuiltInSymbol::None.into(),
                 };
-                Ok(Datum::Symbol(symbol.to_string()))
+                Ok(Datum::Symbol(symbol.into()))
             }
 
-            "text" => {
+            BuiltInSymbol::Text => {
                 // A Text member with displayMode #mode3D is represented here as a
                 // converted Shockwave3D member; Director keeps its .text live. Read
                 // it back from the retained 3D-text spans.
@@ -971,7 +974,7 @@ impl Shockwave3dMemberHandlers {
                             if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = value {
                                 state.diffuse_color = (*r, *g, *b);
                                 if let Some(scene) = w3d.scene_mut() {
-                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == "TextMaterial") {
+                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == Symbol::builtin(BuiltInSymbol::TextMaterial)) {
                                         mat.diffuse = [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0];
                                     }
                                 }
@@ -1045,17 +1048,17 @@ impl Shockwave3dMemberHandlers {
             "directionalPreset" | "directionalpreset" => {
                 // Parse the symbol into preset 0..9 (0 = #None, 2 = #topCenter default).
                 let preset: u32 = match value {
-                    Datum::Symbol(s) => match s.trim_start_matches('#').to_ascii_lowercase().as_str() {
-                        "topleft" => 1,
-                        "topcenter" => 2,
-                        "topright" => 3,
-                        "middleleft" => 4,
-                        "middlecenter" => 5,
-                        "middleright" => 6,
-                        "bottomleft" => 7,
-                        "bottomcenter" => 8,
-                        "bottomright" => 9,
-                        "none" => 0,
+                    Datum::Symbol(s) => match s.into_builtin() {
+                        Some(BuiltInSymbol::TopLeft) => 1,
+                        Some(BuiltInSymbol::TopCenter) => 2,
+                        Some(BuiltInSymbol::TopRight) => 3,
+                        Some(BuiltInSymbol::MiddleLeft) => 4,
+                        Some(BuiltInSymbol::MiddleCenter) => 5,
+                        Some(BuiltInSymbol::MiddleRight) => 6,
+                        Some(BuiltInSymbol::BottomLeft) => 7,
+                        Some(BuiltInSymbol::BottomCenter) => 8,
+                        Some(BuiltInSymbol::BottomRight) => 9,
+                        Some(BuiltInSymbol::None) => 0,
                         _ => 0,
                     },
                     Datum::Int(i) => (*i as u32).min(9),
@@ -1075,12 +1078,12 @@ impl Shockwave3dMemberHandlers {
                             // and also the runtime_state.node_transforms so the renderer picks it up.
                             if let Some(scene) = w3d.scene_mut() {
                                 if let Some(light_node) = scene.nodes.iter_mut()
-                                    .find(|n| n.name.eq_ignore_ascii_case("DefaultDirectional"))
+                                    .find(|n| n.name == Symbol::builtin(BuiltInSymbol::DefaultDirectional))
                                 {
                                     light_node.transform = t;
                                 }
                             }
-                            w3d.runtime_state.node_transforms.insert("DefaultDirectional".to_string(), t);
+                            w3d.runtime_state.node_transforms.insert(Symbol::builtin(BuiltInSymbol::DefaultDirectional), t);
                         }
                     }
                 }
@@ -1137,9 +1140,10 @@ impl Shockwave3dMemberHandlers {
     // (moved from cast_member_ref.rs to consolidate 3D code)
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        let handler_name_builtin = handler_name.into_builtin_or_error()?;
         // Lazily init 3D world for text members before any 3D operation
         reserve_player_mut(|player| {
             let member_ref = match player.get_datum(datum) {
@@ -1150,15 +1154,15 @@ impl Shockwave3dMemberHandlers {
             Ok(())
         })?;
 
-        match handler_name {
-            "getPropRef" => {
+        match handler_name_builtin {
+            BuiltInSymbol::GetPropRef => {
                 // member("x").model[1] → getPropRef(#model, 1)
                 reserve_player_mut(|player| {
                     let cast_member_ref = match player.get_datum(datum) {
                         Datum::CastMember(r) => r.to_owned(),
                         _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
                     };
-                    let collection = player.get_datum(&args[0]).string_value()?;
+                    let collection = player.get_datum(&args[0]).symbol_value()?;
                     let index = if args.len() > 1 {
                         player.get_datum(&args[1]).int_value()? as usize
                     } else {
@@ -1168,14 +1172,14 @@ impl Shockwave3dMemberHandlers {
                     if let Some(m) = member {
                         if let Some(w3d) = m.member_type.as_shockwave3d() {
                             if let Some(ref scene) = w3d.parsed_scene {
-                                let obj_name = Self::get_3d_object_name_by_index(scene, &collection, index)
+                                let obj_name = Self::get_3d_object_name_by_index(scene, collection, index)
                                     .unwrap_or_default();
                                 if !obj_name.is_empty() {
                                     use crate::director::lingo::datum::Shockwave3dObjectRef;
                                     return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                                         cast_lib: cast_member_ref.cast_lib,
                                         cast_member: cast_member_ref.cast_member,
-                                        object_type: collection,
+                                        object_type: collection.into_builtin_or_error()?,
                                         name: obj_name,
                                     })));
                                 }
@@ -1185,7 +1189,7 @@ impl Shockwave3dMemberHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 })
             }
-            "count" => {
+            BuiltInSymbol::Count => {
                 reserve_player_mut(|player| {
                     let cast_member_ref = match player.get_datum(datum) {
                         Datum::CastMember(r) => r.to_owned(),
@@ -1194,12 +1198,12 @@ impl Shockwave3dMemberHandlers {
                     if args.is_empty() {
                         return Err(ScriptError::new("count requires 1 argument".to_string()));
                     }
-                    let count_of = player.get_datum(&args[0]).string_value()?;
+                    let count_of = player.get_datum(&args[0]).symbol_value()?;
                     let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
                     if let Some(m) = member {
                         if let Some(w3d) = m.member_type.as_shockwave3d() {
                             if let Some(ref scene) = w3d.parsed_scene {
-                                let count = Self::get_3d_collection_count(scene, &count_of);
+                                let count = Self::get_3d_collection_count(scene, count_of);
                                 return Ok(player.alloc_datum(Datum::Int(count)));
                             }
                         }
@@ -1208,14 +1212,14 @@ impl Shockwave3dMemberHandlers {
                 })
             }
             // Shockwave 3D collection accessors & mutators
-            "model" | "modelResource" | "shader" | "texture" | "light" | "camera" | "group" | "motion"
-            | "resetWorld" | "revertToWorldDefaults"
-            | "newTexture" | "newShader" | "newModel" | "newModelResource" | "newLight" | "newCamera" | "newGroup" | "newMotion" | "newMesh"
-            | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
-            | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
-            | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "registerForEvent" | "registerScript" | "unregisterAllEvents"
-            | "image" => {
+            BuiltInSymbol::Model | BuiltInSymbol::ModelResource | BuiltInSymbol::Shader | BuiltInSymbol::Texture | BuiltInSymbol::Light | BuiltInSymbol::Camera | BuiltInSymbol::Group | BuiltInSymbol::Motion
+            | BuiltInSymbol::ResetWorld | BuiltInSymbol::RevertToWorldDefaults
+            | BuiltInSymbol::NewTexture | BuiltInSymbol::NewShader | BuiltInSymbol::NewModel | BuiltInSymbol::NewModelResource | BuiltInSymbol::NewLight | BuiltInSymbol::NewCamera | BuiltInSymbol::NewGroup | BuiltInSymbol::NewMotion | BuiltInSymbol::NewMesh
+            | BuiltInSymbol::DeleteTexture | BuiltInSymbol::DeleteShader | BuiltInSymbol::DeleteModel | BuiltInSymbol::DeleteModelResource | BuiltInSymbol::DeleteLight | BuiltInSymbol::DeleteCamera | BuiltInSymbol::DeleteGroup | BuiltInSymbol::DeleteMotion
+            | BuiltInSymbol::CloneModelFromCastmember | BuiltInSymbol::CloneMotionFromCastmember | BuiltInSymbol::CloneDeep
+            | BuiltInSymbol::LoadFile | BuiltInSymbol::Extrude3d | BuiltInSymbol::GetPref | BuiltInSymbol::SetPref
+            | BuiltInSymbol::RegisterForEvent | BuiltInSymbol::RegisterScript | BuiltInSymbol::UnregisterAllEvents
+            | BuiltInSymbol::Image => {
                 reserve_player_mut(|player| {
                     let member_ref = match player.get_datum(datum) {
                         Datum::CastMember(r) => r.to_owned(),
@@ -1231,7 +1235,7 @@ impl Shockwave3dMemberHandlers {
                             ))
                         })?;
 
-                    if handler_name == "unregisterAllEvents" {
+                    if handler_name_builtin == BuiltInSymbol::UnregisterAllEvents {
                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -1239,7 +1243,7 @@ impl Shockwave3dMemberHandlers {
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
-                    if handler_name == "registerForEvent" || handler_name == "registerScript" {
+                    if handler_name_builtin == BuiltInSymbol::RegisterForEvent || handler_name_builtin == BuiltInSymbol::RegisterScript {
                         // member.registerForEvent(eventName, handlerName, scriptObject {, begin, period, repetitions})
                         // For #timeMS this drives the dispatcher in `dispatch_w3d_timer_events`.
                         // Other event names are stored but never fired (their producers —
@@ -1247,13 +1251,13 @@ impl Shockwave3dMemberHandlers {
                         let event_name = args.get(0)
                             .map(|a| {
                                 let d = player.get_datum(a);
-                                d.string_value().unwrap_or_else(|_| String::new())
+                                d.symbol_value().unwrap_or_else(|_| Symbol::empty())
                             })
                             .unwrap_or_default();
                         let handler_sym = args.get(1)
                             .map(|a| {
                                 let d = player.get_datum(a);
-                                d.string_value().unwrap_or_else(|_| String::new())
+                                d.symbol_value().unwrap_or_else(|_| Symbol::empty())
                             })
                             .unwrap_or_default();
                         let script_instance = args.get(2).and_then(|a| {
@@ -1276,8 +1280,8 @@ impl Shockwave3dMemberHandlers {
                             .unwrap_or(0);
                         let now_ms = crate::player::testing_shared::now_ms();
                         let event = crate::player::cast_member::RegisteredW3dEvent {
-                            event_name: event_name.trim_start_matches('#').to_string(),
-                            handler_name: handler_sym.trim_start_matches('#').to_string(),
+                            event_name,
+                            handler_name,
                             script_instance,
                             begin_ms,
                             period_ms,
@@ -1320,7 +1324,7 @@ impl Shockwave3dMemberHandlers {
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
-                    if handler_name == "revertToWorldDefaults" {
+                    if handler_name == BuiltInSymbol::RevertToWorldDefaults {
                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -1348,7 +1352,7 @@ impl Shockwave3dMemberHandlers {
                     }
 
                     // cloneModelFromCastmember / cloneMotionFromCastmember / cloneDeep
-                    if handler_name == "cloneModelFromCastmember" || handler_name == "cloneMotionFromCastmember" || handler_name == "cloneDeep" {
+                    if handler_name == BuiltInSymbol::CloneModelFromCastmember || handler_name == BuiltInSymbol::CloneMotionFromCastmember || handler_name == BuiltInSymbol::CloneDeep {
                         let obj_name = if !args.is_empty() {
                             player.get_datum(&args[0]).string_value().unwrap_or_default()
                         } else {
@@ -1367,10 +1371,10 @@ impl Shockwave3dMemberHandlers {
                         } else {
                             None
                         };
-                        let obj_type = if handler_name == "cloneMotionFromCastmember" {
-                            "motion"
+                        let obj_type = if handler_name_builtin == BuiltInSymbol::CloneMotionFromCastmember {
+                            BuiltInSymbol::Motion
                         } else {
-                            "model"
+                            BuiltInSymbol::Model
                         };
 
                         // Look up source model's shader/transform/resource from source member's scene
@@ -1380,11 +1384,11 @@ impl Shockwave3dMemberHandlers {
                             if let Some(sm) = src_member {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
                                     if let Some(ref scene) = sw3d.parsed_scene {
-                                        let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&source_model_name));
+                                        let node = scene.nodes.iter().find(|n| n.name == Symbol::from_str(&source_model_name));
                                         let (sn, st, sr, smr) = if let Some(n) = node {
-                                            (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
+                                            (n.shader_name, n.transform, n.resource_name, n.model_resource_name)
                                         } else {
-                                            (String::new(), identity, String::new(), String::new())
+                                            (Symbol::empty(), identity, Symbol::empty(), Symbol::empty())
                                         };
                                         // cloneMotionFromCastmember(newName, sourceMotionName, member)
                                         // must clone the SPECIFIC motion named sourceMotionName
@@ -1456,22 +1460,22 @@ impl Shockwave3dMemberHandlers {
                                                 if let Some(kids) = children_by_parent.get(&key) {
                                                     for n in kids {
                                                         descendants.push((*n).clone());
-                                                        stack.push(n.name.clone());
+                                                        stack.push(n.name.clone().to_string());
                                                     }
                                                 }
                                             }
                                             descendants
                                         };
                                         (sn, st, sr, smr, motion_tracks, child_nodes)
-                                    } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
-                                } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
-                            } else { (String::new(), identity, String::new(), String::new(), vec![], vec![]) }
+                                    } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
+                                } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
+                            } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
                         } else {
-                            (String::new(), identity, String::new(), String::new(), vec![], vec![])
+                            (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![])
                         };
 
                         // Track shader name remapping for -clone suffix creation
-                        let mut shader_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                        let mut shader_name_map: std::collections::HashMap<Symbol, Symbol> = std::collections::HashMap::new();
                         // Track texture name remapping for -clone suffix creation. Director
                         // renames a colliding texture to "<name>-clone<N>": two models can both
                         // ship a generically-named texture (e.g. the base map AND the Shield item
@@ -1479,7 +1483,7 @@ impl Shockwave3dMemberHandlers {
                         // and that model's shaders are repointed at the clone, so neither hijacks
                         // the other. dirplayer previously kept only the first → the map wall showed
                         // the shield's sunset texture.
-                        let mut texture_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                        let mut texture_name_map: std::collections::HashMap<Symbol, Symbol> = std::collections::HashMap::new();
 
                         // Namespace prefix for cloned NODE names (must be unique per
                         // clone). Resource/mesh names instead follow loadFile's merge
@@ -1488,7 +1492,7 @@ impl Shockwave3dMemberHandlers {
                         // a same-named clone. `res_rename` maps lowercase source
                         // resource/mesh name -> destination name (populated below).
                         let ns = format!("{}_", obj_name);
-                        let mut res_rename: std::collections::HashMap<String, String> =
+                        let mut res_rename: std::collections::HashMap<Symbol, Symbol> =
                             std::collections::HashMap::new();
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
@@ -1523,28 +1527,28 @@ impl Shockwave3dMemberHandlers {
                                 // when they can attribute them, and falling back to the full tables
                                 // costs little — the load stays ~30s either way, because the meshes
                                 // and model resources were what made it expensive.
-                                let mut used_res: std::collections::HashSet<String> = std::collections::HashSet::new();
-                                for name in [source_resource_name.as_str(), source_model_resource_name.as_str()] {
-                                    if !name.is_empty() { used_res.insert(name.to_ascii_lowercase()); }
+                                let mut used_res: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+                                for name in [source_resource_name, source_model_resource_name] {
+                                    if !name.as_str().is_empty() { used_res.insert(name); }
                                 }
                                 for child in &src_child_nodes {
-                                    for name in [child.resource_name.as_str(), child.model_resource_name.as_str()] {
-                                        if !name.is_empty() { used_res.insert(name.to_ascii_lowercase()); }
+                                    for name in [child.resource_name, child.model_resource_name] {
+                                        if !name.as_str().is_empty() { used_res.insert(name); }
                                     }
                                 }
                                 let filter_res = !used_res.is_empty();
-                                let wants_res = |name: &str| !filter_res || used_res.contains(&name.to_ascii_lowercase());
+                                let wants_res = |name: Symbol| !filter_res || used_res.contains(&name);
 
                                 let shaders: Vec<_> = scene.map(|s| s.shaders.clone()).unwrap_or_default();
                                 let materials: Vec<_> = scene.map(|s| s.materials.clone()).unwrap_or_default();
                                 let resources: Vec<_> = scene.map(|s| s.model_resources.iter()
-                                    .filter(|(k, _)| wants_res(k))
+                                    .filter(|(k, _)| wants_res(**k))
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
                                 let meshes: Vec<_> = scene.map(|s| s.clod_meshes.iter()
-                                    .filter(|(k, _)| wants_res(k))
+                                    .filter(|(k, _)| wants_res(**k))
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
                                 let raw: Vec<_> = scene.map(|s| s.raw_meshes.iter()
-                                    .filter(|m| wants_res(&m.name))
+                                    .filter(|m| wants_res(m.name))
                                     .cloned().collect()).unwrap_or_default();
                                 let textures: Vec<_> = scene.map(|s| s.texture_images.iter()
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
@@ -1562,8 +1566,8 @@ impl Shockwave3dMemberHandlers {
                                  src_res=\"{}\", src_mres=\"{}\"",
                                 handler_name, obj_name, source_model_name, source_member_ref,
                                 src_shaders.len(), src_model_resources.len(),
-                                src_clod_meshes.len(), src_clod_meshes.iter().map(|(k,_)| k.clone()).collect::<Vec<String>>(),
-                                src_raw_meshes.len(), src_raw_meshes.iter().map(|m| m.name.clone()).collect::<Vec<String>>(),
+                                src_clod_meshes.len(), src_clod_meshes.iter().map(|(k,_)| k.clone()).collect::<Vec<Symbol>>(),
+                                src_raw_meshes.len(), src_raw_meshes.iter().map(|m| m.name.clone()).collect::<Vec<Symbol>>(),
                                 src_textures.len(),
                                 source_resource_name, source_model_resource_name,
                             );
@@ -1573,54 +1577,54 @@ impl Shockwave3dMemberHandlers {
                                     if let Some(scene) = w3d.scene_mut() {
                                         // Determine which shaders are USED by the model being cloned.
                                         // Director docs: "copies shaders...used by the model and its children"
-                                        let mut used_shader_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                        let mut used_shader_names: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
                                         // From model resource shader bindings
-                                        let res_key = if !source_model_resource_name.is_empty() {
-                                            source_model_resource_name.as_str()
+                                        let res_key = if !source_model_resource_name.as_str().is_empty() {
+                                            source_model_resource_name
                                         } else {
-                                            source_resource_name.as_str()
+                                            source_resource_name
                                         };
                                         for (rname, rinfo) in &src_model_resources {
-                                            if rname == res_key {
+                                            if *rname == res_key {
                                                 for binding in &rinfo.shader_bindings {
                                                     for shader_name in &binding.mesh_bindings {
-                                                        used_shader_names.insert(shader_name.clone());
+                                                        used_shader_names.insert(*shader_name);
                                                     }
                                                 }
                                             }
                                         }
                                         // From node shader_name
                                         if !source_shader_name.is_empty() {
-                                            used_shader_names.insert(source_shader_name.clone());
+                                            used_shader_names.insert(source_shader_name);
                                         }
                                         // Also collect shaders from CHILD model resources
                                         for child in &src_child_nodes {
                                             let child_res = if !child.model_resource_name.is_empty() {
-                                                child.model_resource_name.as_str()
+                                                child.model_resource_name
                                             } else {
-                                                child.resource_name.as_str()
+                                                child.resource_name
                                             };
                                             for (rname, rinfo) in &src_model_resources {
-                                                if rname == child_res {
+                                                if *rname == child_res {
                                                     for binding in &rinfo.shader_bindings {
                                                         for shader_name in &binding.mesh_bindings {
-                                                            used_shader_names.insert(shader_name.clone());
+                                                            used_shader_names.insert(*shader_name);
                                                         }
                                                     }
                                                 }
                                             }
                                             if !child.shader_name.is_empty() {
-                                                used_shader_names.insert(child.shader_name.clone());
+                                                used_shader_names.insert(child.shader_name);
                                             }
                                         }
 
                                         // Collect texture names used by the used shaders
-                                        let mut used_texture_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                        let mut used_texture_names: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
                                         for shader in &src_shaders {
                                             if used_shader_names.contains(&shader.name) {
                                                 for layer in &shader.texture_layers {
                                                     if !layer.name.is_empty() {
-                                                        used_texture_names.insert(layer.name.clone());
+                                                        used_texture_names.insert(layer.name);
                                                     }
                                                 }
                                             }
@@ -1641,11 +1645,11 @@ impl Shockwave3dMemberHandlers {
                                                 if existing != tex_data {
                                                     let mut n = 1;
                                                     loop {
-                                                        let cand = format!("{}-clone{}", tex_name, n);
+                                                        let cand = Symbol::from_str(&format!("{}-clone{}", tex_name, n));
                                                         if !scene.texture_images.contains_key(&cand)
-                                                            && !texture_name_map.values().any(|v| v == &cand)
+                                                            && !texture_name_map.values().any(|v| *v == cand)
                                                         {
-                                                            texture_name_map.insert(tex_name.clone(), cand);
+                                                            texture_name_map.insert(*tex_name, cand);
                                                             break;
                                                         }
                                                         n += 1;
@@ -1658,7 +1662,7 @@ impl Shockwave3dMemberHandlers {
                                         // If name conflicts, create -clone<N> copy (Director behavior).
                                         // DefaultShader is built-in to every cast member — never copy it.
                                         for shader in &src_shaders {
-                                            if shader.name == "DefaultShader" {
+                                            if shader.name == Symbol::builtin(BuiltInSymbol::DefaultShader) {
                                                 continue;
                                             }
                                             if filter_shaders && !used_shader_names.contains(&shader.name) {
@@ -1670,7 +1674,7 @@ impl Shockwave3dMemberHandlers {
                                             if !texture_name_map.is_empty() {
                                                 for layer in &mut cloned.texture_layers {
                                                     if let Some(nt) = texture_name_map.get(&layer.name) {
-                                                        layer.name = nt.clone();
+                                                        layer.name = Symbol::from_str(&nt.clone().as_str());
                                                     }
                                                 }
                                             }
@@ -1678,7 +1682,7 @@ impl Shockwave3dMemberHandlers {
                                                 // Name conflict — create a -clone<N> copy
                                                 let mut n = 1;
                                                 loop {
-                                                    let clone_name = format!("{}-clone{}", shader.name, n);
+                                                    let clone_name = Symbol::from_str(&format!("{}-clone{}", shader.name, n));
                                                     if !scene.shaders.iter().any(|s| s.name == clone_name) {
                                                         shader_name_map.insert(shader.name.clone(), clone_name.clone());
                                                         cloned.name = clone_name;
@@ -1704,7 +1708,7 @@ impl Shockwave3dMemberHandlers {
                                                         .map(|mapped| {
                                                             // If shader was renamed (conflict), rename material too
                                                             let mut m = mat.clone();
-                                                            m.name = mapped.clone();
+                                                            m.name = Symbol::from_str(&*mapped.as_str());
                                                             m
                                                         });
                                                     let mat_to_push = target_name.unwrap_or_else(|| mat.clone());
@@ -1727,46 +1731,44 @@ impl Shockwave3dMemberHandlers {
                                         // meshes and raw meshes share one namespace (a node's
                                         // resource_name may name any of them).
                                         {
-                                            let mut taken: std::collections::HashSet<String> =
-                                                scene.model_resources.keys().map(|k| k.to_ascii_lowercase()).collect();
-                                            taken.extend(scene.raw_meshes.iter().map(|m| m.name.to_ascii_lowercase()));
-                                            taken.extend(scene.clod_meshes.keys().map(|k| k.to_ascii_lowercase()));
-                                            let mut src_names: Vec<String> =
-                                                src_model_resources.iter().map(|(k, _)| k.clone()).collect();
-                                            src_names.extend(src_clod_meshes.iter().map(|(k, _)| k.clone()));
-                                            src_names.extend(src_raw_meshes.iter().map(|m| m.name.clone()));
+                                            let mut taken: std::collections::HashSet<Symbol> =
+                                                scene.model_resources.keys().copied().collect();
+                                            taken.extend(scene.raw_meshes.iter().map(|m| m.name));
+                                            taken.extend(scene.clod_meshes.keys().copied());
+                                            let mut src_names: Vec<Symbol> =
+                                                src_model_resources.iter().map(|(k, _)| *k).collect();
+                                            src_names.extend(src_clod_meshes.iter().map(|(k, _)| *k));
+                                            src_names.extend(src_raw_meshes.iter().map(|m| m.name));
                                             for name in src_names {
-                                                if name.is_empty() { continue; }
-                                                let key = name.to_ascii_lowercase();
-                                                if res_rename.contains_key(&key) { continue; }
-                                                let dst = if taken.contains(&key) {
+                                                if name.as_str().is_empty() { continue; }
+                                                if res_rename.contains_key(&name) { continue; }
+                                                let dst = if taken.contains(&name) {
                                                     let mut n = 1;
                                                     loop {
-                                                        let cand = format!("{}-clone{}", name, n);
-                                                        if !taken.contains(&cand.to_ascii_lowercase()) { break cand; }
+                                                        let cand = Symbol::from_str(&format!("{}-clone{}", name, n));
+                                                        if !taken.contains(&cand) { break cand; }
                                                         n += 1;
                                                     }
                                                 } else {
-                                                    name.clone()
+                                                    name
                                                 };
-                                                taken.insert(dst.to_ascii_lowercase());
-                                                res_rename.insert(key, dst);
+                                                taken.insert(dst);
+                                                res_rename.insert(name, dst);
                                             }
                                         }
                                         // Helper: resolve a source resource/mesh name through the map.
-                                        let map_res = |name: &str| -> String {
-                                            res_rename.get(&name.to_ascii_lowercase()).cloned()
-                                                .unwrap_or_else(|| name.to_string())
+                                        let map_res = |name: Symbol| -> Symbol {
+                                            res_rename.get(&name).copied().unwrap_or(name)
                                         };
                                         // Model resources: insert under their (collision-renamed) names.
                                         for (res_name, res_info) in &src_model_resources {
-                                            let new_name = map_res(res_name);
+                                            let new_name = map_res(*res_name);
                                             if !scene.model_resources.contains_key(&new_name) {
                                                 let mut cloned_res = res_info.clone();
                                                 for binding in &mut cloned_res.shader_bindings {
                                                     for mesh_shader in &mut binding.mesh_bindings {
-                                                        if let Some(new_name) = shader_name_map.get(mesh_shader.as_str()) {
-                                                            *mesh_shader = new_name.clone();
+                                                        if let Some(renamed) = shader_name_map.get(mesh_shader) {
+                                                            *mesh_shader = *renamed;
                                                         }
                                                     }
                                                 }
@@ -1775,7 +1777,7 @@ impl Shockwave3dMemberHandlers {
                                         }
                                         // CLOD meshes: insert under their (collision-renamed) names.
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
-                                            let new_name = map_res(mesh_name);
+                                            let new_name = map_res(*mesh_name);
                                             if !scene.clod_meshes.contains_key(&new_name) {
                                                 scene.clod_meshes.insert(new_name, mesh_data.clone());
                                             }
@@ -1787,15 +1789,15 @@ impl Shockwave3dMemberHandlers {
                                                 continue;
                                             }
                                             let target = texture_name_map.get(tex_name).cloned()
-                                                .unwrap_or_else(|| tex_name.clone());
-                                            if !scene.texture_images.contains_key(&target) {
-                                                scene.texture_images.insert(target, tex_data.clone());
+                                                .unwrap_or_else(|| Symbol::from_str(&tex_name.clone().to_string()));
+                                            if !scene.texture_images.contains_key(&Symbol::from_str(&target.as_str())) {
+                                                scene.texture_images.insert(Symbol::from_str(&target.as_str()), tex_data.clone());
                                                 scene.texture_content_version += 1;
                                             }
                                         }
                                         // Raw meshes: insert under their (collision-renamed) names.
                                         for raw_mesh in &src_raw_meshes {
-                                            let new_name = map_res(&raw_mesh.name);
+                                            let new_name = map_res(raw_mesh.name);
                                             if !scene.raw_meshes.iter().any(|m| m.name == new_name) {
                                                 let mut cloned = raw_mesh.clone();
                                                 cloned.name = new_name;
@@ -1821,19 +1823,19 @@ impl Shockwave3dMemberHandlers {
                                         // left the cloned biped with too few bones, so bone[6]
                                         // (the head) was out of range: the hair fell back to the
                                         // model transform and the skeletal animation couldn't pose.
-                                        let skel_key = if !source_model_resource_name.is_empty() {
-                                            map_res(&source_model_resource_name)
-                                        } else if !source_resource_name.is_empty() {
-                                            map_res(&source_resource_name)
-                                        } else { String::new() };
+                                        let skel_key = if !source_model_resource_name.as_str().is_empty() {
+                                            map_res(source_model_resource_name)
+                                        } else if !source_resource_name.as_str().is_empty() {
+                                            map_res(source_resource_name)
+                                        } else { Symbol::empty() };
                                         let src_skel = src_skeletons.iter().find(|s|
-                                                s.name.eq_ignore_ascii_case(&source_model_resource_name)
-                                                || s.name.eq_ignore_ascii_case(&source_resource_name))
+                                                s.name == source_model_resource_name
+                                                || s.name == source_resource_name)
                                             .or_else(|| src_skeletons.first());
                                         if let Some(skeleton) = src_skel {
                                             if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
                                                 let mut cloned = skeleton.clone();
-                                                cloned.name = skel_key.clone();
+                                                cloned.name = Symbol::from_str(&skel_key.as_str());
                                                 scene.skeletons.push(cloned);
                                             }
                                         }
@@ -1845,26 +1847,26 @@ impl Shockwave3dMemberHandlers {
                         // Add the cloned object to the target scene. Resolve the root
                         // model's resource pointers through the same collision-only
                         // rename map used when the resources were inserted above.
-                        let map_res_out = |name: &str| -> String {
-                            res_rename.get(&name.to_ascii_lowercase()).cloned()
-                                .unwrap_or_else(|| name.to_string())
+                        let map_res_out = |name: Symbol| -> Symbol {
+                            Symbol::from_str(&res_rename.get(&name).copied()
+                                .unwrap_or_else(|| Symbol::from_str(&name.to_string())).to_string())
                         };
-                        let mapped_resource = if !source_resource_name.is_empty() {
-                            map_res_out(&source_resource_name)
-                        } else { source_resource_name.clone() };
-                        let mapped_model_resource = if !source_model_resource_name.is_empty() {
-                            map_res_out(&source_model_resource_name)
-                        } else { source_model_resource_name.clone() };
+                        let mapped_resource = if !source_resource_name.as_str().is_empty() {
+                            map_res_out(source_resource_name)
+                        } else { source_resource_name };
+                        let mapped_model_resource = if !source_model_resource_name.as_str().is_empty() {
+                            map_res_out(source_model_resource_name)
+                        } else { source_model_resource_name };
 
                         // Don't propagate "DefaultShader" as the node-level shader —
                         // it overrides the model resource's per-mesh shader bindings
                         // (which have the correct materials with proper colors).
-                        let effective_shader_name = if source_shader_name == "DefaultShader" || source_shader_name.is_empty() {
-                            String::new()
+                        let effective_shader_name = if source_shader_name == Symbol::builtin(BuiltInSymbol::DefaultShader) || source_shader_name.is_empty() {
+                            Symbol::empty()
                         } else {
                             shader_name_map.get(&source_shader_name)
-                                .cloned()
-                                .unwrap_or(source_shader_name)
+                                .copied()
+                                .unwrap_or(Symbol::from_str(&source_shader_name.to_string()))
                         };
 
                         // Copy the source member's keyframe MOTIONS so the cloned
@@ -1890,13 +1892,13 @@ impl Shockwave3dMemberHandlers {
                                         // Bring over any source motions not already present (by
                                         // name) so keyframePlayer.play() resolves them.
                                         for m in &src_motions {
-                                            if !scene.motions.iter().any(|em| em.name.eq_ignore_ascii_case(&m.name)) {
+                                            if !scene.motions.iter().any(|em| em.name.eq_ignore_ascii_case(&m.name.as_str())) {
                                                 scene.motions.push(m.clone());
                                             }
                                         }
                                         scene.nodes.push(W3dNode {
-                                            name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                            parent_name: "World".to_string(),
+                                            name: Symbol::from_str(&obj_name), node_type: W3dNodeType::Model,
+                                            parent_name: Symbol::builtin(BuiltInSymbol::World),
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
                                             shader_name: effective_shader_name,
@@ -1905,13 +1907,12 @@ impl Shockwave3dMemberHandlers {
                                             transform: source_transform,
                                         });
                                         // Namespace every descendant's name to avoid collisions
-                                        // with prior clones from the same source. Names are keyed
-                                        // case-insensitively since Director is case-insensitive.
-                                        let mut node_name_map: std::collections::HashMap<String, String> =
+                                        // with prior clones from the same source.
+                                        let mut node_name_map: std::collections::HashMap<Symbol, Symbol> =
                                             std::collections::HashMap::new();
                                         for child in &src_child_nodes {
-                                            let new_name = format!("{}{}", ns, child.name);
-                                            node_name_map.insert(child.name.to_ascii_lowercase(), new_name);
+                                            let new_name = Symbol::from_str(&format!("{}{}", ns, child.name));
+                                            node_name_map.insert(child.name, new_name);
                                         }
 
                                         // Clone child nodes from source scene, re-parenting
@@ -1920,34 +1921,34 @@ impl Shockwave3dMemberHandlers {
                                         for child in &src_child_nodes {
                                             let mut cloned = child.clone();
                                             // Rename the node itself
-                                            if let Some(new_name) = node_name_map.get(&cloned.name.to_ascii_lowercase()) {
-                                                cloned.name = new_name.clone();
+                                            if let Some(new_name) = node_name_map.get(&cloned.name) {
+                                                cloned.name = *new_name;
                                             }
                                             // Re-parent: direct child of source_model → obj_name;
                                             // otherwise remap to the namespaced descendant name.
-                                            if cloned.parent_name.eq_ignore_ascii_case(&source_model_name) {
-                                                cloned.parent_name = obj_name.clone();
-                                            } else if let Some(new_parent) = node_name_map.get(&cloned.parent_name.to_ascii_lowercase()) {
-                                                cloned.parent_name = new_parent.clone();
+                                            if cloned.parent_name == Symbol::from_str(&source_model_name) {
+                                                cloned.parent_name = Symbol::from_str(&obj_name);
+                                            } else if let Some(new_parent) = node_name_map.get(&cloned.parent_name) {
+                                                cloned.parent_name = *new_parent;
                                             }
                                             // Repoint child resource names to the (collision-
                                             // renamed) keys the cloned mesh data was inserted under.
                                             if !cloned.resource_name.is_empty() {
-                                                cloned.resource_name = map_res_out(&cloned.resource_name);
+                                                cloned.resource_name = map_res_out(cloned.resource_name);
                                             }
                                             if !cloned.model_resource_name.is_empty() {
-                                                cloned.model_resource_name = map_res_out(&cloned.model_resource_name);
+                                                cloned.model_resource_name = map_res_out(cloned.model_resource_name);
                                             }
                                             // Remap shader name if it was renamed during clone
                                             if let Some(new_shader) = shader_name_map.get(&cloned.shader_name) {
-                                                cloned.shader_name = new_shader.clone();
+                                                cloned.shader_name = Symbol::from_str(&*new_shader.as_str());
                                             }
                                             // Names are now unique per clone — push unconditionally
                                             scene.nodes.push(cloned);
                                         }
-                                    } else if obj_type == "motion" {
+                                    } else if obj_type == BuiltInSymbol::Motion {
                                         scene.motions.push(W3dMotion {
-                                            name: obj_name.clone(),
+                                            name: Symbol::from_str(&obj_name),
                                             tracks: src_motion_tracks.clone(),
                                         });
                                     }
@@ -1958,23 +1959,24 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                             cast_lib: member_ref.cast_lib,
                             cast_member: member_ref.cast_member,
-                            object_type: obj_type.to_string(),
-                            name: obj_name,
+                            object_type: obj_type,
+                            name: Symbol::from_str(&obj_name),
                         })));
                     }
 
                     // newTexture/newShader/newModel/etc. — create and return a ref
-                    if handler_name.starts_with("new") || handler_name.starts_with("delete") {
-                        let obj_type = match handler_name {
-                            "newTexture" | "deleteTexture" => "texture",
-                            "newShader" | "deleteShader" => "shader",
-                            "newModel" | "deleteModel" => "model",
-                            "newModelResource" | "deleteModelResource" | "newMesh" => "modelResource",
-                            "newLight" | "deleteLight" => "light",
-                            "newCamera" | "deleteCamera" => "camera",
-                            "newGroup" | "deleteGroup" => "group",
-                            "newMotion" | "deleteMotion" => "motion",
-                            _ => "unknown",
+                    let handler_name_str = handler_name.as_str();
+                    if handler_name_str.starts_with("new") || handler_name_str.starts_with("delete") {
+                        let obj_type = match handler_name_builtin {
+                            BuiltInSymbol::NewTexture | BuiltInSymbol::DeleteTexture => BuiltInSymbol::Texture,
+                            BuiltInSymbol::NewShader | BuiltInSymbol::DeleteShader => BuiltInSymbol::Shader,
+                            BuiltInSymbol::NewModel | BuiltInSymbol::DeleteModel => BuiltInSymbol::Model,
+                            BuiltInSymbol::NewModelResource | BuiltInSymbol::DeleteModelResource | BuiltInSymbol::NewMesh => BuiltInSymbol::ModelResource,
+                            BuiltInSymbol::NewLight | BuiltInSymbol::DeleteLight => BuiltInSymbol::Light,
+                            BuiltInSymbol::NewCamera | BuiltInSymbol::DeleteCamera => BuiltInSymbol::Camera,
+                            BuiltInSymbol::NewGroup | BuiltInSymbol::DeleteGroup => BuiltInSymbol::Group,
+                            BuiltInSymbol::NewMotion | BuiltInSymbol::DeleteMotion => BuiltInSymbol::Motion,
+                            _ => BuiltInSymbol::Unknown,
                         };
                         let obj_name = if !args.is_empty() {
                             player.get_datum(&args[0]).string_value().unwrap_or_default()
@@ -1982,12 +1984,13 @@ impl Shockwave3dMemberHandlers {
                             String::new()
                         };
 
-                        if handler_name.starts_with("delete") {
+                        if handler_name_str.starts_with("delete") {
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
+                                        let obj_sym = Symbol::from_str(&obj_name);
                                         match obj_type {
-                                            "model" | "group" | "camera" => {
+                                            BuiltInSymbol::Model | BuiltInSymbol::Group | BuiltInSymbol::Camera => {
                                                 // Director deleteModel removes the model AND its child
                                                 // subtree. Without that, children added via addChild are
                                                 // orphaned (parent gone) and keep rendering at a fixed
@@ -2015,7 +2018,7 @@ impl Shockwave3dMemberHandlers {
                                                 }
                                                 scene.nodes.retain(|n| !doomed.contains(&n.name.to_ascii_lowercase()));
                                             }
-                                            "light" => {
+                                            BuiltInSymbol::Light => {
                                                 // Lights live in two places: the scene
                                                 // graph (scene.nodes) and a separate
                                                 // scene.lights Vec the renderer uses
@@ -2024,20 +2027,20 @@ impl Shockwave3dMemberHandlers {
                                                 // lights keep contributing to lighting
                                                 // and are still visible via
                                                 // sp.light.count.
-                                                scene.nodes.retain(|n| !n.name.eq_ignore_ascii_case(&obj_name));
-                                                scene.lights.retain(|l| !l.name.eq_ignore_ascii_case(&obj_name));
+                                                scene.nodes.retain(|n| n.name != obj_sym);
+                                                scene.lights.retain(|l| l.name != obj_sym);
                                             }
-                                            "shader" => {
+                                            BuiltInSymbol::Shader => {
                                                 // DefaultShader cannot be deleted (Director behavior)
-                                                if !obj_name.eq_ignore_ascii_case("DefaultShader") {
-                                                    scene.shaders.retain(|s| !s.name.eq_ignore_ascii_case(&obj_name));
+                                                if obj_sym != Symbol::builtin(BuiltInSymbol::DefaultShader) {
+                                                    scene.shaders.retain(|s| s.name != obj_sym);
                                                 }
                                             }
-                                            "motion" => {
-                                                scene.motions.retain(|m| m.name != obj_name);
+                                            BuiltInSymbol::Motion => {
+                                                scene.motions.retain(|m| m.name != obj_sym);
                                             }
-                                            "texture" => {
-                                                scene.texture_images.remove(&obj_name);
+                                            BuiltInSymbol::Texture => {
+                                                scene.texture_images.remove(&obj_sym);
                                                 scene.texture_content_version += 1;
                                             }
                                             _ => {}
@@ -2049,29 +2052,30 @@ impl Shockwave3dMemberHandlers {
                         }
 
                         // Pre-read args for newMesh before mutable borrow
-                        let mesh_num_faces = if handler_name == "newMesh" && args.len() >= 2 {
+                        let mesh_num_faces = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 2 {
                             player.get_datum(&args[1]).int_value().unwrap_or(0) as u32
                         } else { 0 };
 
                         // Pre-read model resource name for newModel(name, modelResource)
-                        let new_model_resource_name = if handler_name == "newModel" && args.len() >= 2 {
+                        let new_model_resource_name = if handler_name.eq_builtin(BuiltInSymbol::NewModel) && args.len() >= 2 {
                             match player.get_datum(&args[1]) {
-                                Datum::Shockwave3dObjectRef(r) if r.object_type == "modelResource" => r.name.clone(),
-                                _ => String::new(),
+                                Datum::Shockwave3dObjectRef(r) if r.object_type == BuiltInSymbol::ModelResource => r.name,
+                                _ => Symbol::empty(),
                             }
-                        } else { String::new() };
+                        } else { Symbol::empty() };
 
                         // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type)
-                        let new_res_type = if (handler_name.eq_ignore_ascii_case("newModelResource")
-                            || handler_name.eq_ignore_ascii_case("newMesh")
-                            || handler_name.eq_ignore_ascii_case("newLight")) && args.len() >= 2
+                        let new_res_type = if (handler_name.eq_builtin(BuiltInSymbol::NewModelResource)
+                            || handler_name.eq_builtin(BuiltInSymbol::NewMesh)
+                            || handler_name.eq_builtin(BuiltInSymbol::NewLight)) && args.len() >= 2
                         {
                             player.get_datum(&args[1]).string_value().unwrap_or_default()
                         } else { String::new() };
-                        let new_res_facing = if handler_name == "newModelResource" && args.len() >= 3 {
+                        let new_res_facing = if handler_name.eq_builtin(BuiltInSymbol::NewModelResource) && args.len() >= 3 {
                             player.get_datum(&args[2]).string_value().unwrap_or_default()
                         } else { String::new() };
 
+                        let obj_sym = Symbol::from_str(&obj_name);
                         // Add to parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -2079,41 +2083,41 @@ impl Shockwave3dMemberHandlers {
                                     use crate::director::chunks::w3d::types::*;
                                     let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
                                     match obj_type {
-                                        "model" => {
+                                        BuiltInSymbol::Model => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Model,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(),
-                                                model_resource_name: new_model_resource_name.clone(),
-                                                shader_name: String::new(),
+                                                name: obj_sym, node_type: W3dNodeType::Model,
+                                                parent_name: Symbol::builtin(BuiltInSymbol::World),
+                                                resource_name: Symbol::empty(),
+                                                model_resource_name: new_model_resource_name,
+                                                shader_name: Symbol::empty(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
-                                        "group" => {
+                                        BuiltInSymbol::Group => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Group,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
+                                                name: obj_sym, node_type: W3dNodeType::Group,
+                                                parent_name: Symbol::builtin(BuiltInSymbol::World),
+                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                shader_name: Symbol::empty(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
-                                        "camera" => {
+                                        BuiltInSymbol::Camera => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::View,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
+                                                name: obj_sym, node_type: W3dNodeType::View,
+                                                parent_name: Symbol::builtin(BuiltInSymbol::World),
+                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                shader_name: Symbol::empty(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
                                             });
                                         }
-                                        "light" => {
+                                        BuiltInSymbol::Light => {
                                             let light_type = match_ci!(new_res_type.as_str(), {
                                                 "ambient" => W3dLightType::Ambient,
                                                 "directional" => W3dLightType::Directional,
@@ -2125,7 +2129,7 @@ impl Shockwave3dMemberHandlers {
                                                 obj_name, new_res_type, light_type
                                             ));
                                             scene.lights.push(W3dLight {
-                                                name: obj_name.clone(),
+                                                name: obj_sym,
                                                 light_type,
                                                 color: [191.0/255.0, 191.0/255.0, 191.0/255.0], // Director default: color(191,191,191)
                                                 attenuation: [1.0, 0.0, 0.0],
@@ -2134,22 +2138,22 @@ impl Shockwave3dMemberHandlers {
                                                 ..Default::default()
                                             });
                                             scene.nodes.push(W3dNode {
-                                                name: obj_name.clone(), node_type: W3dNodeType::Light,
-                                                parent_name: "World".to_string(),
-                                                resource_name: String::new(), model_resource_name: String::new(),
-                                                shader_name: String::new(),
+                                                name: obj_sym, node_type: W3dNodeType::Light,
+                                                parent_name: Symbol::builtin(BuiltInSymbol::World),
+                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                shader_name: Symbol::empty(),
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
-                                        "shader" => {
+                                        BuiltInSymbol::Shader => {
                                             scene.shaders.push(W3dShader {
-                                                name: obj_name.clone(),
+                                                name: obj_sym,
                                                 ..Default::default()
                                             });
                                         }
-                                        "modelResource" => {
+                                        BuiltInSymbol::ModelResource => {
                                             // Generate primitive geometry based on type
                                             // For #plane default: both front+back (2 meshes). #front/#back = single mesh.
                                             let want_front = new_res_facing.is_empty() || new_res_facing == "front" || new_res_facing == "both";
@@ -2170,7 +2174,7 @@ impl Shockwave3dMemberHandlers {
                                                     // Front face: normal +Z; Back face: normal -Z (reversed winding)
                                                     if plane_front {
                                                         meshes.push(ClodDecodedMesh {
-                                                            name: obj_name.clone(),
+                                                            name: obj_sym,
                                                             positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
                                                             normals: vec![[0.0,0.0,1.0]; 4],
                                                             tex_coords: vec![vec![[0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0]]],
@@ -2181,7 +2185,7 @@ impl Shockwave3dMemberHandlers {
                                                     }
                                                     if plane_back {
                                                         meshes.push(ClodDecodedMesh {
-                                                            name: obj_name.clone(),
+                                                            name: obj_sym,
                                                             positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
                                                             normals: vec![[0.0,0.0,-1.0]; 4],
                                                             tex_coords: vec![vec![[1.0,1.0],[0.0,1.0],[0.0,0.0],[1.0,0.0]]],
@@ -2318,7 +2322,7 @@ impl Shockwave3dMemberHandlers {
                                             // For non-plane types, build a single mesh from the returned geometry
                                             if !positions.is_empty() && !faces.is_empty() {
                                                 meshes.push(ClodDecodedMesh {
-                                                    name: obj_name.clone(),
+                                                    name: obj_sym,
                                                     positions,
                                                     normals,
                                                     tex_coords,
@@ -2342,26 +2346,26 @@ impl Shockwave3dMemberHandlers {
                                             // new resource so the renderer can bind it
                                             // (Director shows a red/white checkerboard on
                                             // untextured primitives).
-                                            let shader_name = format!("{}_Shader", obj_name);
-                                            let material_name = format!("{}_Material", obj_name);
+                                            let shader_name = Symbol::from_str(&format!("{}_Shader", obj_name));
+                                            let material_name = Symbol::from_str(&format!("{}_Material", obj_name));
                                             scene.materials.push(W3dMaterial {
-                                                name: material_name.clone(),
+                                                name: material_name,
                                                 // Director's default for new primitives: ambient = diffuse = white
                                                 ambient: [1.0, 1.0, 1.0, 1.0],
                                                 ..Default::default()
                                             });
                                             scene.shaders.push(W3dShader {
-                                                name: shader_name.clone(),
-                                                material_name: material_name.clone(),
+                                                name: shader_name,
+                                                material_name,
                                                 ..Default::default()
                                             });
                                             let num_meshes = meshes.len().max(1);
-                                            scene.model_resources.insert(obj_name.clone(), ModelResourceInfo {
-                                                name: obj_name.clone(),
+                                            scene.model_resources.insert(obj_sym, ModelResourceInfo {
+                                                name: obj_sym,
                                                 mesh_infos: vec![mesh_info],
                                                 shader_bindings: vec![ModelShaderBinding {
                                                     name: shader_name,
-                                                    mesh_bindings: vec![String::new(); num_meshes],
+                                                    mesh_bindings: vec![Symbol::empty(); num_meshes],
                                                 }],
                                                 primitive_type: prim_type,
                                                 primitive_width: 1.0,
@@ -2387,7 +2391,7 @@ impl Shockwave3dMemberHandlers {
 
                                             // Store generated mesh geometry so the renderer can upload it
                                             if !meshes.is_empty() {
-                                                scene.clod_meshes.insert(obj_name.clone(), meshes);
+                                                scene.clod_meshes.insert(obj_sym, meshes);
                                             }
                                         }
                                         _ => {}
@@ -2397,7 +2401,7 @@ impl Shockwave3dMemberHandlers {
                         }
 
                         // For newTexture(name, #fromImageObject/#fromCastMember, source)
-                        if handler_name == "newTexture" && args.len() >= 3 {
+                        if handler_name.eq_builtin(BuiltInSymbol::NewTexture) && args.len() >= 3 {
                             let tex_type = player.get_datum(&args[1]).string_value().unwrap_or_default();
                             if tex_type == "fromCastMember" {
                                 let source_member_ref = match player.get_datum(&args[2]) {
@@ -2518,7 +2522,7 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_name.clone(), tex_data);
+                                                    scene.texture_images.insert(obj_sym, tex_data);
                                                     scene.texture_content_version += 1;
                                                     log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
@@ -2548,12 +2552,12 @@ impl Shockwave3dMemberHandlers {
                                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                                 if let Some(scene) = w3d.scene_mut() {
-                                                    if !scene.texture_images.contains_key(&obj_name) {
+                                                    if !scene.texture_images.contains_key(&Symbol::from_str(&obj_name)) {
                                                         let mut ph = Vec::with_capacity(12);
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&[0u8, 0, 0, 0]);
-                                                        scene.texture_images.insert(obj_name.clone(), ph);
+                                                        scene.texture_images.insert(Symbol::from_str(&obj_name.clone()), ph);
                                                         scene.texture_content_version += 1;
                                                     }
                                                 }
@@ -2622,7 +2626,7 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_name.clone(), tex_data);
+                                                    scene.texture_images.insert(obj_sym, tex_data);
                                                     scene.texture_content_version += 1;
                                                     // Log pixel stats
                                                     let total = rgba.len() / 4;
@@ -2647,13 +2651,13 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                             cast_lib: member_ref.cast_lib,
                             cast_member: member_ref.cast_member,
-                            object_type: obj_type.to_string(),
-                            name: obj_name,
+                            object_type: obj_type,
+                            name: obj_sym,
                         })));
                     }
 
                     // image — return the rendered 3D world as a bitmap ref
-                    if handler_name == "image" {
+                    if handler_name_builtin == BuiltInSymbol::Image {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
@@ -2701,35 +2705,35 @@ impl Shockwave3dMemberHandlers {
                             Some(m) => m,
                             None => return Ok(player.alloc_datum(Datum::Void)),
                         };
-                        mesh.name = resname.clone();
+                        mesh.name = Symbol::from_str(&resname.clone());
                         let num_faces = mesh.faces.len() as u32;
                         if let Some(target) = player.movie.cast_manager.find_mut_member_by_ref(&target_ref) {
                             if let Some(w3d_t) = target.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d_t.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
-                                    scene.clod_meshes.insert(resname.clone(), vec![mesh]);
+                                    scene.clod_meshes.insert(Symbol::from_str(&resname.clone()), vec![mesh]);
                                     let mut mi = ClodMeshInfo::default();
                                     mi.num_faces = num_faces;
-                                    scene.model_resources.insert(resname.clone(), ModelResourceInfo {
-                                        name: resname.clone(),
+                                    scene.model_resources.insert(Symbol::from_str(&resname.clone()), ModelResourceInfo {
+                                        name: Symbol::from_str(&resname.clone()),
                                         mesh_infos: vec![mi],
                                         shader_bindings: vec![ModelShaderBinding {
-                                            name: String::new(),
-                                            mesh_bindings: vec![String::new()],
+                                            name: Symbol::from_str(&String::new()),
+                                            mesh_bindings: vec![Symbol::from_str(&String::new())],
                                         }],
                                         ..Default::default()
                                     });
                                     scene.mesh_content_version += 1;
                                 }
-                                w3d_t.runtime_state.text3d_resources.insert(resname.clone(), (source, state));
+                                w3d_t.runtime_state.text3d_resources.insert(Symbol::from_str(&resname.clone()), (source, state));
                             }
                         }
                         use crate::director::lingo::datum::Shockwave3dObjectRef;
                         return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                             cast_lib: target_ref.cast_lib,
                             cast_member: target_ref.cast_member,
-                            object_type: "modelResource".to_string(),
-                            name: resname,
+                            object_type: BuiltInSymbol::ModelResource,
+                            name: Symbol::from_str(&resname),
                         })));
                     }
 
@@ -2746,31 +2750,31 @@ impl Shockwave3dMemberHandlers {
                             texture_content_version: 0,
                         };
                         empty_scene.nodes.push(W3dNode {
-                            name: "World".to_string(),
+                            name: Symbol::builtin(BuiltInSymbol::World),
                             node_type: W3dNodeType::Group,
-                            parent_name: String::new(),
-                            resource_name: String::new(),
-                            model_resource_name: String::new(),
-                            shader_name: String::new(),
+                            parent_name: Symbol::empty(),
+                            resource_name: Symbol::empty(),
+                            model_resource_name: Symbol::empty(),
+                            shader_name: Symbol::empty(),
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
                         });
                         empty_scene.nodes.push(W3dNode {
-                            name: "DefaultView".to_string(),
+                            name: Symbol::builtin(BuiltInSymbol::DefaultView),
                             node_type: W3dNodeType::View,
-                            parent_name: "World".to_string(),
-                            resource_name: String::new(),
-                            model_resource_name: String::new(),
-                            shader_name: String::new(),
+                            parent_name: Symbol::builtin(BuiltInSymbol::World),
+                            resource_name: Symbol::empty(),
+                            model_resource_name: Symbol::empty(),
+                            shader_name: Symbol::empty(),
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
                         });
                         empty_scene.shaders.push(W3dShader {
-                            name: "DefaultShader".to_string(),
+                            name: Symbol::builtin(BuiltInSymbol::DefaultShader),
                             ..Default::default()
                         });
                         // Built-in "defaultmodel" plane resource (used by overlay scripts)
@@ -2794,12 +2798,12 @@ impl Shockwave3dMemberHandlers {
                     } else {
                         let arg = player.get_datum(&args[0]).clone();
                         match arg {
-                            Datum::String(s) => s,
+                            Datum::String(s) => Symbol::from_str(&s),
                             Datum::Int(idx) => {
                                 Self::get_3d_object_name_by_index(scene, handler_name, idx as usize)
                                     .unwrap_or_default()
                             }
-                            _ => arg.string_value().unwrap_or_default(),
+                            _ => Symbol::from_str(&arg.string_value().unwrap_or_default()),
                         }
                     };
 
@@ -2809,29 +2813,28 @@ impl Shockwave3dMemberHandlers {
 
                     // Check if the named object actually exists in the scene.
                     // Per Director docs: "If no [object] exists for the specified parameter, returns void."
-                    // Name comparisons are case-insensitive (Director behavior).
+                    // Symbol equality is already case-insensitive (all strings interned as lowercase).
                     use crate::director::chunks::w3d::types::W3dNodeType;
-                    let obj_name_lower = obj_name.to_lowercase();
-                    let resolved_name: Option<String> = match handler_name {
-                        "modelResource" => scene.model_resources.keys()
-                            .find(|k| k.to_lowercase() == obj_name_lower).cloned(),
-                        "model" => scene.nodes.iter()
-                            .find(|n| n.node_type == W3dNodeType::Model && n.name.to_lowercase() == obj_name_lower)
-                            .map(|n| n.name.clone()),
-                        "shader" => scene.shaders.iter()
-                            .find(|s| s.name.to_lowercase() == obj_name_lower)
-                            .map(|s| s.name.clone()),
-                        "texture" => scene.texture_images.keys()
-                            .find(|k| k.to_lowercase() == obj_name_lower).cloned(),
-                        "light" => scene.lights.iter()
-                            .find(|l| l.name.to_lowercase() == obj_name_lower)
-                            .map(|l| l.name.clone()),
-                        "camera" => scene.nodes.iter()
-                            .find(|n| n.node_type == W3dNodeType::View && n.name.to_lowercase() == obj_name_lower)
-                            .map(|n| n.name.clone()),
-                        "group" => scene.nodes.iter()
-                            .find(|n| n.node_type == W3dNodeType::Group && n.name.to_lowercase() == obj_name_lower)
-                            .map(|n| n.name.clone())
+                    let resolved_name: Option<Symbol> = match handler_name_builtin {
+                        BuiltInSymbol::ModelResource => scene.model_resources.keys()
+                            .find(|k| **k == obj_name).copied(),
+                        BuiltInSymbol::Model => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::Model && n.name == obj_name)
+                            .map(|n| n.name),
+                        BuiltInSymbol::Shader => scene.shaders.iter()
+                            .find(|s| s.name == obj_name)
+                            .map(|s| s.name),
+                        BuiltInSymbol::Texture => scene.texture_images.keys()
+                            .find(|k| **k == obj_name).copied(),
+                        BuiltInSymbol::Light => scene.lights.iter()
+                            .find(|l| l.name == obj_name)
+                            .map(|l| l.name),
+                        BuiltInSymbol::Camera => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::View && n.name == obj_name)
+                            .map(|n| n.name),
+                        BuiltInSymbol::Group => scene.nodes.iter()
+                            .find(|n| n.node_type == W3dNodeType::Group && n.name == obj_name)
+                            .map(|n| n.name)
                             // "World" is the implicit scene root in W3D — there's
                             // no actual Group node for it, but Director scripts
                             // routinely do `sp.group("World").addChild(child)` to
@@ -2839,13 +2842,13 @@ impl Shockwave3dMemberHandlers {
                             // name so the ref is valid; addChild's setter side
                             // already handles "World" by clearing the child's
                             // parent reference.
-                            .or_else(|| if obj_name_lower == "world" {
-                                Some("World".to_string())
+                            .or_else(|| if obj_name == BuiltInSymbol::World {
+                                Some(Symbol::builtin(BuiltInSymbol::World))
                             } else { None }),
-                        "motion" => scene.motions.iter()
-                            .find(|m| m.name.to_lowercase() == obj_name_lower)
-                            .map(|m| m.name.clone()),
-                        _ => Some(obj_name.clone()), // Unknown collection types pass through
+                        BuiltInSymbol::Motion => scene.motions.iter()
+                            .find(|m| m.name == obj_name)
+                            .map(|m| m.name),
+                        _ => Some(obj_name), // Unknown collection types pass through
                     };
                     let resolved_name = match resolved_name {
                         Some(name) => name,
@@ -2856,12 +2859,12 @@ impl Shockwave3dMemberHandlers {
                     Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib: member_ref.cast_lib,
                         cast_member: member_ref.cast_member,
-                        object_type: handler_name.to_string(),
+                        object_type: handler_name_builtin,
                         name: resolved_name,
                     })))
                 })
             }
-            "modelsUnderRay" => {
+            BuiltInSymbol::ModelsUnderRay => {
                 reserve_player_mut(|player| {
                     let member_ref = match player.get_datum(datum) {
                         Datum::CastMember(r) => r.to_owned(),
@@ -2891,25 +2894,25 @@ impl Shockwave3dMemberHandlers {
                     // #modelList: a list of model REFERENCES to restrict the cast to. An
                     // empty/absent list means "no restriction" (test all), matching the
                     // dictionary's "if omitted, all models" wording.
-                    let mut model_whitelist: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let mut model_whitelist: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
 
                     let is_proplist = args.len() > 2 && matches!(player.get_datum(&args[2]), Datum::PropList(..));
                     if is_proplist {
                         let map = player.get_datum(&args[2]).to_map()?.clone();
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxNumberOfModels".to_owned()), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxNumberOfModels".to_owned())), &player.allocator)?;
                         if let Ok(n) = player.get_datum(&v).int_value() { max_models = n; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("levelOfDetail".to_owned()), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"levelOfDetail".to_owned())), &player.allocator)?;
                         if player.get_datum(&v).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed") { detailed = true; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("maxDistance".to_owned()), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxDistance".to_owned())), &player.allocator)?;
                         match player.get_datum(&v) {
                             Datum::Int(i) => max_dist = *i as f32,
                             Datum::Float(f) => max_dist = *f as f32,
                             _ => {}
                         }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol("modelList".to_owned()), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"modelList".to_owned())), &player.allocator)?;
                         let items = match player.get_datum(&v) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
                         for item in &items {
-                            if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                            if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name); }
                         }
                     } else {
                         if args.len() > 2 { max_models = player.get_datum(&args[2]).int_value().unwrap_or(100); }
@@ -2918,7 +2921,7 @@ impl Shockwave3dMemberHandlers {
                         if args.len() > 4 {
                             let items = match player.get_datum(&args[4]) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
                             for item in &items {
-                                if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name.clone()); }
+                                if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name); }
                             }
                         }
                     }
@@ -2946,7 +2949,7 @@ impl Shockwave3dMemberHandlers {
                             // excluding it let the player walk off the map. Only
                             // removeFromWorld (detached_nodes) removes a model from raycasts.
                             for name in &w3d.runtime_state.detached_nodes {
-                                excluded.insert(name.clone());
+                                excluded.insert(*name);
                             }
                             if let Some(ref scene) = w3d.parsed_scene {
                                 for node in &scene.nodes {
@@ -2954,12 +2957,12 @@ impl Shockwave3dMemberHandlers {
                                     let mut parent = &node.parent_name;
                                     for _ in 0..10 {
                                         if parent.is_empty() {
-                                            excluded.insert(node.name.clone());
+                                            excluded.insert(node.name);
                                             break;
                                         }
-                                        if *parent == "World" { break; }
-                                        if w3d.runtime_state.detached_nodes.contains(parent.as_str()) {
-                                            excluded.insert(node.name.clone());
+                                        if *parent == BuiltInSymbol::World { break; }
+                                        if w3d.runtime_state.detached_nodes.contains(parent) {
+                                            excluded.insert(node.name);
                                             break;
                                         }
                                         if let Some(pn) = scene.nodes.iter().find(|n| n.name == *parent) {
@@ -3013,29 +3016,29 @@ impl Shockwave3dMemberHandlers {
                         );
                         for hit in &hits {
                             if detailed {
-                                let model_key = player.alloc_datum(Datum::Symbol("model".to_string()));
+                                let model_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Model.into()));
                                 let model_val = player.alloc_datum(Datum::Shockwave3dObjectRef(
                                     crate::director::lingo::datum::Shockwave3dObjectRef {
                                         cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
-                                        object_type: "model".to_string(),
-                                        name: hit.model_name.clone(),
+                                        object_type: BuiltInSymbol::Model.into(),
+                                        name: Symbol::from_str(&hit.model_name),
                                     }
                                 ));
-                                let dist_key = player.alloc_datum(Datum::Symbol("distance".to_string()));
+                                let dist_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Distance.into()));
                                 let dist_val = player.alloc_datum(Datum::Float(hit.distance as f64));
-                                let pos_key = player.alloc_datum(Datum::Symbol("isectPosition".to_string()));
+                                let pos_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::IsectPosition.into()));
                                 let pos_val = player.alloc_datum(Datum::Vector([
                                     hit.position[0] as f64, hit.position[1] as f64, hit.position[2] as f64,
                                 ]));
-                                let norm_key = player.alloc_datum(Datum::Symbol("isectNormal".to_string()));
+                                let norm_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::IsectNormal.into()));
                                 let norm_val = player.alloc_datum(Datum::Vector([
                                     hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
                                 ]));
-                                let mesh_key = player.alloc_datum(Datum::Symbol("meshID".to_string()));
+                                let mesh_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::MeshID.into()));
                                 let mesh_val = player.alloc_datum(Datum::Int(hit.mesh_id as i32));
-                                let face_key = player.alloc_datum(Datum::Symbol("faceID".to_string()));
+                                let face_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::FaceID.into()));
                                 let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32 + 1));
-                                let vert_key = player.alloc_datum(Datum::Symbol("vertices".to_string()));
+                                let vert_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Vertices.into()));
                                 let mut vert_items = VecDeque::new();
                                 for vtx in &hit.vertices {
                                     vert_items.push_back(player.alloc_datum(Datum::Vector([
@@ -3045,10 +3048,10 @@ impl Shockwave3dMemberHandlers {
                                 let vert_val = player.alloc_datum(Datum::List(
                                     crate::director::lingo::datum::DatumType::List, vert_items, false,
                                 ));
-                                let uv_key = player.alloc_datum(Datum::Symbol("uvCoord".to_string()));
-                                let u_key = player.alloc_datum(Datum::Symbol("u".to_string()));
+                                let uv_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::UvCoord.into()));
+                                let u_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::U.into()));
                                 let u_val = player.alloc_datum(Datum::Float(hit.uv_coord[0] as f64));
-                                let v_key = player.alloc_datum(Datum::Symbol("v".to_string()));
+                                let v_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::V.into()));
                                 let v_val = player.alloc_datum(Datum::Float(hit.uv_coord[1] as f64));
                                 let uv_val = player.alloc_datum(Datum::PropList(
                                     VecDeque::from(vec![(u_key, u_val), (v_key, v_val)]), false,
@@ -3065,8 +3068,8 @@ impl Shockwave3dMemberHandlers {
                                 results.push(player.alloc_datum(Datum::Shockwave3dObjectRef(
                                     crate::director::lingo::datum::Shockwave3dObjectRef {
                                         cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
-                                        object_type: "model".to_string(),
-                                        name: hit.model_name.clone(),
+                                        object_type: BuiltInSymbol::Model,
+                                        name: Symbol::from_str(&hit.model_name),
                                     }
                                 )));
                             }
@@ -3078,9 +3081,9 @@ impl Shockwave3dMemberHandlers {
                     )))
                 })
             }
-            "modelsUnderLoc" | "modelUnderLoc" => {
+            BuiltInSymbol::ModelsUnderLoc | BuiltInSymbol::ModelUnderLoc => {
                 reserve_player_mut(|player| {
-                    if handler_name == "modelUnderLoc" {
+                    if handler_name == BuiltInSymbol::ModelUnderLoc {
                         Ok(player.alloc_datum(Datum::Void))
                     } else {
                         Ok(player.alloc_datum(Datum::List(
@@ -3095,11 +3098,11 @@ impl Shockwave3dMemberHandlers {
         }
     }
 
-    pub fn get_3d_collection_count(scene: &crate::director::chunks::w3d::types::W3dScene, collection: &str) -> i32 {
+    pub fn get_3d_collection_count(scene: &crate::director::chunks::w3d::types::W3dScene, collection: Symbol) -> i32 {
         use crate::director::chunks::w3d::types::W3dNodeType;
-        match collection {
+        match collection.as_lower_str() {
             "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).count() as i32,
-            "modelResource" => scene.model_resources.len() as i32,
+            "modelresource" => scene.model_resources.len() as i32,
             "shader" => scene.shaders.len() as i32,
             "texture" => scene.texture_images.len() as i32,
             "light" => scene.lights.len() as i32,
@@ -3111,36 +3114,36 @@ impl Shockwave3dMemberHandlers {
         }
     }
 
-    pub fn get_3d_object_name_by_index(scene: &crate::director::chunks::w3d::types::W3dScene, collection: &str, index: usize) -> Option<String> {
+    pub fn get_3d_object_name_by_index(scene: &crate::director::chunks::w3d::types::W3dScene, collection: Symbol, index: usize) -> Option<Symbol> {
         use crate::director::chunks::w3d::types::W3dNodeType;
         if index == 0 { return None; }
         let idx = index - 1; // 1-based to 0-based
-        match collection {
-            "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).nth(idx).map(|n| n.name.clone()),
-            "modelResource" => scene.model_resources.keys().nth(idx).cloned(),
-            "shader" => scene.shaders.get(idx).map(|s| s.name.clone()),
-            "texture" => scene.texture_images.keys().nth(idx).cloned(),
-            "light" => scene.lights.get(idx).map(|l| l.name.clone()),
-            "camera" => {
+        match collection.into_builtin() {
+            Some(BuiltInSymbol::Model) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).nth(idx).map(|n| n.name),
+            Some(BuiltInSymbol::ModelResource) => scene.model_resources.keys().nth(idx).copied(),
+            Some(BuiltInSymbol::Shader) => scene.shaders.get(idx).map(|s| s.name),
+            Some(BuiltInSymbol::Texture) => scene.texture_images.keys().nth(idx).copied(),
+            Some(BuiltInSymbol::Light) => scene.lights.get(idx).map(|l| l.name),
+            Some(BuiltInSymbol::Camera) => {
                 // Director puts DefaultView as camera[1], then other cameras in scene order
-                let mut cams: Vec<&str> = Vec::new();
+                let mut cams: Vec<Symbol> = Vec::new();
                 // DefaultView first
-                if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name.eq_ignore_ascii_case("defaultview")) {
-                    cams.push(&dv.name);
+                if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)) {
+                    cams.push(dv.name);
                 }
                 // Then other cameras in scene order
                 for n in &scene.nodes {
-                    if n.node_type == W3dNodeType::View && !n.name.eq_ignore_ascii_case("defaultview") {
-                        cams.push(&n.name);
+                    if n.node_type == W3dNodeType::View && n.name != Symbol::builtin(BuiltInSymbol::DefaultView) {
+                        cams.push(n.name);
                     }
                 }
-                cams.get(idx).map(|s| s.to_string())
+                cams.get(idx).copied()
             }
-            "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
+            Some(BuiltInSymbol::Group) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
             // motion[1] = implicit default; authored motions follow at 2.. (see DEFAULT_MOTION_NAME).
-            "motion" => {
+            Some(BuiltInSymbol::Motion) => {
                 if idx == 0 {
-                    Some(DEFAULT_MOTION_NAME.to_string())
+                    Some(Symbol::from_str(&DEFAULT_MOTION_NAME.to_string()))
                 } else {
                     scene.motions.get(idx - 1).map(|m| m.name.clone())
                 }

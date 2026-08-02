@@ -19,6 +19,7 @@ use super::{
     types::TypeHandlers,
 };
 use std::collections::{HashMap, VecDeque};
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 use rand::Rng;
 
 use crate::{
@@ -200,7 +201,7 @@ impl BuiltInHandlerManager {
             )));
         };
         let handler_args = args[1..].to_vec();
-        BitmapDatumHandlers::call(bitmap_ref, handler_name, &handler_args)
+        BitmapDatumHandlers::call(bitmap_ref, crate::player::symbols::symbol::Symbol::from_str(handler_name), &handler_args)
     }
 
     fn get_pos_global(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -696,7 +697,7 @@ impl BuiltInHandlerManager {
                     handler_name.string_value().unwrap_or_default(),
                 )));
             }
-            let handler_name = handler_name.string_value()?;
+            let handler_name = handler_name.symbol_value()?;
 
             let (instance_ids, list_count) = match receiver_clone {
                 // A LIST receiver is the lenient form: "the message is sent to
@@ -737,7 +738,7 @@ impl BuiltInHandlerManager {
         })?;
 
         if instance_ids.is_none() {
-            return player_call_datum_handler(&receiver_ref, &handler_name, &args).await;
+            return player_call_datum_handler(&receiver_ref, handler_name, &args).await;
         }
         let instance_refs = instance_ids.unwrap();
 
@@ -745,7 +746,7 @@ impl BuiltInHandlerManager {
         for instance_ref in instance_refs {
             let handler = reserve_player_ref(|player| {
                 ScriptInstanceUtils::get_script_instance_handler(
-                    &handler_name,
+                    handler_name,
                     &instance_ref,
                     player,
                 )
@@ -979,56 +980,58 @@ impl BuiltInHandlerManager {
         eval_lingo_command(code).await
     }
 
-    pub fn has_async_handler(name: &str) -> bool {
-        // Lingo handler names are case-insensitive; the sync `call_handler`
-        // already lowercases, and `do`/eval strings often use non-canonical case
-        // (Dora Soccer queues `do("sendsprite 1,#endcamera")`), so match lowercase.
-        match name.to_lowercase().as_str() {
-            "call" => true,
-            "new" => true,
-            "newobject" => true,
-            "callancestor" => true,
-            "sendsprite" => true,
-            "sendallsprites" => true,
-            "value" => true,
-            "do" => true,
-            "updatestage" => true,
-            "go" => true,
+    pub fn has_async_handler(name: Symbol) -> bool {
+        // Lingo handler names are case-insensitive. `SymbolTable::intern`
+        // lowercases before interning, so symbol identity already carries that:
+        // `do("sendsprite 1,#endcamera")` (Dora Soccer) resolves to the same
+        // symbol as `sendSprite`, with no per-call lowercasing.
+        let Some(name_builtin) = name.into_builtin() else { return false; };
+        match name_builtin {
+            BuiltInSymbol::Call => true,
+            BuiltInSymbol::New => true,
+            BuiltInSymbol::NewObject => true,
+            BuiltInSymbol::CallAncestor => true,
+            BuiltInSymbol::SendSprite => true,
+            BuiltInSymbol::SendAllSprites => true,
+            BuiltInSymbol::Value => true,
+            BuiltInSymbol::Do => true,
+            BuiltInSymbol::UpdateStage => true,
+            BuiltInSymbol::Go => true,
             // `play movie X` / `play frame X of movie Y` compile to play(frame, movie)
             // and must load a movie like `go` (async). The 1-arg Flash form is handled
             // synchronously inside the async arm.
-            "play" => true,
-            "nothing" => true,
+            BuiltInSymbol::Play => true,
+            BuiltInSymbol::Nothing => true,
             // Old-style Lingo lets `importFileInto member, url, props` be
             // called as a global verb; route it to the same async impl as
             // the method form `member.importFileInto(url, props)`.
-            "importfileinto" => true,
+            BuiltInSymbol::ImportFileInto => true,
             _ => false,
         }
     }
 
     pub async fn call_async_handler(
-        name: &str,
+        name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // Case-insensitive to match `has_async_handler` and Lingo semantics.
-        match name.to_lowercase().as_str() {
-            "call" => Self::call(args).await,
-            "new" => TypeHandlers::new(args).await,
-            "newobject" => TypeHandlers::new_object(args).await,
-            "callancestor" => TypeHandlers::call_ancestor(args).await,
-            "sendsprite" => MovieHandlers::send_sprite(args).await,
-            "sendallsprites" => MovieHandlers::send_all_sprites(args).await,
-            "value" => TypeHandlers::value(args).await,
-            "do" => Self::do_command(args).await,
-            "updatestage" => MovieHandlers::update_stage(args).await,
-            "go" => MovieHandlers::go(args).await,
+        match name.into_builtin() {
+            Some(BuiltInSymbol::Call) => Self::call(args).await,
+            Some(BuiltInSymbol::New) => TypeHandlers::new(args).await,
+            Some(BuiltInSymbol::NewObject) => TypeHandlers::new_object(args).await,
+            Some(BuiltInSymbol::CallAncestor) => TypeHandlers::call_ancestor(args).await,
+            Some(BuiltInSymbol::SendSprite) => MovieHandlers::send_sprite(args).await,
+            Some(BuiltInSymbol::SendAllSprites) => MovieHandlers::send_all_sprites(args).await,
+            Some(BuiltInSymbol::Value) => TypeHandlers::value(args).await,
+            Some(BuiltInSymbol::Do) => Self::do_command(args).await,
+            Some(BuiltInSymbol::UpdateStage) => MovieHandlers::update_stage(args).await,
+            Some(BuiltInSymbol::Go) => MovieHandlers::go(args).await,
             // The global `play` command. `play movie X` / `play frame X of movie Y`
             // compile to play(frame, movie) — the SAME arg shape as `go`, so route the
             // 2-arg form to the movie-load path. `play movie the movieName` (the current
             // movie) reloads it = restart (frog01's game-over "hit enter to restart").
             // The 1-arg form is the Ruffle/Flash sprite play (sprite.play() global form).
-            "play" => {
+            Some(BuiltInSymbol::Play) => {
                 if args.len() >= 2 {
                     // `play movie X`. If X is the CURRENT movie → in-place restart
                     // (the net loader often can't re-fetch the movie by name once
@@ -1082,8 +1085,8 @@ impl BuiltInHandlerManager {
                     Ok(DatumRef::Void)
                 }
             }
-            "nothing" => MovieHandlers::nothing_async(args).await,
-            "importfileinto" => Self::import_file_into(args).await,
+            Some(BuiltInSymbol::Nothing) => MovieHandlers::nothing_async(args).await,
+            Some(BuiltInSymbol::ImportFileInto) => Self::import_file_into(args).await,
             _ => {
                 let msg = format!("No built-in async handler: {}", name);
                 return Err(ScriptError::new(msg));
@@ -1091,69 +1094,68 @@ impl BuiltInHandlerManager {
         }
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match name.to_lowercase().as_str() {
-            "castlib" => CastHandlers::cast_lib(args),
-            "findempty" => CastHandlers::find_empty(args),
-            "preloadnetthing" => NetHandlers::preload_net_thing(args),
-            "netdone" => NetHandlers::net_done(args),
-            "netabort" => NetHandlers::net_abort(args),
-            "movetofront" | "preloadmember" | "preloadbuffer" | "unloadmember" | "beep"
+    pub fn call_handler(name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match name.into_builtin() {
+            Some(BuiltInSymbol::CastLib) => CastHandlers::cast_lib(args),
+            Some(BuiltInSymbol::FindEmpty) => CastHandlers::find_empty(args),
+            Some(BuiltInSymbol::PreloadNetThing) => NetHandlers::preload_net_thing(args),
+            Some(BuiltInSymbol::NetDone) => NetHandlers::net_done(args),
+            Some(BuiltInSymbol::NetAbort) => NetHandlers::net_abort(args),
             // Cast/movie preload + unload commands: dirplayer loads everything
             // synchronously up front, so there is nothing to (un)cache. Accept
             // as no-ops (netjack startMovie calls preLoadCast).
-            | "preloadcast" | "unloadcast" | "preloadmovie" | "unload" => Ok(DatumRef::Void),
-            "puppettempo" => MovieHandlers::puppet_tempo(args),
-            "objectp" => TypeHandlers::objectp(args),
-            "voidp" => TypeHandlers::voidp(args),
-            "listp" => TypeHandlers::listp(args),
-            "symbolp" => TypeHandlers::symbolp(args),
-            "stringp" => TypeHandlers::stringp(args),
-            "integerp" => TypeHandlers::integerp(args),
-            "floatp" => TypeHandlers::floatp(args),
-            "offset" => StringHandlers::offset(args),
-            "length" => StringHandlers::length(args),
-            "script" => MovieHandlers::script(args),
-            "void" => TypeHandlers::void(args),
-            "param" => Self::param(args),
-            "paramcount" => Self::param_count(args),
-            "count" => Self::count(args),
-            "createmask" => Self::forward_bitmap_handler("createMask", args),
-            "creatematte" => Self::forward_bitmap_handler("createMatte", args),
-            "getat" => Self::get_at(args),
-            "getlast" => Self::get_last(args),
-            "getpos" => Self::get_pos_global(args),
-            "setat" => Self::set_at(args),
-            "ilk" => TypeHandlers::ilk(args),
-            "member" => MovieHandlers::member(args),
+            Some(BuiltInSymbol::MoveToFront | BuiltInSymbol::PreloadMember | BuiltInSymbol::PreloadBuffer | BuiltInSymbol::UnloadMember | BuiltInSymbol::Beep | BuiltInSymbol::PreLoadCast | BuiltInSymbol::UnLoadCast | BuiltInSymbol::PreLoadMovie | BuiltInSymbol::UnLoad) => Ok(DatumRef::Void),
+            Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(args),
+            Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(args),
+            Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(args),
+            Some(BuiltInSymbol::Listp) => TypeHandlers::listp(args),
+            Some(BuiltInSymbol::Symbolp) => TypeHandlers::symbolp(args),
+            Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(args),
+            Some(BuiltInSymbol::Integerp) => TypeHandlers::integerp(args),
+            Some(BuiltInSymbol::Floatp) => TypeHandlers::floatp(args),
+            Some(BuiltInSymbol::Offset) => StringHandlers::offset(args),
+            Some(BuiltInSymbol::Length) => StringHandlers::length(args),
+            Some(BuiltInSymbol::Script) => MovieHandlers::script(args),
+            Some(BuiltInSymbol::Void) => TypeHandlers::void(args),
+            Some(BuiltInSymbol::Param) => Self::param(args),
+            Some(BuiltInSymbol::ParamCount) => Self::param_count(args),
+            Some(BuiltInSymbol::Count) => Self::count(args),
+            Some(BuiltInSymbol::CreateMask) => Self::forward_bitmap_handler("createMask", args),
+            Some(BuiltInSymbol::CreateMatte) => Self::forward_bitmap_handler("createMatte", args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(args),
+            Some(BuiltInSymbol::GetLast) => Self::get_last(args),
+            Some(BuiltInSymbol::GetPos) => Self::get_pos_global(args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(args),
+            Some(BuiltInSymbol::Ilk) => TypeHandlers::ilk(args),
+            Some(BuiltInSymbol::Member) => MovieHandlers::member(args),
             // Director 4 syntax: `cast(N)` / `the X of cast(N)` references a
             // member in the single (internal) cast. Equivalent to `member(N)`
             // in D5+. Movies authored in D4 still use it.
-            "cast" => MovieHandlers::member(args),
-            "space" => StringHandlers::space(args),
-            "integer" => TypeHandlers::integer(args),
-            "string" => StringHandlers::string(args),
-            "chartonum" => StringHandlers::char_to_num(args),
-            "numtochar" => StringHandlers::num_to_char(args),
-            "float" => TypeHandlers::float(args),
-            "put" => Self::put(args),
-            "inspect" => Self::inspect(args),
-            "random" => Self::random(args),
-            "randomvector" => Self::random_vector(args),
-            "bitand" => Self::bit_and(args),
-            "bitor" => Self::bit_or(args),
-            "bitnot" => Self::bit_not(args),
-            "symbol" => TypeHandlers::symbol(args),
-            "puppetsprite" => MovieHandlers::puppet_sprite(args),
-            "clearglobals" => Self::clear_globals(args),
-            "sprite" => MovieHandlers::sprite(args),
-            "point" => TypeHandlers::point(args),
-            "clickloc" => {
+            Some(BuiltInSymbol::Cast) => MovieHandlers::member(args),
+            Some(BuiltInSymbol::Space) => StringHandlers::space(args),
+            Some(BuiltInSymbol::Integer) => TypeHandlers::integer(args),
+            Some(BuiltInSymbol::String) => StringHandlers::string(args),
+            Some(BuiltInSymbol::CharToNum) => StringHandlers::char_to_num(args),
+            Some(BuiltInSymbol::NumToChar) => StringHandlers::num_to_char(args),
+            Some(BuiltInSymbol::Float) => TypeHandlers::float(args),
+            Some(BuiltInSymbol::Put) => Self::put(args),
+            Some(BuiltInSymbol::Inspect) => Self::inspect(args),
+            Some(BuiltInSymbol::Random) => Self::random(args),
+            Some(BuiltInSymbol::RandomVector) => Self::random_vector(args),
+            Some(BuiltInSymbol::BitAnd) => Self::bit_and(args),
+            Some(BuiltInSymbol::BitOr) => Self::bit_or(args),
+            Some(BuiltInSymbol::BitNot) => Self::bit_not(args),
+            Some(BuiltInSymbol::Symbol) => TypeHandlers::symbol(args),
+            Some(BuiltInSymbol::PuppetSprite) => MovieHandlers::puppet_sprite(args),
+            Some(BuiltInSymbol::ClearGlobals) => Self::clear_globals(args),
+            Some(BuiltInSymbol::Sprite) => MovieHandlers::sprite(args),
+            Some(BuiltInSymbol::Point) => TypeHandlers::point(args),
+            Some(BuiltInSymbol::ClickLoc) => {
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::Point([player.movie.click_loc.0 as f64, player.movie.click_loc.1 as f64], 0)))
                 })
             }
-            "constrainh" => {
+            Some(BuiltInSymbol::ConstrainH) => {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
                     let posn = player.get_datum(&args[1]).int_value()?;
@@ -1167,7 +1169,7 @@ impl BuiltInHandlerManager {
                     Ok(player.alloc_datum(Datum::Int(posn.max(left).min(right))))
                 })
             }
-            "constrainv" => {
+            Some(BuiltInSymbol::ConstrainV) => {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
                     let posn = player.get_datum(&args[1]).int_value()?;
@@ -1192,7 +1194,7 @@ impl BuiltInHandlerManager {
             // Ruffle bridge; everything else (sound channels, members,
             // bare integers that don't resolve to a Flash sprite) keeps
             // the historical no-op behaviour.
-            "stop" => {
+            Some(BuiltInSymbol::Stop) => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
                         ruffle_stop(sn);
@@ -1200,7 +1202,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "play" => {
+            Some(BuiltInSymbol::Play) => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
                         // play() is resume-semantic: it OVERRIDES a prior
@@ -1216,7 +1218,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "rewind" => {
+            Some(BuiltInSymbol::Rewind) => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
                         ruffle_rewind(sn);
@@ -1228,7 +1230,7 @@ impl BuiltInHandlerManager {
             // same root-timeline stop as `stop()` (spec: stops the Flash sprite,
             // audio would continue — we don't split audio). See the sprite-method
             // `hold` arm in datum_handlers/sprite.rs.
-            "hold" => {
+            Some(BuiltInSymbol::Hold) => {
                 if args.len() >= 1 {
                     if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
                         ruffle_stop(sn);
@@ -1249,31 +1251,31 @@ impl BuiltInHandlerManager {
             // iteration (`continue()` then `next repeat` in
             // collectionsMaster.initCollections), where it is a no-op in
             // Director as well since nothing paused the playhead.
-            "pause" | "continue" => Ok(DatumRef::Void),
-            "cursor" => TypeHandlers::cursor(args),
-            "externalparamcount" => MovieHandlers::external_param_count(args),
-            "externalparamname" => MovieHandlers::external_param_name(args),
-            "externalparamvalue" => MovieHandlers::external_param_value(args),
-            "getnettext" => NetHandlers::get_net_text(args),
-            "timeout" => TypeHandlers::timeout(args),
-            "rect" => TypeHandlers::rect(args),
-            "getstreamstatus" => NetHandlers::get_stream_status(args),
-            "neterror" => NetHandlers::net_error(args),
-            "netstatus" => NetHandlers::net_status(args),
-            "nettextresult" => NetHandlers::net_text_result(args),
-            "postnettext" => NetHandlers::post_net_text(args),
-            "rgb" => TypeHandlers::rgb(args),
-            "list" => TypeHandlers::list(args),
-            "image" => TypeHandlers::image(args),
-            "filter" => TypeHandlers::filter(args),
-            "newmatrix" => TypeHandlers::new_matrix(args),
-            "constraintdesc" => TypeHandlers::constraint_desc(args),
+            Some(BuiltInSymbol::Pause | BuiltInSymbol::Continue) => Ok(DatumRef::Void),
+            Some(BuiltInSymbol::Cursor) => TypeHandlers::cursor(args),
+            Some(BuiltInSymbol::ExternalParamCount) => MovieHandlers::external_param_count(args),
+            Some(BuiltInSymbol::ExternalParamName) => MovieHandlers::external_param_name(args),
+            Some(BuiltInSymbol::ExternalParamValue) => MovieHandlers::external_param_value(args),
+            Some(BuiltInSymbol::GetNetText) => NetHandlers::get_net_text(args),
+            Some(BuiltInSymbol::Timeout) => TypeHandlers::timeout(args),
+            Some(BuiltInSymbol::Rect) => TypeHandlers::rect(args),
+            Some(BuiltInSymbol::GetStreamStatus) => NetHandlers::get_stream_status(args),
+            Some(BuiltInSymbol::NetError) => NetHandlers::net_error(args),
+            Some(BuiltInSymbol::NetStatus) => NetHandlers::net_status(args),
+            Some(BuiltInSymbol::NetTextResult) => NetHandlers::net_text_result(args),
+            Some(BuiltInSymbol::PostNetText) => NetHandlers::post_net_text(args),
+            Some(BuiltInSymbol::Rgb) => TypeHandlers::rgb(args),
+            Some(BuiltInSymbol::List) => TypeHandlers::list(args),
+            Some(BuiltInSymbol::Image) => TypeHandlers::image(args),
+            Some(BuiltInSymbol::Filter) => TypeHandlers::filter(args),
+            Some(BuiltInSymbol::NewMatrix) => TypeHandlers::new_matrix(args),
+            Some(BuiltInSymbol::ConstraintDesc) => TypeHandlers::constraint_desc(args),
             // Director allows both the method form `bitmap.getPixel(x, y)` and
             // the global form `getPixel(bitmap, x, y)` (chapter 15). Same for
             // `setPixel`. Both end up at the BitmapDatumHandlers entry — the
             // global form just strips the bitmap from arg[0] and forwards the
             // rest as the method args.
-            "getpixel" => {
+            Some(BuiltInSymbol::GetPixel) => {
                 if args.is_empty() {
                     return Err(ScriptError::new(
                         "getPixel requires a bitmap argument".to_string(),
@@ -1282,7 +1284,7 @@ impl BuiltInHandlerManager {
                 let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
                 BitmapDatumHandlers::get_pixel(&args[0], &rest)
             }
-            "setpixel" => {
+            Some(BuiltInSymbol::SetPixel) => {
                 if args.is_empty() {
                     return Err(ScriptError::new(
                         "setPixel requires a bitmap argument".to_string(),
@@ -1291,33 +1293,33 @@ impl BuiltInHandlerManager {
                 let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
                 BitmapDatumHandlers::set_pixel(&args[0], &rest)
             }
-            "chars" => StringHandlers::chars(args),
-            "paletteindex" => TypeHandlers::palette_index(args),
-            "abs" => TypeHandlers::abs(args),
-            "xtra" => TypeHandlers::xtra(args),
-            "stopevent" => MovieHandlers::stop_event(args),
-            "getpref" => MovieHandlers::get_pref(args),
-            "setpref" => MovieHandlers::set_pref(args),
-            "urlencode" => StringHandlers::url_encode(args),
-            "gotonetpage" => MovieHandlers::go_to_net_page(args),
-            "gotonetmovie" => MovieHandlers::go_to_net_movie(args),
-            "pass" => MovieHandlers::pass(args),
-            "union" => TypeHandlers::union(args),
+            Some(BuiltInSymbol::Chars) => StringHandlers::chars(args),
+            Some(BuiltInSymbol::PaletteIndex) => TypeHandlers::palette_index(args),
+            Some(BuiltInSymbol::Abs) => TypeHandlers::abs(args),
+            Some(BuiltInSymbol::Xtra) => TypeHandlers::xtra(args),
+            Some(BuiltInSymbol::StopEvent) => MovieHandlers::stop_event(args),
+            Some(BuiltInSymbol::GetPref) => MovieHandlers::get_pref(args),
+            Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(args),
+            Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(args),
+            Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(args),
+            Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(args),
+            Some(BuiltInSymbol::Pass) => MovieHandlers::pass(args),
+            Some(BuiltInSymbol::Union) => TypeHandlers::union(args),
             // inflate(rect, w, h) — the top-level form of rect.inflate(w, h).
-            "inflate" if !args.is_empty() => {
+            Some(BuiltInSymbol::Inflate) if !args.is_empty() => {
                 RectDatumHandlers::inflate(&args[0], &args[1..].to_vec())
             }
-            "bitxor" => TypeHandlers::bit_xor(args),
-            "power" => TypeHandlers::power(args),
-            "add" => TypeHandlers::add(args),
-            "abort" => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
-            "mousedown" => {
+            Some(BuiltInSymbol::BitXor) => TypeHandlers::bit_xor(args),
+            Some(BuiltInSymbol::Power) => TypeHandlers::power(args),
+            Some(BuiltInSymbol::Add) => TypeHandlers::add(args),
+            Some(BuiltInSymbol::Abort) => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
+            Some(BuiltInSymbol::MouseDown) => {
                 reserve_player_mut(|player| {
                     player.input_polled = true;
                     Ok(player.alloc_datum(datum_bool(player.movie.mouse_down)))
                 })
             }
-            "rightmousedown" => {
+            Some(BuiltInSymbol::RightMouseDown) => {
                 // Right button IS tracked (right_mouse_down/right_mouse_up JS exports set
                 // movie.right_mouse_down; the `the rightMouseDown` property reads it too).
                 // The function form was stubbed to FALSE, so polling movies (Rasterwerks
@@ -1327,10 +1329,10 @@ impl BuiltInHandlerManager {
                     Ok(player.alloc_datum(datum_bool(player.movie.right_mouse_down)))
                 })
             }
-            "getrendererservices" => {
+            Some(BuiltInSymbol::GetRendererServices) => {
                 // Return a prop list with renderer info stubs
                 reserve_player_mut(|player| {
-                    let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(s.to_string()));
+                    let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(Symbol::from_str(s)));
                     let make_str = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::String(s.to_string()));
                     let make_int = |p: &mut DirPlayer, n: i32| p.alloc_datum(Datum::Int(n));
 
@@ -1375,7 +1377,7 @@ impl BuiltInHandlerManager {
                     Ok(result)
                 })
             }
-            "getvariable" => {
+            Some(BuiltInSymbol::GetVariable) => {
                 // Flash (SWF) member interop — getVariable(sprite, path [, asObjectFlag]).
                 //
                 // The optional 3rd arg == 0 is Director's "return the value as a
@@ -1462,7 +1464,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "setvariable" => {
+            Some(BuiltInSymbol::SetVariable) => {
                 // Flash (SWF) member interop — setVariable(sprite, path, value)
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
@@ -1480,7 +1482,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "gotoframe" => {
+            Some(BuiltInSymbol::GoToFrame) => {
                 // Flash (SWF) member interop — goToFrame(sprite, frame_or_label)
                 if args.len() >= 2 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
@@ -1493,7 +1495,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "callframe" => {
+            Some(BuiltInSymbol::CallFrame) => {
                 if args.len() >= 2 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
                     let frame = reserve_player_ref(|player| {
@@ -1505,7 +1507,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "getflashproperty" => {
+            Some(BuiltInSymbol::GetFlashProperty) => {
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
                     let target = reserve_player_ref(|player| {
@@ -1529,7 +1531,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "setflashproperty" => {
+            Some(BuiltInSymbol::SetFlashProperty) => {
                 if args.len() >= 4 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
                     let target = reserve_player_ref(|player| {
@@ -1547,7 +1549,7 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "hittest" => {
+            Some(BuiltInSymbol::HitTest) => {
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
                     // Director stage coords; rebase to sprite-local for the
@@ -1572,13 +1574,13 @@ impl BuiltInHandlerManager {
                             _ => "background",
                         };
                         return reserve_player_mut(|player| {
-                            Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
+                            Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&symbol.to_string()))))
                         });
                     }
                 }
                 Ok(DatumRef::Void)
             }
-            "telltarget" => {
+            Some(BuiltInSymbol::TellTarget) => {
                 if args.len() >= 2 {
                     // tellTarget is complex; for now just log it
                     let target = reserve_player_ref(|player| {
@@ -1588,28 +1590,28 @@ impl BuiltInHandlerManager {
                 }
                 Ok(DatumRef::Void)
             }
-            "getaprop" => TypeHandlers::get_a_prop(args),
-            "inside" => {
+            Some(BuiltInSymbol::GetaProp) => TypeHandlers::get_a_prop(args),
+            Some(BuiltInSymbol::Inside) => {
                 let point = &args[0];
                 let rect = &args[1..].to_vec();
                 PointDatumHandlers::inside(point, rect)
             }
-            "addprop" => {
+            Some(BuiltInSymbol::AddProp) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 PropListDatumHandlers::add_prop(list, args)
             }
-            "deleteprop" => {
+            Some(BuiltInSymbol::DeleteProp) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 PropListDatumHandlers::delete_prop(list, args)
             }
-            "append" => {
+            Some(BuiltInSymbol::Append) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 ListDatumHandlers::append(list, args)
             }
-            "deleteat" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::DeleteAt) => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 match player.get_datum(list) {
@@ -1618,16 +1620,16 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot delete at non list".to_string())),
                 }
             }),
-            "deleteone" => {
+            Some(BuiltInSymbol::DeleteOne) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 ListDatumHandlers::delete_one(list, &args)
             }
-            "deleteall" => {
+            Some(BuiltInSymbol::DeleteAll) => {
                 let list = &args[0];
                 ListDatumHandlers::delete_all(list, &vec![])
             }
-            "getone" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::GetOne) => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 match player.get_datum(list) {
@@ -1636,7 +1638,7 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot get one at non list".to_string())),
                 }
             }),
-            "findpos" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::FindPos) => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 match player.get_datum(list) {
@@ -1645,7 +1647,7 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
                 }
             }),
-            "findposnear" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::FindPosNear) => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 match player.get_datum(list) {
@@ -1654,7 +1656,7 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot findPosNear on non-list".to_string())),
                 }
             }),
-            "setprop" => {
+            Some(BuiltInSymbol::SetProp) => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
                 let args = &args[1..].to_vec();
@@ -1666,7 +1668,7 @@ impl BuiltInHandlerManager {
                     )),
                 }
             }
-            "getpos" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::GetPos) => reserve_player_mut(|player| {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 match player.get_datum(list) {
@@ -1675,7 +1677,7 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new("Cannot getPos of non-list".to_string())),
                 }
             }),
-            "setaprop" => {
+            Some(BuiltInSymbol::SetaProp) => {
                 let datum = &args[0];
                 let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
                 let args = &args[1..].to_vec();
@@ -1687,13 +1689,13 @@ impl BuiltInHandlerManager {
                     )),
                 }
             }
-            "addat" => {
+            Some(BuiltInSymbol::AddAt) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 ListDatumHandlers::add_at(list, args)
             }
-            "getnodes" => Self::get_nodes(args),
-            "duplicate" => {
+            Some(BuiltInSymbol::GetNodes) => Self::get_nodes(args),
+            Some(BuiltInSymbol::Duplicate) => {
                 let item = &args[0];
                 let args = &args[1..].to_vec();
                 reserve_player_mut(|player| match player.get_datum(item) {
@@ -1711,7 +1713,7 @@ impl BuiltInHandlerManager {
                     Datum::Symbol(s) => Ok(player.alloc_datum(Datum::Symbol(s.clone()))),
                     Datum::ColorRef(c) => Ok(player.alloc_datum(Datum::ColorRef(c.clone()))),
                     Datum::Vector(v) => Ok(player.alloc_datum(Datum::Vector(*v))),
-                    Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::Transform3d(*t))),
+                    Datum::Transform3d(t) => Ok(player.alloc_datum(Datum::transform3d(**t))),
                     Datum::CastMember(r) => Ok(player.alloc_datum(Datum::CastMember(r.clone()))),
                     Datum::BitmapRef(bitmap_ref) => {
                         // `duplicate(image)` returns an independent copy of the
@@ -1730,66 +1732,66 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new(format!("duplicate() not implemented for type {}", player.get_datum(item).type_str()))),
                 })
             }
-            "getprop" => {
+            Some(BuiltInSymbol::GetProp) => {
                 let list = &args[0];
                 let args = &args[1..].to_vec();
                 PropListDatumHandlers::get_prop(list, args)
             }
-            "min" => TypeHandlers::min(args),
-            "max" => TypeHandlers::max(args),
-            "sort" => TypeHandlers::sort(args),
-            "intersect" => TypeHandlers::intersect(args),
-            "inflate" => TypeHandlers::inflate(args),
-            "map" => TypeHandlers::map(args),
-            "pointtochar" => TypeHandlers::point_to_char(args),
-            "scrollbyline" => TypeHandlers::scroll_by_line(args),
-            "scrollbypage" => TypeHandlers::scroll_by_page(args),
-            "rollover" => MovieHandlers::rollover(args),
+            Some(BuiltInSymbol::Min) => TypeHandlers::min(args),
+            Some(BuiltInSymbol::Max) => TypeHandlers::max(args),
+            Some(BuiltInSymbol::Sort) => TypeHandlers::sort(args),
+            Some(BuiltInSymbol::Intersect) => TypeHandlers::intersect(args),
+            Some(BuiltInSymbol::Inflate) => TypeHandlers::inflate(args),
+            Some(BuiltInSymbol::MapFn) => TypeHandlers::map(args),
+            Some(BuiltInSymbol::PointToChar) => TypeHandlers::point_to_char(args),
+            Some(BuiltInSymbol::ScrollByLine) => TypeHandlers::scroll_by_line(args),
+            Some(BuiltInSymbol::ScrollByPage) => TypeHandlers::scroll_by_page(args),
+            Some(BuiltInSymbol::Rollover) => MovieHandlers::rollover(args),
             // Legacy function form of the read-only mouse position properties
             // (`mouseH()` / `mouseV()` — same value as `the mouseH` / `the mouseV`),
             // in movie/stage pixels. Used by older movies for hit-region tests.
-            "mouseh" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.0)))),
-            "mousev" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.1)))),
-            "getpropat" => TypeHandlers::get_prop_at(args),
-            "puppetsound" => MovieHandlers::puppet_sound(args),
-            "pi" => TypeHandlers::pi(args),
-            "sin" => TypeHandlers::sin(args),
-            "cos" => TypeHandlers::cos(args),
-            "sqrt" => TypeHandlers::sqrt(args),
-            "tan" => TypeHandlers::tan(args),
-            "atan" => TypeHandlers::atan(args),
-            "sound" => TypeHandlers::sound(args),
-            "vector" => TypeHandlers::vector(args),
-            "transform" => TypeHandlers::transform3d(args),
-            "color" => TypeHandlers::color(args),
-            "date" => TypeHandlers::date(args),
-            "keypressed" => Self::key_pressed(args),
+            Some(BuiltInSymbol::MouseH) => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.0)))),
+            Some(BuiltInSymbol::MouseV) => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.1)))),
+            Some(BuiltInSymbol::GetPropAt) => TypeHandlers::get_prop_at(args),
+            Some(BuiltInSymbol::PuppetSound) => MovieHandlers::puppet_sound(args),
+            Some(BuiltInSymbol::Pi) => TypeHandlers::pi(args),
+            Some(BuiltInSymbol::Sin) => TypeHandlers::sin(args),
+            Some(BuiltInSymbol::Cos) => TypeHandlers::cos(args),
+            Some(BuiltInSymbol::Sqrt) => TypeHandlers::sqrt(args),
+            Some(BuiltInSymbol::Tan) => TypeHandlers::tan(args),
+            Some(BuiltInSymbol::Atan) => TypeHandlers::atan(args),
+            Some(BuiltInSymbol::Sound) => TypeHandlers::sound(args),
+            Some(BuiltInSymbol::Vector) => TypeHandlers::vector(args),
+            Some(BuiltInSymbol::Transform) => TypeHandlers::transform3d(args),
+            Some(BuiltInSymbol::Color) => TypeHandlers::color(args),
+            Some(BuiltInSymbol::Date) => TypeHandlers::date(args),
+            Some(BuiltInSymbol::KeyPressed) => Self::key_pressed(args),
             // Legacy function-call forms of the modifier-key state properties (Director
             // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /
             // `optionDown` / `commandDown`, read-only). Movies call e.g. `shiftDown()`.
-            "shiftdown" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::ShiftDown) => reserve_player_mut(|player| {
                 Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_shift_down())))
             }),
-            "controldown" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::ControlDown) => reserve_player_mut(|player| {
                 Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_control_down())))
             }),
-            "optiondown" | "altdown" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::OptionDown | BuiltInSymbol::AltDown) => reserve_player_mut(|player| {
                 Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_alt_down())))
             }),
-            "commanddown" => reserve_player_mut(|player| {
+            Some(BuiltInSymbol::CommandDown) => reserve_player_mut(|player| {
                 Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_command_down())))
             }),
-            "showglobals" => Self::show_globals(),
-            "tellstreamstatus" => Self::tell_stream_status(args),
-            "frame" => {
+            Some(BuiltInSymbol::ShowGlobals) => Self::show_globals(),
+            Some(BuiltInSymbol::TellStreamStatus) => Self::tell_stream_status(args),
+            Some(BuiltInSymbol::Frame) => {
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::Int(player.movie.current_frame as i32)))
                 })
             }
-            "label" => Self::label(args),
-            "alert" => Self::alert(args),
-            "objectp" => Self::object_p(args),
-            "soundbusy" => TypeHandlers::sound_busy(args),
+            Some(BuiltInSymbol::Label) => Self::label(args),
+            Some(BuiltInSymbol::Alert) => Self::alert(args),
+            Some(BuiltInSymbol::Objectp) => Self::object_p(args),
+            Some(BuiltInSymbol::SoundBusy) => TypeHandlers::sound_busy(args),
             // `stopSound` (Director 11.5 Scripting Dictionary p.872) —
             // legacy command that stops the sound currently playing on
             // sound channel 1 (the implicit puppetSound channel). Fugue
@@ -1797,7 +1799,7 @@ impl BuiltInHandlerManager {
             // then stopSound()` to interrupt playback before checking
             // for clicked underline targets — without it, soundBusy(1)
             // stays true forever and the underline branch never runs.
-            "stopsound" => {
+            Some(BuiltInSymbol::StopSound) => {
                 reserve_player_mut(|player| {
                     if let Some(ch) = player.sound_manager.get_channel(0) {
                         ch.borrow_mut().stop_sound();
@@ -1805,24 +1807,24 @@ impl BuiltInHandlerManager {
                 });
                 Ok(DatumRef::Void)
             }
-            "delay" => MovieHandlers::delay(args),
-            "halt" => MovieHandlers::halt(args),
-            "starttimer" => Self::start_timer(args),
-            "externalevent" => Self::external_event(args),
-            "dontpassevent" => Self::dont_pass_event(args),
-            "frameready" => Self::frame_ready(args),
-            "marker" => Self::marker(args),
-            "play" => {
+            Some(BuiltInSymbol::Delay) => MovieHandlers::delay(args),
+            Some(BuiltInSymbol::Halt) => MovieHandlers::halt(args),
+            Some(BuiltInSymbol::StartTimer) => Self::start_timer(args),
+            Some(BuiltInSymbol::ExternalEvent) => Self::external_event(args),
+            Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),
+            Some(BuiltInSymbol::FrameReady) => Self::frame_ready(args),
+            Some(BuiltInSymbol::Marker) => Self::marker(args),
+            Some(BuiltInSymbol::Play) => {
                 // play member("name") - play a sound on channel 1
                 if args.is_empty() {
                     return Ok(DatumRef::Void);
                 }
                 reserve_player_mut(|player| {
                     let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
-                    SoundChannelDatumHandlers::call(player, &channel_datum, &"play".to_string(), args)
+                    SoundChannelDatumHandlers::call(player, &channel_datum, Symbol::builtin(BuiltInSymbol::Play), args)
                 })
             }
-            "spritebox" => {
+            Some(BuiltInSymbol::SpriteBox) => {
                 // spriteBox(sprite, left, top, right, bottom)
                 if args.len() < 5 {
                     return Err(ScriptError::new(
@@ -1854,7 +1856,7 @@ impl BuiltInHandlerManager {
                     Ok(DatumRef::Void)
                 })
             }
-            "puppettransition" => {
+            Some(BuiltInSymbol::PuppetTransition) => {
                 // puppetTransition(int {, time, size, area}) or (transitionMemberRef).
                 // Applies the transition between the current stage and the next frame;
                 // we hand it to the same engine the score transition channel uses.
@@ -1887,7 +1889,7 @@ impl BuiltInHandlerManager {
                     Ok(DatumRef::Void)
                 })
             }
-            "preload" => {
+            Some(BuiltInSymbol::Preload) => {
                 // All cast data is resident in memory (WASM) — there's nothing to
                 // stream in, so preload completes instantly. Per the 11.5 Scripting
                 // Dictionary, preLoad returns the number of the last frame it loaded:
@@ -1921,7 +1923,7 @@ impl BuiltInHandlerManager {
                     Ok(player.alloc_datum(Datum::Int(last)))
                 })
             }
-            "charpostoloc" => {
+            Some(BuiltInSymbol::CharPosToLoc) => {
                 reserve_player_mut(|player| {
                     if args.len() < 2 {
                         return Err(ScriptError::new(
@@ -1965,10 +1967,9 @@ impl BuiltInHandlerManager {
                     // width BEFORE growing the rect.
                     let effective_wrap_width: i16 = if word_wrap { member_width } else { 0 };
 
-                    let align_lower = alignment.to_lowercase();
-                    let align_kind: u8 = if align_lower == "center" || align_lower == "#center" {
+                    let align_kind: u8 = if alignment == BuiltInSymbol::Center {
                         1
-                    } else if align_lower == "right" || align_lower == "#right" {
+                    } else if alignment == BuiltInSymbol::Right {
                         2
                     } else {
                         0
@@ -2368,7 +2369,7 @@ impl BuiltInHandlerManager {
                         // dotleft/dotright both got an extra ~71px centring offset.
                         let line_has_anchor_tab = !tab_stops.is_empty()
                             && tab_stops.iter().any(|t| {
-                                t.tab_type == "right" || t.tab_type == "center"
+                                t.tab_type == BuiltInSymbol::Right || t.tab_type == BuiltInSymbol::Center
                             });
                         let start_x = if align_kind != 0 && member_width > 0 && !line_has_anchor_tab {
                             // Compute the width of the line that `index` falls on, using the
@@ -2406,7 +2407,7 @@ impl BuiltInHandlerManager {
                     }
                 })
             }
-            "locvtolinepos" | "linepostolocv" | "loctocharpos" | "charpostoloc"
+            Some(BuiltInSymbol::LocVToLinePos | BuiltInSymbol::LinePosToLocV | BuiltInSymbol::LocToCharPos | BuiltInSymbol::CharPosToLoc)
                 if !args.is_empty() =>
             {
                 // Global form `locVToLinePos(member, loc)` etc. Director exposes
@@ -2433,7 +2434,7 @@ impl BuiltInHandlerManager {
                 }
                 // Static-only Xtras (OpenURL, SysMenu, BudAPI, Curl statics).
                 if let Some(res) =
-                    crate::player::xtra::manager::try_call_xtra_static_handler(name, args)
+                    crate::player::xtra::manager::try_call_xtra_static_handler(name.into(), args)
                 {
                     return res;
                 }
@@ -2554,11 +2555,11 @@ impl BuiltInHandlerManager {
                 // wizard's `keyPressed("SPACE")` from `keyPressed(SPACE)`).
                 // Map the common names to Mac virtual key codes.
                 if let Some(code) = match key_str.to_ascii_uppercase().as_str() {
-                    "SPACE" => Some(49u16),
-                    "RETURN" => Some(36),
-                    "ENTER" => Some(76),
-                    "TAB" => Some(48),
-                    "BACKSPACE" => Some(51),
+                    "space" => Some(49u16),
+                    "return" => Some(36),
+                    "enter" => Some(76),
+                    "tab" => Some(48),
+                    "backSpace" => Some(51),
                     "ESCAPE" | "ESC" => Some(53),
                     _ => None,
                 } {
@@ -2897,7 +2898,21 @@ impl BuiltInHandlerManager {
                     }
                 }
                 // If argument is a string, return the frame number of that marker
-                Datum::String(marker_name) | Datum::Symbol(marker_name) => {
+                Datum::String(marker_name) => {
+                    let marker_name_lower = marker_name.to_lowercase();
+                    let marker = player
+                        .movie
+                        .score
+                        .frame_labels
+                        .iter()
+                        .find(|label| label.label.to_lowercase() == marker_name_lower);
+                    
+                    Ok(player.alloc_datum(Datum::Int(
+                        marker.map_or(0, |label| label.frame_num as i32),
+                    )))
+                }
+                Datum::Symbol(symbol) => {
+                    let marker_name = symbol.as_str();
                     let marker_name_lower = marker_name.to_lowercase();
                     let marker = player
                         .movie

@@ -3,6 +3,7 @@ use crate::{
     player::{
         reserve_player_mut, reserve_player_ref, DatumRef,
         ScriptError, ScriptErrorCode,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 use super::super::types::TypeHandlers;
@@ -10,17 +11,17 @@ use super::super::types::TypeHandlers;
 pub struct PlayerDatumHandlers {}
 
 impl PlayerDatumHandlers {
-    pub fn call(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "count" => Self::count(args),
-            "cursor" => TypeHandlers::cursor(args),
+    pub fn call(handler_name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Count) => Self::count(args),
+            Some(BuiltInSymbol::Cursor) => TypeHandlers::cursor(args),
             // `_key.keyPressed()` — no-arg form returns the currently-pressed
             // key character (Director 11.5: `_key.keyPressed() = SPACE`); the
             // single-arg form `_key.keyPressed(charOrCode)` tests a specific
             // key and is shared with the top-level `keyPressed()` builtin.
             // parent_dialog's updateDialog (the key-rebind UI) calls the
             // no-arg form: `nn = _key.keyPressed()`.
-            "keyPressed" | "keypressed" => {
+            Some(BuiltInSymbol::KeyPressed) => {
                 if args.is_empty() {
                     reserve_player_mut(|player| {
                         let k = player.keyboard_manager.key_pressed();

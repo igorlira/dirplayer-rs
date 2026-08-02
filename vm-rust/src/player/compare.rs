@@ -140,7 +140,7 @@ pub fn datum_equals(
         }
 
         (Symbol(s), o) | (o, Symbol(s)) => Ok(match o {
-            Symbol(other) => s.eq_ignore_ascii_case(other),
+            Symbol(other) => s == other,
             _ => false
         }),
 
@@ -324,7 +324,7 @@ pub fn datum_equals(
         (HavokObjectRef(a), o) | (o, HavokObjectRef(a)) => Ok(match o {
             HavokObjectRef(b) => a.cast_lib == b.cast_lib
                 && a.cast_member == b.cast_member
-                && a.name.eq_ignore_ascii_case(&b.name),
+                && a.name == b.name,
             _ => false
         }),
 
@@ -336,8 +336,8 @@ pub fn datum_equals(
         (Shockwave3dObjectRef(a), o) | (o, Shockwave3dObjectRef(a)) => Ok(match o {
             Shockwave3dObjectRef(b) => a.cast_lib == b.cast_lib
                 && a.cast_member == b.cast_member
-                && a.object_type.eq_ignore_ascii_case(&b.object_type)
-                && a.name.eq_ignore_ascii_case(&b.name),
+                && a.object_type == b.object_type
+                && a.name.eq_ignore_ascii_case(&b.name.as_str()),
             _ => false
         }),
 
@@ -379,7 +379,7 @@ pub fn datum_equals_member(
     let symbol_string_match = match (left, right) {
         (Symbol(sym), other @ (String(_) | StringChunk(..)))
         | (other @ (String(_) | StringChunk(..)), Symbol(sym)) => {
-            Some(sym.eq_ignore_ascii_case(&other.string_value_cow()?))
+            Some(sym.as_str().eq_ignore_ascii_case(&other.string_value_cow()?.as_ref()))
         }
         _ => None,
     };
@@ -436,10 +436,10 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
     }
     // A symbol compares as its string name (see `datum_less_than`).
     if let Datum::Symbol(s) = left {
-        return datum_greater_than(&Datum::String(s.clone()), right, allocator);
+        return datum_greater_than(&Datum::String(s.clone().to_string()), right, allocator);
     }
     if let Datum::Symbol(s) = right {
-        return datum_greater_than(left, &Datum::String(s.clone()), allocator);
+        return datum_greater_than(left, &Datum::String(s.clone().to_string()), allocator);
     }
     match (left, right) {
         // Int comparisons
@@ -562,10 +562,10 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
     // ordered comparisons), so route symbols through the string logic below. This
     // covers int-vs-symbol, symbol-vs-symbol, etc. without dedicated arms.
     if let Datum::Symbol(s) = left {
-        return datum_less_than(&Datum::String(s.clone()), right, allocator);
+        return datum_less_than(&Datum::String(s.clone().to_string()), right, allocator);
     }
     if let Datum::Symbol(s) = right {
-        return datum_less_than(left, &Datum::String(s.clone()), allocator);
+        return datum_less_than(left, &Datum::String(s.clone().to_string()), allocator);
     }
     match (left, right) {
         // Int comparisons
@@ -628,11 +628,11 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         (Datum::String(left), Datum::String(right)) =>
             Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
         (Datum::Symbol(left), Datum::Symbol(right)) =>
-            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+            Ok(left.as_str().to_ascii_lowercase() < right.as_str().to_ascii_lowercase()),
         (Datum::String(left), Datum::Symbol(right)) =>
-            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+            Ok(left.to_ascii_lowercase() < right.as_str().to_ascii_lowercase()),
         (Datum::Symbol(left), Datum::String(right)) =>
-            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
+            Ok(left.as_str().to_ascii_lowercase() < right.to_ascii_lowercase()),
 
         // String comparisons
         (Datum::String(..), Datum::String(..)) => Ok(false),

@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError},
+    player::{symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct FloatDatumHandlers {}
@@ -9,12 +9,12 @@ impl FloatDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let float_value = player.get_datum(datum_ref).float_value()?;
-        match prop {
+        match prop.as_str() {
             "abs" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol("float".to_string()))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("float")))),
             "integer" => Ok(player.alloc_datum(Datum::Int(float_value.round() as i32))),
             "float" => Ok(datum_ref.clone()),
             "char" => {
@@ -24,7 +24,7 @@ impl FloatDatumHandlers {
                     Ok(player.alloc_datum(Datum::String(ch.to_string())))
                 } else {
                     Err(ScriptError::new(format!(
-                        "Float {} out of range for char (must be 0-255)", 
+                        "Float {} out of range for char (must be 0-255)",
                         float_value
                     )))
                 }

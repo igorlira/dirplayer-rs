@@ -1,4 +1,4 @@
-use crate::director::lingo::datum::Datum;
+use crate::{director::lingo::datum::Datum, player::symbols::symbol::Symbol};
 use crate::player::script_ref::ScriptInstanceRef;
 use super::{VirtualScriptHandler, VirtualScriptRegistry};
 use crate::player::{DatumRef, DirPlayer, ScriptError};
@@ -6,19 +6,19 @@ use crate::player::{DatumRef, DirPlayer, ScriptError};
 pub struct JavascriptProxy;
 
 impl VirtualScriptHandler for JavascriptProxy {
-    fn has_handler(&self, name: &str) -> bool {
-        matches!(name, "new" | "newJavaScriptProxy" | "JavaScriptProxy" | "call")
+    fn has_handler(&self, name: Symbol) -> bool {
+        matches!(name.as_lower_str(), "new" | "newjavascriptproxy" | "javascriptproxy" | "call")
     }
 
     fn call_handler(
         &self,
         player: &mut DirPlayer,
         instance: Option<&ScriptInstanceRef>,
-        name: &str,
+        name: Symbol,
         _args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
-        match name {
-            "new" | "newJavaScriptProxy" | "JavaScriptProxy" => {
+        match name.as_lower_str() {
+            "new" | "newjavascriptproxy" | "javascriptproxy" => {
                 if let Some(instance_ref) = instance {
                     // Called on an existing instance — return self
                     let datum = player.alloc_datum(Datum::ScriptInstanceRef(instance_ref.clone()));

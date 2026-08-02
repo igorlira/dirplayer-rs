@@ -15,6 +15,7 @@ use crate::player::datum_ref::DatumRef;
 
 use crate::player::allocator::{DatumAllocator, DatumAllocatorTrait};
 use crate::player::reserve_player_ref;
+use crate::player::symbols::symbol::Symbol;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StaticDatum {
@@ -46,7 +47,7 @@ impl From<&DatumRef> for StaticDatum {
                 Datum::Int(i) => StaticDatum::Int(i),
                 Datum::Float(f) => StaticDatum::Float(f),
                 Datum::String(s) => StaticDatum::String(s),
-                Datum::Symbol(s) => StaticDatum::Symbol(s),
+                Datum::Symbol(s) => StaticDatum::Symbol(s.to_string()),
                 Datum::List(_, vec, _) => {
                     StaticDatum::List(vec.iter().map(StaticDatum::from).collect())
                 }
@@ -74,7 +75,7 @@ impl From<&Datum> for StaticDatum {
             Datum::Int(i) => StaticDatum::Int(*i),
             Datum::Float(f) => StaticDatum::Float(*f),
             Datum::String(s) => StaticDatum::String(s.clone()),
-            Datum::Symbol(s) => StaticDatum::Symbol(s.clone()),
+            Datum::Symbol(s) => StaticDatum::Symbol(s.to_string()),
             Datum::List(_, vec, _) => {
                 StaticDatum::List(vec.iter().map(StaticDatum::from).collect())
             }
@@ -146,7 +147,7 @@ pub fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocat
         StaticDatum::String(s) => allocator.alloc_datum(Datum::String(s.clone())).unwrap(),
         StaticDatum::Int(i) => allocator.alloc_datum(Datum::Int(*i)).unwrap(),
         StaticDatum::Float(f) => allocator.alloc_datum(Datum::Float(*f)).unwrap(),
-        StaticDatum::Symbol(s) => allocator.alloc_datum(Datum::Symbol(s.clone())).unwrap(),
+        StaticDatum::Symbol(s) => allocator.alloc_datum(Datum::Symbol(Symbol::from_str(s))).unwrap(),
         StaticDatum::List(items) => {
             let datum_refs: VecDeque<DatumRef> = items
                 .iter()
@@ -179,7 +180,7 @@ pub fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocat
             let mut reader = BinaryReader::from_u8(bytes);
             reader.set_endian(binary_reader::Endian::Big);
             match reader.read_media() {
-                Ok(media) => allocator.alloc_datum(Datum::Media(media)).unwrap(),
+                Ok(media) => allocator.alloc_datum(Datum::media(media)).unwrap(),
                 Err(e) => {
                     web_sys::console::warn_1(&format!("Failed to parse media from StaticDatum: {}", e).into());
                     DatumRef::Void

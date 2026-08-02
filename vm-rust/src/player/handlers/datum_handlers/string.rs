@@ -6,7 +6,7 @@ use crate::{
     director::lingo::datum::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
     },
-    player::{eval::try_eval_lingo_expr_static, reserve_player_ref, reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, eval::try_eval_lingo_expr_static, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 use super::string_chunk::StringChunkUtils;
@@ -18,14 +18,14 @@ impl StringDatumUtils {
     pub fn get_prop_ref(
         player: &DirPlayer,
         datum_ref: &DatumRef,
-        prop_name: &str,
+        prop_name: Symbol,
         start: i32,
         end: i32,
     ) -> Result<Datum, ScriptError> {
         let datum = player.get_datum(datum_ref);
         if let Datum::String(str_val) = datum {
-            match prop_name.to_lowercase().as_str() {
-                "item" | "word" | "char" | "line" => {
+            match prop_name.into_builtin() {
+                Some(BuiltInSymbol::Item | BuiltInSymbol::Word | BuiltInSymbol::Char | BuiltInSymbol::Line) => {
                     let chunk_expr = StringChunkExpr {
                         chunk_type: StringChunkType::from(prop_name),
                         start,
@@ -51,17 +51,17 @@ impl StringDatumUtils {
         }
     }
 
-    pub fn get_built_in_prop(value: &str, prop_name: &str) -> Result<Datum, ScriptError> {
-        match prop_name {
-            "length" => Ok(Datum::Int(value.chars().count() as i32)),
-            "ilk" => Ok(Datum::Symbol("string".to_owned())),
+    pub fn get_built_in_prop(value: &str, prop_name: Symbol) -> Result<Datum, ScriptError> {
+        match prop_name.into_builtin() {
+            Some(BuiltInSymbol::Length) => Ok(Datum::Int(value.chars().count() as i32)),
+            Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::String))),
             // `.text` yields the textual content. For a plain string (and for
             // a resolved string chunk falling through here) it's the string
             // itself — same as `.string`. spectral-wizard's
             // getDefaultFixedLineSpace reads `member(..).char[1..1].ref.text`
             // to copy a character into a probe field.
-            "string" | "text" => Ok(Datum::String(value.to_owned())),
-            "value" => {
+            Some(BuiltInSymbol::String | BuiltInSymbol::Text) => Ok(Datum::String(value.to_owned())),
+            Some(BuiltInSymbol::Value) => {
                 // Normalise (strip comments + trim unbalanced brackets) before
                 // parsing, then evaluate as a Lingo expression.
                 let cleaned = normalise_lingo_expr_for_value(value);
@@ -82,17 +82,17 @@ impl StringDatumUtils {
                     }
                 }
             }
-            "charToNum" => {
+            Some(BuiltInSymbol::CharToNum) => {
                 let code = value.chars().next().map_or(0, |c| c as i32);
                 Ok(Datum::Int(code))
             }
-            "charSpacing" => Ok(Datum::Int(0)),
-            "char" => {
+            Some(BuiltInSymbol::CharSpacing) => Ok(Datum::Int(0)),
+            Some(BuiltInSymbol::Char) => {
                 // String chunk type accessed as property — return the string itself
                 // so subsequent indexing (e.g., .char[1]) can work via character indexing
                 Ok(Datum::String(value.to_owned()))
             }
-            "marker" => {
+            Some(BuiltInSymbol::Marker) => {
                 // Quirky director behavior:
                 // Any string can run .marker on it to get the frame number of the marker, if it does not match a marker name, it returns 0
                 reserve_player_ref(|player| {
@@ -110,16 +110,16 @@ impl StringDatumUtils {
             // Director's `the number of <chunk> in <str>` form lands here as
             // a compound property name "number of lines/words/items/chars".
             // Returns the chunk count.
-            "number of chars" | "number of characters" => {
+            Some(BuiltInSymbol::NumberOfChars | BuiltInSymbol::NumberOfCharacters) => {
                 Ok(Datum::Int(value.chars().count() as i32))
             }
-            "number of lines" => {
+            Some(BuiltInSymbol::NumberOfLines) => {
                 Ok(Datum::Int(string_get_lines(value).len() as i32))
             }
-            "number of words" => {
+            Some(BuiltInSymbol::NumberOfWords) => {
                 Ok(Datum::Int(string_get_words(value).len() as i32))
             }
-            "number of items" => {
+            Some(BuiltInSymbol::NumberOfItems) => {
                 let delim = reserve_player_ref(|player| Ok(player.movie.item_delimiter))?;
                 Ok(Datum::Int(string_get_items(value, delim).len() as i32))
             }
@@ -163,7 +163,7 @@ impl StringDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let prop_name = player.get_datum(&args[0]).string_value()?;
+            let prop_name = player.get_datum(&args[0]).symbol_value()?;
             let start = player.get_datum(&args[1]).int_value()?;
             let end = if args.len() > 2 {
                 player.get_datum(&args[2]).int_value()?
@@ -171,14 +171,14 @@ impl StringDatumHandlers {
                 start
             };
 
-            let prop_ref = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?;
+            let prop_ref = StringDatumUtils::get_prop_ref(player, datum, prop_name, start, end)?;
             Ok(player.alloc_datum(prop_ref))
         })
     }
 
     pub fn get_chunk_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let prop_name = player.get_datum(&args[0]).string_value()?;
+            let prop_name = player.get_datum(&args[0]).symbol_value()?;
             let start = player.get_datum(&args[1]).int_value()?;
             let end = if args.len() > 2 {
                 player.get_datum(&args[2]).int_value()?
@@ -186,7 +186,7 @@ impl StringDatumHandlers {
                 start
             };
 
-            let str_value = StringDatumUtils::get_prop_ref(player, datum, &prop_name, start, end)?
+            let str_value = StringDatumUtils::get_prop_ref(player, datum, prop_name, start, end)?
                 .string_value()?;
             Ok(player.alloc_datum(Datum::String(str_value)))
         })
@@ -217,16 +217,16 @@ impl StringDatumHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "count" => Self::count(datum, args),
-            "getAt" => Self::get_at(datum, args),
-            "duplicate" => Self::duplicate(datum, args),
-            "getPropRef" => Self::get_chunk_prop_ref(datum, args),
-            "getProp" => Self::get_chunk_prop(datum, args),
-            "split" => Self::split(datum, args),
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Count) => Self::count(datum, args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(datum, args),
+            Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
+            Some(BuiltInSymbol::GetPropRef) => Self::get_chunk_prop_ref(datum, args),
+            Some(BuiltInSymbol::GetProp) => Self::get_chunk_prop(datum, args),
+            Some(BuiltInSymbol::Split) => Self::split(datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {handler_name} for string datum"
             ))),

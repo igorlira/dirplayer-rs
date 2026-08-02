@@ -130,7 +130,7 @@ fn list_to_rect_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([
 /// `#none - 0` to evaluate.
 fn symbol_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
     match datum {
-        Datum::Symbol(name) => Some(Datum::String(name.clone())),
+        Datum::Symbol(name) => Some(Datum::String(name.clone().to_string())),
         _ => None,
     }
 }
@@ -896,7 +896,7 @@ pub fn multiply_datums(
                         + a[12 + row] * b[col*4 + 3];
                 }
             }
-            Datum::Transform3d(r)
+            Datum::transform3d(r)
         }
         _ => {
             return Err(ScriptError::new(format!(

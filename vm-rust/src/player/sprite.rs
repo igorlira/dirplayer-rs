@@ -1,3 +1,5 @@
+use crate::player::symbols::symbol::Symbol;
+
 use super::{cast_lib::CastMemberRef, script_ref::ScriptInstanceRef};
 
 #[allow(dead_code)]
@@ -129,9 +131,9 @@ pub struct Sprite {
     pub base_color: ColorRef,
     pub base_bg_color: ColorRef,
     /// Active camera name(s) for Shockwave3D sprites (set via sprite.camera(1) = ...)
-    pub w3d_camera: Option<String>,
+    pub w3d_camera: Option<Symbol>,
     /// Additional cameras for multi-camera rendering (index 2+)
-    pub w3d_cameras: Vec<String>,
+    pub w3d_cameras: Vec<Symbol>,
     /// Last on-screen rect captured when this sprite left its span. Director
     /// keeps a score channel's `the rect of sprite` at its last value even
     /// after the member clears to 0 (empty channel between two spans), so init

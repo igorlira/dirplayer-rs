@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::director::lingo::datum::Datum;
 
+use crate::player::symbols::symbol::Symbol;
 use crate::player::{
     cast_member::CastMemberType,
     font::{get_text_index_at_pos, DrawTextParams},
@@ -328,15 +329,15 @@ impl SpriteDatumHandlers {
                     // index 1 = primary camera, 2+ = additional cameras rendered on top
                     let cam_name = if !args.is_empty() {
                         match player.get_datum(&args[0]) {
-                            Datum::Shockwave3dObjectRef(r) => r.name.clone(),
-                            Datum::String(s) => s.clone(),
-                            _ => String::new(),
+                            Datum::Shockwave3dObjectRef(r) => Some(r.name.clone()),
+                            Datum::String(s) => Some(Symbol::from_str(s)),
+                            _ => None,
                         }
-                    } else { String::new() };
+                    } else { None };
                     let index = if args.len() >= 2 {
                         Some(player.get_datum(&args[1]).int_value().unwrap_or(1) as usize)
                     } else { None };
-                    if !cam_name.is_empty() {
+                    if let Some(cam_name) = cam_name {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
                         if let Some(index) = index {
                             // addCamera(cam, index) — insert at specific position
@@ -385,13 +386,13 @@ impl SpriteDatumHandlers {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
 
                     // Get the property name from the first arg
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
 
                     // First, try to get it as a built-in sprite property
                     match crate::player::score::sprite_get_prop(
                         player,
                         sprite_num as i16,
-                        &prop_name,
+                        prop_name,
                     ) {
                         Ok(prop_datum) => {
                             let result = player.last_sprite_prop_ref.take()
@@ -424,7 +425,7 @@ impl SpriteDatumHandlers {
                         if let Ok(result) = script_get_prop(
                             player,
                             &instance_ref,
-                            &prop_name,
+                            prop_name,
                         ) {
                             // If there's a second argument, it's a sub-property access
                             if args.len() > 1 {
@@ -450,13 +451,13 @@ impl SpriteDatumHandlers {
                     }
 
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
 
                     // Try built-in sprite property first
                     match crate::player::score::sprite_get_prop(
                         player,
                         sprite_num as i16,
-                        &prop_name,
+                        prop_name,
                     ) {
                         Ok(prop_datum) => {
                             return Ok(player.last_sprite_prop_ref.take()
@@ -478,7 +479,7 @@ impl SpriteDatumHandlers {
                     let instance_refs =
                         player.get_sprite_script_instance_ids(sprite_num, fallback.as_slice());
                     for instance_ref in instance_refs {
-                        if let Ok(result) = script_get_prop(player, &instance_ref, &prop_name) {
+                        if let Ok(result) = script_get_prop(player, &instance_ref, prop_name) {
                             return Ok(result);
                         }
                     }
@@ -495,13 +496,13 @@ impl SpriteDatumHandlers {
                     }
 
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
 
                     // Get the property value (this handles scriptInstanceList cache etc.)
                     match crate::player::score::sprite_get_prop(
                         player,
                         sprite_num as i16,
-                        &prop_name,
+                        prop_name,
                     ) {
                         Ok(prop_datum) => {
                             let result = player.last_sprite_prop_ref.take()
@@ -558,7 +559,7 @@ impl SpriteDatumHandlers {
                     }
                     let instance_refs = sprite.unwrap().script_instance_list.clone();
                     for instance_ref in instance_refs {
-                        if let Ok(result) = script_get_prop(player, &instance_ref, &prop_name) {
+                        if let Ok(result) = script_get_prop(player, &instance_ref, prop_name) {
                             if args.len() > 1 {
                                 return crate::player::handlers::types::TypeUtils::get_sub_prop(
                                     &result, &args[1], player,
@@ -581,14 +582,14 @@ impl SpriteDatumHandlers {
                     }
 
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
                     let value = player.get_datum(&args[1]).clone();
                     let value_ref = &args[1];
 
                     // Try built-in sprite property first
                     match crate::player::score::sprite_set_prop(
                         sprite_num as i16,
-                        &prop_name,
+                        prop_name,
                         value,
                     ) {
                         Ok(_) => return Ok(DatumRef::Void),
@@ -602,7 +603,7 @@ impl SpriteDatumHandlers {
                     }
                     let instance_refs = sprite.unwrap().script_instance_list.clone();
                     for instance_ref in instance_refs {
-                        if let Ok(_) = script_set_prop(player, &instance_ref, &prop_name, value_ref, false) {
+                        if let Ok(_) = script_set_prop(player, &instance_ref, prop_name, value_ref, false) {
                             return Ok(DatumRef::Void);
                         }
                     }
@@ -937,7 +938,7 @@ impl SpriteDatumHandlers {
                         _ => "background",
                     };
                     return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::Symbol(symbol.to_string())))
+                        Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&symbol.to_string()))))
                     });
                 }
                 Ok(DatumRef::Void)
@@ -982,7 +983,7 @@ impl SpriteDatumHandlers {
                         };
                         let flash_method = player.get_datum(&args[1]).string_value()?;
                         let lingo_handler = player.get_datum(&args[2]).symbol_value().unwrap_or_else(|_| {
-                            player.get_datum(&args[2]).string_value().unwrap_or_default()
+                            player.get_datum(&args[2]).symbol_value().unwrap_or(Symbol::empty())
                         });
 
                         // Translate _level0 to _root
@@ -1061,7 +1062,7 @@ impl SpriteDatumHandlers {
                         if let Some(target_ref) = lc_target {
                             player.flash_lc_callbacks.insert(
                                 (translated_path.clone(), flash_method.clone()),
-                                (lingo_handler.clone(), target_ref),
+                                (lingo_handler.clone().to_string(), target_ref),
                             );
                         }
 
@@ -1078,7 +1079,7 @@ impl SpriteDatumHandlers {
                                     js_args.push(&flash_method.clone().into());
                                     js_args.push(&cast_lib.into());
                                     js_args.push(&cast_member.into());
-                                    js_args.push(&lingo_handler.into());
+                                    js_args.push(&lingo_handler.as_str().into());
                                     js_args.push(&flash_cl.into());
                                     js_args.push(&flash_cm.into());
                                     let _ = func.apply(&JsValue::NULL, &js_args);
@@ -1294,7 +1295,7 @@ impl SpriteDatumHandlers {
                                         } else if val.starts_with('"') && val.ends_with('"') {
                                             Datum::String(val[1..val.len()-1].to_string())
                                         } else if val.starts_with('#') {
-                                            Datum::Symbol(val[1..].to_string())
+                                            Datum::Symbol(Symbol::from_str(&val[1..]))
                                         } else {
                                             Datum::String(val.to_string())
                                         };
@@ -1303,7 +1304,7 @@ impl SpriteDatumHandlers {
                                             let _ = crate::player::script::script_set_prop(
                                                 player,
                                                 &instance_ref,
-                                                &key,
+                                                Symbol::from_str(&key),
                                                 &val_ref,
                                                 false,
                                             );
@@ -1341,7 +1342,7 @@ impl SpriteDatumHandlers {
 
     pub async fn call_async(
         datum: DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // Flash (SWF) interop: block until the sprite's Ruffle instance has
@@ -1382,7 +1383,7 @@ impl SpriteDatumHandlers {
                     player.flash_ready_sprites.insert(sn);
                 });
             }
-            return Self::call(&datum, handler_name, args);
+            return Self::call(&datum, handler_name.as_str(), args);
         }
 
         // First, try the sprite's attached script instances
@@ -1436,7 +1437,7 @@ impl SpriteDatumHandlers {
                     }).collect();
                     format!("[{}]", parts.join(","))
                 });
-                match ruffle_call_function(sn, &root_flash_path(handler_name), &json_args) {
+                match ruffle_call_function(sn, &root_flash_path(handler_name.as_str()), &json_args) {
                     Ok(val) => {
                         let datum = if let Some(s) = val.as_string() {
                             Datum::String(s)

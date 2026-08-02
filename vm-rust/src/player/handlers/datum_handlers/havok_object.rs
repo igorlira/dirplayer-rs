@@ -3,9 +3,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType, HavokObjectRef},
     player::{
-        cast_lib::CastMemberRef,
-        cast_member::CastMemberType,
-        reserve_player_mut, DatumRef, ScriptError,
+        DatumRef, ScriptError, cast_lib::CastMemberRef, cast_member::CastMemberType, reserve_player_mut, symbols::builtin::BuiltInSymbol, symbols::symbol::Symbol
     },
 };
 
@@ -22,12 +20,12 @@ impl HavokObjectDatumHandlers {
                 cast_lib: hk_ref.cast_lib,
                 cast_member: hk_ref.cast_member,
             };
-            match hk_ref.object_type.as_str() {
-                "rigidBody" => Self::get_rigid_body_prop(player, &member_ref, &hk_ref.name, prop_name),
-                "spring" => Self::get_spring_prop(player, &member_ref, &hk_ref.name, prop_name),
-                "linearDashpot" => Self::get_linear_dashpot_prop(player, &member_ref, &hk_ref.name, prop_name),
-                "angularDashpot" => Self::get_angular_dashpot_prop(player, &member_ref, &hk_ref.name, prop_name),
-                "corrector" => Self::get_corrector_prop(player, &member_ref, &hk_ref.name, prop_name),
+            match hk_ref.object_type {
+                BuiltInSymbol::RigidBody => Self::get_rigid_body_prop(player, &member_ref, hk_ref.name, prop_name),
+                BuiltInSymbol::Spring => Self::get_spring_prop(player, &member_ref, hk_ref.name, prop_name),
+                BuiltInSymbol::LinearDashpot => Self::get_linear_dashpot_prop(player, &member_ref, hk_ref.name, prop_name),
+                BuiltInSymbol::AngularDashpot => Self::get_angular_dashpot_prop(player, &member_ref, hk_ref.name, prop_name),
+                BuiltInSymbol::Corrector => Self::get_corrector_prop(player, &member_ref, hk_ref.name, prop_name),
                 _ => Err(ScriptError::new(format!("Unknown Havok object type: {}", hk_ref.object_type))),
             }
         })
@@ -44,12 +42,12 @@ impl HavokObjectDatumHandlers {
                 cast_lib: hk_ref.cast_lib,
                 cast_member: hk_ref.cast_member,
             };
-            match hk_ref.object_type.as_str() {
-                "rigidBody" => Self::set_rigid_body_prop(player, &member_ref, &hk_ref.name, prop_name, val),
-                "spring" => Self::set_spring_prop(player, &member_ref, &hk_ref.name, prop_name, val),
-                "linearDashpot" => Self::set_linear_dashpot_prop(player, &member_ref, &hk_ref.name, prop_name, val),
-                "angularDashpot" => Self::set_angular_dashpot_prop(player, &member_ref, &hk_ref.name, prop_name, val),
-                "corrector" => Self::set_corrector_prop(player, &member_ref, &hk_ref.name, prop_name, val),
+            match hk_ref.object_type {
+                BuiltInSymbol::RigidBody => Self::set_rigid_body_prop(player, &member_ref, hk_ref.name, prop_name, val),
+                BuiltInSymbol::Spring => Self::set_spring_prop(player, &member_ref, hk_ref.name, prop_name, val),
+                BuiltInSymbol::LinearDashpot => Self::set_linear_dashpot_prop(player, &member_ref, hk_ref.name, prop_name, val),
+                BuiltInSymbol::AngularDashpot => Self::set_angular_dashpot_prop(player, &member_ref, hk_ref.name, prop_name, val),
+                BuiltInSymbol::Corrector => Self::set_corrector_prop(player, &member_ref, hk_ref.name, prop_name, val),
                 _ => Err(ScriptError::new(format!("Unknown Havok object type: {}", hk_ref.object_type))),
             }
         })
@@ -65,10 +63,10 @@ impl HavokObjectDatumHandlers {
                 cast_lib: hk_ref.cast_lib,
                 cast_member: hk_ref.cast_member,
             };
-            match hk_ref.object_type.as_str() {
-                "rigidBody" => Self::call_rigid_body(player, &member_ref, &hk_ref.name, handler_name, args),
-                "spring" | "linearDashpot" | "angularDashpot" => {
-                    Self::call_constraint(player, &member_ref, &hk_ref.object_type, &hk_ref.name, handler_name, args)
+            match hk_ref.object_type {
+                BuiltInSymbol::RigidBody => Self::call_rigid_body(player, &member_ref, hk_ref.name, handler_name, args),
+                BuiltInSymbol::Spring | BuiltInSymbol::LinearDashpot | BuiltInSymbol::AngularDashpot => {
+                    Self::call_constraint(player, &member_ref, hk_ref.object_type, hk_ref.name, handler_name, args)
                 }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for Havok {} object", handler_name, hk_ref.object_type
@@ -82,7 +80,7 @@ impl HavokObjectDatumHandlers {
     fn get_rigid_body_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        rb_name: &str,
+        rb_name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         // "rotation" returns a list — needs alloc_datum for each element which
@@ -97,7 +95,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 let rb = havok.state.rigid_bodies.iter()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                     .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
                 (rb.rotation_axis, rb.rotation_angle)
             };
@@ -114,11 +112,11 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let rb = havok.state.rigid_bodies.iter()
-            .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+            .find(|r| r.name == rb_name)
             .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
 
         let result = match prop {
-            "name" => Datum::String(rb.name.clone()),
+            "name" => Datum::String(rb.name.to_string()),
             "position" => Datum::Vector(rb.position),
             "centerOfMass" | "centerofmass" => {
                 // Havok Lingo docs: "offset from the models origin to the rigid
@@ -157,8 +155,8 @@ impl HavokObjectDatumHandlers {
                 return Ok(player.alloc_datum(Datum::HavokObjectRef(HavokObjectRef {
                     cast_lib: member_ref.cast_lib,
                     cast_member: member_ref.cast_member,
-                    object_type: "corrector".to_string(),
-                    name: rb_name.to_string(),
+                    object_type: BuiltInSymbol::Corrector,
+                    name: rb_name,
                 })));
             }
             _ => return Err(ScriptError::new(format!("Unknown rigidBody property: {}", prop))),
@@ -170,7 +168,7 @@ impl HavokObjectDatumHandlers {
     fn set_rigid_body_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        rb_name: &str,
+        rb_name: Symbol,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
@@ -200,7 +198,7 @@ impl HavokObjectDatumHandlers {
                 };
                 {
                     let rb = havok.state.rigid_bodies.iter_mut()
-                        .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                        .find(|r| r.name == rb_name)
                         .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
                     rb.rotation_axis = axis;
                     rb.rotation_angle = angle;
@@ -248,7 +246,7 @@ impl HavokObjectDatumHandlers {
             // the meter-scale L back to display-unit angular velocity (÷ worldScale²).
             let world_scale = havok.state.scale;
             let rb = havok.state.rigid_bodies.iter_mut()
-                .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                .find(|r| r.name == rb_name)
                 .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
 
             match prop {
@@ -315,7 +313,7 @@ impl HavokObjectDatumHandlers {
         // Collect sync data after property update
         let sync_data = if needs_w3d_sync {
             havok.state.rigid_bodies.iter()
-                .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                .find(|r| r.name.as_str().eq_ignore_ascii_case(rb_name.as_str()))
                 .map(|rb| (rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale))
         } else { None };
 
@@ -355,7 +353,7 @@ impl HavokObjectDatumHandlers {
     fn call_rigid_body(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        rb_name: &str,
+        rb_name: Symbol,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -369,7 +367,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     rb.active = true; rb.lingo_disturbed = true;
                     // Record that this body is force-driven so a later kinematic
@@ -401,7 +399,7 @@ impl HavokObjectDatumHandlers {
                 };
 
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     use super::cast_member::havok_physics::{v3_sub, quat_rotate_v, v3_cross};
                     rb.active = true; rb.lingo_disturbed = true;
@@ -436,7 +434,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     use super::cast_member::havok_physics::{v3_add, v3_scale};
                     rb.active = true; rb.lingo_disturbed = true;
@@ -459,7 +457,7 @@ impl HavokObjectDatumHandlers {
                 };
 
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     use super::cast_member::havok_physics::{v3_sub, v3_add, v3_scale, v3_cross, quat_rotate_v, mat3_transform, mat3_mul, mat3_transpose, quat_to_mat3};
                     rb.active = true; rb.lingo_disturbed = true;
@@ -501,7 +499,7 @@ impl HavokObjectDatumHandlers {
                 let world_scale = havok.state.scale;
                 let inv_scale_sq = if world_scale.abs() > 1e-10 { (1.0 / world_scale) * (1.0 / world_scale) } else { 1.0 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     // Wake a sleeping body — a Lingo torque is a disturbance, and
                     // an inactive body is skipped in step (the torque would be
@@ -532,7 +530,7 @@ impl HavokObjectDatumHandlers {
                 let world_scale = havok.state.scale;
                 let inv_scale_sq = if world_scale.abs() > 1e-10 { (1.0 / world_scale) * (1.0 / world_scale) } else { 1.0 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     use super::cast_member::havok_physics::{v3_add, v3_scale, mat3_transform, mat3_mul, mat3_transpose, quat_to_mat3};
                     // Wake a sleeping body (consistent with applyImpulse).
@@ -569,7 +567,7 @@ impl HavokObjectDatumHandlers {
                 };
                 use crate::player::handlers::datum_handlers::cast_member::havok_physics as hv;
                 let idx = havok.state.rigid_bodies.iter()
-                    .position(|r| r.name.eq_ignore_ascii_case(rb_name));
+                    .position(|r| r.name.as_str().eq_ignore_ascii_case(rb_name.as_str()));
                 if let Some(idx) = idx {
                     let new_orient = match rotation {
                         Some((axis, angle)) => hv::quat_from_axis_angle_degrees(axis, angle),
@@ -606,7 +604,7 @@ impl HavokObjectDatumHandlers {
                 // recovery interpolatingMoveTo, so it stays a vehicle and just moves
                 // to the exact target.
                 let idx = havok.state.rigid_bodies.iter()
-                    .position(|r| r.name.eq_ignore_ascii_case(rb_name));
+                    .position(|r| r.name.as_str().eq_ignore_ascii_case(rb_name.as_str()));
                 if let Some(idx) = idx {
                     let (received_force, half) = {
                         let rb = &havok.state.rigid_bodies[idx];
@@ -684,7 +682,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     rb.position = pos;
                 }
@@ -699,7 +697,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 if let Some(rb) = havok.state.rigid_bodies.iter_mut()
-                    .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+                    .find(|r| r.name == rb_name)
                 {
                     rb.center_of_mass[0] += offset[0];
                     rb.center_of_mass[1] += offset[1];
@@ -751,7 +749,7 @@ impl HavokObjectDatumHandlers {
     fn get_spring_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        spring_name: &str,
+        spring_name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
@@ -761,11 +759,11 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let spring = havok.state.springs.iter()
-            .find(|s| s.name.eq_ignore_ascii_case(spring_name))
+            .find(|s| s.name == spring_name)
             .ok_or_else(|| ScriptError::new(format!("Spring '{}' not found", spring_name)))?;
 
         let result = match prop {
-            "name" => Datum::String(spring.name.clone()),
+            "name" => Datum::String(spring.name.to_string()),
             "pointA" | "pointa" => Datum::Vector(spring.point_a),
             "pointB" | "pointb" => Datum::Vector(spring.point_b),
             "restLength" | "restlength" => Datum::Float(spring.rest_length),
@@ -781,7 +779,7 @@ impl HavokObjectDatumHandlers {
     fn set_spring_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        spring_name: &str,
+        spring_name: Symbol,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
@@ -792,7 +790,7 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let spring = havok.state.springs.iter_mut()
-            .find(|s| s.name.eq_ignore_ascii_case(spring_name))
+            .find(|s| s.name == spring_name)
             .ok_or_else(|| ScriptError::new(format!("Spring '{}' not found", spring_name)))?;
 
         match prop {
@@ -813,7 +811,7 @@ impl HavokObjectDatumHandlers {
     fn get_linear_dashpot_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        name: &str,
+        name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
@@ -823,11 +821,11 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let dp = havok.state.linear_dashpots.iter()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .find(|d| d.name == name)
             .ok_or_else(|| ScriptError::new(format!("LinearDashpot '{}' not found", name)))?;
 
         let result = match prop {
-            "name" => Datum::String(dp.name.clone()),
+            "name" => Datum::String(dp.name.to_string()),
             "pointA" | "pointa" => Datum::Vector(dp.point_a),
             "pointB" | "pointb" => Datum::Vector(dp.point_b),
             "strength" => Datum::Float(dp.strength),
@@ -840,7 +838,7 @@ impl HavokObjectDatumHandlers {
     fn set_linear_dashpot_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        name: &str,
+        name: Symbol,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
@@ -851,7 +849,7 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let dp = havok.state.linear_dashpots.iter_mut()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .find(|d| d.name == name)
             .ok_or_else(|| ScriptError::new(format!("LinearDashpot '{}' not found", name)))?;
 
         match prop {
@@ -869,7 +867,7 @@ impl HavokObjectDatumHandlers {
     fn get_angular_dashpot_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        name: &str,
+        name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
@@ -879,11 +877,11 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let dp = havok.state.angular_dashpots.iter()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .find(|d| d.name == name)
             .ok_or_else(|| ScriptError::new(format!("AngularDashpot '{}' not found", name)))?;
 
         let result = match prop {
-            "name" => Datum::String(dp.name.clone()),
+            "name" => Datum::String(dp.name.to_string()),
             "damping" => Datum::Float(dp.damping),
             "strength" => Datum::Float(dp.strength),
             "rotation" => {
@@ -902,7 +900,7 @@ impl HavokObjectDatumHandlers {
     fn set_angular_dashpot_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        name: &str,
+        name: Symbol,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
@@ -930,7 +928,7 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 let dp = havok.state.angular_dashpots.iter_mut()
-                    .find(|d| d.name.eq_ignore_ascii_case(name))
+                    .find(|d| d.name == name)
                     .ok_or_else(|| ScriptError::new(format!("AngularDashpot '{}' not found", name)))?;
                 dp.rotation_axis = axis;
                 dp.rotation_angle = angle;
@@ -945,7 +943,7 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let dp = havok.state.angular_dashpots.iter_mut()
-            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .find(|d| d.name == name)
             .ok_or_else(|| ScriptError::new(format!("AngularDashpot '{}' not found", name)))?;
 
         match prop {
@@ -961,7 +959,7 @@ impl HavokObjectDatumHandlers {
     fn get_corrector_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        rb_name: &str,
+        rb_name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
         let member = player.movie.cast_manager.find_member_by_ref(member_ref)
@@ -971,7 +969,7 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let rb = havok.state.rigid_bodies.iter()
-            .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+            .find(|r| r.name == rb_name)
             .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
         let c = &rb.corrector;
 
@@ -990,7 +988,7 @@ impl HavokObjectDatumHandlers {
     fn set_corrector_prop(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        rb_name: &str,
+        rb_name: Symbol,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
@@ -1001,7 +999,7 @@ impl HavokObjectDatumHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
         let rb = havok.state.rigid_bodies.iter_mut()
-            .find(|r| r.name.eq_ignore_ascii_case(rb_name))
+            .find(|r| r.name == rb_name)
             .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name)))?;
         let c = &mut rb.corrector;
 
@@ -1022,14 +1020,15 @@ impl HavokObjectDatumHandlers {
     fn call_constraint(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
-        object_type: &str,
-        name: &str,
+        object_type: BuiltInSymbol,
+        name: Symbol,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "setRigidBodyA" | "setrigidbodya" => {
                 let rb_name = player.get_datum(&args[0]).string_value()?;
+                let rb_sym = Symbol::from_str(&rb_name);
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -1037,19 +1036,19 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 match object_type {
-                    "spring" => {
-                        if let Some(s) = havok.state.springs.iter_mut().find(|s| s.name.eq_ignore_ascii_case(name)) {
-                            s.rigid_body_a = Some(rb_name);
+                    BuiltInSymbol::Spring => {
+                        if let Some(s) = havok.state.springs.iter_mut().find(|s| s.name == name) {
+                            s.rigid_body_a = Some(rb_sym);
                         }
                     }
-                    "linearDashpot" => {
-                        if let Some(d) = havok.state.linear_dashpots.iter_mut().find(|d| d.name.eq_ignore_ascii_case(name)) {
-                            d.rigid_body_a = Some(rb_name);
+                    BuiltInSymbol::LinearDashpot => {
+                        if let Some(d) = havok.state.linear_dashpots.iter_mut().find(|d| d.name == name) {
+                            d.rigid_body_a = Some(rb_sym);
                         }
                     }
-                    "angularDashpot" => {
-                        if let Some(d) = havok.state.angular_dashpots.iter_mut().find(|d| d.name.eq_ignore_ascii_case(name)) {
-                            d.rigid_body_a = Some(rb_name);
+                    BuiltInSymbol::AngularDashpot => {
+                        if let Some(d) = havok.state.angular_dashpots.iter_mut().find(|d| d.name == name) {
+                            d.rigid_body_a = Some(rb_sym);
                         }
                     }
                     _ => {}
@@ -1058,7 +1057,11 @@ impl HavokObjectDatumHandlers {
             }
             "setRigidBodyB" | "setrigidbodyb" => {
                 let rb_name_str = player.get_datum(&args[0]).string_value()?;
-                let rb_val = if rb_name_str.eq_ignore_ascii_case("none") { None } else { Some(rb_name_str) };
+                let rb_val: Option<Symbol> = if Symbol::from_str(&rb_name_str) == BuiltInSymbol::None {
+                    None
+                } else {
+                    Some(Symbol::from_str(&rb_name_str))
+                };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -1066,18 +1069,18 @@ impl HavokObjectDatumHandlers {
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
                 match object_type {
-                    "spring" => {
-                        if let Some(s) = havok.state.springs.iter_mut().find(|s| s.name.eq_ignore_ascii_case(name)) {
+                    BuiltInSymbol::Spring => {
+                        if let Some(s) = havok.state.springs.iter_mut().find(|s| s.name == name) {
                             s.rigid_body_b = rb_val;
                         }
                     }
-                    "linearDashpot" => {
-                        if let Some(d) = havok.state.linear_dashpots.iter_mut().find(|d| d.name.eq_ignore_ascii_case(name)) {
+                    BuiltInSymbol::LinearDashpot => {
+                        if let Some(d) = havok.state.linear_dashpots.iter_mut().find(|d| d.name == name) {
                             d.rigid_body_b = rb_val;
                         }
                     }
-                    "angularDashpot" => {
-                        if let Some(d) = havok.state.angular_dashpots.iter_mut().find(|d| d.name.eq_ignore_ascii_case(name)) {
+                    BuiltInSymbol::AngularDashpot => {
+                        if let Some(d) = havok.state.angular_dashpots.iter_mut().find(|d| d.name == name) {
                             d.rigid_body_b = rb_val;
                         }
                     }
@@ -1092,15 +1095,15 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
-                let rb_name = match object_type {
-                    "spring" => havok.state.springs.iter().find(|s| s.name.eq_ignore_ascii_case(name)).and_then(|s| s.rigid_body_a.clone()),
-                    "linearDashpot" => havok.state.linear_dashpots.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.rigid_body_a.clone()),
-                    "angularDashpot" => havok.state.angular_dashpots.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.rigid_body_a.clone()),
+                let rb_name: Option<Symbol> = match object_type {
+                    BuiltInSymbol::Spring => havok.state.springs.iter().find(|s| s.name == name).and_then(|s| s.rigid_body_a),
+                    BuiltInSymbol::LinearDashpot => havok.state.linear_dashpots.iter().find(|d| d.name == name).and_then(|d| d.rigid_body_a),
+                    BuiltInSymbol::AngularDashpot => havok.state.angular_dashpots.iter().find(|d| d.name == name).and_then(|d| d.rigid_body_a),
                     _ => None,
                 };
                 match rb_name {
-                    Some(n) => Ok(player.alloc_datum(Datum::String(n))),
-                    None => Ok(player.alloc_datum(Datum::Symbol("none".to_string()))),
+                    Some(n) => Ok(player.alloc_datum(Datum::String(n.to_string()))),
+                    None => Ok(player.alloc_datum(Datum::Symbol(BuiltInSymbol::None.into()))),
                 }
             }
             "getRigidBodyB" | "getrigidbodyb" => {
@@ -1110,23 +1113,23 @@ impl HavokObjectDatumHandlers {
                     CastMemberType::HavokPhysics(h) => h,
                     _ => return Err(ScriptError::new("Not a Havok member".to_string())),
                 };
-                let rb_name = match object_type {
-                    "spring" => havok.state.springs.iter().find(|s| s.name.eq_ignore_ascii_case(name)).and_then(|s| s.rigid_body_b.clone()),
-                    "linearDashpot" => havok.state.linear_dashpots.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.rigid_body_b.clone()),
-                    "angularDashpot" => havok.state.angular_dashpots.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.rigid_body_b.clone()),
+                let rb_name: Option<Symbol> = match object_type {
+                    BuiltInSymbol::Spring => havok.state.springs.iter().find(|s| s.name == name).and_then(|s| s.rigid_body_b),
+                    BuiltInSymbol::LinearDashpot => havok.state.linear_dashpots.iter().find(|d| d.name == name).and_then(|d| d.rigid_body_b),
+                    BuiltInSymbol::AngularDashpot => havok.state.angular_dashpots.iter().find(|d| d.name == name).and_then(|d| d.rigid_body_b),
                     _ => None,
                 };
                 match rb_name {
-                    Some(n) => Ok(player.alloc_datum(Datum::String(n))),
-                    None => Ok(player.alloc_datum(Datum::Symbol("none".to_string()))),
+                    Some(n) => Ok(player.alloc_datum(Datum::String(n.to_string()))),
+                    None => Ok(player.alloc_datum(Datum::Symbol(BuiltInSymbol::None.into()))),
                 }
             }
             "getProp" => {
                 let prop = player.get_datum(&args[0]).string_value()?;
                 let result = match object_type {
-                    "spring" => Self::get_spring_prop(player, member_ref, name, &prop)?,
-                    "linearDashpot" => Self::get_linear_dashpot_prop(player, member_ref, name, &prop)?,
-                    "angularDashpot" => Self::get_angular_dashpot_prop(player, member_ref, name, &prop)?,
+                    BuiltInSymbol::Spring => Self::get_spring_prop(player, member_ref, name, &prop)?,
+                    BuiltInSymbol::LinearDashpot => Self::get_linear_dashpot_prop(player, member_ref, name, &prop)?,
+                    BuiltInSymbol::AngularDashpot => Self::get_angular_dashpot_prop(player, member_ref, name, &prop)?,
                     _ => return Err(ScriptError::new(format!("Unknown constraint type: {}", object_type))),
                 };
                 // Optional indexed-access form: obj.getProp(#prop, N) → Nth element.

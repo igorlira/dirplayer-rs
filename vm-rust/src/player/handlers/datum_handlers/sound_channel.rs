@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl SoundChannelDatumHandlers {
     pub fn get_proplist_prop(
         player: &DirPlayer,
         prop_list: &Datum,
-        key_name: &str,
+        key_name: Symbol,
     ) -> Option<Datum> {
         if let Datum::PropList(props, _) = prop_list {
             for (key_ref, value_ref) in props {
@@ -138,12 +138,11 @@ impl SoundChannelDatumHandlers {
     pub fn call(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let handler_name_lower = handler_name.to_lowercase();
-        match handler_name_lower.as_str() {
-            "play" => {
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Play) => {
                 if args.is_empty() {
                     // play() with no args - play current playlist
                     Self::handle_play(player, datum)?;
@@ -153,7 +152,7 @@ impl SoundChannelDatumHandlers {
                 }
                 Ok(datum.clone())
             }
-            "playfile" => {
+            Some(BuiltInSymbol::PlayFile) => {
                 if args.is_empty() {
                     return Err(ScriptError::new(
                         "playFile requires a member argument".to_string(),
@@ -162,23 +161,23 @@ impl SoundChannelDatumHandlers {
                 Self::handle_play_file(player, datum, &args[0], 1)?;
                 Ok(datum.clone())
             }
-            "playnext" => {
+            Some(BuiltInSymbol::PlayNext) => {
                 Self::handle_play_next(player, datum)?;
                 Ok(datum.clone())
             }
-            "stop" => {
+            Some(BuiltInSymbol::Stop) => {
                 Self::handle_stop(player, datum)?;
                 Ok(datum.clone())
             }
-            "pause" => {
+            Some(BuiltInSymbol::Pause) => {
                 Self::handle_pause(player, datum)?;
                 Ok(datum.clone())
             }
-            "rewind" => {
+            Some(BuiltInSymbol::Rewind) => {
                 Self::handle_rewind(player, datum)?;
                 Ok(datum.clone())
             }
-            "queue" => {
+            Some(BuiltInSymbol::Queue) => {
                 if args.is_empty() {
                     return Err(ScriptError::new(
                         "queue requires a member argument".to_string(),
@@ -187,11 +186,11 @@ impl SoundChannelDatumHandlers {
                 Self::handle_queue(player, datum, &args[0])?;
                 Ok(datum.clone())
             }
-            "breakloop" => {
+            Some(BuiltInSymbol::BreakLoop) => {
                 Self::handle_break_loop(player, datum)?;
                 Ok(datum.clone())
             }
-            "fadein" => {
+            Some(BuiltInSymbol::FadeIn) => {
                 let ticks = if args.is_empty() {
                     60
                 } else {
@@ -205,7 +204,7 @@ impl SoundChannelDatumHandlers {
                 Self::handle_fade_in(player, datum, ticks, to_volume)?;
                 Ok(datum.clone())
             }
-            "fadeout" => {
+            Some(BuiltInSymbol::FadeOut) => {
                 let ticks = if args.is_empty() {
                     60
                 } else {
@@ -214,7 +213,7 @@ impl SoundChannelDatumHandlers {
                 Self::handle_fade_out(player, datum, ticks)?;
                 Ok(datum.clone())
             }
-            "fadeto" => {
+            Some(BuiltInSymbol::FadeTo) => {
                 if args.len() < 2 {
                     return Err(ScriptError::new(
                         "fadeTo requires ticks and volume arguments".to_string(),
@@ -225,7 +224,7 @@ impl SoundChannelDatumHandlers {
                 Self::handle_fade_to(player, datum, ticks, to_volume)?;
                 Ok(datum.clone())
             }
-            "setplaylist" => {
+            Some(BuiltInSymbol::SetPlaylist) => {
                 if args.is_empty() {
                     return Err(ScriptError::new(
                         "setPlayList requires a list argument".to_string(),
@@ -234,8 +233,8 @@ impl SoundChannelDatumHandlers {
                 Self::handle_set_playlist(player, datum, &args[0])?;
                 Ok(datum.clone())
             }
-            "getplaylist" => Self::handle_get_playlist(player, datum),
-            "isbusy" => {
+            Some(BuiltInSymbol::GetPlaylist) => Self::handle_get_playlist(player, datum),
+            Some(BuiltInSymbol::IsBusy) => {
                 let is_busy = Self::handle_is_busy(player, datum)?;
                 Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
             }
@@ -248,7 +247,7 @@ impl SoundChannelDatumHandlers {
     pub fn get_prop(
         player: &DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         // Get the Rc<RefCell<SoundChannel>>
         let channel_rc = Self::get_sound_channel(player, datum)?;
@@ -256,28 +255,28 @@ impl SoundChannelDatumHandlers {
         // Borrow the inner SoundChannel
         let channel = channel_rc.borrow();
 
-        match prop {
-            "volume" => Ok(Datum::Float(channel.volume as f64)),
-            "duration" => Ok(Datum::Float(channel.get_duration() as f64)),
-            "pan" => Ok(Datum::Float(channel.pan as f64)),
-            "loopCount" => Ok(Datum::Int(channel.loop_count)),
-            "loopsRemaining" => Ok(Datum::Int(channel.loops_remaining)),
-            "startTime" => Ok(Datum::Float(channel.start_time as f64)),
-            "endTime" => Ok(Datum::Float(channel.end_time as f64)),
-            "loopStartTime" => Ok(Datum::Float(channel.loop_start_time as f64)),
-            "loopEndTime" => Ok(Datum::Float(channel.loop_end_time as f64)),
-            "elapsedTime" => Ok(Datum::Float(channel.elapsed_time as f64)),
-            "sampleRate" => Ok(Datum::Int(channel.sample_rate.try_into().unwrap())),
-            "sampleCount" => Ok(Datum::Int(channel.sample_count.try_into().unwrap())),
-            "channelCount" => Ok(Datum::Int(channel.channel_count.into())),
-            "status" => Ok(Datum::Int(channel.status.clone() as i32)),
-            "member" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Volume) => Ok(Datum::Float(channel.volume as f64)),
+            Some(BuiltInSymbol::Duration) => Ok(Datum::Float(channel.get_duration() as f64)),
+            Some(BuiltInSymbol::Pan) => Ok(Datum::Float(channel.pan as f64)),
+            Some(BuiltInSymbol::LoopCount) => Ok(Datum::Int(channel.loop_count)),
+            Some(BuiltInSymbol::LoopsRemaining) => Ok(Datum::Int(channel.loops_remaining)),
+            Some(BuiltInSymbol::StartTime) => Ok(Datum::Float(channel.start_time as f64)),
+            Some(BuiltInSymbol::EndTime) => Ok(Datum::Float(channel.end_time as f64)),
+            Some(BuiltInSymbol::LoopStartTime) => Ok(Datum::Float(channel.loop_start_time as f64)),
+            Some(BuiltInSymbol::LoopEndTime) => Ok(Datum::Float(channel.loop_end_time as f64)),
+            Some(BuiltInSymbol::ElapsedTime) => Ok(Datum::Float(channel.elapsed_time as f64)),
+            Some(BuiltInSymbol::SampleRate) => Ok(Datum::Int(channel.sample_rate.try_into().unwrap())),
+            Some(BuiltInSymbol::SampleCount) => Ok(Datum::Int(channel.sample_count.try_into().unwrap())),
+            Some(BuiltInSymbol::ChannelCount) => Ok(Datum::Int(channel.channel_count.into())),
+            Some(BuiltInSymbol::Status) => Ok(Datum::Int(channel.status.clone() as i32)),
+            Some(BuiltInSymbol::Member) => {
                 match &channel.member {
                     Some(member_ref) => Ok(player.get_datum(member_ref).clone()),
                     None => Ok(Datum::Void),
                 }
             }
-            "currentTime" => {
+            Some(BuiltInSymbol::CurrentTime) => {
                 let ct = if channel.status == SoundStatus::Playing {
                     let elapsed = channel.audio_context.as_ref().map_or(0.0, |ctx| ctx.current_time()) - channel.playback_start_context_time;
                     (channel.start_time + elapsed * 1000.0).min(channel.get_duration() as f64)
@@ -296,41 +295,41 @@ impl SoundChannelDatumHandlers {
     pub fn set_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop {
-            "volume" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Volume) => {
                 let vol = player.get_datum(value_ref).float_value()?;
                 Self::set_sound_volume(player, datum, vol)?;
                 Ok(())
             }
-            "pan" => {
+            Some(BuiltInSymbol::Pan) => {
                 let pan = player.get_datum(value_ref).float_value()?;
                 Self::set_sound_pan(player, datum, pan)?;
                 Ok(())
             }
-            "loopCount" => {
+            Some(BuiltInSymbol::LoopCount) => {
                 let count = player.get_datum(value_ref).int_value()?;
                 Self::set_loop_count(player, datum, count)?;
                 Ok(())
             }
-            "startTime" => {
+            Some(BuiltInSymbol::StartTime) => {
                 let time = player.get_datum(value_ref).float_value()?;
                 Self::set_start_time(player, datum, time)?;
                 Ok(())
             }
-            "endTime" => {
+            Some(BuiltInSymbol::EndTime) => {
                 let time = player.get_datum(value_ref).float_value()?;
                 Self::set_end_time(player, datum, time)?;
                 Ok(())
             }
-            "loopStartTime" => {
+            Some(BuiltInSymbol::LoopStartTime) => {
                 let time = player.get_datum(value_ref).float_value()?;
                 Self::set_loop_start_time(player, datum, time)?;
                 Ok(())
             }
-            "loopEndTime" => {
+            Some(BuiltInSymbol::LoopEndTime) => {
                 let time = player.get_datum(value_ref).float_value()?;
                 Self::set_loop_end_time(player, datum, time)?;
                 Ok(())
@@ -615,11 +614,11 @@ impl SoundChannelDatumHandlers {
                     if let Ok(sym) = key.symbol_value() {
                         let value = player.get_datum(&value_ref).clone();
 
-                        match sym.to_lowercase().as_str() {
-                            "member" | "#member" => {
+                        match sym.into_builtin() {
+                            Some(BuiltInSymbol::Member) => {
                                 member_value = Some(value.clone());
                             }
-                            "loopcount" | "#loopcount" => {
+                            Some(BuiltInSymbol::LoopCount) => {
                                 if let Datum::Int(n) = value {
                                     loopcount_value = Some(n);
                                 }
@@ -1421,7 +1420,7 @@ impl SoundChannel {
         }
     }
 
-    fn get_proplist_prop(player: &DirPlayer, prop_list: &Datum, key_name: &str) -> Option<Datum> {
+    fn get_proplist_prop(player: &DirPlayer, prop_list: &Datum, key_name: Symbol) -> Option<Datum> {
         if let Datum::PropList(props, _) = prop_list {
             for (key_ref, value_ref) in props {
                 let key = player.get_datum(key_ref);
@@ -1717,7 +1716,7 @@ impl SoundChannel {
         }
 
         // Case 3: PropList with #member property (for playlist items)
-        let member_datum = Self::get_proplist_prop(player, datum, "member")?;
+        let member_datum = Self::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member))?;
 
         match member_datum {
             Datum::CastMember(ref member_ref) => {
@@ -3743,14 +3742,14 @@ impl SoundChannel {
             }
         };
 
-        let member_opt = SoundChannel::get_proplist_prop(player, &datum, "member");
+        let member_opt = SoundChannel::get_proplist_prop(player, &datum, Symbol::builtin(BuiltInSymbol::Member));
         if member_opt.is_none() {
             warn!("⚠️ queue(): missing #member — ignored");
             return;
         }
 
         let loop_count = if let Some(Datum::Int(count)) =
-            SoundChannel::get_proplist_prop(player, &datum, "loopCount")
+            SoundChannel::get_proplist_prop(player, &datum, Symbol::builtin(BuiltInSymbol::LoopCount))
         {
             count
         } else {
@@ -3763,7 +3762,7 @@ impl SoundChannel {
         // exactly at the time of cue #cm. Without honouring this, playback
         // restarts at 0ms after every user click, re-firing the whole cue
         // list from the top. Accept Int or Float (Director is lax here).
-        let start_time_ms = match SoundChannel::get_proplist_prop(player, &datum, "startTime") {
+        let start_time_ms = match SoundChannel::get_proplist_prop(player, &datum, Symbol::from_str("startTime")) {
             Some(Datum::Int(v)) => v as f64,
             Some(Datum::Float(v)) => v,
             _ => 0.0,
@@ -3819,9 +3818,9 @@ impl SoundChannel {
         for datum_ref in list {
             let datum = player.get_datum(&datum_ref);
 
-            if let Some(member_datum) = SoundChannel::get_proplist_prop(player, datum, "member") {
+            if let Some(member_datum) = SoundChannel::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member)) {
                 let loop_count = if let Some(Datum::Int(count)) =
-                    SoundChannel::get_proplist_prop(player, datum, "loopCount")
+                    SoundChannel::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::LoopCount))
                 {
                     count
                 } else {

@@ -62,6 +62,7 @@ binary_rw = "4.1.0"
 # Used for 3D-text (extrude3D) front/back cap tessellation so glyph holes
 # (O, A, 8, e ...) are filled correctly instead of the old triangle-fan.
 earcutr = "0.4"
+lasso = "0.7.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

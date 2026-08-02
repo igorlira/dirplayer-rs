@@ -10,7 +10,7 @@ use crate::{
     director::enums::BitmapInfo,
     player::{
         cast_lib::CastMemberRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
-        sprite::ColorRef,
+        sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 use num::FromPrimitive;
@@ -86,38 +86,37 @@ pub enum BuiltInPalette {
 }
 
 impl BuiltInPalette {
-    pub fn from_symbol_string(symbol: &str) -> Option<Self> {
-        match symbol {
-            "grayscale" => Some(BuiltInPalette::GrayScale),
-            "pastels" => Some(BuiltInPalette::Pastels),
-            "vivid" => Some(BuiltInPalette::Vivid),
-            "ntsc" => Some(BuiltInPalette::Ntsc),
-            "metallic" => Some(BuiltInPalette::Metallic),
-            "web216" => Some(BuiltInPalette::Web216),
-            "vga" => Some(BuiltInPalette::Vga),
-            "systemWinDir4" => Some(BuiltInPalette::SystemWinDir4),
-            "systemWin" => Some(BuiltInPalette::SystemWin),
-            "systemMac" => Some(BuiltInPalette::SystemMac),
-            "rainbow" => Some(BuiltInPalette::Rainbow),
+    pub fn from_symbol(symbol: Symbol) -> Option<Self> {
+        match symbol.into_builtin_or_error().ok()? {
+            BuiltInSymbol::Grayscale => Some(BuiltInPalette::GrayScale),
+            BuiltInSymbol::Pastels => Some(BuiltInPalette::Pastels),
+            BuiltInSymbol::Vivid => Some(BuiltInPalette::Vivid),
+            BuiltInSymbol::Ntsc => Some(BuiltInPalette::Ntsc),
+            BuiltInSymbol::Metallic => Some(BuiltInPalette::Metallic),
+            BuiltInSymbol::Web216 => Some(BuiltInPalette::Web216),
+            BuiltInSymbol::Vga => Some(BuiltInPalette::Vga),
+            BuiltInSymbol::SystemWinDir4 => Some(BuiltInPalette::SystemWinDir4),
+            BuiltInSymbol::SystemWin => Some(BuiltInPalette::SystemWin),
+            BuiltInSymbol::SystemMac => Some(BuiltInPalette::SystemMac),
+            BuiltInSymbol::Rainbow => Some(BuiltInPalette::Rainbow),
             _ => None,
         }
     }
 
-    pub fn symbol_string(&self) -> String {
+    pub fn symbol(&self) -> BuiltInSymbol {
         match self {
-            BuiltInPalette::GrayScale => "grayscale",
-            BuiltInPalette::Pastels => "pastels",
-            BuiltInPalette::Vivid => "vivid",
-            BuiltInPalette::Ntsc => "ntsc",
-            BuiltInPalette::Metallic => "metallic",
-            BuiltInPalette::Web216 => "web216",
-            BuiltInPalette::Vga => "vga",
-            BuiltInPalette::SystemWinDir4 => "systemWinDir4",
-            BuiltInPalette::SystemWin => "systemWin",
-            BuiltInPalette::SystemMac => "systemMac",
-            BuiltInPalette::Rainbow => "rainbow",
+            BuiltInPalette::GrayScale => BuiltInSymbol::Grayscale,
+            BuiltInPalette::Pastels => BuiltInSymbol::Pastels,
+            BuiltInPalette::Vivid => BuiltInSymbol::Vivid,
+            BuiltInPalette::Ntsc => BuiltInSymbol::Ntsc,
+            BuiltInPalette::Metallic => BuiltInSymbol::Metallic,
+            BuiltInPalette::Web216 => BuiltInSymbol::Web216,
+            BuiltInPalette::Vga => BuiltInSymbol::Vga,
+            BuiltInPalette::SystemWinDir4 => BuiltInSymbol::SystemWinDir4,
+            BuiltInPalette::SystemWin => BuiltInSymbol::SystemWin,
+            BuiltInPalette::SystemMac => BuiltInSymbol::SystemMac,
+            BuiltInPalette::Rainbow => BuiltInSymbol::Rainbow,
         }
-        .to_string()
     }
 }
 

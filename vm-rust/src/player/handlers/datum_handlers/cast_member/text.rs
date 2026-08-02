@@ -2,22 +2,17 @@ use std::collections::VecDeque;
 
 use log::{debug, warn};
 use crate::{
-    director::enums::TextInfo,
-    director::lingo::datum::{
-        datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
-    },
+    director::{enums::TextInfo, lingo::{datum::{
+        Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool
+    }, decompiler::TokenType::Builtin}},
     player::{
-        bitmap::{
+        DatumRef, DirPlayer, ScriptError, bitmap::{
             bitmap::{Bitmap, PaletteRef, get_system_default_palette},
             drawing::CopyPixelsParams,
-        },
-        cast_lib::CastMemberRef,
-        font::{get_text_index_at_pos, get_glyph_preference, GlyphPreference, measure_text, measure_text_wrapped, DrawTextParams},
-        handlers::datum_handlers::{
+        }, cast_lib::CastMemberRef, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
             cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
-        },
-        DatumRef, DirPlayer, ScriptError,
+        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -241,27 +236,27 @@ impl TextMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name {
             "count" => {
-                let count_of = player.get_datum(&args[0]).string_value()?;
+                let count_of = player.get_datum(&args[0]).symbol_value()?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &text.text,
-                    StringChunkType::from(&count_of),
+                    StringChunkType::from(count_of),
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let prop_name = player.get_datum(&args[0]).symbol_value()?;
                 let start = player.get_datum(&args[1]).int_value()?;
                 let end = if args.len() > 2 {
                     player.get_datum(&args[2]).int_value()?
                 } else {
                     start
                 };
-                let chunk_type = std::panic::catch_unwind(|| StringChunkType::from(prop_name.as_str()))
+                let chunk_type = std::panic::catch_unwind(|| StringChunkType::from(prop_name))
                     .map_err(|_| ScriptError::new(format!("Invalid chunk type '{}' for text member getPropRef", prop_name)))?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
@@ -345,10 +340,10 @@ impl TextMemberHandlers {
             }
             "setProp" => {
                 // setProp(#line, index, value) or setProp(#word, index, value) etc.
-                let prop_name = player.get_datum(&args[0]).string_value()?;
+                let prop_name = player.get_datum(&args[0]).symbol_value()?;
                 let index = player.get_datum(&args[1]).int_value()?;
                 let new_value = player.get_datum(&args[2]).string_value()?;
-                let chunk_type = StringChunkType::from(&prop_name);
+                let chunk_type = StringChunkType::from(prop_name);
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start: index,
@@ -461,7 +456,7 @@ impl TextMemberHandlers {
                     .collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
-            "alignment" => Ok(Datum::String(text_data.alignment.to_owned())),
+            "alignment" => Ok(Datum::String(text_data.alignment.to_string())),
             "wordwrap" => Ok(datum_bool(text_data.word_wrap)),
             "width" => Ok(Datum::Int(text_data.width as i32)),
             "font" => Ok(Datum::String(text_data.font.to_owned())),
@@ -475,12 +470,12 @@ impl TextMemberHandlers {
                 let mut item_refs = VecDeque::new();
                 if text_data.font_style.is_empty() {
                     item_refs.push_back(
-                        player.alloc_datum(Datum::Symbol("plain".to_string())),
+                        player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Plain))),
                     );
                 } else {
                     for item in &text_data.font_style {
                         item_refs.push_back(
-                            player.alloc_datum(Datum::Symbol(item.to_owned())),
+                            player.alloc_datum(Datum::Symbol((*item).into())),
                         );
                     }
                 }
@@ -488,7 +483,7 @@ impl TextMemberHandlers {
             }
             "fixedlinespace" => Ok(Datum::Int(text_data.fixed_line_space as i32)),
             "topspacing" => Ok(Datum::Int(text_data.top_spacing as i32)),
-            "boxtype" => Ok(Datum::Symbol(text_data.box_type.to_owned())),
+            "boxtype" => Ok(Datum::Symbol(text_data.box_type.into())),
             "antialias" => Ok(datum_bool(text_data.anti_alias)),
             "html" => {
                 // Generate Director-style HTML from current text member state
@@ -737,7 +732,7 @@ impl TextMemberHandlers {
                     .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
                         &font, fb, text_data.fixed_line_space, text_data.top_spacing,
                     ));
-                let box_height = if text_data.box_type == "adjust" {
+                let box_height = if text_data.box_type == BuiltInSymbol::Adjust {
                     if text_data.rect_set_at_runtime {
                         // #adjust + runtime-set rect: auto-grow to content but keep
                         // the set height when content fits. CS navigator toggles
@@ -916,7 +911,7 @@ impl TextMemberHandlers {
                         ));
                     height + overflow
                 };
-                let box_height = if text_data.box_type == "adjust" {
+                let box_height = if text_data.box_type == BuiltInSymbol::Adjust {
                     if text_data.rect_set_at_runtime {
                         // #adjust + runtime-set rect: auto-grow to content but keep
                         // the set height when content fits (mirrors `.rect`/`.image`).
@@ -970,7 +965,7 @@ impl TextMemberHandlers {
                     let faces = info.display_face_list();
                     let mut item_refs = VecDeque::new();
                     for face in faces {
-                        item_refs.push_back(player.alloc_datum(Datum::Symbol(face.trim_start_matches('#').to_string())));
+                        item_refs.push_back(player.alloc_datum(Datum::Symbol(face.into())));
                     }
                     Ok(Datum::List(DatumType::List, item_refs, false))
                 } else {
@@ -986,7 +981,7 @@ impl TextMemberHandlers {
             }
             "beveltype" => {
                 if let Some(ref info) = text_data.info {
-                    Ok(Datum::Symbol(info.bevel_type_str().trim_start_matches('#').to_string()))
+                    Ok(Datum::Symbol(info.bevel_type_symbol().into()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -1007,21 +1002,21 @@ impl TextMemberHandlers {
             }
             "displaymode" => {
                 if let Some(ref info) = text_data.info {
-                    Ok(Datum::Symbol(info.display_mode_str().trim_start_matches('#').to_string()))
+                    Ok(Datum::Symbol(info.display_mode_symbol().into()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
             "directionalpreset" => {
                 if let Some(ref info) = text_data.info {
-                    Ok(Datum::Symbol(info.directional_preset_str().trim_start_matches('#').to_string()))
+                    Ok(Datum::Symbol(info.directional_preset_symbol().into()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
             }
             "texturetype" => {
                 if let Some(ref info) = text_data.info {
-                    Ok(Datum::Symbol(info.texture_type_str().trim_start_matches('#').to_string()))
+                    Ok(Datum::Symbol(info.texture_type_symbol().into()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -1112,7 +1107,7 @@ impl TextMemberHandlers {
             }
             "prerender" => {
                 if let Some(ref info) = text_data.info {
-                    Ok(Datum::Symbol(info.pre_render_str().trim_start_matches('#').to_string()))
+                    Ok(Datum::Symbol(info.pre_render_symbol().into()))
                 } else {
                     Err(ScriptError::new("TextInfo not available for this member".to_string()))
                 }
@@ -1514,7 +1509,7 @@ impl TextMemberHandlers {
                     // and .rect must match or the underline ("login_b_login_forgotten",
                     // Navigator "Go") is dropped.
                     let measured = box_height + pfr_descender_overflow;
-                    box_height = if text_data.box_type == "adjust" {
+                    box_height = if text_data.box_type == BuiltInSymbol::Adjust {
                         if text_data.rect_set_at_runtime {
                             // CS / Origins runtime-set rect: grow to content, keep the
                             // set height when it fits (keeps .image == .rect so the
@@ -1561,12 +1556,8 @@ impl TextMemberHandlers {
                 bitmap.data.fill(0);
 
                 // Determine alignment
-                let alignment = match text_data.alignment.to_lowercase().as_str() {
-                    "center" | "#center" => TextAlignment::Center,
-                    "right" | "#right" => TextAlignment::Right,
-                    "justify" | "#justify" => TextAlignment::Justify,
-                    _ => TextAlignment::Left,
-                };
+                let text_alignment: TextAlignment = text_data.alignment.into();
+
 
                 let glyph_pref = get_glyph_preference();
                 // font and is_pfr_font already loaded above for measurement
@@ -1606,9 +1597,9 @@ impl TextMemberHandlers {
                         )
                     };
                     let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                    let default_bold = text_data.font_style.iter().any(|s| s == "bold");
-                    let default_italic = text_data.font_style.iter().any(|s| s == "italic");
-                    let default_underline = text_data.font_style.iter().any(|s| s == "underline");
+                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
 
                     // Prefer the stored styled spans (set via chunk style setters
                     // or XMED parsing) over a single synthetic span. Fill in any
@@ -1658,7 +1649,7 @@ impl TextMemberHandlers {
                         text_data.top_spacing as i32,
                         box_width as i32,
                         box_height as i32,
-                        alignment,
+                        text_alignment,
                         box_width as i32,
                         text_data.word_wrap,
                         None,
@@ -1678,9 +1669,9 @@ impl TextMemberHandlers {
                     // atlas-copy path below when there's no outline data or the
                     // Canvas2D render errors.
                     if let Some(ref parsed) = pfr_outline {
-                        let default_bold = text_data.font_style.iter().any(|s| s == "bold");
-                        let default_italic = text_data.font_style.iter().any(|s| s == "italic");
-                        let default_underline = text_data.font_style.iter().any(|s| s == "underline");
+                        let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                        let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                        let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
                         let (dr, dg, db) = {
                             use crate::player::bitmap::bitmap::resolve_color_ref;
                             let palettes = player.movie.cast_manager.palettes();
@@ -1725,7 +1716,7 @@ impl TextMemberHandlers {
                             // the atlas-copy path. Passing it here too would
                             // double the top inset.
                             0, 0, box_width as i32, box_height as i32,
-                            alignment, box_width as i32, text_data.word_wrap,
+                            text_alignment, box_width as i32, text_data.word_wrap,
                             text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
                             cs_px, &text_data.tab_stops,
                         ) {
@@ -1766,9 +1757,9 @@ impl TextMemberHandlers {
                         &bitmap.palette_ref,
                         bitmap.original_bit_depth,
                     );
-                    let default_bold = text_data.font_style.iter().any(|s| s == "bold");
-                    let default_italic = text_data.font_style.iter().any(|s| s == "italic");
-                    let default_underline = text_data.font_style.iter().any(|s| s == "underline");
+                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
                     let is_pfr_font = font.char_widths.is_some();
 
                     // PFR pixel-font vertical anchoring (Paige semantics). Recover
@@ -1902,7 +1893,7 @@ impl TextMemberHandlers {
                     // Capture tab stops for the closure (line_char_offset usage below
                     // also needs them, but the closure can't borrow text_data through
                     // reserve_player_mut). Clone to a small Vec.
-                    let line_tab_stops: Vec<(String, i32)> = text_data
+                    let line_tab_stops: Vec<(BuiltInSymbol, i32)> = text_data
                         .tab_stops
                         .iter()
                         .map(|t| (t.tab_type.clone(), t.position as i32))
@@ -1956,11 +1947,11 @@ impl TextMemberHandlers {
                         // place segments at fixed positions).
                         let has_right_tab = line_tab_stops
                             .iter()
-                            .any(|(t, _)| t == "right");
+                            .any(|(t, _)| *t == BuiltInSymbol::Right);
                         let line_offset = if has_right_tab {
                             0
                         } else {
-                            match alignment {
+                            match text_alignment {
                                 TextAlignment::Center => ((max_width - logical_line_width) / 2).max(0),
                                 TextAlignment::Right => (max_width - logical_line_width).max(0),
                                 _ => 0,
@@ -1973,9 +1964,9 @@ impl TextMemberHandlers {
                         for i in 1..segments.len() {
                             let seg_w = segment_width(segments[i]);
                             let stop_x = match line_tab_stops.get(i - 1) {
-                                Some((tab_type, tab_pos)) => match tab_type.as_str() {
-                                    "right" => (*tab_pos - seg_w).max(cursor_x),
-                                    "center" => (*tab_pos - seg_w / 2).max(cursor_x),
+                                Some((tab_type, tab_pos)) => match tab_type {
+                                    BuiltInSymbol::Right => (*tab_pos - seg_w).max(cursor_x),
+                                    BuiltInSymbol::Center => (*tab_pos - seg_w / 2).max(cursor_x),
                                     _ => (*tab_pos).max(cursor_x), // #left / #decimal
                                 },
                                 None => cursor_x, // no more tab stops — render inline
@@ -2251,14 +2242,14 @@ impl TextMemberHandlers {
             // Previously-unstaged stored properties
             "bottomspacing" => Ok(Datum::Int(text_data.bottom_spacing as i32)),
             "charspacing" => Ok(Datum::Int(text_data.char_spacing)),
-            "antialiastype" => Ok(Datum::Symbol(text_data.anti_alias_type.clone())),
+            "antialiastype" => Ok(Datum::Symbol(text_data.anti_alias_type.into())),
             "tabcount" => Ok(Datum::Int(text_data.tab_stops.len() as i32)),
             "tabs" => {
                 let mut items: VecDeque<DatumRef> = VecDeque::new();
                 for t in &text_data.tab_stops {
-                    let type_key = player.alloc_datum(Datum::Symbol("type".to_string()));
-                    let type_val = player.alloc_datum(Datum::Symbol(t.tab_type.clone()));
-                    let pos_key = player.alloc_datum(Datum::Symbol("position".to_string()));
+                    let type_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Type.into()));
+                    let type_val = player.alloc_datum(Datum::Symbol(t.tab_type.into()));
+                    let pos_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Position.into()));
                     let pos_val = player.alloc_datum(Datum::Int(t.position));
                     let entries: VecDeque<(DatumRef, DatumRef)> = VecDeque::from([
                         (type_key, type_val),
@@ -2341,9 +2332,9 @@ impl TextMemberHandlers {
             ),
             "alignment" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |player| value.symbol_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().alignment = value?;
+                    cast_member.member_type.as_text_mut().unwrap().alignment = value?.into_builtin_or_error()?;
                     Ok(())
                 },
             ),
@@ -2404,15 +2395,12 @@ impl TextMemberHandlers {
                     match value {
                         Datum::List(_, items, _) => {
                             for x in items {
-                                item_strings.push(player.get_datum(&x).string_value()?);
+                                item_strings.push(player.get_datum(&x).symbol_value()?);
                             }
                         }
-                        Datum::Symbol(s) | Datum::String(s) => {
-                            item_strings.push(s.clone());
-                        }
                         _ => {
-                            // Best-effort: try string conversion, otherwise empty.
-                            if let Ok(s) = value.string_value() {
+                            // Best-effort: try symbol conversion, otherwise empty.
+                            if let Ok(s) = value.symbol_value() {
                                 if !s.is_empty() {
                                     item_strings.push(s);
                                 }
@@ -2424,10 +2412,10 @@ impl TextMemberHandlers {
                 |cast_member, value| {
                     let styles = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
-                    let bold = styles.iter().any(|s| s == "bold");
-                    let italic = styles.iter().any(|s| s == "italic");
-                    let underline = styles.iter().any(|s| s == "underline");
-                    text_member.font_style = styles;
+                    let bold = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Bold));
+                    let italic = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Italic));
+                    let underline = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Underline));
+                    text_member.font_style = styles.iter().map(|s| s.into_builtin_or_error()).collect::<Result<_, _>>()?;
                     for span in &mut text_member.html_styled_spans {
                         span.style.bold = bold;
                         span.style.italic = italic;
@@ -2458,9 +2446,9 @@ impl TextMemberHandlers {
             ),
             "boxtype" => borrow_member_mut(
                 member_ref,
-                |player| value.string_value(),
+                |player| value.symbol_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().box_type = value?;
+                    cast_member.member_type.as_text_mut().unwrap().box_type = value?.into_builtin_or_error()?;
                     Ok(())
                 },
             ),
@@ -2523,11 +2511,11 @@ impl TextMemberHandlers {
                     // Extract alignment from <p align="..."> or <center> tag
                     let html_lower = html_string.to_lowercase();
                     if html_lower.contains("align=\"center\"") || html_lower.contains("align='center'") || html_lower.contains("<center") {
-                        text_member.alignment = "center".to_string();
+                        text_member.alignment = BuiltInSymbol::Center;
                     } else if html_lower.contains("align=\"right\"") || html_lower.contains("align='right'") {
-                        text_member.alignment = "right".to_string();
+                        text_member.alignment = BuiltInSymbol::Right;
                     } else if html_lower.contains("align=\"left\"") || html_lower.contains("align='left'") {
-                        text_member.alignment = "left".to_string();
+                        text_member.alignment = BuiltInSymbol::Left;
                     }
 
                     // Extract bgcolor and text color from body tag
@@ -2588,13 +2576,13 @@ impl TextMemberHandlers {
                         // Build font_style list from bold/italic/underline flags
                         let mut font_styles = Vec::new();
                         if style.bold {
-                            font_styles.push("bold".to_string());
+                            font_styles.push(BuiltInSymbol::Bold);
                         }
                         if style.italic {
-                            font_styles.push("italic".to_string());
+                            font_styles.push(BuiltInSymbol::Italic);
                         }
                         if style.underline {
-                            font_styles.push("underline".to_string());
+                            font_styles.push(BuiltInSymbol::Underline);
                         }
                         text_member.font_style = font_styles;
                     }
@@ -3197,9 +3185,9 @@ impl TextMemberHandlers {
             ),
             "antialiastype" => borrow_member_mut(
                 member_ref,
-                |_player| value.string_value(),
+                |_player| value.symbol_value(),
                 |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = value?;
+                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = value?.into_builtin_or_error()?;
                     Ok(())
                 },
             ),
@@ -3220,16 +3208,16 @@ impl TextMemberHandlers {
                             let item_datum = player.get_datum(item_ref);
                             if let Ok((entries, _)) = item_datum.to_map_tuple() {
                                 let entries = entries.clone();
-                                let mut tab_type = "left".to_string();
+                                let mut tab_type = BuiltInSymbol::Left;
                                 let mut position = 0i32;
                                 for (key_ref, val_ref) in &entries {
-                                    let key = player.get_datum(key_ref).string_value().unwrap_or_default();
-                                    match key.as_str() {
-                                        "type" => {
-                                            let t = player.get_datum(val_ref).string_value().unwrap_or_default();
+                                    let key = player.get_datum(key_ref).symbol_value().unwrap_or(Symbol::empty()).into_builtin();
+                                    match key {
+                                        Some(BuiltInSymbol::Type) => {
+                                            let t = player.get_datum(val_ref).symbol_value().unwrap_or(Symbol::empty()).into_builtin().unwrap_or(BuiltInSymbol::Left);
                                             tab_type = t;
                                         }
-                                        "position" => {
+                                        Some(BuiltInSymbol::Position) => {
                                             position = player.get_datum(val_ref).int_value().unwrap_or(0);
                                         }
                                         _ => {}

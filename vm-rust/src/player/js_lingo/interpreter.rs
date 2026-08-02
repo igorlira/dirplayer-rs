@@ -12,6 +12,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::player::symbols::symbol::Symbol;
+
 use super::opcodes::JsOp;
 use super::value::{
     JsArray, JsArrayRef, JsError, JsFunction, JsFunctionRef, JsObject, JsObjectRef, JsValue,
@@ -1750,7 +1752,7 @@ fn director_ref_get_property(kind: &super::value::DirectorRefKind, name: &str) -
     crate::player::reserve_player_mut(|player| {
         let datum_opt = match kind {
             DirectorRefKind::Sprite(channel) => {
-                crate::player::score::sprite_get_prop(player, *channel, name).ok()
+                crate::player::score::sprite_get_prop(player, *channel, name.into()).ok()
             }
             DirectorRefKind::Member { cast_lib, cast_member } => {
                 let mref = crate::player::cast_lib::CastMemberRef {
@@ -1758,7 +1760,7 @@ fn director_ref_get_property(kind: &super::value::DirectorRefKind, name: &str) -
                     cast_member: *cast_member,
                 };
                 use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
-                CastMemberRefHandlers::get_prop(player, &mref, name).ok()
+                CastMemberRefHandlers::get_prop(player, &mref, Symbol::from_str(name)).ok()
             }
         };
         match datum_opt {
@@ -1786,7 +1788,7 @@ fn director_ref_set_property(
     });
     match kind {
         DirectorRefKind::Sprite(channel) => {
-            crate::player::score::sprite_set_prop(*channel, name, datum)
+            crate::player::score::sprite_set_prop(*channel, name.into(), datum)
                 .map_err(|e| JsError::new(format!("sprite({}).{} = ...: {}", channel, name, e.message)))
         }
         DirectorRefKind::Member { cast_lib, cast_member } => {
@@ -1795,7 +1797,7 @@ fn director_ref_set_property(
                 cast_member: *cast_member,
             };
             use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
-            CastMemberRefHandlers::set_prop(&mref, name, datum).map_err(|e| {
+            CastMemberRefHandlers::set_prop(&mref, name.into(), datum).map_err(|e| {
                 JsError::new(format!(
                     "member({} of castLib {}).{} = ...: {}",
                     cast_member, cast_lib, name, e.message

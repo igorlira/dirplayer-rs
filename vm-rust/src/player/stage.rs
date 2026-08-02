@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::bitmap::bitmap::PaletteRef, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
+use crate::{director::lingo::datum::Datum, player::{bitmap::bitmap::PaletteRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}}, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
 
 use super::{
     bitmap::bitmap::{get_system_default_palette, Bitmap},
@@ -194,16 +194,16 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
     }
 }
 
-pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, ScriptError> {
-    match prop {
-        "rect" => Ok(Datum::Rect(stage_layout(player).stage_rect, 0)),
-        "drawRect" => Ok(Datum::Rect(stage_layout(player).draw_rect, 0)),
-        "sourceRect" => {
+pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, ScriptError> {
+    match prop.into_builtin() {
+        Some(BuiltInSymbol::Rect) => Ok(Datum::Rect(stage_layout(player).stage_rect, 0)),
+        Some(BuiltInSymbol::DrawRect) => Ok(Datum::Rect(stage_layout(player).draw_rect, 0)),
+        Some(BuiltInSymbol::SourceRect) => {
             // TODO where does this come from?
             Ok(Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0))
         }
-        "bgColor" => Ok(Datum::ColorRef(player.bg_color.clone())),
-        "image" => {
+        Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(player.bg_color.clone())),
+        Some(BuiltInSymbol::Image) => {
             // `(the stage).image` is a *live, writable* handle to the stage
             // framebuffer (Director 11.5 Scripting Dictionary — drawing into
             // it via draw()/copyPixels()/fill() appears on screen). We back it
@@ -281,23 +281,23 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, Scrip
                 }
             }
         }
-        "name" => Ok(Datum::String("stage".to_string())),
+        Some(BuiltInSymbol::Name) => Ok(Datum::String("stage".to_string())),
         _ => return Err(ScriptError::new(format!("Invalid stage property {}", prop))),
     }
 }
 
 pub fn set_stage_prop(
     player: &mut DirPlayer,
-    prop: &str,
+    prop: Symbol,
     value: &DatumRef,
 ) -> Result<(), ScriptError> {
-    match prop {
-        "title" => {
+    match prop.into_builtin() {
+        Some(BuiltInSymbol::Title) => {
             let value = player.get_datum(value).clone();
             player.title = value.string_value()?;
             Ok(())
         }
-        "bgColor" => {
+        Some(BuiltInSymbol::BgColor) => {
             let value = player.get_datum(value).clone();
             match value {
                 Datum::ColorRef(color_ref) => {
@@ -314,13 +314,13 @@ pub fn set_stage_prop(
             }
             Ok(())
         }
-        "drawRect" | "rect" => {
+        Some(BuiltInSymbol::DrawRect | BuiltInSymbol::Rect) => {
             let value = player.get_datum(value).clone();
             match value {
                 Datum::Rect(r, _) => {
                     let w = (r[2] - r[0]).max(1.0) as u32;
                     let h = (r[3] - r[1]).max(1.0) as u32;
-                    if prop == "drawRect" {
+                    if prop.into_builtin().unwrap() == BuiltInSymbol::DrawRect {
                         player.stage_draw_rect = Some(r);
                     }
                     player.stage_size = (w, h);
@@ -333,7 +333,7 @@ pub fn set_stage_prop(
                 )),
             }
         }
-        "sourceRect" => Ok(()),
+        Some(BuiltInSymbol::SourceRect) => Ok(()),
         _ => {
             return Err(ScriptError::new(format!(
                 "Cannot set stage property {}",

@@ -19,6 +19,7 @@ use vm_rust::player::cast_member::{
     PhysXBodyType, PhysXConstraint, PhysXConstraintKind, PhysXPhysicsState, PhysXRigidBody,
     PhysXShapeKind, PhysXTerrain,
 };
+use vm_rust::player::symbols::symbol::Symbol;
 use vm_rust::player::handlers::datum_handlers::cast_member::{
     physx_gu_heightfield::GuHeightField,
     physx_gu_mesh::{box_vs_mesh, capsule_vs_mesh, sphere_vs_mesh, GuTriangleMesh},
@@ -60,7 +61,7 @@ fn build_floor_mesh(grid: usize) -> GuTriangleMesh {
 
 fn make_dynamic_sphere(name: &str, pos: [f64; 3], radius: f64, mass: f64) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = name.to_string();
+    b.name = Symbol::from_str(name);
     b.body_type = PhysXBodyType::Dynamic;
     b.shape = PhysXShapeKind::Sphere;
     b.position = pos;
@@ -73,7 +74,7 @@ fn make_dynamic_sphere(name: &str, pos: [f64; 3], radius: f64, mass: f64) -> Phy
 
 fn make_static_box(name: &str, pos: [f64; 3], half_extents: [f64; 3]) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = name.to_string();
+    b.name = Symbol::from_str(name);
     b.body_type = PhysXBodyType::Static;
     b.shape = PhysXShapeKind::Box;
     b.position = pos;
@@ -86,7 +87,7 @@ fn make_static_box(name: &str, pos: [f64; 3], half_extents: [f64; 3]) -> PhysXRi
 
 fn make_static_concave_mesh_body(name: &str, mesh: GuTriangleMesh) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = name.to_string();
+    b.name = Symbol::from_str(name);
     b.body_type = PhysXBodyType::Static;
     b.shape = PhysXShapeKind::ConcaveShape;
     b.triangle_mesh = Some(mesh);
@@ -99,7 +100,7 @@ fn make_static_concave_mesh_body(name: &str, mesh: GuTriangleMesh) -> PhysXRigid
 fn make_terrain(name: &str, hf: GuHeightField) -> PhysXTerrain {
     PhysXTerrain {
         id: 1,
-        name: name.to_string(),
+        name: Symbol::from_str(name),
         height_field: hf,
         friction: 0.5,
         restitution: 0.2,
@@ -450,9 +451,9 @@ fn collision_pair_filter_lets_sphere_pass_through_box() {
     state.bodies.push(make_static_box("floor", [0.0; 3], [10.0, 0.5, 10.0]));
     state.bodies.push(make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0));
     let key = if "ball" < "floor" {
-        ("ball".to_string(), "floor".to_string())
+        (Symbol::from_str("ball"), Symbol::from_str("floor"))
     } else {
-        ("floor".to_string(), "ball".to_string())
+        (Symbol::from_str("floor"), Symbol::from_str("ball"))
     };
     state.disabled_collision_pairs.insert(key);
 

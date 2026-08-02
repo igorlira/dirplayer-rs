@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use futures::channel::oneshot;
 
 use crate::director::lingo::datum::{Datum, DatumType, XtraInstanceId, datum_bool};
-use crate::player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, reserve_player_ref};
+use crate::player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, reserve_player_ref, symbols::symbol::Symbol};
 
 use xtra_sdk::Datum as XDatum;
 use xtra_sdk::scene3d::{FrameData as SceneFrameData, MeshData as SceneMeshData};
@@ -699,7 +699,7 @@ pub fn host_call_dispatch(op_id: u32, args_bytes: &[u8]) -> Vec<u8> {
             // Allocate the value into the datum arena, then bind the global.
             let value_ref = xdatum_to_host_datum_ref(&value);
             reserve_player_mut(|player| {
-                player.globals.insert(name, value_ref);
+                player.globals.insert(Symbol::from_str(&name), value_ref);
             });
             Vec::new()
         }
@@ -734,7 +734,7 @@ fn host_datum_to_xdatum(d: &Datum, player: &DirPlayer) -> XDatum {
         Datum::Int(i) => XDatum::Int(*i),
         Datum::Float(f) => XDatum::Float(*f),
         Datum::String(s) => XDatum::String(s.clone()),
-        Datum::Symbol(s) => XDatum::Symbol(s.clone()),
+        Datum::Symbol(s) => XDatum::Symbol(s.to_string()),
         // Container variants recurse, resolving each child DatumRef through
         // the player's datum arena. Groove passes/returns lists, prop-lists,
         // points and rects, so these must survive the boundary intact.
@@ -776,7 +776,7 @@ fn xdatum_to_host_datum(d: &XDatum, player: &mut DirPlayer) -> Datum {
         XDatum::Int(i) => Datum::Int(*i),
         XDatum::Float(f) => Datum::Float(*f),
         XDatum::String(s) => Datum::String(s.clone()),
-        XDatum::Symbol(s) => Datum::Symbol(s.clone()),
+        XDatum::Symbol(s) => Datum::Symbol(Symbol::from_str(s)),
         // Container variants recurse: each child is converted and allocated
         // into the player's datum arena first, then the parent references the
         // fresh DatumRefs. Mirrors `host_datum_to_xdatum` in the other

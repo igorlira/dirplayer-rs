@@ -15,16 +15,11 @@ use super::cast_member::{
 use crate::{
     director::{
         enums::{ScriptType, ShapeType},
-        lingo::datum::{datum_bool, Datum, DatumType},
+        lingo::datum::{Datum, DatumType, datum_bool},
     },
     js_api::JsApi,
     player::{
-        bitmap::bitmap::{resolve_color_ref, Bitmap},
-        cast_lib::CastMemberRef,
-        cast_member::{BitmapMember, CastMember, CastMemberType, CastMemberTypeId, TextMember},
-        handlers::types::TypeUtils,
-        reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer, ScriptError,
-        sprite::ColorRef,
+        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, resolve_color_ref}, cast_lib::CastMemberRef, cast_member::{BitmapMember, CastMember, CastMemberType, CastMemberTypeId, TextMember}, handlers::types::TypeUtils, reserve_player_mut, reserve_player_ref, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -124,15 +119,15 @@ impl CastMemberRefHandlers {
     /// Check if a cast member handler needs async dispatch.
     /// Havok `step` runs physics with per-substep Lingo callbacks; bitmap
     /// `importFileInto` needs to await the network fetch.
-    pub fn has_async_handler(datum: &DatumRef, handler_name: &str) -> bool {
-        if handler_name.eq_ignore_ascii_case("importFileInto") {
+    pub fn has_async_handler(datum: &DatumRef, handler_name: Symbol) -> bool {
+        if handler_name == BuiltInSymbol::ImportFileInto {
             return true;
         }
         // 3D `member.loadFile(w3dFile …)` fetches the W3D over the net.
-        if handler_name.eq_ignore_ascii_case("loadFile") {
+        if handler_name == BuiltInSymbol::LoadFile {
             return true;
         }
-        if handler_name != "step" { return false; }
+        if handler_name != BuiltInSymbol::Step { return false; }
         // Check if this is a Havok member
         reserve_player_ref(|player| {
             let r = match player.get_datum(datum) {
@@ -157,11 +152,11 @@ impl CastMemberRefHandlers {
     ///     7. Sync to W3D models, clear forces
     pub fn call_async<'a>(
         datum: &'a DatumRef,
-        _handler_name: &'a str,
+        _handler_name: Symbol,
         args: &'a Vec<DatumRef>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DatumRef, ScriptError>> + 'a>> {
         Box::pin(async move {
-            if _handler_name.eq_ignore_ascii_case("importFileInto") {
+            if _handler_name == BuiltInSymbol::ImportFileInto {
                 // Method form `member.importFileInto(url, props)` forwards
                 // to the global verb in BuiltInHandlerManager which holds
                 // the canonical implementation — prepend `self` so its
@@ -170,7 +165,7 @@ impl CastMemberRefHandlers {
                 forwarded.push(datum.clone());
                 forwarded.extend(args.iter().cloned());
                 return crate::player::handlers::manager::BuiltInHandlerManager::call_async_handler(
-                    "importFileInto", &forwarded,
+                    BuiltInSymbol::ImportFileInto.into(), &forwarded,
                 ).await;
             }
             if _handler_name.eq_ignore_ascii_case("loadFile") {
@@ -203,13 +198,13 @@ impl CastMemberRefHandlers {
                     player.alloc_datum(Datum::Float(*dt_value))
                 });
                 IN_STEP_CALLBACK.with(|c| c.set(true));
-                let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![dt_ref]).await;
+                let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![dt_ref]).await;
                 IN_STEP_CALLBACK.with(|c| c.set(false));
             }
 
             // Invoke collision interest callbacks (async, post-step).
             for (cb_handler, cb_instance, collision_info_ref) in &collision_cbs {
-                let _ = super::player_call_datum_handler(cb_instance, cb_handler, &vec![collision_info_ref.clone()]).await;
+                let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![collision_info_ref.clone()]).await;
             }
 
             Ok(step_result)
@@ -218,13 +213,14 @@ impl CastMemberRefHandlers {
 
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name {
-            "duplicate" => Self::duplicate(datum, args),
-            "erase" => Self::erase(datum, args),
-            "getPixel" | "setPixel" => {
+        let handler_name_str = handler_name.as_str();
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
+            Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
+            Some(BuiltInSymbol::GetPixel) | Some(BuiltInSymbol::SetPixel) => {
                 // Director lets image methods be called directly on a bitmap MEMBER
                 // (`member.getPixel(x,y)`), proxying to the member's image object.
                 // unicraft's terrainPreview samples a heightmap this way.
@@ -242,23 +238,23 @@ impl CastMemberRefHandlers {
                             "{}: member type {:?} has no image", handler_name, other.member_type_id()))),
                     }
                 })?;
-                if handler_name == "getPixel" {
+                if handler_name == BuiltInSymbol::GetPixel {
                     BitmapDatumHandlers::get_pixel(&image_datum, args)
                 } else {
                     BitmapDatumHandlers::set_pixel(&image_datum, args)
                 }
             }
-            "charPosToLoc" => {
+            Some(BuiltInSymbol::CharPosToLoc) => {
                 let member_arg = datum.clone();
                 let mut delegated_args: Vec<DatumRef> = Vec::with_capacity(args.len() + 1);
                 delegated_args.push(member_arg);
                 delegated_args.extend(args.iter().cloned());
                 crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
-                    "charpostoloc",
+                    Symbol::from_str("charpostoloc"),
                     &delegated_args,
                 )
             }
-            "getProp" => {
+            Some(BuiltInSymbol::GetProp) => {
                 // Chunk-typed property + range args (e.g.
                 // `member.char[y..y+8]`, `member.line[3..5]`) compiles to
                 // `getProp(member, #char, y, y+8)`. Route those to the
@@ -279,7 +275,7 @@ impl CastMemberRefHandlers {
                 if is_chunk_typed && args.len() >= 2 {
                     // Delegate to the member-type getPropRef which builds a
                     // StringChunk via field.rs / text.rs.
-                    return Self::call_member_type(datum, &"getPropRef".to_string(), args);
+                    return Self::call_member_type(datum, "getPropRef", args);
                 }
 
                 let result_ref = reserve_player_mut(|player| {
@@ -291,8 +287,8 @@ impl CastMemberRefHandlers {
                             ))
                         }
                     };
-                    let prop = player.get_datum(&args[0]).string_value()?;
-                    let result = Self::get_prop(player, &cast_member_ref, &prop)?;
+                    let prop = player.get_datum(&args[0]).symbol_value()?;
+                    let result = Self::get_prop(player, &cast_member_ref, prop)?;
                     Ok(player.alloc_datum(result))
                 })?;
                 if args.len() > 1 {
@@ -303,21 +299,21 @@ impl CastMemberRefHandlers {
                     Ok(result_ref)
                 }
             }
-            "getPropRef" => {
+            Some(BuiltInSymbol::GetPropRef) => {
                 if is_havok_member(datum)? {
-                    HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                    HavokPhysicsMemberHandlers::call(datum, handler_name_str, args)
                 } else if is_physx_member(datum)? {
                     PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else if is_3d_member(datum)? {
                     Shockwave3dMemberHandlers::call(datum, handler_name, args)
                 } else {
-                    Self::call_member_type(datum, handler_name, args)
+                    Self::call_member_type(datum, handler_name_str, args)
                         .or_else(|_| reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void))))
                 }
             }
-            "count" => {
+            Some(BuiltInSymbol::Count) => {
                 if is_havok_member(datum)? {
-                    HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                    HavokPhysicsMemberHandlers::call(datum, handler_name_str, args)
                 } else if is_physx_member(datum)? {
                     PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else if is_3d_member(datum)? {
@@ -337,11 +333,11 @@ impl CastMemberRefHandlers {
                         }
                         // Try to get the member's text
                         // First try "text" property, then fallback to "previewText" for Font members
-                        let text = match Self::get_prop(player, &cast_member_ref, &"text".to_string()) {
+                        let text = match Self::get_prop(player, &cast_member_ref, Symbol::builtin(BuiltInSymbol::Text)) {
                             Ok(datum) => datum.string_value()?,
                             Err(_) => {
                                 // Try previewText for Font members
-                                match Self::get_prop(player, &cast_member_ref, &"previewText".to_string()) {
+                                match Self::get_prop(player, &cast_member_ref, Symbol::builtin(BuiltInSymbol::PreviewText)) {
                                     Ok(datum) => datum.string_value()?,
                                     Err(_) => {
                                         return Err(ScriptError::new(format!(
@@ -352,11 +348,11 @@ impl CastMemberRefHandlers {
                             }
                         };
 
-                        let count_of = player.get_datum(&args[0]).string_value_cow()?;
+                        let count_of = player.get_datum(&args[0]).symbol_value()?;
 
                         let delimiter = player.movie.item_delimiter;
-                        let chunk_type = std::panic::catch_unwind(|| crate::director::lingo::datum::StringChunkType::from(&*count_of))
-                            .map_err(|_| ScriptError::new(format!("Invalid string chunk type: {}", count_of)))?;
+                        let chunk_type = std::panic::catch_unwind(|| crate::director::lingo::datum::StringChunkType::from(count_of))
+                            .map_err(|_| ScriptError::new(format!("Invalid string chunk type: {}", count_of.as_str())))?;
                         let count = crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils::resolve_chunk_count(
                             &text,
                             chunk_type,
@@ -366,12 +362,29 @@ impl CastMemberRefHandlers {
                     })
                 }
             }
+            // Shockwave 3D member handlers — delegated to Shockwave3dMemberHandlers::call()
+            Some(
+                BuiltInSymbol::Model | BuiltInSymbol::ModelResource | BuiltInSymbol::Shader | BuiltInSymbol::Texture
+                | BuiltInSymbol::Light | BuiltInSymbol::Camera | BuiltInSymbol::Group | BuiltInSymbol::Motion
+                | BuiltInSymbol::ResetWorld | BuiltInSymbol::RevertToWorldDefaults
+                | BuiltInSymbol::NewTexture | BuiltInSymbol::NewShader | BuiltInSymbol::NewModel | BuiltInSymbol::NewModelResource
+                | BuiltInSymbol::NewLight | BuiltInSymbol::NewCamera | BuiltInSymbol::NewGroup | BuiltInSymbol::NewMotion | BuiltInSymbol::NewMesh
+                | BuiltInSymbol::DeleteTexture | BuiltInSymbol::DeleteShader | BuiltInSymbol::DeleteModel | BuiltInSymbol::DeleteModelResource
+                | BuiltInSymbol::DeleteLight | BuiltInSymbol::DeleteCamera | BuiltInSymbol::DeleteGroup | BuiltInSymbol::DeleteMotion
+                | BuiltInSymbol::CloneModelFromCastmember | BuiltInSymbol::CloneMotionFromCastmember | BuiltInSymbol::CloneDeep
+                | BuiltInSymbol::LoadFile | BuiltInSymbol::Extrude3d | BuiltInSymbol::GetPref | BuiltInSymbol::SetPref
+                | BuiltInSymbol::RegisterForEvent | BuiltInSymbol::RegisterScript | BuiltInSymbol::UnregisterAllEvents
+                | BuiltInSymbol::Image
+                | BuiltInSymbol::ModelsUnderRay | BuiltInSymbol::ModelsUnderLoc | BuiltInSymbol::ModelUnderLoc,
+            ) => {
+                Shockwave3dMemberHandlers::call(datum, handler_name, args)
+            }
             // Havok + PhysX (AGEIA) Physics member handlers — overlapping
             // handler names are routed by member type below. Director Lingo
             // is fully case-insensitive on handler names, so we use
             // `match_ci!` to recognize every casing the script may use
             // (`EnableCollisionCallback`, `enablecollisioncallback`, etc.).
-            _ if match_ci!(handler_name, {
+            _ if match_ci!(handler_name_str, {
                 // Havok handlers
                 "initialize" | "shutdown" | "step" | "reset"
                     | "rigidBody" | "spring"
@@ -408,37 +421,25 @@ impl CastMemberRefHandlers {
                 _ => false,
             }) => {
                 if is_havok_member(datum)? {
-                    HavokPhysicsMemberHandlers::call(datum, handler_name, args)
+                    HavokPhysicsMemberHandlers::call(datum, handler_name_str, args)
                 } else if is_physx_member(datum)? {
                     PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
                 } else {
-                    Self::call_member_type(datum, handler_name, args)
+                    Self::call_member_type(datum, handler_name_str, args)
                 }
-            }
-            // Shockwave 3D member handlers — delegated to Shockwave3dMemberHandlers::call()
-            "model" | "modelResource" | "shader" | "texture" | "light" | "camera" | "group" | "motion"
-            | "resetWorld" | "revertToWorldDefaults"
-            | "newTexture" | "newShader" | "newModel" | "newModelResource" | "newLight" | "newCamera" | "newGroup" | "newMotion" | "newMesh"
-            | "deleteTexture" | "deleteShader" | "deleteModel" | "deleteModelResource" | "deleteLight" | "deleteCamera" | "deleteGroup" | "deleteMotion"
-            | "cloneModelFromCastmember" | "cloneMotionFromCastmember" | "cloneDeep"
-            | "loadFile" | "extrude3d" | "getPref" | "setPref"
-            | "registerForEvent" | "registerScript" | "unregisterAllEvents"
-            | "image"
-            | "modelsUnderRay" | "modelsUnderLoc" | "modelUnderLoc" => {
-                Shockwave3dMemberHandlers::call(datum, handler_name, args)
             }
             // Mixer Xtra (chapter 15:8702) — minimum-viable stub. The full
             // Mixer API has its own audio engine (createSoundObject, sound
             // playback, filter chains, callbacks) which is out of scope; we
             // stub the init-time surface so movies that reset the mixer
             // state on startup don't crash. Music won't actually play.
-            _ if match_ci!(handler_name, {
+            _ if match_ci!(handler_name_str, {
                 "getSoundObjectList" | "getSoundObject" | "createSoundObject"
                     | "deleteSoundObject" | "deleteAllSoundObjects" => true,
                 _ => false,
             }) => {
                 reserve_player_mut(|player| {
-                    if handler_name.eq_ignore_ascii_case("getSoundObjectList") {
+                    if handler_name_str.eq_ignore_ascii_case("getSoundObjectList") {
                         // Empty list — no sound objects exist.
                         Ok(player.alloc_datum(Datum::List(
                             DatumType::List, std::collections::VecDeque::new(), false,
@@ -454,7 +455,7 @@ impl CastMemberRefHandlers {
                     }
                 })
             }
-            _ => Self::call_member_type(datum, handler_name, args),
+            _ => Self::call_member_type(datum, handler_name_str, args),
         }
     }
 
@@ -509,7 +510,7 @@ impl CastMemberRefHandlers {
                     TextMemberHandlers::call(player, datum, handler_name, args)
                 }
                 CastMemberType::Button(_) => {
-                    ButtonMemberHandlers::call(player, datum, handler_name, args)
+                    ButtonMemberHandlers::call(player, datum, Symbol::from_str(handler_name), args)
                 }
                 CastMemberType::HavokPhysics(_) => {
                     HavokPhysicsMemberHandlers::call(datum, handler_name, args)
@@ -523,10 +524,10 @@ impl CastMemberRefHandlers {
                 // or log+stub, instead of throwing a generic "No handler"
                 // that hides the real member type.
                 CastMemberType::Shockwave3d(_) => {
-                    Shockwave3dMemberHandlers::call(datum, handler_name, args)
+                    Shockwave3dMemberHandlers::call(datum, Symbol::from_str(handler_name), args)
                 }
                 CastMemberType::PhysXPhysics(_) => {
-                    PhysXPhysicsMemberHandlers::call(datum, handler_name, args)
+                    PhysXPhysicsMemberHandlers::call(datum, Symbol::from_str(handler_name), args)
                 }
                 CastMemberType::VectorShape(_) => {
                     VectorShapeMemberHandlers::call(player, datum, handler_name, args)
@@ -633,10 +634,10 @@ impl CastMemberRefHandlers {
     fn get_invalid_member_prop(
         player: &mut DirPlayer,
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
-        match prop {
-            "name" => Ok(Datum::String("".to_string())),
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Name) => Ok(Datum::String("".to_string())),
             // Director: `.number` returns 0 for the empty/NULL member ref
             // (i.e. `sprite(N).member.number` when sprite N has no member),
             // and the negative slot for `member(-1)`-style invalid refs.
@@ -645,28 +646,28 @@ impl CastMemberRefHandlers {
             // -1 unconditionally made that test never fire and dragged the
             // loop through unrelated UI sprites further down the score
             // (verified in Trick or Treat Beat's `buildTileAnims`).
-            "number" => Ok(Datum::Int(
+            Some(BuiltInSymbol::Number) => Ok(Datum::Int(
                 if member_ref.cast_lib == 0 && member_ref.cast_member == 0 {
                     0
                 } else {
                     member_ref.cast_member.min(-1)
                 },
             )),
-            // A valid member's `.type` returns a Symbol (see get_prop's "type"
+                        // A valid member's `.type` returns a Symbol (see get_prop's "type"
             // arm), so the invalid/empty member must too — Director's `#empty`.
             // Returning a String made `member("x").type = #empty` FALSE (String
             // vs Symbol), so the common lazy-create idiom
             //   `if member(name).type = #empty then member = new(#bitmap) ...`
             // took the else branch and used the invalid (-1,-1) ref instead of
             // creating the member (g349 cave-door `drawframes`).
-            "type" => Ok(Datum::Symbol("empty".to_string())),
-            "castLibNum" => Ok(Datum::Int(-1)),
-            "memberNum" => Ok(Datum::Int(-1)),
-            "text" | "comments" => Ok(Datum::String("".to_string())),
-            "loaded" | "mediaReady" => Ok(Datum::Int(1)),
-            "width" | "height" | "rect" | "duration" => Ok(Datum::Void),
-            "image" => Ok(Datum::Void),
-            "regPoint" => Ok(Datum::Point([0.0, 0.0], 0)),
+            Some(BuiltInSymbol::Type) => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Empty))),
+            Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(-1)),
+            Some(BuiltInSymbol::MemberNum) => Ok(Datum::Int(-1)),
+            Some(BuiltInSymbol::Text | BuiltInSymbol::Comments) => Ok(Datum::String("".to_string())),
+            Some(BuiltInSymbol::Loaded | BuiltInSymbol::MediaReady) => Ok(Datum::Int(1)),
+            Some(BuiltInSymbol::Width | BuiltInSymbol::Height | BuiltInSymbol::Rect | BuiltInSymbol::Duration) => Ok(Datum::Void),
+            Some(BuiltInSymbol::Image) => Ok(Datum::Void),
+            Some(BuiltInSymbol::RegPoint) => Ok(Datum::Point([0.0, 0.0], 0)),
             _ => Err(ScriptError::new(format!(
                 "Cannot get prop {} of invalid cast member ({}, {})",
                 prop, member_ref.cast_lib, member_ref.cast_member
@@ -678,10 +679,11 @@ impl CastMemberRefHandlers {
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
         member_type: &CastMemberTypeId,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
-        debug!("Getting prop '{}' for member type {:?}", prop, member_type);
-        if prop.eq_ignore_ascii_case("regPoint") {
+        let prop_str = prop.as_str();
+        debug!("Getting prop '{}' for member type {:?}", prop_str, member_type);
+        if prop == BuiltInSymbol::RegPoint {
             // Text members with centerRegPoint use the CURRENT (measured) size for
             // the reg point, not the stored TextInfo.reg_x/reg_y which are authored
             // defaults that don't track wrapped-text expansion.
@@ -740,9 +742,9 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Bitmap => {
                 BitmapMemberHandlers::get_prop(player, cast_member_ref, prop)
             }
-            CastMemberTypeId::Field => FieldMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Field => FieldMemberHandlers::get_prop(player, cast_member_ref, prop_str),
             CastMemberTypeId::Text => {
-                TextMemberHandlers::get_prop(player, cast_member_ref, prop)
+                TextMemberHandlers::get_prop(player, cast_member_ref, prop_str)
                     .or_else(|_| {
                         // Forward to 3D handler if text member has embedded 3D world
                         if player.movie.cast_manager.find_member_by_ref(cast_member_ref)
@@ -751,20 +753,20 @@ impl CastMemberRefHandlers {
                             Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop)
                         } else {
                             Err(ScriptError::new(format!(
-                                "Cannot get castMember property {} for text", prop
+                                "Cannot get castMember property {} for text", prop_str
                             )))
                         }
                     })
             },
             CastMemberTypeId::Button => ButtonMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::FilmLoop => {
-                FilmLoopMemberHandlers::get_prop(player, cast_member_ref, prop)
+                FilmLoopMemberHandlers::get_prop(player, cast_member_ref, prop_str)
             }
             CastMemberTypeId::Sound => SoundMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Font => FontMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Palette => PaletteMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Shockwave3d => Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop),
-            CastMemberTypeId::HavokPhysics => HavokPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::HavokPhysics => HavokPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop_str),
             CastMemberTypeId::PhysXPhysics => PhysXPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::Script => {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
@@ -773,11 +775,11 @@ impl CastMemberRefHandlers {
                     CastMemberType::Script(s) => s,
                     _ => return Err(ScriptError::new("Cast member is not a script".to_string())),
                 };
-                match prop {
-                    "text" => Ok(Datum::String("".to_string())),
-                    "script" => Ok(Datum::ScriptRef(cast_member_ref.clone())),
-                    "scriptText" => Ok(Datum::String("".to_string())),
-                    "scriptType" => {
+                match prop.into_builtin() {
+                    Some(BuiltInSymbol::Text) => Ok(Datum::String("".to_string())),
+                    Some(BuiltInSymbol::Script) => Ok(Datum::ScriptRef(cast_member_ref.clone())),
+                    Some(BuiltInSymbol::ScriptText) => Ok(Datum::String("".to_string())),
+                    Some(BuiltInSymbol::ScriptType) => {
                         let symbol = match script_data.script_type {
                             ScriptType::Movie => "movie",
                             ScriptType::Parent => "parent",
@@ -785,9 +787,9 @@ impl CastMemberRefHandlers {
                             ScriptType::Member => "member",
                             _ => "unknown",
                         };
-                        Ok(Datum::Symbol(symbol.to_string()))
+                        Ok(Datum::Symbol(Symbol::from_str(symbol)))
                     }
-                    "ilk" => Ok(Datum::Symbol("script".to_string())),
+                    Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::from_str("script"))),
                     _ => Err(ScriptError::new(format!("Script members don't support property {}", prop))),
                 }
             }
@@ -797,15 +799,15 @@ impl CastMemberRefHandlers {
 
                 if let CastMemberType::Shape(shape_member) = &cast_member.member_type {
                     let info = &shape_member.shape_info;
-                    match prop {
-                        "rect" => {
+                    match prop.into_builtin() {
+                        Some(BuiltInSymbol::Rect) => {
                             let width = info.width() as f64;
                             let height = info.height() as f64;
                             Ok(Datum::Rect([0.0, 0.0, width, height], 0))
                         }
-                        "width" => Ok(Datum::Int(info.width() as i32)),
-                        "height" => Ok(Datum::Int(info.height() as i32)),
-                        "shapeType" => {
+                        Some(BuiltInSymbol::Width) => Ok(Datum::Int(info.width() as i32)),
+                        Some(BuiltInSymbol::Height) => Ok(Datum::Int(info.height() as i32)),
+                        Some(BuiltInSymbol::ShapeType) => {
                             let symbol = match info.shape_type {
                                 ShapeType::Rect => "rect",
                                 ShapeType::OvalRect => "roundRect",
@@ -813,23 +815,23 @@ impl CastMemberRefHandlers {
                                 ShapeType::Line => "line",
                                 ShapeType::Unknown => "rect",
                             };
-                            Ok(Datum::Symbol(symbol.to_string()))
+                            Ok(Datum::Symbol(Symbol::from_str(symbol)))
                         }
-                        "filled" => Ok(datum_bool(info.fill_type != 0)),
+                        Some(BuiltInSymbol::Filled) => Ok(datum_bool(info.fill_type != 0)),
                         // Director stores line thickness 1-based: 1 = no
                         // border ("hairline" / invisible), 2 = 1px, 3 = 2px,
                         // …, 6 = 5px (max). The Lingo `lineSize of member`
                         // getter returns the 0-based form (file value − 1),
                         // so file=1 → Lingo=0 (matches Director on a
                         // sprite-4 shape with no border).
-                        "lineSize" => {
+                        Some(BuiltInSymbol::LineSize) => {
                             let raw = info.line_thickness as i32;
                             Ok(Datum::Int((raw - 1).max(0)))
                         }
-                        "pattern" => Ok(Datum::Int(info.pattern as i32)),
-                        "foreColor" => Ok(Datum::Int(info.fore_color as i32)),
-                        "backColor" => Ok(Datum::Int(info.back_color as i32)),
-                        "image" => {
+                        Some(BuiltInSymbol::Pattern) => Ok(Datum::Int(info.pattern as i32)),
+                        Some(BuiltInSymbol::ForeColor) => Ok(Datum::Int(info.fore_color as i32)),
+                        Some(BuiltInSymbol::BackColor) => Ok(Datum::Int(info.back_color as i32)),
+                        Some(BuiltInSymbol::Image) => {
                             // Director rasterizes shape members on demand for
                             // `the image of member`. Snapshot the small
                             // ShapeInfo so we can release the cast_manager
@@ -966,11 +968,11 @@ impl CastMemberRefHandlers {
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 if let CastMemberType::Flash(flash) = &cast_member.member_type {
                     let (l, t, r, b) = flash.effective_rect();
-                    match prop {
-                        "width" => Ok(Datum::Int((r - l) as i32)),
-                        "height" => Ok(Datum::Int((b - t) as i32)),
-                        "rect" => Ok(Datum::Rect([l as f64, t as f64, r as f64, b as f64], 0)),
-                        "regPoint" => {
+                    match prop.into_builtin() {
+                        Some(BuiltInSymbol::Width) => Ok(Datum::Int((r - l) as i32)),
+                        Some(BuiltInSymbol::Height) => Ok(Datum::Int((b - t) as i32)),
+                        Some(BuiltInSymbol::Rect) => Ok(Datum::Rect([l as f64, t as f64, r as f64, b as f64], 0)),
+                        Some(BuiltInSymbol::RegPoint) => {
                             let rp = flash.reg_point;
                             Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
                         }
@@ -982,7 +984,7 @@ impl CastMemberRefHandlers {
                         // makes bogey_nights' #hiding `sprite.frame =
                         // member.frameCount` pin the SWF root at frame 0 and
                         // stall the grab state machine into a stuck #retreat).
-                        "frameCount" => Ok(Datum::Int(
+                        Some(BuiltInSymbol::FrameCount) => Ok(Datum::Int(
                             crate::player::cast_member::CastMember::parse_swf_frame_count(&flash.data)
                                 .map(|n| n as i32)
                                 .unwrap_or(0),
@@ -994,7 +996,7 @@ impl CastMemberRefHandlers {
                         // detect a missing/empty preloader after linking it via
                         // `x.fileName = <url>`, so this must reflect the bytes the
                         // fileName setter loaded from the preload cache.
-                        "size" => Ok(Datum::Int(flash.data.len() as i32)),
+                        Some(BuiltInSymbol::Size) => Ok(Datum::Int(flash.data.len() as i32)),
                         _ => Ok(Datum::Void),
                     }
                 } else {
@@ -1006,9 +1008,9 @@ impl CastMemberRefHandlers {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
                 if let CastMemberType::Movie(mv) = &cast_member.member_type {
-                    match prop {
-                        "fileName" | "pathName" => Ok(Datum::String(mv.file_name.clone())),
-                        "scriptsEnabled" => Ok(Datum::Int(mv.scripts_enabled as i32)),
+                    match prop.as_lower_str() {
+                        "filename" | "pathname" => Ok(Datum::String(mv.file_name.clone())),
+                        "scriptsenabled" => Ok(Datum::Int(mv.scripts_enabled as i32)),
                         "crop" => Ok(Datum::Int(mv.crop as i32)),
                         "center" => Ok(Datum::Int(mv.center as i32)),
                         "sound" => Ok(Datum::Int(mv.sound as i32)),
@@ -1020,7 +1022,7 @@ impl CastMemberRefHandlers {
                             0,
                         )),
                         "linked" => Ok(Datum::Int(1)),
-                        "regPoint" => Ok(Datum::Point(
+                        "regpoint" => Ok(Datum::Point(
                             [mv.reg_point.0 as f64, mv.reg_point.1 as f64],
                             0,
                         )),
@@ -1032,25 +1034,25 @@ impl CastMemberRefHandlers {
             }
             _ => {
                 // SWA/streaming media properties — return sensible defaults
-                match prop {
-                    "soundChannel" => Ok(Datum::Int(0)),
-                    "preloadTime" => Ok(Datum::Int(0)),
-                    "volume" => Ok(Datum::Int(0)),
-                    "url" => Ok(Datum::String(String::new())),
-                    "state" => Ok(Datum::Int(0)), // 0=stopped
-                    "currentTime" => Ok(Datum::Int(0)),
-                    "duration" => Ok(Datum::Int(0)),
-                    "percentPlayed" => Ok(Datum::Int(0)),
-                    "percentStreamed" => Ok(Datum::Int(0)),
-                    "loop" => Ok(Datum::Int(0)),
-                    "pausedAtStart" => Ok(Datum::Int(0)),
+                match prop.into_builtin() {
+                    Some(BuiltInSymbol::SoundChannel) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::PreloadTime) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::Volume) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::Url) => Ok(Datum::String(String::new())),
+                    Some(BuiltInSymbol::State) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::CurrentTime) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::Duration) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::PercentPlayed) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::PercentStreamed) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::Loop) => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::PausedAtStart) => Ok(Datum::Int(0)),
                     // Mixer Xtra status (chapter 15:8702). Real Director
                     // returns #playing / #stopped / #paused / #error; our
                     // mixer stub never plays anything, so #stopped is the
                     // honest default. Scripts compare against #playing to
                     // gate audio-driven branches — those branches stay off.
-                    "status" => Ok(Datum::Symbol("stopped".to_string())),
-                    "numBuffersToPreload" | "playbackQuality" | "audioContextLatency" => Ok(Datum::Int(0)),
+                    Some(BuiltInSymbol::Status) => Ok(Datum::Symbol(Symbol::from_str("stopped"))),
+                    Some(BuiltInSymbol::NumBuffersToPreload | BuiltInSymbol::PlaybackQuality | BuiltInSymbol::AudioContextLatency) => Ok(Datum::Int(0)),
                     _ => Err(ScriptError::new(format!(
                         "Cannot get castMember prop {} for member of type {:?}",
                         prop, member_type
@@ -1062,7 +1064,7 @@ impl CastMemberRefHandlers {
 
     fn set_member_type_prop(
         member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
         let member_type = reserve_player_ref(|player| {
@@ -1089,6 +1091,7 @@ impl CastMemberRefHandlers {
             None => return Ok(()), // Member was erased, silently ignore
         };
 
+        let prop_str = prop.as_str();
         // `the scriptText of member` is settable on ANY member type. We don't
         // compile Lingo, but movies (freeT) use it as scratch storage, so
         // round-trip the string keyed by member ref (read back by the getter).
@@ -1101,7 +1104,7 @@ impl CastMemberRefHandlers {
             });
         }
 
-        if prop.eq_ignore_ascii_case("regPoint") {
+        if prop == BuiltInSymbol::RegPoint {
             return reserve_player_mut(|player| {
                 let (vals, _flags) = value.to_point_inline()?;
                 let x = vals[0] as i32;
@@ -1130,9 +1133,9 @@ impl CastMemberRefHandlers {
         // Handle Script-specific props before the main match so unrecognized
         // props fall through to the wildcard arm (e.g. implicit bitmap conversion).
         if member_type == CastMemberTypeId::Script {
-            match prop {
-                "scriptText" => return Ok(()), // No-op: no lingo compiler
-                "scriptType" => {
+            match prop.into_builtin() {
+                Some(BuiltInSymbol::ScriptText) => return Ok(()), // No-op: no lingo compiler
+                Some(BuiltInSymbol::ScriptType) => {
                     let type_str = value.string_value()?;
                     let script_type = match type_str.to_lowercase().as_str() {
                         "movie" => ScriptType::Movie,
@@ -1157,9 +1160,9 @@ impl CastMemberRefHandlers {
         }
 
         match member_type {
-            CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Field => FieldMemberHandlers::set_prop(member_ref, prop_str, value),
             CastMemberTypeId::Text => {
-                let text_result = TextMemberHandlers::set_prop(member_ref, prop, value.clone());
+                let text_result = TextMemberHandlers::set_prop(member_ref, prop_str, value.clone());
                 if text_result.is_err() {
                     // Forward to 3D handler if text member has embedded 3D world
                     let has_w3d = reserve_player_ref(|player| {
@@ -1168,7 +1171,7 @@ impl CastMemberRefHandlers {
                     });
                     if has_w3d {
                         reserve_player_mut(|player| {
-                            Shockwave3dMemberHandlers::set_prop(player, member_ref, prop, &value)
+                            Shockwave3dMemberHandlers::set_prop(player, member_ref, prop_str, &value)
                         })
                     } else {
                         text_result
@@ -1289,27 +1292,29 @@ impl CastMemberRefHandlers {
                 });
             }
             CastMemberTypeId::Shockwave3d => reserve_player_mut(|player| {
-                Shockwave3dMemberHandlers::set_prop(player, member_ref, prop, &value)
+                Shockwave3dMemberHandlers::set_prop(player, member_ref, prop_str, &value)
             }),
             CastMemberTypeId::HavokPhysics => {
-                HavokPhysicsMemberHandlers::set_prop(member_ref, prop, value)
+                HavokPhysicsMemberHandlers::set_prop(member_ref, prop_str, value)
             }
             CastMemberTypeId::PhysXPhysics => {
-                PhysXPhysicsMemberHandlers::set_prop(member_ref, prop, value)
+                PhysXPhysicsMemberHandlers::set_prop(member_ref, prop_str, value)
             }
             _ => {
                 // SWA/streaming media properties — accept silently as no-ops
-                if matches!(prop, "soundChannel" | "preloadTime" | "volume" | "url"
-                    | "state" | "currentTime" | "duration" | "percentPlayed"
-                    | "percentStreamed" | "loop" | "pausedAtStart") {
+                if matches!(prop.into_builtin(), Some(
+                    BuiltInSymbol::SoundChannel | BuiltInSymbol::PreloadTime | BuiltInSymbol::Volume
+                    | BuiltInSymbol::Url | BuiltInSymbol::State | BuiltInSymbol::CurrentTime
+                    | BuiltInSymbol::Duration | BuiltInSymbol::PercentPlayed
+                    | BuiltInSymbol::PercentStreamed | BuiltInSymbol::Loop | BuiltInSymbol::PausedAtStart
+                )) {
                     return Ok(());
                 }
                 // Check if this is a bitmap-specific property being set on a non-bitmap
-                if prop == "image"
-                    || prop == "regPoint"
-                    || prop == "paletteRef"
-                    || prop == "palette"
-                {
+                if matches!(prop.into_builtin(), Some(
+                    BuiltInSymbol::Image | BuiltInSymbol::RegPoint
+                    | BuiltInSymbol::PaletteRef | BuiltInSymbol::Palette
+                )) {
                     // Director allows setting bitmap properties on non-bitmap members
                     // by implicitly converting them to bitmap members
                     reserve_player_mut(|player| {
@@ -1345,7 +1350,7 @@ impl CastMemberRefHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<Datum, ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
         if is_invalid {
@@ -1382,33 +1387,32 @@ impl CastMemberRefHandlers {
             }
         };
 
-        match prop {
-            "name" => Ok(Datum::String(name)),
-            "memberNum" => Ok(Datum::Int(member_num as i32)),
-            "number" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Name) => Ok(Datum::String(name)),
+            Some(BuiltInSymbol::MemberNum) => Ok(Datum::Int(member_num as i32)),
+            Some(BuiltInSymbol::Number) => {
                 if player.movie.dir_version >= 600 {
                     Ok(Datum::Int(slot_number))
                 } else {
                     Ok(Datum::Int(member_num as i32))
                 }
             }
-            "type" => Ok(Datum::Symbol(member_type.symbol_string()?.to_string())),
-            "castLibNum" => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
-            "color" => Ok(Datum::ColorRef(color)),
-            "bgColor" => Ok(Datum::ColorRef(bg_color)),
-            "loaded" => Ok(Datum::Int(1)),
-            "mediaReady" => Ok(Datum::Int(1)),
-            "comments" => Ok(Datum::String(comments)),
-            "ilk" => Ok(Datum::Symbol("member".to_string())),
-            // In Director, member.member returns the member reference itself
-            "member" => Ok(Datum::CastMember(cast_member_ref.clone())),
+            Some(BuiltInSymbol::Type) => Ok(Datum::Symbol(Symbol::from_str(member_type.symbol_string()?))),
+            Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
+            Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(color)),
+            Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(bg_color)),
+            Some(BuiltInSymbol::Loaded) => Ok(Datum::Int(1)),
+            Some(BuiltInSymbol::MediaReady) => Ok(Datum::Int(1)),
+            Some(BuiltInSymbol::Comments) => Ok(Datum::String(comments)),
+            Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::from_str("member"))),
+            Some(BuiltInSymbol::Member) => Ok(Datum::CastMember(cast_member_ref.clone())),
             _ => Self::get_member_type_prop(player, cast_member_ref, &member_type, prop),
         }
     }
 
     pub fn set_prop(
         cast_member_ref: &CastMemberRef,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
         let is_invalid = cast_member_ref.cast_lib < 0 || cast_member_ref.cast_member < 0;
@@ -1432,8 +1436,8 @@ impl CastMemberRefHandlers {
                 .is_some()
         });
         let result = if exists {
-            match prop {
-                "name" => borrow_member_mut(
+            match prop.into_builtin() {
+                Some(BuiltInSymbol::Name) => borrow_member_mut(
                     cast_member_ref,
                     |_player| value.string_value(),
                     |cast_member, value| {
@@ -1441,7 +1445,7 @@ impl CastMemberRefHandlers {
                         Ok(())
                     },
                 ),
-                "comments" => borrow_member_mut(
+                Some(BuiltInSymbol::Comments) => borrow_member_mut(
                     cast_member_ref,
                     |_player| value.string_value(),
                     |cast_member, value| {
@@ -1449,7 +1453,7 @@ impl CastMemberRefHandlers {
                         Ok(())
                     },
                 ),
-                "color" => borrow_member_mut(
+                Some(BuiltInSymbol::Color) => borrow_member_mut(
                     cast_member_ref,
                     |_| {},
                     |cast_member, _| {
@@ -1473,7 +1477,7 @@ impl CastMemberRefHandlers {
                         Ok(())
                     },
                 ),
-                "bgColor" => borrow_member_mut(
+                Some(BuiltInSymbol::BgColor) => borrow_member_mut(
                     cast_member_ref,
                     |_| {},
                     |cast_member, _| {
@@ -1484,12 +1488,12 @@ impl CastMemberRefHandlers {
                 // Mixer Xtra setter stubs — same scope rationale as the
                 // call() arm above. Music init scripts touch these on the
                 // mixer cast member; we accept the writes but discard them.
-                _ if match_ci!(prop, {
-                    "numBuffersToPreload" | "preloadTime" | "playbackQuality"
-                        | "audioContext" | "audioContextLatency"
+                _ if match prop.into_builtin() {
+                    Some(BuiltInSymbol::NumBuffersToPreload) | Some(BuiltInSymbol::PreloadTime) | Some(BuiltInSymbol::PlaybackQuality)
+                        | Some(BuiltInSymbol::AudioContext) | Some(BuiltInSymbol::AudioContextLatency)
                         => true,
                     _ => false,
-                }) => Ok(()),
+                } => Ok(()),
                 _ => Self::set_member_type_prop(cast_member_ref, prop, value),
             }
         } else {
@@ -1504,7 +1508,7 @@ impl CastMemberRefHandlers {
             Ok(())
         };
         if result.is_ok() {
-            if prop == "name" {
+            if prop == BuiltInSymbol::Name {
                 reserve_player_mut(|player| {
                     player.movie.cast_manager.invalidate_member_name_cache();
                 });

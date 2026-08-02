@@ -2,20 +2,11 @@ use log::{debug, warn, error};
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF},
-        datum_formatting::format_datum, ScriptInstanceRef, Score,
-        reserve_player_mut, reserve_player_ref, reserve_player_mut_async,
-        player_call_script_handler,
-        score::{get_sprite_at, concrete_sprite_hit_test}, handlers::datum_handlers::player_call_datum_handler,
-        handlers::datum_handlers::script_instance::ScriptInstanceUtils,
-        DatumRef, ScriptError, ScriptErrorCode, get_score_sprite_mut, MovieFrameTarget,
-        events::{
-            player_invoke_static_event, player_wait_available,
-            dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite,
-            dispatch_system_event_to_timeouts, player_invoke_targeted_event
-        },
+        DatumRef, MovieFrameTarget, Score, ScriptError, ScriptErrorCode, ScriptInstanceRef, cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF}, datum_formatting::format_datum, events::{
+            dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_static_event, player_invoke_targeted_event, player_wait_available
+        }, get_score_sprite_mut, handlers::datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, player_call_script_handler, reserve_player_mut, reserve_player_mut_async, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
-    utils::{log_i},
+    utils::log_i,
 };
 
 pub struct MovieHandlers {}
@@ -414,7 +405,7 @@ impl MovieHandlers {
                 player_wait_available().await;
 
                 let begin_sprite_nums = player_dispatch_event_beginsprite(
-                    &"beginSprite".to_string(),
+                    Symbol::builtin(BuiltInSymbol::BeginSprite),
                     &vec![]
                 ).await;
 
@@ -455,7 +446,7 @@ impl MovieHandlers {
                 for behavior_ref in &remaining_behaviors {
                     let receivers = vec![behavior_ref.clone()];
                     let _ = player_invoke_targeted_event(
-                        &"beginSprite".to_string(),
+                        Symbol::builtin(BuiltInSymbol::BeginSprite),
                         &vec![],
                         Some(&receivers),
                     ).await;
@@ -493,7 +484,7 @@ impl MovieHandlers {
 
                         if still_active {
                             let result =
-                                player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+                                player_call_datum_handler(&actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![]).await;
 
                             if let Err(err) = result {
                                 if err.code == ScriptErrorCode::Abort {
@@ -547,10 +538,10 @@ impl MovieHandlers {
                     });
 
                     // Relay prepareFrame to timeout targets
-                    dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+                    dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
 
                     // 4. Send prepareFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+                    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
 
                     reserve_player_mut(|player| {
                         player.in_prepare_frame = false;
@@ -563,7 +554,7 @@ impl MovieHandlers {
                     });
 
                     // 5. Send enterFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+                    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::EnterFrame), &vec![]).await;
 
                     reserve_player_mut(|player| {
                         player.in_enter_frame = false;
@@ -711,7 +702,7 @@ impl MovieHandlers {
         for receiver in receivers {
             let handler_pair = reserve_player_ref(|player| {
                 ScriptInstanceUtils::get_script_instance_handler(
-                    &message,
+                    message,
                     &receiver,
                     player,
                 )
@@ -742,7 +733,7 @@ impl MovieHandlers {
         }
 
         if !handled_by_sprite {
-            player_invoke_static_event(&message, &remaining_args).await?;
+            player_invoke_static_event(message, &remaining_args).await?;
         }
 
         Ok(last_return_value)
@@ -784,7 +775,7 @@ impl MovieHandlers {
         let mut last_return_value = DatumRef::Void;
         for receiver in receivers {
             let handler_pair = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(&message, &receiver, player)
+                ScriptInstanceUtils::get_script_instance_handler(message, &receiver, player)
             })?;
             if let Some(handler_ref) = handler_pair {
                 match player_call_script_handler(Some(receiver), handler_ref, &remaining_args).await {
@@ -806,7 +797,7 @@ impl MovieHandlers {
         }
 
         if !handled_by_sprite {
-            player_invoke_static_event(&message, &remaining_args).await?;
+            player_invoke_static_event(message, &remaining_args).await?;
         }
 
         Ok(last_return_value)
@@ -1079,7 +1070,7 @@ impl MovieHandlers {
 
                 if still_active {
                     let result =
-                        player_call_datum_handler(&actor_ref, &"stepFrame".to_string(), &vec![]).await;
+                        player_call_datum_handler(&actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![]).await;
 
                     if let Err(err) = result {
                         if err.code == ScriptErrorCode::Abort {
@@ -1131,9 +1122,9 @@ impl MovieHandlers {
         crate::player::events::dispatch_rollover_events();
 
         // Relay prepareFrame to timeout targets
-        dispatch_system_event_to_timeouts(&"prepareFrame".to_string(), &vec![]).await;
+        dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
 
-        dispatch_event_to_all_behaviors(&"prepareFrame".to_string(), &vec![]).await;
+        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
 
         // Tick W3D registered #timeMS events + animation clock + dispatch
         // any queued PhysX collision callbacks. This is the *real* per-frame
@@ -1162,7 +1153,7 @@ impl MovieHandlers {
             player.in_enter_frame = true;
         });
 
-        dispatch_event_to_all_behaviors(&"enterFrame".to_string(), &vec![]).await;
+        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::EnterFrame), &vec![]).await;
 
         reserve_player_mut(|player| {
             player.in_enter_frame = false;

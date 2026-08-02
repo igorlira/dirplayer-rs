@@ -34,6 +34,19 @@ pub struct Bytecode {
 }
 
 impl Bytecode {
+    /// Construct a bytecode op directly (operand `obj`, byte position `pos`).
+    /// Used by interpreter benchmarks/tests that synthesize handlers in memory.
+    pub fn new(opcode: OpCode, obj: i64, pos: usize) -> Self {
+        Bytecode {
+            opcode,
+            obj,
+            pos,
+            owner_loop: 0,
+            translation: None,
+            line_number: None,
+        }
+    }
+
     pub fn pos_to_str(pos: usize) -> String {
         format_args!("[{}]", pos).to_string()
     }

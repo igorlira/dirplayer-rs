@@ -3,12 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use chrono::Local;
 
 use crate::{
-    director::{
+    CastMemberRef, director::{
         file::DirectorFile,
-        lingo::datum::{datum_bool, Datum},
-    },
-    utils::PATH_SEPARATOR, reserve_player_ref, reserve_player_mut,
-    player::ColorRef, player::ScriptInstanceRef, CastMemberRef,
+        lingo::datum::{Datum, datum_bool},
+    }, player::{ColorRef, ScriptInstanceRef, symbols::{builtin::{self, BuiltInSymbol}, symbol::Symbol}}, reserve_player_mut, reserve_player_ref, utils::PATH_SEPARATOR
 };
 
 use super::{
@@ -197,9 +195,10 @@ impl Movie {
         self.stage_color_ref = stage_color_ref;
     }
 
-    pub fn get_prop(&self, prop: &str) -> Result<Datum, ScriptError> {
-        match_ci!(prop, {
-            "alertHook" => match self.alert_hook.to_owned() {
+    pub fn get_prop(&self, prop: Symbol) -> Result<Datum, ScriptError> {
+        let builtin_prop = prop.into_builtin_or_error()?;
+        match builtin_prop {
+            BuiltInSymbol::AlertHook => match self.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
                     Ok(Datum::ScriptInstanceRef(script_instance_id))
@@ -207,46 +206,46 @@ impl Movie {
                 Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                 None => Ok(Datum::Int(0)),
             },
-            "exitlock" => Ok(datum_bool(self.exit_lock)),
-            "itemdelimiter" => Ok(Datum::String(self.item_delimiter.into())),
-            "runmode" => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
-            "date" => {
+            BuiltInSymbol::ExitLock => Ok(datum_bool(self.exit_lock)),
+            BuiltInSymbol::ItemDelimiter => Ok(Datum::String(self.item_delimiter.into())),
+            BuiltInSymbol::RunMode => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
+            BuiltInSymbol::Date => {
                 // TODO localize formatting
                 let time = Local::now();
                 let formatted = time.format("%m/%d/%Y").to_string();
                 Ok(Datum::String(formatted))
             },
-            "long time" => {
+            BuiltInSymbol::LongTime => {
                 let time = Local::now();
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
             },
-            "lastChannel" => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            BuiltInSymbol::LastChannel => Ok(Datum::Int(self.score.get_channel_count() as i32)),
             // Movie property, read-only: the number of the last frame in the movie.
             // A score always has at least frame 1, so fall back to 1 rather than 0
             // when the frame count couldn't be determined.
-            "lastFrame" => Ok(Datum::Int(self.score.frame_count.unwrap_or(1).max(1) as i32)),
-            "moviePath" => {
+            BuiltInSymbol::LastFrame => Ok(Datum::Int(self.score.frame_count.unwrap_or(1).max(1) as i32)),
+            BuiltInSymbol::MoviePath => {
                 let mut result = self.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);
                 }
                 Ok(Datum::String(result))
             },
-            "platform" => Ok(Datum::String("Windows,32".to_string())),
-            "frame" => Ok(Datum::Int(self.current_frame as i32)),
-            "productversion" => Ok(Datum::String("11.0".to_string())),
-            "moviename" | "movie" => Ok(Datum::String(self.file_name.to_owned())),
-            "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
-            "path" => Ok(Datum::String(self.base_path.to_owned())),
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
+            BuiltInSymbol::Platform => Ok(Datum::String("Windows,32".to_string())),
+            BuiltInSymbol::Frame => Ok(Datum::Int(self.current_frame as i32)),
+            BuiltInSymbol::ProductVersion => Ok(Datum::String("11.0".to_string())),
+            BuiltInSymbol::MovieName | BuiltInSymbol::Movie => Ok(Datum::String(self.file_name.to_owned())),
+            BuiltInSymbol::UpdateLock => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
+            BuiltInSymbol::Path => Ok(Datum::String(self.base_path.to_owned())),
+            BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
                 let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
                     &self.mouse_down_script
-                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                } else if builtin_prop == BuiltInSymbol::MouseUpScript {
                     &self.mouse_up_script
-                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyDownScript {
                     &self.key_down_script
-                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyUpScript {
                     &self.key_up_script
                 } else {
                     &self.timeout_script
@@ -258,8 +257,8 @@ impl Movie {
                     None => Ok(Datum::Int(0)),
                 }
             },
-            "allowCustomCaching" => Ok(datum_bool(self.allow_custom_caching)),
-            "timer" => {
+            BuiltInSymbol::AllowCustomCaching => Ok(datum_bool(self.allow_custom_caching)),
+            BuiltInSymbol::Timer => {
                 reserve_player_ref(|player| {
                     let elapsed = chrono::Local::now()
                         .signed_duration_since(player.start_time)
@@ -269,7 +268,7 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             },
-            "lastKey" => {
+            BuiltInSymbol::LastKey => {
                 // `the lastKey` returns ticks (1/60 s) since the last key event.
                 // Before any key is pressed, fall back to ticks since movie start
                 // (matches Director's monotonic behaviour for these accessors).
@@ -285,22 +284,22 @@ impl Movie {
                     Ok(Datum::Int(ticks as i32))
                 })
             },
-            "mouseDown" => {
+            BuiltInSymbol::MouseDown => {
                 Ok(datum_bool(self.mouse_down))
             },
             // `the mouseUp` is the inverse of `the mouseDown` — true while
             // the mouse button is in the up (released) state. Director uses
             // this in per-frame polling like storyscramble's Draggable
             // behavior (`if the mouseUp then …`) to detect button release.
-            "mouseUp" => {
+            BuiltInSymbol::MouseUp => {
                 Ok(datum_bool(!self.mouse_down))
             },
-            "rightMouseDown" => Ok(datum_bool(self.right_mouse_down)),
-            "rightMouseUp" => Ok(datum_bool(!self.right_mouse_down)),
+            BuiltInSymbol::RightMouseDown => Ok(datum_bool(self.right_mouse_down)),
+            BuiltInSymbol::RightMouseUp => Ok(datum_bool(!self.right_mouse_down)),
             // `the trace` toggles the same Lingo-tracing facility as the Trace
             // button / `the traceScript` (Director 11.5 Scripting Dictionary).
-            "trace" | "traceScript" => Ok(datum_bool(self.trace_script)),
-            "activeWindow" => Ok(Datum::Stage),
+            BuiltInSymbol::Trace | BuiltInSymbol::TraceScript => Ok(datum_bool(self.trace_script)),
+            BuiltInSymbol::ActiveWindow => Ok(Datum::Stage),
             // `the frontWindow` — "indicates which movie in a window (MIAW) is
             // currently frontmost on the screen… When the Stage is frontmost,
             // frontWindow is the Stage" (Director 11.5 Scripting Dictionary,
@@ -317,26 +316,26 @@ impl Movie {
             // and with an empty windowList both sides are 0, so the click is
             // accepted. Erroring here aborted the handler and the game took no
             // input at all.
-            "frontWindow" => Ok(Datum::Stage),
+            BuiltInSymbol::FrontWindow => Ok(Datum::Stage),
             // `the windowList` is the Player property listing all open
             // movie-in-a-window (MIAW) windows (Director 11.5 Scripting
             // Dictionary). dirplayer has no MIAW support, so it's always empty —
             // `count(the windowList)` is then 0, matching a player with only the
             // Stage open.
-            "windowList" => Ok(Datum::List(
+            BuiltInSymbol::WindowList => Ok(Datum::List(
                 crate::director::lingo::datum::DatumType::List,
                 VecDeque::new(),
                 false,
             )),
-            "rollOver" => {
+            BuiltInSymbol::Rollover => {
                 reserve_player_ref(|player| {
                     let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                     Ok(Datum::Int(sprite.unwrap_or(0) as i32))
                 })
             },
-            "randomSeed" => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
-            "maxInteger" => Ok(Datum::Int(i32::MAX)),
-            "memorySize" => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
+            BuiltInSymbol::RandomSeed => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+            BuiltInSymbol::MaxInteger => Ok(Datum::Int(i32::MAX)),
+            BuiltInSymbol::MemorySize => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
             // Memory-reporting companions to `the memorySize`, in bytes.
             //   freeBytes  — total free memory, not necessarily contiguous
             //   freeBlock  — the largest free CONTIGUOUS block
@@ -351,25 +350,25 @@ impl Movie {
             // freeBlock <= freeBytes as the spec requires ("differs from
             // freeBlock in that it reports ALL free memory"), so requirement
             // checks pass instead of failing on a fabricated shortage.
-            "freeBytes" => Ok(Datum::Int(192 * 1024 * 1024)),
-            "freeBlock" => Ok(Datum::Int(128 * 1024 * 1024)),
+            BuiltInSymbol::FreeBytes => Ok(Datum::Int(192 * 1024 * 1024)),
+            BuiltInSymbol::FreeBlock => Ok(Datum::Int(128 * 1024 * 1024)),
             // `_system.colorDepth` — monitor color depth (Director 11.5
             // Scripting Dictionary, valid values 1/2/4/8/16/32). The web
             // canvas is true-color, so report 32. Setting it is a no-op
             // (see set_prop), matching a monitor that can't change depth.
-            "colorDepth" => Ok(Datum::Int(32)),
-            "active3dRenderer" => Ok(Datum::String("#openGL".to_string())),
-            "scriptExecutionStyle" => Ok(Datum::Int(9)),
-            "xtraList" => {
+            BuiltInSymbol::ColorDepth => Ok(Datum::Int(32)),
+            BuiltInSymbol::Active3dRenderer => Ok(Datum::String("#openGL".to_string())),
+            BuiltInSymbol::ScriptExecutionStyle => Ok(Datum::Int(9)),
+            BuiltInSymbol::XtraList => {
                 // Return a list of prop lists, each with #name and #fileName
                 use crate::player::xtra::manager::get_registered_xtra_names;
                 reserve_player_mut(|player| {
                     let names = get_registered_xtra_names();
                     let mut items = VecDeque::new();
                     for name in names {
-                        let name_key = player.alloc_datum(Datum::Symbol("name".to_string()));
+                        let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
                         let name_val = player.alloc_datum(Datum::String(name.to_string()));
-                        let file_key = player.alloc_datum(Datum::Symbol("fileName".to_string()));
+                        let file_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
                         let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
                         let entry = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                             (name_key, name_val), (file_key, file_val),
@@ -383,8 +382,8 @@ impl Movie {
                     ))
                 })
             },
-            "soundDevice" => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
-            "soundDeviceList" => {
+            BuiltInSymbol::SoundDevice => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+            BuiltInSymbol::SoundDeviceList => {
                 reserve_player_mut(|player| {
                     let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
                     Ok(Datum::List(
@@ -394,7 +393,7 @@ impl Movie {
                     ))
                 })
             },
-            "desktopRectList" => {
+            BuiltInSymbol::DesktopRectList => {
                 reserve_player_mut(|player| {
                     let w = player.movie.rect.right as i32;
                     let h = player.movie.rect.bottom as i32;
@@ -406,7 +405,7 @@ impl Movie {
                     ))
                 })
             },
-            "labelList" => {
+            BuiltInSymbol::LabelList => {
                 // Director's `the labelList` ends each label (including the
                 // last) with a `\r`, so `the number of lines in the labelList`
                 // returns label_count + 1 — script idioms like
@@ -424,59 +423,60 @@ impl Movie {
                 }
                 Ok(Datum::String(s))
             },
-            "debugplaybackenabled" => Ok(datum_bool(self.debug_playback_enabled)),
-            "emulateMultibuttonMouse" => Ok(datum_bool(self.emulate_multibutton_mouse)),
-            "editShortCutsEnabled" => Ok(datum_bool(self.edit_shortcuts_enabled)),
-            "enableFlashLingo" => Ok(datum_bool(self.enable_flash_lingo)),
+            BuiltInSymbol::DebugPlaybackEnabled => Ok(datum_bool(self.debug_playback_enabled)),
+            BuiltInSymbol::EmulateMultibuttonMouse => Ok(datum_bool(self.emulate_multibutton_mouse)),
+            BuiltInSymbol::EditShortcutsEnabled => Ok(datum_bool(self.edit_shortcuts_enabled)),
+            BuiltInSymbol::EnableFlashLingo => Ok(datum_bool(self.enable_flash_lingo)),
             // No-op system prop: nothing to preload-abort in dirplayer.
             // Return the Director default (FALSE) so read-backs don't error.
-            "preLoadEventAbort" => Ok(datum_bool(false)),
+            BuiltInSymbol::PreLoadEventAbort => Ok(datum_bool(false)),
             // soundMixMedia (Sound property, read/write) — Flash sound mixing is a
             // Windows-only nuance we don't model. Return the Director 7+ default (TRUE).
-            "soundMixMedia" => Ok(datum_bool(true)),
+            BuiltInSymbol::SoundMixMedia => Ok(datum_bool(true)),
             // machineType (classic Director system property, absent from the 11.5
             // dictionary): a Macintosh model code, or 256 on Windows/Intel. dirplayer
             // emulates Windows Shockwave playback, so report 256 — movies branch their
             // path separators and platform paths on this.
-            "machineType" => Ok(Datum::Int(256)),
+            BuiltInSymbol::MachineType => Ok(Datum::Int(256)),
             _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
-        })
+        }
     }
 
     pub fn set_prop(
         &mut self,
-        prop: &str,
+        prop: Symbol,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        match_ci!(prop, {
-            "exitLock" => {
+        let builtin_prop = prop.into_builtin_or_error()?;
+        match builtin_prop {
+            BuiltInSymbol::ExitLock => {
                 self.exit_lock = value.int_value()? == 1;
                 Ok(())
             },
-            "itemDelimiter" => {
+            BuiltInSymbol::ItemDelimiter => {
                 self.item_delimiter = (value.string_value()?).chars().next().unwrap();
                 Ok(())
             },
-            "debugPlaybackEnabled" => {
+            BuiltInSymbol::DebugPlaybackEnabled => {
                 self.debug_playback_enabled = value.int_value()? != 0;
                 Ok(())
             },
-            "emulateMultibuttonMouse" => {
+            BuiltInSymbol::EmulateMultibuttonMouse => {
                 self.emulate_multibutton_mouse = value.int_value()? != 0;
                 Ok(())
             },
-            "editShortCutsEnabled" => {
+            BuiltInSymbol::EditShortcutsEnabled => {
                 self.edit_shortcuts_enabled = value.int_value()? != 0;
                 Ok(())
             },
-            "enableFlashLingo" => {
+            BuiltInSymbol::EnableFlashLingo => {
                 // Store the flag for read-back; does NOT restrict Flash->Lingo
                 // callbacks (see field comment). Round-trip only.
                 self.enable_flash_lingo = value.int_value()? != 0;
                 Ok(())
             },
-            "alertHook" => {
+            BuiltInSymbol::AlertHook => {
                 match value {
                     Datum::Int(0) => {
                         self.alert_hook = None;
@@ -497,26 +497,26 @@ impl Movie {
             },
             // `the trace` is an alias for the Trace-button / `the traceScript`
             // tracing toggle (Director 11.5 Scripting Dictionary).
-            "trace" | "traceScript" => {
+            BuiltInSymbol::Trace | BuiltInSymbol::TraceScript => {
                 self.trace_script = value.int_value()? != 0;
                 Ok(())
             },
-            "traceLogFile" => {
+            BuiltInSymbol::TraceLogFile => {
                 self.trace_log_file = value.string_value()?;
                 Ok(())
             },
-            "updateLock" => {
+            BuiltInSymbol::UpdateLock => {
                 self.update_lock = value.int_value()? != 0;
                 Ok(())
             },
-            "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {
-                let target = if prop.eq_ignore_ascii_case("mouseDownScript") {
+            BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
+                let target = if builtin_prop == BuiltInSymbol::MouseDownScript {
                     &mut self.mouse_down_script
-                } else if prop.eq_ignore_ascii_case("mouseUpScript") {
+                } else if builtin_prop == BuiltInSymbol::MouseUpScript {
                     &mut self.mouse_up_script
-                } else if prop.eq_ignore_ascii_case("keyDownScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyDownScript {
                     &mut self.key_down_script
-                } else if prop.eq_ignore_ascii_case("keyUpScript") {
+                } else if builtin_prop == BuiltInSymbol::KeyUpScript {
                     &mut self.key_up_script
                 } else {
                     &mut self.timeout_script
@@ -547,23 +547,23 @@ impl Movie {
                     )),
                 }
             },
-            "allowCustomCaching" => {
+            BuiltInSymbol::AllowCustomCaching => {
                 self.allow_custom_caching = value.int_value()? != 0;
                 Ok(())
             },
-            "puppetTempo" => {
+            BuiltInSymbol::PuppetTempo => {
                 self.puppet_tempo = value.int_value()? as u32;
                 Ok(())
             },
-            "colorDepth" | "useFastQuads" | "romanLingo" | "allowSaveLocal" | "cpuHogTicks"
-            | "preLoadEventAbort" => {
+            BuiltInSymbol::ColorDepth | BuiltInSymbol::UseFastQuads | BuiltInSymbol::RomanLingo | BuiltInSymbol::AllowSaveLocal | BuiltInSymbol::CpuHogTicks
+            | BuiltInSymbol::PreLoadEventAbort => {
                 // Read-only / no-op in practice; ignore sets like Director does.
                 // preLoadEventAbort gates whether a preload event handler may
                 // abort preloading — dirplayer loads synchronously, so there
                 // is nothing to abort (netjack's startMovie sets it).
                 Ok(())
             },
-            "stageColor" => {
+            BuiltInSymbol::StageColor => {
                 match value {
                     Datum::Int(color_index) => {
                         self.stage_color_ref = ColorRef::PaletteIndex(color_index as u8);
@@ -578,7 +578,7 @@ impl Movie {
                     }
                 }
             },
-            "timeoutLength" => {
+            BuiltInSymbol::TimeoutLength => {
                 // Idle ticks before `timeOut`. Restart the idle counter so the
                 // countdown runs from now (the movie usually sets this right after
                 // the activity that should trigger the eventual timeout).
@@ -586,42 +586,42 @@ impl Movie {
                 self.timeout_last_reset_ms = crate::player::testing_shared::now_ms();
                 Ok(())
             },
-            "timeoutMouse" => { self.timeout_mouse = value.int_value()? != 0; Ok(()) },
-            "timeoutKeyDown" => { self.timeout_keydown = value.int_value()? != 0; Ok(()) },
-            "timeoutLapsed" => {
+            BuiltInSymbol::TimeoutMouse => { self.timeout_mouse = value.int_value()? != 0; Ok(()) },
+            BuiltInSymbol::TimeoutKeyDown => { self.timeout_keydown = value.int_value()? != 0; Ok(()) },
+            BuiltInSymbol::TimeoutLapsed => {
                 // Writable: `set the timeoutLapsed` re-bases the idle counter.
                 let ticks = value.int_value()? as f64;
                 self.timeout_last_reset_ms =
                     crate::player::testing_shared::now_ms() - ticks * (1000.0 / 60.0);
                 Ok(())
             },
-            "timeoutPlay"
-            | "soundEnabled" | "soundLevel"
-            | "beepOn" | "centerStage" | "exitLock" | "fixStageSize"
+            BuiltInSymbol::TimeoutPlay
+            | BuiltInSymbol::SoundEnabled | BuiltInSymbol::SoundLevel
+            | BuiltInSymbol::BeepOn | BuiltInSymbol::CenterStage | BuiltInSymbol::ExitLock | BuiltInSymbol::FixStageSize
             // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
             // read/write) toggles whether Flash cast members mix their audio into the
             // Score sound channels — a Windows-only playback nuance. dirplayer uses
             // WebAudio, so we accept the set without acting on it.
-            | "soundMixMedia" => {
+            | BuiltInSymbol::SoundMixMedia => {
                 // Anim props that are set via property_type 0x07 - accept silently
                 Ok(())
             },
-            "randomSeed" => {
+            BuiltInSymbol::RandomSeed => {
                 self.random_seed = Some(value.int_value()?);
                 Ok(())
             },
-            "soundDevice" => {
+            BuiltInSymbol::SoundDevice => {
                 // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
                 // In WASM we use WebAudio, so this is stored but not acted upon
                 self.sound_device = value.string_value().unwrap_or_default();
                 Ok(())
             },
-            "preferred3drenderer" | "milesfast" => {
+            BuiltInSymbol::Preferred3dRenderer | BuiltInSymbol::MilesFast => {
                 // 3D renderer preference / sound settings — accept silently in WASM
                 Ok(())
             },
             _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
-        })
+        }
     }
 
     /// Get the current effective tempo (puppetTempo overrides frameTempo)

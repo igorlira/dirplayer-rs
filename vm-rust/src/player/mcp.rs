@@ -4,13 +4,14 @@
 use std::rc::Rc;
 
 use fxhash::FxHashMap;
+use itertools::Itertools;
 use serde::Serialize;
 
 use crate::{director::{
     enums::ScriptType,
     file::get_variable_multiplier,
     lingo::{decompiler::handler::decompile_handler, script::ScriptContext as LingoScriptContext},
-}, player::datum_formatting::format_concrete_datum_with_depth};
+}, player::{datum_formatting::format_concrete_datum_with_depth, symbols::symbol::Symbol}};
 
 use super::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
@@ -369,7 +370,7 @@ fn get_script_info(script: &Script) -> McpScriptInfo {
         cast_member: script.member_ref.cast_member,
         name: script.name.clone(),
         script_type: script_type_str(&script.script_type).to_string(),
-        handlers: script.handler_names.clone(),
+        handlers: script.handler_names.iter().map(|x| x.as_str().to_owned()).collect_vec()
     }
 }
 
@@ -532,7 +533,7 @@ pub fn mcp_disassemble_handler(
         Err(e) => return mcp_error(e),
     };
 
-    let handler = match ctx.script.get_own_handler(&handler_name.to_lowercase()) {
+    let handler = match ctx.script.get_own_handler(Symbol::from_str(&handler_name)) {
         Some(h) => h,
         None => return mcp_error(format!("Handler '{}' not found in script", handler_name)),
     };
@@ -567,7 +568,7 @@ pub fn mcp_decompile_handler(
         Err(e) => return mcp_error(e),
     };
 
-    let handler = match ctx.script.get_own_handler(&handler_name.to_lowercase()) {
+    let handler = match ctx.script.get_own_handler(Symbol::from_str(&handler_name)) {
         Some(h) => h,
         None => return mcp_error(format!("Handler '{}' not found in script", handler_name)),
     };
@@ -755,7 +756,7 @@ pub fn mcp_get_globals(player: &DirPlayer) -> String {
         globals: player
             .globals
             .iter()
-            .map(|(name, datum_ref)| (name.clone(), datum_to_mcp_value(player, datum_ref)))
+            .map(|(name, datum_ref)| (name.as_str().to_owned(), datum_to_mcp_value(player, datum_ref)))
             .collect(),
     })
 }
@@ -781,7 +782,7 @@ pub fn mcp_get_locals(player: &DirPlayer, scope_index: Option<usize>) -> String 
         .movie
         .cast_manager
         .get_script_by_ref(&scope.script_ref)
-        .and_then(|script| script.get_own_handler_by_name_id(scope.handler_name_id))
+        .and_then(|script| script.get_own_handler_by_local_name_id(scope.handler_name_id))
         .map(|handler| get_argument_names(lctx, &handler.argument_name_ids))
         .unwrap_or_default();
 
@@ -827,7 +828,7 @@ pub fn mcp_inspect_datum(player: &DirPlayer, datum_id: DatumId) -> String {
                 .get_script_instance(instance_ref)
                 .properties
                 .iter()
-                .map(|(name, datum_ref)| (name.to_string(), datum_to_mcp_value(player, datum_ref)))
+                .map(|(name, datum_ref)| (name.as_str().to_owned(), datum_to_mcp_value(player, datum_ref)))
                 .collect(),
         ),
         crate::director::lingo::datum::Datum::PropList(entries, _) => Some(
@@ -921,7 +922,7 @@ pub fn mcp_inspect_cast_member(player: &DirPlayer, cast_lib: i32, cast_member: i
         name: member.name.clone(),
         member_type: member.member_type.type_string().to_string(),
         script_type,
-        handlers,
+        handlers: handlers.map(|h| h.iter().map(|x| x.as_str().to_owned()).collect_vec()),
     })
 }
 

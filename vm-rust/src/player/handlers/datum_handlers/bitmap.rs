@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use fxhash::FxHashMap;
+
 use crate::{
     director::lingo::datum::{Datum, datum_bool},
     player::{
@@ -7,7 +9,7 @@ use crate::{
             bitmap::{Bitmap, BuiltInPalette, PaletteRef, resolve_color_ref},
             manager::BitmapRef,
             mask::BitmapMask,
-        }, geometry::IntRect, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut
+        }, geometry::IntRect, handlers::types::TypeUtils, player_duplicate_datum, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 
@@ -18,14 +20,14 @@ pub struct BitmapDatumHandlers {}
 impl BitmapDatumHandlers {
     pub fn call(
         datum: &DatumRef,
-        handler_name: &str,
+        handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         // If a mutating op targets the persistent stage framebuffer, mark it
         // dirty so the renderer begins compositing it over the sprite output
         // (the "imaging Lingo" engine pattern — see stage.rs `image` getter).
         if matches!(
-            handler_name,
+            handler_name.as_str(),
             "fill" | "draw" | "setPixel" | "copyPixels" | "applyFilter"
                 | "setAlpha" | "floodFill"
         ) {
@@ -38,7 +40,7 @@ impl BitmapDatumHandlers {
                 Ok::<(), ScriptError>(())
             })?;
         }
-        match handler_name {
+        match handler_name.as_str() {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
             "setPixel" => Self::set_pixel(datum, args),
@@ -534,7 +536,7 @@ impl BitmapDatumHandlers {
             } else {
                 let cr = PropListUtils::get_by_concrete_key(
                     &draw_map,
-                    &Datum::Symbol("color".to_owned()),
+                    &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)),
                     &player.allocator,
                 )?;
                 player.get_datum(&cr).to_color_ref()?
@@ -554,7 +556,7 @@ impl BitmapDatumHandlers {
             // VOID lookup result as a literal "VOID" shape name.
             let shape_type_d = PropListUtils::get_by_concrete_key(
                 &draw_map,
-                &Datum::Symbol("shapeType".to_owned()),
+                &Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShapeType)),
                 &player.allocator,
             )?;
             let shape_type_d = player.get_datum(&shape_type_d);
@@ -566,7 +568,7 @@ impl BitmapDatumHandlers {
 
             let blend = PropListUtils::get_by_concrete_key(
                 &draw_map,
-                &Datum::Symbol("blend".to_owned()),
+                &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Blend)),
                 &player.allocator,
             )?;
             let blend = player.get_datum(&blend);
@@ -580,12 +582,12 @@ impl BitmapDatumHandlers {
             // stroke thickness for rect/oval/roundRect/line outlines. Some
             // scripts use alias keys (#lineWidth, #width, #strokeWidth) for
             // the same property — accept all four.
-            let thickness = ["lineSize", "lineWidth", "width", "strokeWidth"]
+            let thickness = [BuiltInSymbol::LineSize, BuiltInSymbol::LineWidth, BuiltInSymbol::Width, BuiltInSymbol::StrokeWidth]
                 .into_iter()
                 .find_map(|key| {
                     let value = PropListUtils::get_by_concrete_key(
                         &draw_map,
-                        &Datum::Symbol(key.to_owned()),
+                        &Datum::Symbol(Symbol::builtin(key)),
                         &player.allocator,
                     )
                     .ok()?;
@@ -602,7 +604,7 @@ impl BitmapDatumHandlers {
             // visual default for the rounded-rect tool).
             let radius_d = PropListUtils::get_by_concrete_key(
                 &draw_map,
-                &Datum::Symbol("radius".to_owned()),
+                &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Radius)),
                 &player.allocator,
             )?;
             let radius_d = player.get_datum(&radius_d);
@@ -775,17 +777,17 @@ impl BitmapDatumHandlers {
 
             let params = player.get_datum(&args[arg_pos]);
             let (color_ref, shape) = match params {
-                Datum::ColorRef(color_ref) => (color_ref.clone(), "rect".to_string()),
-                Datum::Int(i) => (ColorRef::PaletteIndex(*i as u8), "rect".to_string()),
+                Datum::ColorRef(color_ref) => (color_ref.clone(), Symbol::builtin(BuiltInSymbol::Rect)),
+                Datum::Int(i) => (ColorRef::PaletteIndex(*i as u8), Symbol::builtin(BuiltInSymbol::Rect)),
                 Datum::PropList(prop_list, ..) => {
                     let shape_ref = PropListUtils::get_by_concrete_key(
                         &prop_list,
-                        &Datum::Symbol("shapeType".to_string()),
+                        &Datum::Symbol(Symbol::from_str(&"shapeType".to_string())),
                         &player.allocator,
                     )?;
                     let shape = match player.get_datum(&shape_ref) {
-                        Datum::Symbol(s) => s.clone(),
-                        Datum::Void => "rect".to_string(),
+                        Datum::Symbol(s) => *s,
+                        Datum::Void => Symbol::builtin(BuiltInSymbol::Rect),
                         _ => {
                             return Err(ScriptError::new(
                                 "Invalid shapeType in fill prop list".to_string(),
@@ -799,7 +801,7 @@ impl BitmapDatumHandlers {
                     } else {
                         let cr = PropListUtils::get_by_concrete_key(
                             &prop_list,
-                            &Datum::Symbol("color".to_string()),
+                            &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)),
                             &player.allocator,
                         )?;
                         player.get_datum(&cr).to_color_ref()?.clone()
@@ -1000,17 +1002,16 @@ impl BitmapDatumHandlers {
             // string keys to match Director's convention.
             let (filter_type, props) = match player.get_datum(&args[0]) {
                 Datum::PropList(items, _) => {
-                    let mut filter_type: Option<String> = None;
-                    let mut props: HashMap<String, f64> = HashMap::new();
+                    let mut filter_type: Option<Symbol> = None;
+                    let mut props: FxHashMap<Symbol, f64> = FxHashMap::default();
                     for (k, v) in items.iter() {
                         let key = match player.get_datum(k) {
-                            Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
+                            Datum::Symbol(s) => *s,
+                            Datum::String(s) => Symbol::from_str(s),
                             _ => continue,
                         };
-                        if key == "filtertype" {
-                            if let Datum::Symbol(s) | Datum::String(s) = player.get_datum(v) {
-                                filter_type = Some(s.to_lowercase());
-                            }
+                        if key.into_builtin() == Some(BuiltInSymbol::FilterType) {
+                            filter_type = player.get_datum(v).symbol_value().ok();
                         } else {
                             // Numeric properties for AdjustColor.
                             let val = player.get_datum(v).float_value().unwrap_or(0.0);
@@ -1027,19 +1028,19 @@ impl BitmapDatumHandlers {
             };
 
             let kind = filter_type.unwrap_or_default();
-            match kind.as_str() {
-                "adjustcolorfilter" => {
+            match kind.into_builtin() {
+                Some(BuiltInSymbol::AdjustColorFilter) => {
                     let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).ok_or_else(
                         || ScriptError::new("applyFilter: invalid bitmap".to_string()),
                     )?;
-                    let brightness = props.get("brightness").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
-                    let contrast = props.get("contrast").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
-                    let saturation = props.get("saturation").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
-                    let hue = props.get("hue").copied().unwrap_or(0.0).clamp(-180.0, 180.0);
+                    let brightness = props.get(&Symbol::builtin(BuiltInSymbol::Brightness)).copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let contrast = props.get(&Symbol::builtin(BuiltInSymbol::Contrast)).copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let saturation = props.get(&Symbol::builtin(BuiltInSymbol::Saturation)).copied().unwrap_or(0.0).clamp(-100.0, 100.0);
+                    let hue = props.get(&Symbol::builtin(BuiltInSymbol::Hue)).copied().unwrap_or(0.0).clamp(-180.0, 180.0);
                     apply_adjust_color_filter(bitmap, brightness, contrast, saturation, hue);
                     bitmap.mark_dirty();
                 }
-                "" => {
+                Some(BuiltInSymbol::EmptyString) => {
                     return Err(ScriptError::new(
                         "applyFilter: filter object has no #filterType".to_string(),
                     ));
@@ -1047,7 +1048,7 @@ impl BitmapDatumHandlers {
                 other => {
                     log::warn!(
                         "applyFilter: filter type '#{}' is not implemented \u{2014} bitmap unchanged",
-                        other
+                        other.map(|x| Symbol::builtin(x).as_str()).unwrap_or_default()
                     );
                 }
             }
@@ -1061,8 +1062,8 @@ impl BitmapDatumHandlers {
             return Err(ScriptError::new("getProp requires at least 1 argument".to_string()));
         }
         reserve_player_mut(|player| {
-            let prop = player.get_datum(&args[0]).string_value()?;
-            let prop_value = Self::get_prop(player, datum, &prop)?;
+            let prop = player.get_datum(&args[0]).symbol_value()?;
+            let prop_value = Self::get_prop(player, datum, prop)?;
             if args.len() == 1 {
                 Ok(prop_value)
             } else if args.len() == 2 {
@@ -1079,7 +1080,7 @@ impl BitmapDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        prop: &str,
+        prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let bitmap = player.get_datum(datum);
         let bitmap = match bitmap {
@@ -1091,22 +1092,22 @@ impl BitmapDatumHandlers {
         let bitmap = player.bitmap_manager.get_bitmap(*bitmap).unwrap();
         let width = bitmap.width as i32;
         let height = bitmap.height as i32;
-        let result = match prop {
-            "width" => Ok(Datum::Int(width)),
-            "height" => Ok(Datum::Int(height)),
-            "rect" => {
+        let result = match prop.into_builtin() {
+            Some(BuiltInSymbol::Width) => Ok(Datum::Int(width)),
+            Some(BuiltInSymbol::Height) => Ok(Datum::Int(height)),
+            Some(BuiltInSymbol::Rect) => {
                  Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
             }
-            "depth" => Ok(Datum::Int(bitmap.bit_depth as i32)),
-            "paletteRef" => {
+            Some(BuiltInSymbol::Depth) => Ok(Datum::Int(bitmap.bit_depth as i32)),
+            Some(BuiltInSymbol::PaletteRef) => {
                 if let PaletteRef::BuiltIn(palette) = bitmap.palette_ref {
-                    Ok(Datum::Symbol(palette.symbol_string()))
+                    Ok(Datum::Symbol(Symbol::builtin(palette.symbol())))
                 } else {
                     Ok(Datum::PaletteRef(bitmap.palette_ref.to_owned()))
                 }
             }
-            "ilk" => Ok(Datum::Symbol("image".to_string())),
-            "useAlpha" => Ok(Datum::Int(if bitmap.use_alpha { 1 } else { 0 })),
+            Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Image))),
+            Some(BuiltInSymbol::UseAlpha) => Ok(Datum::Int(if bitmap.use_alpha { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get bitmap property {}",
                 prop
@@ -1118,14 +1119,14 @@ impl BitmapDatumHandlers {
     pub fn set_bitmap_ref_prop(
         player: &mut DirPlayer,
         bitmap_ref: BitmapRef,
-        prop: &str,
+        prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         let value = player.get_datum(value);
-        match prop {
-            "paletteRef" => match value {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::PaletteRef) => match value {
                 Datum::Symbol(symbol) => {
-                    let palette = BuiltInPalette::from_symbol_string(&symbol).ok_or_else(|| {
+                    let palette = BuiltInPalette::from_symbol(*symbol).ok_or_else(|| {
                         ScriptError::new("Invalid built-in palette symbol".to_string())
                     })?;
                     let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).unwrap();
@@ -1149,7 +1150,7 @@ impl BitmapDatumHandlers {
                     value.type_str()
                 ))),
             },
-            "useAlpha" => {
+            Some(BuiltInSymbol::UseAlpha) => {
                 let use_alpha = value.to_bool()?;
                 let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).unwrap();
                 bitmap.use_alpha = use_alpha;

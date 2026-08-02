@@ -21,7 +21,7 @@ pub fn take_dirty_ids() -> HashSet<usize> {
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, DatumRef, DirPlayer, ScriptError},
+    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
 };
 
 const IDENTITY: [f64; 16] = [
@@ -34,19 +34,19 @@ const IDENTITY: [f64; 16] = [
 pub struct Transform3dDatumHandlers;
 
 impl Transform3dDatumHandlers {
-    pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &str) -> Result<Datum, ScriptError> {
+    pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
         let m = match player.get_datum(datum) {
-            Datum::Transform3d(m) => *m,
+            Datum::Transform3d(m) => **m,
             _ => return Err(ScriptError::new("Expected Transform3d".into())),
         };
 
-        match prop {
-            "position" => Ok(Datum::Vector([m[12], m[13], m[14]])),
-            "rotation" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Position) => Ok(Datum::Vector([m[12], m[13], m[14]])),
+            Some(BuiltInSymbol::Rotation) => {
                 let (rx, ry, rz) = matrix_to_euler(&m);
                 Ok(Datum::Vector([rx, ry, rz]))
             }
-            "scale" => {
+            Some(BuiltInSymbol::Scale) => {
                 let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
                 let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
                 let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
@@ -58,10 +58,10 @@ impl Transform3dDatumHandlers {
             // `targetZaxis.angleBetween(model.transform.zAxis)`; a non-unit zAxis skews
             // that angle so the body settles facing the wrong way. (The control node is
             // unit-scaled, which is why movement was correct but the visible model wasn't.)
-            "xAxis" => Ok(Datum::Vector(normalize_vec3([m[0], m[1], m[2]]))),
-            "yAxis" => Ok(Datum::Vector(normalize_vec3([m[4], m[5], m[6]]))),
-            "zAxis" => Ok(Datum::Vector(normalize_vec3([m[8], m[9], m[10]]))),
-            "axisAngle" => {
+            Some(BuiltInSymbol::XAxis) => Ok(Datum::Vector(normalize_vec3([m[0], m[1], m[2]]))),
+            Some(BuiltInSymbol::YAxis) => Ok(Datum::Vector(normalize_vec3([m[4], m[5], m[6]]))),
+            Some(BuiltInSymbol::ZAxis) => Ok(Datum::Vector(normalize_vec3([m[8], m[9], m[10]]))),
+            Some(BuiltInSymbol::AxisAngle) => {
                 // Extract axis-angle from the rotation part of the matrix
                 let (axis, angle) = matrix_to_axis_angle(&m);
                 let axis_ref = player.alloc_datum(Datum::Vector(axis));
@@ -72,11 +72,11 @@ impl Transform3dDatumHandlers {
                     false,
                 ))
             }
-            _ => Err(ScriptError::new(format!("Unknown transform property '{}'", prop))),
+            _ => Err(ScriptError::new(format!("Unknown transform property '{prop}'"))),
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: &str, value: &DatumRef) -> Result<(), ScriptError> {
+    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol, value: &DatumRef) -> Result<(), ScriptError> {
         mark_transform_dirty(datum);
         let val = player.get_datum(value).clone();
         let m = match player.get_datum_mut(datum) {
@@ -84,8 +84,8 @@ impl Transform3dDatumHandlers {
             _ => return Err(ScriptError::new("Expected Transform3d".into())),
         };
 
-        match prop {
-            "position" => {
+        match prop.into_builtin() {
+            Some(BuiltInSymbol::Position) => {
                 if let Datum::Vector(v) = val {
                     // Guard: only set finite values
                     if v[0].is_finite() { m[12] = v[0]; }
@@ -104,7 +104,7 @@ impl Transform3dDatumHandlers {
                 }
                 Ok(())
             }
-            "rotation" => {
+            Some(BuiltInSymbol::Rotation) => {
                 if let Datum::Vector(v) = val {
                     // Log non-zero Z rotation (steering)
                     if v[2].abs() > 0.1 {
@@ -138,7 +138,7 @@ impl Transform3dDatumHandlers {
                 }
                 Ok(())
             }
-            "scale" => {
+            Some(BuiltInSymbol::Scale) => {
                 if let Datum::Vector(v) = val {
                     // Normalize existing rotation columns, then apply new scale
                     let cur_sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
@@ -150,7 +150,7 @@ impl Transform3dDatumHandlers {
                 }
                 Ok(())
             }
-            "axisAngle" | "axisangle" => {
+            Some(BuiltInSymbol::AxisAngle) => {
                 // axisAngle = [vector(axis), angle_degrees]
                 // Extract values before getting mutable borrow on transform
                 let (axis, angle_deg) = if let Datum::List(_, items, _) = &val {
@@ -188,8 +188,8 @@ impl Transform3dDatumHandlers {
         }
     }
 
-    pub fn call(datum: &DatumRef, handler_name: &str, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        match handler_name {
+    pub fn call(datum: &DatumRef, handler_name: Symbol, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+        match handler_name.as_str() {
             "identity" => Self::identity(datum),
             "translate" => Self::translate(datum, args, true),    // Director translate = pre-multiply (moves in local space)
             "preTranslate" => Self::translate(datum, args, false),
@@ -208,8 +208,8 @@ impl Transform3dDatumHandlers {
             "getProp" | "getPropRef" => {
                 // transform.rotation[3] → getProp(#rotation, 3)
                 reserve_player_mut(|player| {
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
-                    let prop_datum = Self::get_prop(player, datum, &prop_name)?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                    let prop_datum = Self::get_prop(player, datum, prop_name)?;
                     if args.len() > 1 {
                         let index = player.get_datum(&args[1]).int_value()?;
                         let prop_ref = player.alloc_datum(prop_datum);
@@ -241,8 +241,8 @@ impl Transform3dDatumHandlers {
             "count" => {
                 // transform.rotation.count → 3
                 reserve_player_mut(|player| {
-                    let prop_name = player.get_datum(&args[0]).string_value()?;
-                    let prop_datum = Self::get_prop(player, datum, &prop_name)?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                    let prop_datum = Self::get_prop(player, datum, prop_name)?;
                     let count = match &prop_datum {
                         Datum::Vector(_) => 3,
                         Datum::List(_, items, _) => items.len() as i32,
@@ -258,7 +258,7 @@ impl Transform3dDatumHandlers {
     fn identity(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
-            *player.get_datum_mut(datum) = Datum::Transform3d(IDENTITY);
+            *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
             Ok(DatumRef::Void)
         })
     }
@@ -268,7 +268,7 @@ impl Transform3dDatumHandlers {
             mark_transform_dirty(datum);
             let (dx, dy, dz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -280,7 +280,7 @@ impl Transform3dDatumHandlers {
             ];
 
             let result = if pre { mat4_mul(&t, &m) } else { mat4_mul(&m, &t) };
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -289,7 +289,7 @@ impl Transform3dDatumHandlers {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -329,7 +329,7 @@ impl Transform3dDatumHandlers {
                 if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) }
             };
 
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -339,7 +339,7 @@ impl Transform3dDatumHandlers {
             mark_transform_dirty(datum);
             let (sx, sy, sz) = Self::read_xyz(player, args)?;
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
 
@@ -351,7 +351,7 @@ impl Transform3dDatumHandlers {
             ];
 
             let result = if pre { mat4_mul(&s, &m) } else { mat4_mul(&m, &s) };
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
         })
     }
@@ -359,11 +359,11 @@ impl Transform3dDatumHandlers {
     fn inverse(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let inv = mat4_invert_affine(&m);
-            Ok(player.alloc_datum(Datum::Transform3d(inv)))
+            Ok(player.alloc_datum(Datum::transform3d(inv)))
         })
     }
 
@@ -373,11 +373,11 @@ impl Transform3dDatumHandlers {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let inv = mat4_invert_affine(&m);
-            *player.get_datum_mut(datum) = Datum::Transform3d(inv);
+            *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(inv));
             Ok(DatumRef::Void)
         })
     }
@@ -385,43 +385,43 @@ impl Transform3dDatumHandlers {
     fn duplicate(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            Ok(player.alloc_datum(Datum::Transform3d(m)))
+            Ok(player.alloc_datum(Datum::transform3d(m)))
         })
     }
 
     fn multiply(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let other = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let result = mat4_mul(&m, &other);
-            Ok(player.alloc_datum(Datum::Transform3d(result)))
+            Ok(player.alloc_datum(Datum::transform3d(result)))
         })
     }
 
     fn interpolate(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0; // percent → 0-1
             // Lerp position/scale, SLERP rotation (Director 11.5 interpolate():
             // "position and rotation"). Element-wise matrix lerp shears rotation.
             let result = interpolate_transform(&m, &target, t);
-            Ok(player.alloc_datum(Datum::Transform3d(result)))
+            Ok(player.alloc_datum(Datum::Transform3d(Box::new(result))))
         })
     }
 
@@ -429,17 +429,17 @@ impl Transform3dDatumHandlers {
         reserve_player_mut(|player| {
             mark_transform_dirty(datum);
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let t = player.get_datum(&args[1]).float_value()? / 100.0;
             // interpolateTo modifies transform1 in place (Director 11.5).
             let result = interpolate_transform(&m, &target, t);
-            *player.get_datum_mut(datum) = Datum::Transform3d(result);
+            *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(result));
             Ok(DatumRef::Void)
         })
     }
@@ -447,7 +447,7 @@ impl Transform3dDatumHandlers {
     fn get_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => *m,
+                Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;

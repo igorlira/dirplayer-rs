@@ -7,6 +7,7 @@
 //! the `overwrite = FALSE` half: splicing a second W3D file's assets into an
 //! existing scene, optionally renaming incoming elements that collide.
 
+use crate::player::symbols::symbol::Symbol;
 use std::collections::{HashMap, HashSet};
 
 use super::types::W3dScene;
@@ -17,14 +18,14 @@ use super::types::W3dScene;
 /// document the pattern. We reuse the `-clone<N>` suffix this codebase already
 /// applies to W3D name collisions in `cloneModelFromCastmember`, so both paths
 /// read alike.
-fn unique_w3d_name(base: &str, taken: &HashSet<String>) -> String {
-    if !taken.contains(&base.to_ascii_lowercase()) {
-        return base.to_string();
+fn unique_w3d_name(base: Symbol, taken: &HashSet<Symbol>) -> Symbol {
+    if !taken.contains(&base) {
+        return base;
     }
     let mut n = 1;
     loop {
-        let candidate = format!("{}-clone{}", base, n);
-        if !taken.contains(&candidate.to_ascii_lowercase()) {
+        let candidate = Symbol::from_str(&format!("{}-clone{}", base.as_str(), n));
+        if !taken.contains(&candidate) {
             return candidate;
         }
         n += 1;
@@ -32,26 +33,28 @@ fn unique_w3d_name(base: &str, taken: &HashSet<String>) -> String {
 }
 
 /// Apply a rename map (keyed by lowercased original name) to a reference field.
-fn remap(field: &mut String, map: &HashMap<String, String>) {
-    if field.is_empty() {
+fn remap(field: &mut Symbol, map: &HashMap<Symbol, Symbol>) {
+    if field.as_str().is_empty() {
         return;
     }
-    if let Some(new_name) = map.get(&field.to_ascii_lowercase()) {
-        *field = new_name.clone();
+    if let Some(new_name) = map.get(field) {
+        *field = *new_name;
     }
 }
 
 /// Plan renames for one namespace, recording only the names that actually move.
 fn plan_renames(
-    names: Vec<String>,
-    taken: &mut HashSet<String>,
-    out: &mut HashMap<String, String>,
+    names: Vec<Symbol>,
+    taken: &mut HashSet<Symbol>,
+    out: &mut HashMap<Symbol, Symbol>,
 ) {
+    // Symbols are interned case-insensitively, so identity already carries the
+    // lowercasing this used to do by hand.
     for name in names {
-        if name.is_empty() {
+        if name.as_str().is_empty() {
             continue;
         }
-        let key = name.to_ascii_lowercase();
+        let key = name;
         if out.contains_key(&key) || !taken.contains(&key) {
             // Either already planned (the same name appears twice inside the
             // incoming file) or not colliding at all — leave it alone.
@@ -60,8 +63,8 @@ fn plan_renames(
             }
             continue;
         }
-        let new_name = unique_w3d_name(&name, taken);
-        taken.insert(new_name.to_ascii_lowercase());
+        let new_name = unique_w3d_name(name, taken);
+        taken.insert(new_name);
         out.insert(key, new_name);
     }
 }
@@ -92,54 +95,54 @@ impl W3dScene {
     pub fn merge_from(&mut self, mut src: W3dScene, generate_unique_names: bool) {
         // Rename maps are per-namespace: Director lets a shader and a model
         // share a name without colliding, so they must not share a map.
-        let mut model_res_renames: HashMap<String, String> = HashMap::new();
-        let mut shader_renames: HashMap<String, String> = HashMap::new();
-        let mut material_renames: HashMap<String, String> = HashMap::new();
-        let mut texture_renames: HashMap<String, String> = HashMap::new();
-        let mut node_renames: HashMap<String, String> = HashMap::new();
+        let mut model_res_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut shader_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut material_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut texture_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut node_renames: HashMap<Symbol, Symbol> = HashMap::new();
 
         if generate_unique_names {
             // Model resources and raw meshes share one namespace: a node's
             // resource_name may refer to either.
-            let mut taken_model_res: HashSet<String> = self
+            let mut taken_model_res: HashSet<Symbol> = self
                 .model_resources
                 .keys()
-                .map(|k| k.to_ascii_lowercase())
+                .map(|k| *k)
                 .collect();
-            taken_model_res.extend(self.raw_meshes.iter().map(|m| m.name.to_ascii_lowercase()));
-            let mut taken_shaders: HashSet<String> =
-                self.shaders.iter().map(|s| s.name.to_ascii_lowercase()).collect();
-            let mut taken_materials: HashSet<String> =
-                self.materials.iter().map(|m| m.name.to_ascii_lowercase()).collect();
+            taken_model_res.extend(self.raw_meshes.iter().map(|m| m.name));
+            let mut taken_shaders: HashSet<Symbol> =
+                self.shaders.iter().map(|s| s.name).collect();
+            let mut taken_materials: HashSet<Symbol> =
+                self.materials.iter().map(|m| m.name).collect();
             // Likewise texture_images (bytes, keyed by name) and texture_infos
             // (metadata) name the same textures.
-            let mut taken_textures: HashSet<String> = self
+            let mut taken_textures: HashSet<Symbol> = self
                 .texture_images
                 .keys()
-                .map(|k| k.to_ascii_lowercase())
+                .map(|k| *k)
                 .collect();
-            taken_textures.extend(self.texture_infos.iter().map(|t| t.name.to_ascii_lowercase()));
-            let mut taken_nodes: HashSet<String> =
-                self.nodes.iter().map(|n| n.name.to_ascii_lowercase()).collect();
+            taken_textures.extend(self.texture_infos.iter().map(|t| t.name));
+            let mut taken_nodes: HashSet<Symbol> =
+                self.nodes.iter().map(|n| n.name).collect();
 
-            let mut res_names: Vec<String> = src.model_resources.keys().cloned().collect();
-            res_names.extend(src.raw_meshes.iter().map(|m| m.name.clone()));
+            let mut res_names: Vec<Symbol> = src.model_resources.keys().cloned().collect();
+            res_names.extend(src.raw_meshes.iter().map(|m| m.name));
             plan_renames(res_names, &mut taken_model_res, &mut model_res_renames);
             plan_renames(
-                src.shaders.iter().map(|s| s.name.clone()).collect(),
+                src.shaders.iter().map(|s| s.name).collect(),
                 &mut taken_shaders,
                 &mut shader_renames,
             );
             plan_renames(
-                src.materials.iter().map(|m| m.name.clone()).collect(),
+                src.materials.iter().map(|m| m.name).collect(),
                 &mut taken_materials,
                 &mut material_renames,
             );
-            let mut tex_names: Vec<String> = src.texture_images.keys().cloned().collect();
-            tex_names.extend(src.texture_infos.iter().map(|t| t.name.clone()));
+            let mut tex_names: Vec<Symbol> = src.texture_images.keys().cloned().collect();
+            tex_names.extend(src.texture_infos.iter().map(|t| t.name));
             plan_renames(tex_names, &mut taken_textures, &mut texture_renames);
             plan_renames(
-                src.nodes.iter().map(|n| n.name.clone()).collect(),
+                src.nodes.iter().map(|n| n.name).collect(),
                 &mut taken_nodes,
                 &mut node_renames,
             );
@@ -214,14 +217,14 @@ impl W3dScene {
         // Splice the assets in. With generateUniqueNames the names are now
         // distinct so these all append/insert; without it, a same-named
         // incoming element replaces the existing one.
-        merge_named(&mut self.materials, src.materials, |m| m.name.clone());
-        merge_named(&mut self.shaders, src.shaders, |s| s.name.clone());
-        merge_named(&mut self.nodes, src.nodes, |n| n.name.clone());
-        merge_named(&mut self.lights, src.lights, |l| l.name.clone());
-        merge_named(&mut self.texture_infos, src.texture_infos, |t| t.name.clone());
-        merge_named(&mut self.skeletons, src.skeletons, |s| s.name.clone());
-        merge_named(&mut self.motions, src.motions, |m| m.name.clone());
-        merge_named(&mut self.raw_meshes, src.raw_meshes, |m| m.name.clone());
+        merge_named(&mut self.materials, src.materials, |m| m.name.clone().to_string());
+        merge_named(&mut self.shaders, src.shaders, |s| s.name.clone().to_string());
+        merge_named(&mut self.nodes, src.nodes, |n| n.name.clone().to_string());
+        merge_named(&mut self.lights, src.lights, |l| l.name.clone().to_string());
+        merge_named(&mut self.texture_infos, src.texture_infos, |t| t.name.clone().to_string());
+        merge_named(&mut self.skeletons, src.skeletons, |s| s.name.clone().to_string());
+        merge_named(&mut self.motions, src.motions, |m| m.name.clone().to_string());
+        merge_named(&mut self.raw_meshes, src.raw_meshes, |m| m.name.clone().to_string());
         self.texture_images.extend(src.texture_images);
         self.model_resources.extend(src.model_resources);
         self.clod_meshes.extend(src.clod_meshes);

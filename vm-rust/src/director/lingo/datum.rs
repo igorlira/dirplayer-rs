@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}
+    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
 };
 
 #[allow(dead_code)]
@@ -70,23 +70,23 @@ pub enum StringChunkType {
     Line,
 }
 
-impl From<&str> for StringChunkType {
-    fn from(s: &str) -> Self {
-        match s {
-            "item" | "items"  => StringChunkType::Item,
-            "word" | "words"  => StringChunkType::Word,
-            "char" | "chars" => StringChunkType::Char,
-            "line" | "lines" => StringChunkType::Line,
+impl From<Symbol> for StringChunkType {
+    fn from(s: Symbol) -> Self {
+        match s.into_builtin_or_error().unwrap() {
+            BuiltInSymbol::Item | BuiltInSymbol::Items => StringChunkType::Item,
+            BuiltInSymbol::Word | BuiltInSymbol::Words => StringChunkType::Word,
+            BuiltInSymbol::Char | BuiltInSymbol::Chars => StringChunkType::Char,
+            BuiltInSymbol::Line | BuiltInSymbol::Lines => StringChunkType::Line,
             _ => panic!("Invalid string chunk type"),
         }
     }
 }
 
-impl From<&String> for StringChunkType {
-    fn from(s: &String) -> Self {
-        StringChunkType::from(s.as_str())
-    }
-}
+// impl From<&String> for StringChunkType {
+//     fn from(s: &String) -> Self {
+//         StringChunkType::from(s.as_str())
+//     }
+// }
 
 impl From<&i32> for StringChunkType {
     fn from(n: &i32) -> Self {
@@ -102,6 +102,18 @@ impl From<&i32> for StringChunkType {
     }
 }
 
+impl From<BuiltInSymbol> for StringChunkType {
+    fn from(symbol: BuiltInSymbol) -> Self {
+        match symbol {
+            BuiltInSymbol::Item => StringChunkType::Item,
+            BuiltInSymbol::Word => StringChunkType::Word,
+            BuiltInSymbol::Char => StringChunkType::Char,
+            BuiltInSymbol::Line => StringChunkType::Line,
+            _ => panic!("Invalid builtin symbol for string chunk type"),
+        }
+    }
+}
+
 impl Into<String> for StringChunkType {
     fn into(self) -> String {
         match self {
@@ -109,6 +121,17 @@ impl Into<String> for StringChunkType {
             StringChunkType::Word => "word".to_string(),
             StringChunkType::Char => "char".to_string(),
             StringChunkType::Line => "line".to_string(),
+        }
+    }
+}
+
+impl Into<BuiltInSymbol> for StringChunkType {
+    fn into(self) -> BuiltInSymbol {
+        match self {
+            StringChunkType::Item => BuiltInSymbol::Item,
+            StringChunkType::Word => BuiltInSymbol::Word,
+            StringChunkType::Char => BuiltInSymbol::Char,
+            StringChunkType::Line => BuiltInSymbol::Line,
         }
     }
 }
@@ -149,9 +172,9 @@ pub struct Shockwave3dObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// Object type: "model", "shader", "texture", "camera", "light", "group", "motion", "modelResource"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object name within the scene
-    pub name: String,
+    pub name: Symbol,
 }
 
 /// Reference to a Havok physics object (rigidBody, spring, linearDashpot, angularDashpot, corrector).
@@ -160,9 +183,9 @@ pub struct HavokObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// "rigidBody", "spring", "linearDashpot", "angularDashpot", "corrector"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object name within the Havok scene
-    pub name: String,
+    pub name: Symbol,
 }
 
 /// Reference to a PhysX (AGEIA) physics object (rigidBody, spring, joint).
@@ -173,11 +196,11 @@ pub struct PhysXObjectRef {
     pub cast_lib: i32,
     pub cast_member: i32,
     /// "rigidBody", "spring", "linearJoint", "angularJoint", "d6Joint", "constraint"
-    pub object_type: String,
+    pub object_type: BuiltInSymbol,
     /// Object ID within the PhysX world (matches `PhysXRigidBody.id` / `PhysXConstraint.id`).
     pub id: u32,
     /// Object name (cached for getName / display).
-    pub name: String,
+    pub name: Symbol,
 }
 
 impl FlashObjectRef {
@@ -237,7 +260,7 @@ pub enum Datum {
     VarRef(VarRef),
     List(DatumType, VecDeque<DatumRef>, bool), // bool is for whether the list is sorted
     PropList(VecDeque<PropListPair>, bool),    // bool is for whether the map is sorted
-    Symbol(String),
+    Symbol(Symbol),
     CastLib(u32),
     Stage,
     ScriptRef(CastMemberRef),
@@ -252,14 +275,8 @@ pub enum Datum {
     CursorRef(CursorRef),
     TimeoutRef(TimeoutRef),
     TimeoutFactory,
-    TimeoutInstance {
-        name: String,
-        duration: i32,
-        callback: DatumRef,
-        target: DatumRef,
-        /// For script-based timeouts (like _TIMER_), this holds the script instance
-        script_instance: Option<DatumRef>,
-    },
+    /// Boxed (~100B of fields) to keep `Datum` small.
+    TimeoutInstance(Box<TimeoutInstanceData>),
     ColorRef(ColorRef),
     BitmapRef(BitmapRef),
     PaletteRef(PaletteRef),
@@ -274,13 +291,16 @@ pub enum Datum {
     DateRef(u32),
     MathRef(u32),
     Vector([f64; 3]),
-    Media(Media),
+    /// Boxed: `Media` is large (~160B); boxing keeps `Datum` small so every
+    /// alloc/clone of the common variants (Int/Symbol/etc.) stays cheap.
+    Media(Box<Media>),
     Null,
     JavaScript(Vec<u8>),
     FlashObjectRef(FlashObjectRef),
     Shockwave3dObjectRef(Shockwave3dObjectRef),
-    /// 4x4 row-major transform matrix for Shockwave 3D
-    Transform3d([f64; 16]),
+    /// 4x4 row-major transform matrix for Shockwave 3D.
+    /// Boxed (128B array) to keep `Datum` small — 3D transforms are rare.
+    Transform3d(Box<[f64; 16]>),
     HavokObjectRef(HavokObjectRef),
     PhysXObjectRef(PhysXObjectRef),
     /// A writable reference to a single vertex of a `#vectorShape` member,
@@ -372,7 +392,7 @@ impl Datum {
             Datum::CursorRef(_) => DatumType::CursorRef,
             Datum::TimeoutRef(_) => DatumType::TimeoutRef,
             Datum::TimeoutFactory => DatumType::TimeoutRef,
-            Datum::TimeoutInstance { .. } => DatumType::TimeoutRef,
+            Datum::TimeoutInstance(_) => DatumType::TimeoutRef,
             Datum::ColorRef(_) => DatumType::ColorRef,
             Datum::BitmapRef(_) => DatumType::BitmapRef,
             Datum::PaletteRef(_) => DatumType::PaletteRef,
@@ -409,7 +429,7 @@ impl Datum {
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
             Datum::Float(n) => Ok(n.to_string()),
-            Datum::Symbol(s) => Ok(s.clone()),
+            Datum::Symbol(s) => Ok(s.to_string()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -430,12 +450,23 @@ impl Datum {
         }
     }
 
+    // pub fn spur_value(&self) -> Result<lasso::Spur, ScriptError> {
+    //     match self {
+    //         Datum::Symbol(s) => Ok(*s),
+    //         Datum::String(s) => Ok(get_symbol_spur(s)),
+    //         _ => Err(ScriptError::new(format!(
+    //             "Cannot convert datum type {} to symbol",
+    //             self.type_str()
+    //         ))),
+    //     }
+    // }
+
     pub fn string_value_cow(&self) -> Result<Cow<'_, str>, ScriptError> {
         match self {
             Datum::String(s) => Ok(Cow::Borrowed(s)),
             Datum::StringChunk(_, _, str_value) => Ok(Cow::Borrowed(str_value)),
             Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
-            Datum::Symbol(s) => Ok(Cow::Borrowed(s)),
+            Datum::Symbol(s) => Ok(Cow::Owned(s.to_string())),
             Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -452,9 +483,10 @@ impl Datum {
         }
     }
 
-    pub fn symbol_value(&self) -> Result<String, ScriptError> {
+    pub fn symbol_value(&self) -> Result<Symbol, ScriptError> {
         match self {
-            Datum::Symbol(s) => Ok(s.clone()),
+            Datum::Symbol(s) => Ok(*s),
+            Datum::String(s) => Ok(Symbol::from_str(s)),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to symbol",
                 self.type_str()
@@ -512,7 +544,7 @@ impl Datum {
 
     pub fn media_value(&self) -> Result<Media, ScriptError> {
         match self {
-            Datum::Media(media) => Ok(media.clone()),
+            Datum::Media(media) => Ok((**media).clone()),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum of type {} to media",
                 self.type_str()
@@ -593,8 +625,7 @@ impl Datum {
             Datum::String(s) => Ok(!s.is_empty()),
             Datum::Void | Datum::Null => Ok(false),
             Datum::Symbol(s) => {
-                let lower = s.to_lowercase();
-                Ok(lower != "false")
+                Ok(!s.eq_builtin(BuiltInSymbol::False))
             },
             _ => Err(ScriptError::new("Cannot convert datum to bool".to_string())),
         }
@@ -862,6 +893,37 @@ impl Datum {
         }
     }
 
+    /// Construct a boxed `Media` datum (the variant payload is boxed to keep
+    /// `Datum` small). Use at construction sites instead of `Datum::Media(..)`.
+    #[inline]
+    pub fn media(m: Media) -> Datum {
+        Datum::Media(Box::new(m))
+    }
+
+    /// Construct a boxed `Transform3d` datum.
+    #[inline]
+    pub fn transform3d(m: [f64; 16]) -> Datum {
+        Datum::Transform3d(Box::new(m))
+    }
+
+    /// Construct a boxed `TimeoutInstance` datum.
+    #[inline]
+    pub fn timeout_instance(
+        name: String,
+        duration: i32,
+        callback: DatumRef,
+        target: DatumRef,
+        script_instance: Option<DatumRef>,
+    ) -> Datum {
+        Datum::TimeoutInstance(Box::new(TimeoutInstanceData {
+            name,
+            duration,
+            callback,
+            target,
+            script_instance,
+        }))
+    }
+
     pub fn from_f64(value: f64) -> Datum {
         if value.fract() == 0.0 {
             Datum::Int(value as i32)
@@ -949,4 +1011,15 @@ pub const DATUM_FALSE: Datum = Datum::Int(0);
 pub enum VarRef {
     Script(CastMemberRef),
     ScriptInstance(ScriptInstanceRef),
+}
+
+/// Payload for `Datum::TimeoutInstance` (boxed inside `Datum` to keep it small).
+#[derive(Clone)]
+pub struct TimeoutInstanceData {
+    pub name: String,
+    pub duration: i32,
+    pub callback: DatumRef,
+    pub target: DatumRef,
+    /// For script-based timeouts (like _TIMER_), this holds the script instance.
+    pub script_instance: Option<DatumRef>,
 }

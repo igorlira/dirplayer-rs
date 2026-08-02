@@ -121,6 +121,19 @@ impl NetManager {
         }
     }
 
+    /// True if any network task has been created but not yet completed. Used by
+    /// the frame loop to run frames fast (no tempo idle) while the movie is
+    /// still loading assets.
+    pub fn has_pending_tasks(&self) -> bool {
+        let shared_state = self.shared_state.try_lock().unwrap();
+        self.tasks.keys().any(|id| {
+            shared_state
+                .task_states
+                .get(id)
+                .map_or(true, |s| s.result.is_none())
+        })
+    }
+
     pub fn get_task_result(&self, task_id: Option<u32>) -> Option<NetResult> {
         return self.get_task_state(task_id).and_then(|x| x.result);
     }

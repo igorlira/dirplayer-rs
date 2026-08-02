@@ -23,7 +23,7 @@ macro_rules! multiuser_log {
 use crate::{
     director::{lingo::datum::{Datum, DatumType}, static_datum::{StaticDatum, static_datum_to_runtime}},
     player::{
-        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, xtra::multiuser::{blowfish::{DEFAULT_CIPHER_KEY, MUSBlowfish}}
+        DatumRef, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol}, xtra::multiuser::blowfish::{DEFAULT_CIPHER_KEY, MUSBlowfish}
     },
 };
 
@@ -43,7 +43,7 @@ pub struct MultiuserMessage {
 }
 
 pub struct MultiuserXtraInstance {
-    pub net_message_handler: Option<(DatumRef, String)>,
+    pub net_message_handler: Option<(DatumRef, Symbol)>,
     pub message_queue: Vec<MultiuserMessage>,
     pub socket_tx: Option<Sender<Vec<u8>>>,
     pub connection_mode: MultiuserConnectionMode,
@@ -56,7 +56,7 @@ impl MultiuserXtraInstance {
         if let Some((handler_obj_ref, handler_symbol)) = &self.net_message_handler {
             let handler_symbol = handler_symbol.clone();
             let handler_obj_ref = handler_obj_ref.clone();
-            player_dispatch_callback_event(handler_obj_ref, &handler_symbol, &vec![]);
+            player_dispatch_callback_event(handler_obj_ref, handler_symbol, &vec![]);
         }
     }
 
@@ -188,16 +188,12 @@ impl MultiuserXtraManager {
                         let host = player.get_datum(args.get(0).unwrap()).string_value()?;
                         let port = player.get_datum(args.get(1).unwrap()).int_value()?;
                         let plist = player.get_datum(args.get(2).unwrap());
-                        let lookup_str = |key: &str| -> String {
+                        let lookup_str = |key: BuiltInSymbol| -> String {
                             if let Datum::PropList(pairs, _) = plist {
                                 for (k, v) in pairs.iter() {
                                     let kd = player.get_datum(k);
-                                    let key_matches = match kd {
-                                        Datum::Symbol(s) | Datum::String(s) => {
-                                            s.eq_ignore_ascii_case(key)
-                                        }
-                                        _ => false,
-                                    };
+                                    let kd_symbol = kd.symbol_value().and_then(|x| x.into_builtin_or_error());
+                                    let key_matches = kd_symbol.is_ok_and(|x| x == key);
                                     if key_matches {
                                         return player.get_datum(v).string_value().unwrap_or_default();
                                     }
@@ -205,9 +201,9 @@ impl MultiuserXtraManager {
                             }
                             String::default()
                         };
-                        let username = lookup_str("userID");
-                        let password = lookup_str("password");
-                        let movie_id = lookup_str("movieid");
+                        let username = lookup_str(BuiltInSymbol::UserID);
+                        let password = lookup_str(BuiltInSymbol::Password);
+                        let movie_id = lookup_str(BuiltInSymbol::Movieid);
                         let mode = args.get(3).and_then(|d| player.get_datum(d).int_value().ok()).unwrap_or(0);
                         let encryption_key = args.get(4).and_then(|d| player.get_datum(d).string_value().ok()).unwrap_or_default();
                         Ok((username, password, host, port, movie_id, mode, encryption_key))
