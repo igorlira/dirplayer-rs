@@ -49,9 +49,21 @@ impl ListDatumUtils {
             "count" => Ok(Datum::Int(list_vec.len() as i32)),
             "length" => Ok(Datum::Int(list_vec.len() as i32)),
             "ilk" => Ok(Datum::Symbol("list".to_string())),
-            _ => Err(ScriptError::new(format!(
-                "No property {prop_name} for list datum"
-            ))),
+            // `propertyList.propertyName` is a documented spelling of getaProp,
+            // and "the getaProp command returns VOID when the specified value is
+            // not in the list" — only BRACKET access raises: "Unlike the
+            // getAProp command where VOID is returned when a property doesn't
+            // exist, a script error will occur if the property doesn't exist
+            // when using bracket access" (Director 11.5 Scripting Dictionary,
+            // `getaProp`). Erroring here had it backwards.
+            //
+            // A LINEAR list reaching this arm is the same question asked of a
+            // list that simply has no such property, so it answers the same way.
+            // Argent Free Ride's Track Builder leans on it directly: when its
+            // track XML yields no attributes, `pAttributes.skydome` is expected
+            // to come back VOID, and the very next lines guard with
+            // `voidp(pAttributes.findPos(#terrain_sx))`.
+            _ => Ok(Datum::Void),
         }
     }
 }
