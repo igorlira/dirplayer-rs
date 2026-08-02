@@ -200,8 +200,16 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
     let baumgarte = 0.2;
     let slop = 0.005;
     let rest_threshold = 1.0;
+    // Cap the depenetration velocity the Baumgarte bias may inject, matching
+    // PhysX's maxDepenetrationVelocity default of 3 m/s. `scaling_factor` is
+    // the movie's worldScale (display units per metre⁻¹: Agent Free Ride
+    // passes 0.01 ⇒ 1 unit = 1 cm ⇒ cap = 300 units/s). Without the cap, a
+    // body that spawns or tunnels deep inside a mesh gets bias ≈ depth·0.2/dt
+    // — thousands of units/s — and is launched out of the world.
+    let world_scale = state.scaling_factor[0].abs().max(1e-9);
+    let max_pen_bias = 3.0 / world_scale;
     for c in constraints.iter_mut() {
-        prepare_constraint(c, &state.bodies, dt, baumgarte, slop, rest_threshold);
+        prepare_constraint(c, &state.bodies, dt, baumgarte, slop, rest_threshold, max_pen_bias);
     }
     let velocity_iterations = 4;
     if state.use_soa_solver {
@@ -221,9 +229,23 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
     }
 
     // ---- 6. Integrate positions / orientations ----
+    // Sanity ceiling on solver output. A degenerate contact set (deep
+    // penetration at speed against a mesh edge) can make the iterated solver
+    // diverge; one runaway substep then poisons every later broadphase AABB
+    // and eventually NaNs the whole world. PhysX guards this with
+    // maxLinearVelocity/maxAngularVelocity; 1e5 display-units/s is far above
+    // any legitimate gameplay speed in the movies we run.
+    const MAX_LIN_VEL: f64 = 1.0e5;
+    const MAX_ANG_VEL: f64 = 1.0e3;
     for body in state.bodies.iter_mut() {
         if matches!(body.body_type, PhysXBodyType::Static) || body.pinned { continue; }
         if body.cached_is_sleeping { continue; }
+        if body.linear_velocity.iter().any(|v| !v.is_finite()) { body.linear_velocity = [0.0; 3]; }
+        if body.angular_velocity.iter().any(|v| !v.is_finite()) { body.angular_velocity = [0.0; 3]; }
+        let lv = v_len_sq(body.linear_velocity).sqrt();
+        if lv > MAX_LIN_VEL { body.linear_velocity = v_mul(body.linear_velocity, MAX_LIN_VEL / lv); }
+        let av = v_len_sq(body.angular_velocity).sqrt();
+        if av > MAX_ANG_VEL { body.angular_velocity = v_mul(body.angular_velocity, MAX_ANG_VEL / av); }
         body.position = v_add(body.position, v_mul(body.linear_velocity, dt));
         // Orientation: integrate via quaternion in axis-angle storage.
         let q = axisangle_to_quat(body.orientation);
@@ -250,6 +272,17 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
         PhysXShapeKind::Sphere => {
             let r = [body.radius; 3];
             (v_sub(body.position, r), v_add(body.position, r))
+        }
+        // Concave with cooked triangles: the cooked verts are already in the
+        // world basis and are NOT centred on the body position (a track tile
+        // spans local y 0..20000), so a ±half_extents box around `position`
+        // misses the pair over the far half of every tile. Use the mesh's own
+        // AABB offset by the position.
+        PhysXShapeKind::ConcaveShape if body.triangle_mesh.is_some() => {
+            let mesh = body.triangle_mesh.as_ref().unwrap();
+            let mn = [mesh.aabb_min[0] as f64, mesh.aabb_min[1] as f64, mesh.aabb_min[2] as f64];
+            let mx = [mesh.aabb_max[0] as f64, mesh.aabb_max[1] as f64, mesh.aabb_max[2] as f64];
+            (v_add(body.position, mn), v_add(body.position, mx))
         }
         PhysXShapeKind::Box | PhysXShapeKind::ConvexShape | PhysXShapeKind::ConcaveShape => {
             // Conservative AABB of an oriented box.
@@ -485,7 +518,16 @@ fn build_mesh_contacts(
     let Some(mesh) = mesh_body.triangle_mesh.as_ref() else { return; };
 
     // Transform query shape into mesh-local space.
-    let mesh_q = axisangle_to_quat(mesh_body.orientation);
+    //
+    // The cooked triangle vertices (createRigidBody) are stored with the
+    // model's authored WORLD basis already applied — only the translation is
+    // left to the body's `position`. The body's `orientation` records that
+    // same authored basis (simulate()'s model write-back needs it), so
+    // rotating the query by orientation⁻¹ here would rotate the query into a
+    // frame the vertices are NOT in and displace every non-identity-oriented
+    // tile (Agent Free Ride's track tiles are authored at [0,0,-1]·60°).
+    // Mesh-local space is therefore translation-only.
+    let mesh_q = [0.0, 0.0, 0.0, 1.0];
     let mesh_qinv = q_inv(mesh_q);
     let to_local = |p: [f64; 3]| -> [f64; 3] { q_rotate(mesh_qinv, v_sub(p, mesh_body.position)) };
     let to_world_vec = |v: [f64; 3]| -> [f64; 3] { q_rotate(mesh_q, v) };
@@ -508,7 +550,14 @@ fn build_mesh_contacts(
             mp::capsule_vs_mesh(mesh, f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
                                 shape_body.radius as f32, 0.0)
         }
-        PhysXShapeKind::Box => {
+        // ConvexShape rides the box path: `createRigidBody` builds its hull
+        // with `polygonal_box(half_extents)`, so an OBB test against the mesh
+        // is exact for the hull we actually store. Skipping convex entirely
+        // (the previous behaviour) left dynamic #convexShape bodies — every
+        // vehicle chassis in the Vehicle-Base games — without ANY terrain
+        // narrowphase, so Agent Free Ride's boarder free-fell from the first
+        // simulate() and never generated a single contact.
+        PhysXShapeKind::Box | PhysXShapeKind::ConvexShape => {
             let c = f64_to_f32(to_local(shape_body.position));
             // Combined rotation: mesh^{-1} * shape ⇒ shape's local axes in mesh-local.
             let q_combined = q_mul(mesh_qinv, axisangle_to_quat(shape_body.orientation));
@@ -518,7 +567,7 @@ fn build_mesh_contacts(
             let he = f64_to_f32(shape_body.half_extents);
             mp::box_vs_mesh(mesh, c, he, ax, ay, az, 0.0)
         }
-        _ => return, // ConvexShape / ConcaveShape vs ConcaveShape: undefined per PhysX
+        _ => return, // ConcaveShape vs ConcaveShape: undefined per PhysX
     };
 
     let pair_friction = (mesh_body.friction * shape_body.friction).max(0.0).sqrt();
@@ -663,6 +712,7 @@ fn prepare_constraint(
     c: &mut ContactConstraint,
     bodies: &[crate::player::cast_member::PhysXRigidBody],
     dt: f64, baumgarte: f64, slop: f64, rest_threshold: f64,
+    max_pen_bias: f64,
 ) {
     let a = &bodies[c.body_a];
     let ghost; // optional storage for static-terrain ghost body
@@ -683,7 +733,7 @@ fn prepare_constraint(
     c.eff_mass_t2 = compute_eff_mass(a, b, c.tan2, c.ra, c.rb);
 
     let depth = (c.penetration - slop).max(0.0);
-    c.bias_n = -(baumgarte / dt) * depth;
+    c.bias_n = -((baumgarte / dt) * depth).min(max_pen_bias);
 
     let vn = contact_velocity_along(a, b, c.ra, c.rb, c.normal);
     if vn < -rest_threshold {
