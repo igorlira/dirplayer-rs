@@ -121,19 +121,30 @@ impl XmlParserXtraInstance {
             let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
             let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
             let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
-            let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
+            let mut attr_value_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
             for (attr_name, attr_value) in &node.attributes {
                 let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
                 let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
                 attr_pairs.push_back((attr_key, attr_val));
                 attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
-                attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
+                let av_key = player.alloc_datum(Datum::String(attr_name.clone()));
+                let av_val = player.alloc_datum(Datum::String(attr_value.clone()));
+                attr_value_pairs.push_back((av_key, av_val));
             }
             let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
             let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
             let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
             let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
-            let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
+            // `XMLnode.attributeValue[ attributeNameOrNumber ]` (Director 11.5
+            // Scripting Dictionary, `attributeValue`) — indexable by attribute
+            // NAME as well as by position. A property list serves both through
+            // the existing bracket rule, which tries a key lookup first and
+            // falls back to 1-based positional access for an integer; a plain
+            // linear list only ever answered the number. Argent Free Ride's
+            // Track Loader uses each form in turn — `attributeValue[lAttrIdx]`
+            // while collecting a node's attributes, then
+            // `lChild.attributeValue["id"]` to pick the track out by name.
+            let attr_value_value = player.alloc_datum(Datum::PropList(attr_value_pairs, false));
 
             // Create #child list and collect #charData
             let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
@@ -191,19 +202,21 @@ impl XmlParserXtraInstance {
         let attributes_key = player.alloc_datum(Datum::Symbol("attributes".to_string()));
         let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
         let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
-        let mut attr_value_refs: VecDeque<DatumRef> = VecDeque::new();
+        let mut attr_value_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
         for (attr_name, attr_value) in &node.attributes {
             let attr_key = player.alloc_datum(Datum::Symbol(attr_name.clone()));
             let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
             attr_pairs.push_back((attr_key, attr_val));
             attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
-            attr_value_refs.push_back(player.alloc_datum(Datum::String(attr_value.clone())));
+            let av_key = player.alloc_datum(Datum::String(attr_name.clone()));
+            let av_val = player.alloc_datum(Datum::String(attr_value.clone()));
+            attr_value_pairs.push_back((av_key, av_val));
         }
         let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
         let attr_name_key = player.alloc_datum(Datum::Symbol("attributeName".to_string()));
         let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
         let attr_value_key = player.alloc_datum(Datum::Symbol("attributeValue".to_string()));
-        let attr_value_value = player.alloc_datum(Datum::List(DatumType::List, attr_value_refs, false));
+        let attr_value_value = player.alloc_datum(Datum::PropList(attr_value_pairs, false));
 
         // Create #child list and collect #charData
         let child_key = player.alloc_datum(Datum::Symbol("child".to_string()));
@@ -354,7 +367,32 @@ impl XmlParserXtraManager {
                 })?;
 
                 let result = instance.parse_string(&xml_string);
-                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(result))))
+                // VOID on success, the descriptive error string on failure.
+                //
+                // The Scripting Dictionary documents the pair together under
+                // `getError() (XML)`: "When there is no error, this function
+                // returns <VOID>", shown as
+                //     errCode = parserObject.parseString(member("XMLtext").text)
+                //     errorString = parserObject.getError()
+                //     if voidP(errorString) then  -- use the XML
+                // so a clean parse is signalled by VOID and a failure by the
+                // string. Movies apply that same `voidp` test directly to
+                // parseString's own return — Argent Free Ride's Xml Loader is
+                // one:
+                //     lError = lXmlXtra.parseString(pXmlCastMember.text)
+                //     if not voidp(lError) then _Error(lError) else ParseXml(...)
+                // Returning Int(0) for success made `voidp` false, so it took
+                // the error branch on a perfectly good document and never
+                // parsed its track XML at all — the level then built with no
+                // attributes, no chunks and no tokens.
+                if result == 0 && instance.error.is_none() {
+                    return Ok(DatumRef::Void);
+                }
+                let message = instance
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("XML parsing error: {}", result));
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(message))))
             }
             "makelist" => instance.make_list(),
             "makesublist" => {
