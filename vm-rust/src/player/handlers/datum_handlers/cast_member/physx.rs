@@ -30,6 +30,89 @@ use crate::{
     },
 };
 
+/// Column-major 4x4 product, matching `raycast::multiply_4x4` — the two must
+/// agree or a body and the ray that probes for it end up in different frames.
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            r[col * 4 + row] = a[row] * b[col * 4]
+                + a[4 + row] * b[col * 4 + 1]
+                + a[8 + row] * b[col * 4 + 2]
+                + a[12 + row] * b[col * 4 + 3];
+        }
+    }
+    r
+}
+
+/// Build the column-major 4x4 a bound 3D model should take for a body pose.
+///
+/// Kept local to the PhysX stack on purpose. The obvious move is to reuse
+/// Havok's `build_sync_transform`, but the two stacks disagree on conventions:
+/// `physx_native` stores orientation as Director's [axis, angleDegrees] and its
+/// quaternions are (x, y, z, w) — w LAST — while `havok_physics` uses
+/// [w, x, y, z] — w FIRST. Borrowing across that seam silently mirrors the
+/// rotation, which is what pitched Agent Free Ride's chassis and pushed its
+/// hover points under the track.
+///
+/// Rotation is about the centre of mass, not the visual origin: `pos` is where
+/// the origin sits with no rotation, so the world COM is `pos + com`, and a pure
+/// rotation must leave the COM fixed while the origin orbits it. That gives a
+/// translation of `pos + com - R*com`. `scale` restores the model's authored
+/// size, since this overwrites the model's whole matrix.
+fn body_model_transform(
+    pos: [f64; 3],
+    orientation_axis_angle: [f64; 4],
+    com: [f64; 3],
+    scale: [f64; 3],
+) -> [f32; 16] {
+    let q = super::physx_native::axisangle_to_quat(orientation_axis_angle); // (x, y, z, w)
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, xz, yz) = (x * y, x * z, y * z);
+    let (wx, wy, wz) = (w * x, w * y, w * z);
+    // Column-major basis vectors (the W3D scene's layout).
+    let c0 = [1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)];
+    let c1 = [2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)];
+    let c2 = [2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)];
+    let rot_com = [
+        c0[0] * com[0] + c1[0] * com[1] + c2[0] * com[2],
+        c0[1] * com[0] + c1[1] * com[1] + c2[1] * com[2],
+        c0[2] * com[0] + c1[2] * com[1] + c2[2] * com[2],
+    ];
+    let mut m = [0.0f32; 16];
+    for i in 0..3 {
+        m[i] = (c0[i] * scale[0]) as f32;
+        m[4 + i] = (c1[i] * scale[1]) as f32;
+        m[8 + i] = (c2[i] * scale[2]) as f32;
+        m[12 + i] = (pos[i] + com[i] - rot_com[i]) as f32;
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// Inverse of the rotation half of [`body_model_transform`]: a model's authored
+/// world basis expressed as Director's [axis, angleDegrees].
+fn axis_angle_from_basis(c0: [f64; 3], c1: [f64; 3], c2: [f64; 3]) -> [f64; 4] {
+    let m = [c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2]];
+    let trace = m[0] + m[4] + m[8];
+    // Shepperd's method, emitting (x, y, z, w) to match physx_native.
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [(m[7] - m[5]) / s, (m[2] - m[6]) / s, (m[3] - m[1]) / s, 0.25 * s]
+    } else if m[0] > m[4] && m[0] > m[8] {
+        let s = (1.0 + m[0] - m[4] - m[8]).sqrt() * 2.0;
+        [0.25 * s, (m[1] + m[3]) / s, (m[2] + m[6]) / s, (m[7] - m[5]) / s]
+    } else if m[4] > m[8] {
+        let s = (1.0 + m[4] - m[0] - m[8]).sqrt() * 2.0;
+        [(m[1] + m[3]) / s, 0.25 * s, (m[5] + m[7]) / s, (m[2] - m[6]) / s]
+    } else {
+        let s = (1.0 + m[8] - m[0] - m[4]).sqrt() * 2.0;
+        [(m[2] + m[6]) / s, (m[5] + m[7]) / s, 0.25 * s, (m[3] - m[1]) / s]
+    };
+    super::physx_native::quat_to_axisangle(q)
+}
+
 pub struct PhysXPhysicsMemberHandlers {}
 
 impl PhysXPhysicsMemberHandlers {
@@ -539,6 +622,70 @@ impl PhysXPhysicsMemberHandlers {
         };
         let sub_steps = physx.state.sub_steps;
         super::physx_native::step_native(&mut physx.state, dt, sub_steps);
+
+        // Write each simulated body's pose back onto the 3D model it was bound
+        // to at createRigidBody. Director's physics engines drive their linked
+        // models: scripts read `model.transform` (and cast rays from it) and
+        // expect it to follow the body. Havok's simulate() has always done this
+        // (see `havok.rs`); the PhysX path stepped the solver and stopped, so
+        // every bound model stayed at its authored pose forever.
+        //
+        // Agent Free Ride's vehicles show the cost: `setPosition` moves the
+        // chassis BODY to the grid start, but the chassis MODEL stayed at its
+        // authored spot ~100k units off-track, and the hover raycasts — which
+        // originate from `pChassisMdl.transform * pHoverPointList[i]` — found no
+        // ground at all, leaving `GetHoverContactPoint()` empty.
+        //
+        // Static bodies are skipped: they are level geometry that never moves,
+        // and rewriting their transforms would only undo script-side placement.
+        let sync_data: Vec<(String, [f32; 16])> = physx.state.bodies.iter()
+            .filter(|rb| rb.body_type != PhysXBodyType::Static && !rb.model_name.is_empty())
+            .map(|rb| {
+                // `rb.orientation` is stored the way the Director 11.5 property
+                // is defined — "a list with the direction vector, and the angle"
+                // — i.e. [axis.x, axis.y, axis.z, angleDegrees], and the solver
+                // converts on every use. build_sync_transform wants a QUATERNION,
+                // so feeding it the raw pair produced a wrecked basis (Agent Free
+                // Ride's [vector(0,0,1), 135] came out as a Y column of ~-36449)
+                // that pitched the chassis and pushed its hover points under the
+                // track.
+                let t = body_model_transform(
+                    rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
+                );
+                (rb.model_name.clone(), t)
+            })
+            .collect();
+
+        // Resolve each model to the Shockwave3D member that owns it. A movie can
+        // hold several 3D worlds (Agent Free Ride has the level, the vehicles and
+        // the traps), so the body's own model name is the only reliable key.
+        let mut targets: Vec<(CastMemberRef, String, [f32; 16])> = Vec::new();
+        for (model_name, t) in &sync_data {
+            if t.iter().any(|v| !v.is_finite()) { continue; }
+            'casts: for cast in &player.movie.cast_manager.casts {
+                for (number, member) in &cast.members {
+                    if let CastMemberType::Shockwave3d(w3d) = &member.member_type {
+                        let has_node = w3d.parsed_scene.as_ref().map_or(false, |s| {
+                            s.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(model_name))
+                        });
+                        if has_node {
+                            targets.push((
+                                CastMemberRef { cast_lib: cast.number as i32, cast_member: *number as i32 },
+                                model_name.clone(),
+                                *t,
+                            ));
+                            break 'casts;
+                        }
+                    }
+                }
+            }
+        }
+        for (member_ref, model_name, t) in &targets {
+            crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                player, member_ref, model_name, *t,
+            );
+        }
+
         Ok(player.alloc_datum(Datum::Int(0)))
     }
 
@@ -601,11 +748,28 @@ impl PhysXPhysicsMemberHandlers {
         // sphere-vs-terrain contacts grazed the heightfield with separation
         // ≈ 0 — the solver couldn't generate enough impulse to halt fall,
         // so dynamic bodies sank through the world.
-        let (prim_radius, prim_half_extents, prim_half_height, prim_position) = {
+        // Collision geometry cooked from the bound model, in BODY-LOCAL space
+        // (positions rotated/scaled by the model's world basis; the body's
+        // position supplies the translation). Director's PhysX xtra cooks this
+        // at createRigidBody time from the linked 3D model — nothing in Lingo
+        // hands it over. Without it every #concaveShape track body fell back to
+        // the default 1-unit box, so Agent Free Ride's rider had nothing solid
+        // under him and dropped straight through the terrain.
+        let mut cooked_verts: Vec<[f64; 3]> = Vec::new();
+        let mut cooked_tris: Vec<u32> = Vec::new();
+        // Authored orientation of the bound model. simulate() writes the body's
+        // pose back over the model's whole 4x4, so a body that starts at the
+        // identity quaternion silently RE-ORIENTS its model on the first step.
+        // Agent Free Ride's chassis is authored rotated; flattening it dropped
+        // the hover points ~70 units, which put them under the track surface
+        // before the first hover update could ever push back.
+        let mut model_orientation: [f64; 4] = [0.0, 0.0, 1.0, 0.0];
+
+        let (prim_radius, prim_half_extents, prim_half_height, prim_position, prim_scale) = {
             let three_d_member_name = "new"; // ClubMarian's 3D world member
             let _ = three_d_member_name;
             // Walk every Shockwave3D member to find the model by name.
-            let mut found = (1.0_f64, [1.0_f64; 3], 1.0_f64, [0.0_f64; 3]);
+            let mut found = (1.0_f64, [1.0_f64; 3], 1.0_f64, [0.0_f64; 3], [1.0_f64; 3]);
             for cast in &player.movie.cast_manager.casts {
                 for (_, member) in &cast.members {
                     if let crate::player::cast_member::CastMemberType::Shockwave3d(w3d) = &member.member_type {
@@ -621,6 +785,71 @@ impl PhysXPhysicsMemberHandlers {
                                     let w = res.primitive_width as f64;
                                     let h = res.primitive_height as f64;
                                     let l = res.primitive_length as f64;
+                                    // Prefer the RUNTIME transform: a script that has
+                                    // already moved the model expects the body to start
+                                    // where the model is now, not where it was authored.
+                                    let node_xf = |n: &crate::director::chunks::w3d::types::W3dNode| -> [f32; 16] {
+                                        w3d.runtime_state.node_transforms
+                                            .get(&n.name)
+                                            .or_else(|| w3d.runtime_state.node_transforms.iter()
+                                                .find(|(k, _)| k.eq_ignore_ascii_case(&n.name))
+                                                .map(|(_, v)| v))
+                                            .copied()
+                                            .unwrap_or(n.transform)
+                                    };
+                                    // Compose the parent chain, the same way the raycast
+                                    // does: a body bound to a parented model must sit at
+                                    // the model's WORLD pose, not its local offset.
+                                    let xf = {
+                                        let mut acc = node_xf(node);
+                                        let mut parent = node.parent_name.clone();
+                                        for _ in 0..20 {
+                                            if parent.is_empty() || parent.eq_ignore_ascii_case("World") { break; }
+                                            let Some(pn) = scene.nodes.iter()
+                                                .find(|n| n.name.eq_ignore_ascii_case(&parent)) else { break };
+                                            acc = mat4_mul(&node_xf(pn), &acc);
+                                            parent = pn.parent_name.clone();
+                                        }
+                                        acc
+                                    };
+                                    // Cook the model's triangles into body-local space:
+                                    // rotate/scale by the world basis, drop the translation
+                                    // (the body's position carries that).
+                                    if let Some(sub_meshes) = scene.clod_meshes.get(resource.as_str()) {
+                                        for sm in sub_meshes {
+                                            let base = cooked_verts.len() as u32;
+                                            for p in &sm.positions {
+                                                let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                                                cooked_verts.push([
+                                                    xf[0] as f64 * x + xf[4] as f64 * y + xf[8]  as f64 * z,
+                                                    xf[1] as f64 * x + xf[5] as f64 * y + xf[9]  as f64 * z,
+                                                    xf[2] as f64 * x + xf[6] as f64 * y + xf[10] as f64 * z,
+                                                ]);
+                                            }
+                                            for f in &sm.faces {
+                                                cooked_tris.push(base + f[0]);
+                                                cooked_tris.push(base + f[1]);
+                                                cooked_tris.push(base + f[2]);
+                                            }
+                                        }
+                                    }
+                                    // Authored world basis → Director's
+                                    // [axis, angleDegrees], scale divided out.
+                                    {
+                                        let col = |c: usize| {
+                                            let v = [xf[c * 4] as f64, xf[c * 4 + 1] as f64, xf[c * 4 + 2] as f64];
+                                            let s = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                                            let s = if s > 1e-9 { s } else { 1.0 };
+                                            [v[0] / s, v[1] / s, v[2] / s]
+                                        };
+                                        model_orientation = axis_angle_from_basis(col(0), col(1), col(2));
+                                    }
+                                    let axis_len = |a: usize| {
+                                        let s = ((xf[a] as f64).powi(2)
+                                            + (xf[a + 1] as f64).powi(2)
+                                            + (xf[a + 2] as f64).powi(2)).sqrt();
+                                        if s > 1e-9 { s } else { 1.0 }
+                                    };
                                     found = (
                                         if r > 0.0 { r } else { 1.0 },
                                         [if w > 0.0 { w * 0.5 } else { 1.0 },
@@ -628,10 +857,8 @@ impl PhysXPhysicsMemberHandlers {
                                          if l > 0.0 { l * 0.5 } else { 1.0 }],
                                         // Capsule half-height = half_length minus radius cap (PhysX 3.4 convention).
                                         if l > 0.0 { (l * 0.5 - r).max(0.0) } else { 1.0 },
-                                        // Initial body position from the model's local transform [12,13,14].
-                                        [node.transform[12] as f64,
-                                         node.transform[13] as f64,
-                                         node.transform[14] as f64],
+                                        [xf[12] as f64, xf[13] as f64, xf[14] as f64],
+                                        [axis_len(0), axis_len(4), axis_len(8)],
                                     );
                                     break;
                                 }
@@ -665,7 +892,52 @@ impl PhysXPhysicsMemberHandlers {
         rb.radius = prim_radius;
         rb.half_extents = prim_half_extents;
         rb.half_height = prim_half_height;
+
+        // Cook the model geometry into the body. `prim_*` above only describe
+        // Director PRIMITIVES (#box/#sphere/...); a body bound to an authored
+        // mesh has none of them and would otherwise keep the 1-unit defaults.
+        if !cooked_tris.is_empty() {
+            let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for v in &cooked_verts {
+                for i in 0..3 {
+                    if v[i] < mn[i] { mn[i] = v[i]; }
+                    if v[i] > mx[i] { mx[i] = v[i]; }
+                }
+            }
+            let he = [
+                (0.5 * (mx[0] - mn[0])).abs().max(1e-4),
+                (0.5 * (mx[1] - mn[1])).abs().max(1e-4),
+                (0.5 * (mx[2] - mn[2])).abs().max(1e-4),
+            ];
+            rb.half_extents = he;
+            if prim_radius <= 1.0 {
+                rb.radius = he[0].max(he[1]).max(he[2]);
+            }
+            match shape {
+                PhysXShapeKind::ConcaveShape => {
+                    // Level geometry: the triangle-mesh narrowphase needs the
+                    // actual triangles, and it is the only path that can hold a
+                    // vehicle on a sloped, uneven track.
+                    let verts32: Vec<[f32; 3]> = cooked_verts.iter()
+                        .map(|v| [v[0] as f32, v[1] as f32, v[2] as f32]).collect();
+                    rb.triangle_mesh = Some(
+                        super::physx_gu_mesh::GuTriangleMesh::build(verts32, cooked_tris),
+                    );
+                }
+                PhysXShapeKind::ConvexShape => {
+                    // Box hull from the mesh AABB rather than a true convex
+                    // hull: it is right-sized (the whole point — the default
+                    // 1-unit box let dynamic bodies sink), cheap to build for a
+                    // 2000-face chassis, and the convex narrowphase treats it
+                    // like any other polyhedron. A proper hull would be tighter.
+                    rb.convex_hull = Some(super::physx_gu_convex::polygonal_box(he));
+                }
+                _ => {}
+            }
+        }
         rb.position = prim_position;
+        rb.orientation = model_orientation;
+        rb.sync_scale = prim_scale;
         rb.friction = physx.state.friction;
         rb.restitution = physx.state.restitution;
         rb.linear_damping = physx.state.linear_damping;

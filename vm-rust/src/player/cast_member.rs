@@ -2472,6 +2472,13 @@ pub struct PhysXRigidBody {
     /// by the mesh-vs-shape narrowphase in `physx_gu_mesh`. None until a
     /// script populates it (typical: `createConcaveMesh` ⇒ assign verts/faces).
     pub triangle_mesh: Option<crate::player::handlers::datum_handlers::cast_member::physx_gu_mesh::GuTriangleMesh>,
+
+    /// Authored scale of the bound 3D model, captured at `createRigidBody`.
+    /// `simulate()` writes each body's pose back onto its model, and that write
+    /// replaces the whole 4x4 — so without the authored scale folded back in,
+    /// a model authored at anything other than 1x would snap to unit size on
+    /// the first step. Mirrors `HavokRigidBody::sync_scale`.
+    pub sync_scale: [f64; 3],
 }
 
 impl Default for PhysXRigidBody {
@@ -2492,6 +2499,7 @@ impl Default for PhysXRigidBody {
             radius: 1.0, half_extents: [0.5, 0.5, 0.5], half_height: 1.0,
             convex_hull: None,
             triangle_mesh: None,
+            sync_scale: [1.0; 3],
         }
     }
 }

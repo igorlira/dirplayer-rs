@@ -282,7 +282,7 @@ fn aabb_overlap(a: &([f64; 3], [f64; 3]), b: &([f64; 3], [f64; 3])) -> bool {
         && a.1[2] >= b.0[2] && a.0[2] <= b.1[2]
 }
 
-fn axisangle_to_quat(o: [f64; 4]) -> [f64; 4] {
+pub fn axisangle_to_quat(o: [f64; 4]) -> [f64; 4] {
     // Axis-angle (axis.x, axis.y, axis.z, angle_deg) → quat (x, y, z, w).
     let angle_rad = o[3] * std::f64::consts::PI / 180.0;
     let half = angle_rad * 0.5;
@@ -290,7 +290,7 @@ fn axisangle_to_quat(o: [f64; 4]) -> [f64; 4] {
     [o[0] * s, o[1] * s, o[2] * s, half.cos()]
 }
 
-fn quat_to_axisangle(q: [f64; 4]) -> [f64; 4] {
+pub fn quat_to_axisangle(q: [f64; 4]) -> [f64; 4] {
     // Quat (x, y, z, w) → axis-angle (axis.x, axis.y, axis.z, angle_deg).
     let w_clamped = q[3].clamp(-1.0, 1.0);
     let angle_rad = 2.0 * w_clamped.acos();
