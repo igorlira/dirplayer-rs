@@ -160,6 +160,18 @@ impl BuiltInHandlerManager {
         })
     }
 
+    /// `the paramCount` — Director 11.5 Scripting Dictionary: "indicates the
+    /// number of parameters sent to the current handler". Counted over the same
+    /// scope `param()` indexes into, so a method's `me` counts as parameter 1
+    /// and `paramCount` agrees with the highest valid `param(n)`.
+    fn param_count(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let scope_ref = player.current_scope_ref();
+            let count = player.scopes.get(scope_ref).map_or(0, |scope| scope.args.len());
+            Ok(player.alloc_datum(Datum::Int(count as i32)))
+        })
+    }
+
     fn count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
@@ -1087,6 +1099,7 @@ impl BuiltInHandlerManager {
             "script" => MovieHandlers::script(args),
             "void" => TypeHandlers::void(args),
             "param" => Self::param(args),
+            "paramcount" => Self::param_count(args),
             "count" => Self::count(args),
             "createmask" => Self::forward_bitmap_handler("createMask", args),
             "creatematte" => Self::forward_bitmap_handler("createMatte", args),
