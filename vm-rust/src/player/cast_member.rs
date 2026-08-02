@@ -2479,6 +2479,14 @@ pub struct PhysXRigidBody {
     /// a model authored at anything other than 1x would snap to unit size on
     /// the first step. Mirrors `HavokRigidBody::sync_scale`.
     pub sync_scale: [f64; 3],
+
+    /// Accumulated Lingo `applyForce` (PxForceMode::eFORCE): integrated as
+    /// `v += F/m·dt` across the NEXT simulate() and then cleared, matching
+    /// PxRigidBody::addForce semantics (force lives until the step consumes it).
+    pub pending_force: [f64; 3],
+    /// Accumulated Lingo `applyTorque` / point-offset torque from
+    /// `applyForce(F, point)`: integrated as `ω += I⁻¹·T·dt`, then cleared.
+    pub pending_torque: [f64; 3],
 }
 
 impl Default for PhysXRigidBody {
@@ -2500,6 +2508,8 @@ impl Default for PhysXRigidBody {
             convex_hull: None,
             triangle_mesh: None,
             sync_scale: [1.0; 3],
+            pending_force: [0.0; 3],
+            pending_torque: [0.0; 3],
         }
     }
 }

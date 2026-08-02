@@ -395,10 +395,14 @@ impl PhysXObjectDatumHandlers {
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match_ci!(handler_name, {
+            // The four force/impulse verbs: they forward to
+            // PxRigidBody::addForce/addTorque and PxRigidBodyExt::
+            // addForceAtLocalPos, so the optional point is BODY-LOCAL, forces
+            // accumulate until the next simulate(), impulses are immediate,
+            // and every angular path goes through the inverse inertia tensor.
             "applyForce" => {
                 let force = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                // optional second arg: position vector — Phase 1 ignores torque from offset
-                let _pos: Option<[f64; 3]> = if args.len() > 1 {
+                let pos: Option<[f64; 3]> = if args.len() > 1 {
                     if let Datum::Vector(v) = player.get_datum(&args[1]) { Some(*v) } else { None }
                 } else { None };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
@@ -410,12 +414,7 @@ impl PhysXObjectDatumHandlers {
                 if let Some(rb) = physx.state.bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    if rb.mass > 0.0 && !matches!(rb.body_type, PhysXBodyType::Static) && !rb.pinned {
-                        rb.linear_velocity[0] += force[0] / rb.mass;
-                        rb.linear_velocity[1] += force[1] / rb.mass;
-                        rb.linear_velocity[2] += force[2] / rb.mass;
-                    }
-                    rb.cached_is_sleeping = false;
+                    super::cast_member::physx_native::apply_lingo_force(rb, force, pos);
                 }
                 Ok(player.alloc_datum(Datum::Int(0)))
             },
@@ -430,16 +429,13 @@ impl PhysXObjectDatumHandlers {
                 if let Some(rb) = physx.state.bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    rb.angular_velocity[0] += torque[0];
-                    rb.angular_velocity[1] += torque[1];
-                    rb.angular_velocity[2] += torque[2];
-                    rb.cached_is_sleeping = false;
+                    super::cast_member::physx_native::apply_lingo_torque(rb, torque);
                 }
                 Ok(player.alloc_datum(Datum::Int(0)))
             },
             "applyLinearImpulse" => {
                 let imp = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
-                let _pos: Option<[f64; 3]> = if args.len() > 1 {
+                let pos: Option<[f64; 3]> = if args.len() > 1 {
                     if let Datum::Vector(v) = player.get_datum(&args[1]) { Some(*v) } else { None }
                 } else { None };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
@@ -451,12 +447,7 @@ impl PhysXObjectDatumHandlers {
                 if let Some(rb) = physx.state.bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    if rb.mass > 0.0 && !matches!(rb.body_type, PhysXBodyType::Static) && !rb.pinned {
-                        rb.linear_velocity[0] += imp[0] / rb.mass;
-                        rb.linear_velocity[1] += imp[1] / rb.mass;
-                        rb.linear_velocity[2] += imp[2] / rb.mass;
-                    }
-                    rb.cached_is_sleeping = false;
+                    super::cast_member::physx_native::apply_lingo_linear_impulse(rb, imp, pos);
                 }
                 Ok(player.alloc_datum(Datum::Int(0)))
             },
@@ -471,10 +462,7 @@ impl PhysXObjectDatumHandlers {
                 if let Some(rb) = physx.state.bodies.iter_mut()
                     .find(|r| r.name.eq_ignore_ascii_case(rb_name))
                 {
-                    rb.angular_velocity[0] += imp[0];
-                    rb.angular_velocity[1] += imp[1];
-                    rb.angular_velocity[2] += imp[2];
-                    rb.cached_is_sleeping = false;
+                    super::cast_member::physx_native::apply_lingo_angular_impulse(rb, imp);
                 }
                 Ok(player.alloc_datum(Datum::Int(0)))
             },
