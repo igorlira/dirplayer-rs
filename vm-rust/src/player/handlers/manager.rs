@@ -670,14 +670,31 @@ impl BuiltInHandlerManager {
 
     async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let receiver_ref = &args[1];
+        // A VOID name names no handler, so there is no message to send —
+        // quietly do nothing rather than raise. Director 11.5 documents the
+        // parameter as "a symbol that specifies the handler to activate", but
+        // the name is routinely read out of a property list that may not have
+        // the entry yet. Agent Free Ride's FSM (`BehaviorScript 116 - FSM
+        // object`) does exactly this on every transition:
+        //
+        //   lOldStateProps = pFSM.GetStateProperties(pOldState)
+        //   call(lOldStateProps.exit, lOldStateProps.callbackScript, ...)
+        //
+        // and on the FIRST ChangeState pOldState has no registered state, so
+        // `.exit` is VOID. Raising there killed the movie as gameplay started.
+        if reserve_player_ref(|player| player.get_datum(&args[0]).is_void()) {
+            return Ok(DatumRef::Void);
+        }
         let (handler_name, args, instance_ids, list_count) = reserve_player_mut(|player| {
             let handler_name = player.get_datum(&args[0]);
             let receiver_clone = player.get_datum(receiver_ref).clone();
             let args = args[2..].to_vec();
             if !handler_name.is_symbol() {
-                return Err(ScriptError::new(
-                    "Handler name must be a symbol".to_string(),
-                ));
+                return Err(ScriptError::new(format!(
+                    "Handler name must be a symbol (got {}: {:?})",
+                    handler_name.type_str(),
+                    handler_name.string_value().unwrap_or_default(),
+                )));
             }
             let handler_name = handler_name.string_value()?;
 
