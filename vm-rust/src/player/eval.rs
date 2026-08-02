@@ -392,9 +392,31 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 "TAB" => reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String("\t".to_owned())))
                 }),
-                _ => Err(ScriptError::new(format!(
-                    "Unknown identifier '{}' in static expression", name
-                ))),
+                // Otherwise it's a variable reference. Director's `value()`
+                // evaluates the string as Lingo, so identifiers resolve against
+                // the accessible context — NabiscoWorld Mini Mini-Golf stores
+                // score-driver data as `["staple 1", obstacle_spr, -1, ...]` in a
+                // text member and reads it with `member(nam).text.value`, where
+                // `obstacle_spr` is a declared global. Erroring on the identifier
+                // failed the whole expression, so `.value` handed back the raw
+                // string and `count()` then raised on a string.
+                //
+                // An identifier that isn't a known global yields VOID rather than
+                // an error: the 11.5 dictionary says of `value()` that
+                // expressions Lingo cannot parse "will produce unexpected
+                // results, but will not produce Lingo errors", and Director reads
+                // an unset global as VOID. Lingo identifiers are case-insensitive.
+                _ => reserve_player_mut(|player| {
+                    if let Some(global_ref) = player.globals.get(name) {
+                        return Ok(global_ref.clone());
+                    }
+                    let found = player
+                        .globals
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.clone());
+                    Ok(found.unwrap_or(DatumRef::Void))
+                }),
             }
         }
         Rule::config_key | Rule::config_ident_part => {
@@ -2553,3 +2575,6 @@ pub fn test_parse_config_key(key_str: &str) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| format!("{}", e))
 }
+
+
+

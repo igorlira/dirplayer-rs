@@ -2287,7 +2287,7 @@ impl TypeHandlers {
 /// double quote (the `QUOTE` constant is used instead), so a simple in-string
 /// toggle is sufficient. If the brackets never balance, `s` is returned as-is
 /// so the normal parser still reports the error.
-fn truncate_to_first_balanced_list(s: &str) -> String {
+pub(crate) fn truncate_to_first_balanced_list(s: &str) -> String {
     let trimmed_start = s.len() - s.trim_start().len();
     let bytes = s.as_bytes();
     if bytes.get(trimmed_start) != Some(&b'[') {
@@ -2334,3 +2334,4 @@ pub fn is_expected_value_retry_fragment(input: &str, cleaned: &str) -> bool {
     }
     false
 }
+
