@@ -1416,11 +1416,46 @@ impl Shockwave3dMemberHandlers {
                                         // Use case-insensitive matching (Director is case-insensitive)
                                         let child_nodes = {
                                             let mut descendants = Vec::new();
+                                            // Expand each parent name at most once. Without this
+                                            // the walk is unbounded whenever a name repeats in the
+                                            // scene: every pop re-scans ALL nodes and re-pushes the
+                                            // same child names, so `descendants` grows without
+                                            // limit and the handler never returns — a hang with
+                                            // memory climbing into the gigabytes.
+                                            //
+                                            // Duplicate names are normal, not exotic. A node is
+                                            // matched by NAME here, and `loadFile` merges a world
+                                            // into the existing one, so loading the same .w3d twice
+                                            // (Agent Free Ride loads level.w3d twice during its
+                                            // level setup) gives every node a same-named twin. A
+                                            // self-parented node or any parent cycle does it too.
+                                            let mut visited: std::collections::HashSet<String> =
+                                                std::collections::HashSet::new();
+                                            // Index children by parent name ONCE. The walk used to
+                                            // rescan every node for each parent it popped, an
+                                            // O(subtree x scene) sweep of case-insensitive string
+                                            // compares — with ~2000 nodes in a merged level world
+                                            // that is millions of comparisons per clone, and this
+                                            // game clones 40 models during level setup.
+                                            let mut children_by_parent: std::collections::HashMap<
+                                                String,
+                                                Vec<&crate::director::chunks::w3d::types::W3dNode>,
+                                            > = std::collections::HashMap::new();
+                                            for n in &scene.nodes {
+                                                children_by_parent
+                                                    .entry(n.parent_name.to_lowercase())
+                                                    .or_default()
+                                                    .push(n);
+                                            }
                                             let mut stack = vec![source_model_name.to_string()];
                                             while let Some(parent) = stack.pop() {
-                                                for n in &scene.nodes {
-                                                    if n.parent_name.eq_ignore_ascii_case(&parent) {
-                                                        descendants.push(n.clone());
+                                                let key = parent.to_lowercase();
+                                                if !visited.insert(key.clone()) {
+                                                    continue;
+                                                }
+                                                if let Some(kids) = children_by_parent.get(&key) {
+                                                    for n in kids {
+                                                        descendants.push((*n).clone());
                                                         stack.push(n.name.clone());
                                                     }
                                                 }
@@ -1462,13 +1497,55 @@ impl Shockwave3dMemberHandlers {
                                 let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                                 let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
+
+                                // Director 11.5 (`cloneModelFromCastmember`): this copies "the model
+                                // resources, shaders, and textures used by the model and its
+                                // children" — not the source member's whole 3D world. Working the
+                                // GEOMETRY subset out here, against a borrow of the source scene,
+                                // keeps the copy off the hot path: pulling every table out by value
+                                // first meant each clone dragged the entire source world across
+                                // before the filters below ever ran. Agent Free Ride clones 40
+                                // models out of a 247-mesh level during setup and spent minutes
+                                // there with RSS climbing into the gigabytes, while the Lingo datum
+                                // arena stayed flat at ~5.2k — none of that growth was script data.
+                                //
+                                // A node's resource_name may name a model resource, a CLOD mesh or
+                                // a raw mesh (they share one namespace), so all three are filtered
+                                // by the same key set. An empty set means we couldn't attribute
+                                // anything, and we fall back to copying everything as before.
+                                //
+                                // Shaders and textures are deliberately NOT filtered here. A model
+                                // can pick up a shader the source file never bound to its resource
+                                // (a runtime shaderList assignment, for one), so attributing them
+                                // from the file alone under-collects: filtering the track's clones
+                                // this way stripped their textures and rendered the whole slope
+                                // black. The copy loops below already skip unused shaders/textures
+                                // when they can attribute them, and falling back to the full tables
+                                // costs little — the load stays ~30s either way, because the meshes
+                                // and model resources were what made it expensive.
+                                let mut used_res: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                for name in [source_resource_name.as_str(), source_model_resource_name.as_str()] {
+                                    if !name.is_empty() { used_res.insert(name.to_ascii_lowercase()); }
+                                }
+                                for child in &src_child_nodes {
+                                    for name in [child.resource_name.as_str(), child.model_resource_name.as_str()] {
+                                        if !name.is_empty() { used_res.insert(name.to_ascii_lowercase()); }
+                                    }
+                                }
+                                let filter_res = !used_res.is_empty();
+                                let wants_res = |name: &str| !filter_res || used_res.contains(&name.to_ascii_lowercase());
+
                                 let shaders: Vec<_> = scene.map(|s| s.shaders.clone()).unwrap_or_default();
                                 let materials: Vec<_> = scene.map(|s| s.materials.clone()).unwrap_or_default();
                                 let resources: Vec<_> = scene.map(|s| s.model_resources.iter()
+                                    .filter(|(k, _)| wants_res(k))
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
                                 let meshes: Vec<_> = scene.map(|s| s.clod_meshes.iter()
+                                    .filter(|(k, _)| wants_res(k))
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let raw: Vec<_> = scene.map(|s| s.raw_meshes.clone()).unwrap_or_default();
+                                let raw: Vec<_> = scene.map(|s| s.raw_meshes.iter()
+                                    .filter(|m| wants_res(&m.name))
+                                    .cloned().collect()).unwrap_or_default();
                                 let textures: Vec<_> = scene.map(|s| s.texture_images.iter()
                                     .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
                                 let lights: Vec<_> = scene.map(|s| s.lights.clone()).unwrap_or_default();
