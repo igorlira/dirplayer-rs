@@ -110,6 +110,15 @@ pub fn reset() {
     });
 }
 
+/// Datum-arena census: live count per datum type, plus Int pool/refcount
+/// detail. Callable from the console as `dirplayer_datumStats()` while a movie
+/// is running, so a long Lingo loop that is growing the heap can be attributed
+/// to what it is actually allocating instead of guessed at from a CPU profile.
+#[wasm_bindgen(js_name = "dirplayer_datumStats")]
+pub fn datum_stats() -> String {
+    crate::player::reserve_player_ref(|player| player.allocator.datum_type_stats())
+}
+
 // Debug commands bypass the command queue to avoid deadlocks when a breakpoint
 // is hit during command processing. These operations are safe to call directly
 // because they only modify player state synchronously.
