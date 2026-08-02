@@ -1257,14 +1257,35 @@ impl MovieHandlers {
         reserve_player_mut(|player| { player.stage_dirty = true; });
         crate::rendering::draw_frame_immediate();
 
-        if should_yield {
-            // Yield to allow the browser event loop to process pending events
-            // (mouse up/move, keyboard, etc.). This is essential for scripts
-            // using "repeat while the mouseDown" or similar busy-wait loops.
-            // The mouse_up()/mouse_down() WASM exports update movie.mouse_down
-            // immediately via reserve_player_mut, so the state is correct when
-            // the script resumes. The MouseUp command stays queued and won't
-            // dispatch until the current handler finishes.
+        // Yield to allow the browser event loop to process pending events
+        // (mouse up/move, keyboard, etc.). This is essential for scripts
+        // using "repeat while the mouseDown" or similar busy-wait loops.
+        // The mouse_up()/mouse_down() WASM exports update movie.mouse_down
+        // immediately via reserve_player_mut, so the state is correct when
+        // the script resumes. The MouseUp command stays queued and won't
+        // dispatch until the current handler finishes.
+        //
+        // Rate-limited to once per YIELD_INTERVAL_MS, because the yield is not
+        // free: `sleep` allocates a gloo_timers Timeout, costing a `setTimeout`
+        // to arm and a `clearTimeout` when the future drops. Yielding on EVERY
+        // updateStage() meant a script looping on it paid two JS timer
+        // operations per iteration — in Argent Free Ride's level load that put
+        // `clearTimeout` at 42% of self time with the tab unresponsive. Once
+        // every 8 ms still hands the browser ~120 chances a second to deliver
+        // input, which is what the busy-wait loops actually need.
+        // `nothing_async` below already throttles for the same reason.
+        const YIELD_INTERVAL_MS: f64 = 8.0;
+        let yield_now = should_yield
+            && reserve_player_mut(|player| {
+                let now = js_sys::Date::now();
+                if now - player.last_update_stage_yield_ms >= YIELD_INTERVAL_MS {
+                    player.last_update_stage_yield_ms = now;
+                    true
+                } else {
+                    false
+                }
+            });
+        if yield_now {
             async_std::task::sleep(std::time::Duration::from_millis(2)).await;
         }
 

@@ -453,6 +453,15 @@ pub struct DirPlayer {
     pub in_mouse_command: bool, // Pauses frame loop during mouse handlers; updateStage renders without yielding
     pub nothing_call_count: u32,    // Consecutive nothing() calls, reset after yield
     pub last_nothing_yield_ms: f64, // Timestamp of last nothing() yield for time-throttled rendering
+    /// Timestamp of the last `updateStage()` yield. Each yield is an
+    /// `async_std::task::sleep`, which on wasm allocates a `gloo_timers`
+    /// Timeout — one `setTimeout` on creation and one `clearTimeout` when the
+    /// future drops. A script that calls `updateStage()` in a tight loop
+    /// (progress bars, busy-waits) therefore paid two JS timer operations per
+    /// iteration, and the churn cost more than the work: in Argent Free Ride's
+    /// level load, `clearTimeout` alone was 42% of self time, and the tab
+    /// stopped responding. Throttled the same way `nothing_async` already is.
+    pub last_update_stage_yield_ms: f64,
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
@@ -661,6 +670,7 @@ impl DirPlayer {
             in_mouse_command: false,
             nothing_call_count: 0,
             last_nothing_yield_ms: 0.0,
+            last_update_stage_yield_ms: 0.0,
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
