@@ -702,6 +702,17 @@ impl TypeHandlers {
                     }
                 }
                 Datum::Void => Datum::Void,
+                // Director returns a point unchanged rather than converting or
+                // erroring — verified in Director:
+                //   p = point(-342, 159)
+                //   put float(p * p)  -- point(116964, 25281)
+                // (components stay integers). NabiscoWorld Mini Mini-Golf's
+                // Hole 18 `obstacle` handler relies on this: it computes
+                // `sqhv = float(dhv * dhv)` on a point and then reads
+                // `sqhv.locH` / `sqhv.locV`, so float() must yield a point.
+                // Same leniency as the String arm above, which returns the
+                // input unchanged when it doesn't parse as a number.
+                Datum::Point(..) => value.to_owned(),
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot convert datum of type {} to float",
