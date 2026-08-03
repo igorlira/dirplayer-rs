@@ -2451,6 +2451,69 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                         return Ok(());
                     }
+                    // meshDeformMesh.textureCoordinateList = list — Director 11.5
+                    // Scripting Dictionary, `textureCoordinateList`: "when used with a
+                    // model resource whose type is #mesh, or with a meshDeform modifier
+                    // attached to a model, this property allows you to get or set the
+                    // textureCoordinateList property of the model resource ... a list of
+                    // sublists identifying locations in an image ... Each sublist consists
+                    // of two values ... between 0.0 and 1.0."
+                    //
+                    // Dropping this write left the mesh with its original (often
+                    // degenerate) UVs, so a script-built quad sampled a single texel and
+                    // rendered as one flat colour — AreaZero's SmallPrintText.
+                    // Writes texture layer 0, matching the dictionary's note that
+                    // textureCoordinateList addresses "the first texture layer".
+                    if s3d_ref.object_type == "meshDeformMesh"
+                        && prop_name.eq_ignore_ascii_case("textureCoordinateList")
+                    {
+                        let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
+                        let model_name = parts.get(0).unwrap_or(&"").to_string();
+                        let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        // Each entry is a 2-element list [u, v]; accept a point too.
+                        let uvs: Vec<[f32; 2]> = if let Datum::List(_, items, _) = value {
+                            items.iter().map(|item_ref| match player.get_datum(item_ref) {
+                                Datum::List(_, uv, _) => {
+                                    let get = |i: usize| uv.get(i)
+                                        .map(|r| player.get_datum(r).to_float().unwrap_or(0.0))
+                                        .unwrap_or(0.0) as f32;
+                                    [get(0), get(1)]
+                                }
+                                Datum::Point(vals, _) => [vals[0] as f32, vals[1] as f32],
+                                _ => [0.0, 0.0],
+                            }).collect()
+                        } else { vec![] };
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                let key = w3d.parsed_scene.as_ref().and_then(|scene| {
+                                    let rn = scene.nodes.iter()
+                                        .find(|n| n.name.eq_ignore_ascii_case(&model_name))
+                                        .map(|n| if !n.model_resource_name.is_empty() {
+                                            n.model_resource_name.clone()
+                                        } else { n.resource_name.clone() });
+                                    rn.filter(|k| scene.clod_meshes.contains_key(k))
+                                        .or_else(|| if scene.clod_meshes.contains_key(&model_name) {
+                                            Some(model_name.clone())
+                                        } else { None })
+                                });
+                                if let (Some(key), false) = (key, uvs.is_empty()) {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if let Some(mesh) = scene.clod_meshes.get_mut(&key)
+                                            .and_then(|meshes| meshes.get_mut(mesh_idx))
+                                        {
+                                            if mesh.tex_coords.is_empty() {
+                                                mesh.tex_coords.push(uvs);
+                                            } else {
+                                                mesh.tex_coords[0] = uvs;
+                                            }
+                                            scene.mesh_content_version = scene.mesh_content_version.wrapping_add(1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
                     // Log unhandled set_prop for meshDeform types
                     if s3d_ref.object_type.contains("meshDeform") || s3d_ref.object_type.contains("MeshDeform") {
                         console_warn!(
