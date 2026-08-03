@@ -384,7 +384,81 @@ impl PhysXObjectDatumHandlers {
             },
             _ => return Err(ScriptError::new(format!("Cannot set rigidBody property: {}", prop))),
         });
+
+        // Moving a body moves its MODEL immediately, at setter time — not at the
+        // next simulate(). Measured in Director:
+        //   put model("veh_chassis2").transform.position -- vector(655, 4522, -855)
+        //   rb.position = rb.position + vector(0, 0, 5000)
+        //   put model("veh_chassis2").transform.position -- vector(655, 4522, 4144)
+        // i.e. the full delta lands before any step. That matches the Xtra:
+        // CPhysicsRigidBodyAGEIA::SetPosition / SetOrientation call the
+        // model-update virtual at the end of the setter
+        //
+        // Without this, a teleported body left its model at the stale pose for a
+        // frame. Agent Free Ride's enemy vehicles are respawned that way, and
+        // `Vehicle Base.UpdateHover` casts its rays from `pChassisMdl.transform`
+        // in the SAME update — so the rays started at the fallen position, hit
+        // nothing, left pHoverContactPoint empty, and `Snowboard Enemy Graphics`
+        // then read `[1]` off an empty list ("List index 1 out of bounds").
+        let sync = if prop.eq_ignore_ascii_case("position") || prop.eq_ignore_ascii_case("orientation") || prop.eq_ignore_ascii_case("transform") {
+            Self::physx_body_sync_data(player, &member_ref, rb_name)
+        } else {
+            None
+        };
+        if let Some((model_name, t)) = sync {
+            if let Some(target) = Self::resolve_model_owner(player, &model_name) {
+                crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
+                    player, &target, &model_name, t,
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Transform to push onto a body's linked model, or None when the body is
+    /// static or unlinked (static bodies never drive their model — rewriting
+    /// their transform would undo script-side placement, the same rule
+    /// `simulate()` applies).
+    fn physx_body_sync_data(
+        player: &crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        rb_name: &str,
+    ) -> Option<(String, [f32; 16])> {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+        let CastMemberType::PhysXPhysics(physx) = &member.member_type else { return None };
+        let rb = physx.state.bodies.iter().find(|r| r.name.eq_ignore_ascii_case(rb_name))?;
+        if rb.body_type == crate::player::cast_member::PhysXBodyType::Static || rb.model_name.is_empty() {
+            return None;
+        }
+        let t = crate::player::handlers::datum_handlers::cast_member::physx::body_model_transform(
+            rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
+        );
+        if t.iter().any(|v| !v.is_finite()) { return None; }
+        Some((rb.model_name.clone(), t))
+    }
+
+    /// The Shockwave3D member owning `model_name`. A movie can hold several 3D
+    /// worlds, so the model name is the only reliable key (as in `simulate()`).
+    fn resolve_model_owner(
+        player: &crate::player::DirPlayer,
+        model_name: &str,
+    ) -> Option<CastMemberRef> {
+        for cast in &player.movie.cast_manager.casts {
+            for (number, member) in &cast.members {
+                if let CastMemberType::Shockwave3d(w3d) = &member.member_type {
+                    let has_node = w3d.parsed_scene.as_ref().map_or(false, |s| {
+                        s.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(model_name))
+                    });
+                    if has_node {
+                        return Some(CastMemberRef {
+                            cast_lib: cast.number as i32,
+                            cast_member: *number as i32,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn call_rigid_body(
