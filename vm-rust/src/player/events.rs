@@ -456,7 +456,21 @@ pub async fn player_invoke_static_event(
             player
                 .active_static_event_handlers
                 .iter()
-                .any(|(m, h)| *m == script_member_ref && h == handler_name)
+                .any(|(m, h, a)| {
+                    if *m != script_member_ref || h != handler_name {
+                        return false;
+                    }
+                    // Same handler, but is it the SAME CALL? Compare arguments.
+                    // Formatting is only reached when member+handler already
+                    // match, so this costs nothing on the common path.
+                    if a.len() != args.len() {
+                        return false;
+                    }
+                    a.iter().zip(args.iter()).all(|(x, y)| {
+                        crate::player::format_datum(x, player)
+                            == crate::player::format_datum(y, player)
+                    })
+                })
         });
         if already_active {
             continue;
@@ -474,7 +488,7 @@ pub async fn player_invoke_static_event(
         reserve_player_mut(|player| {
             player
                 .active_static_event_handlers
-                .push((script_member_ref.clone(), handler_name.to_owned()));
+                .push((script_member_ref.clone(), handler_name.to_owned(), args.clone()));
         });
         let call_result = player_call_script_handler(
             receiver,  // Changed from None to receiver
