@@ -252,7 +252,22 @@ impl NetHandlers {
                     } else if let Some(Err(error)) = task_state.result.as_ref() {
                         Datum::Int(*error)
                     } else {
-                        Datum::Int(0)
+                        // Still IN PROGRESS. Director 11.5 Scripting Dictionary,
+                        // `netError()`: "If no background loading operation has
+                        // started, or if the operation is in progress, this
+                        // function returns an empty string." We returned Int(0),
+                        // which movies read as a real (unrecognised) status the
+                        // moment they start polling.
+                        //
+                        // AreaZero's `[PS] Preload Engine.stepFrame` polls
+                        //   if (netDone(id) = 1) and (netError(id) = "OK") then ...
+                        //   else if netError(id) <> EMPTY then <classify + abort>
+                        // so the very first poll — before the fetch finishes —
+                        // saw 0 <> EMPTY, fell through every documented code to
+                        // `otherwise`, and reported "Engine was not downloaded and
+                        // linked. Error was: Error unknown." for a download that
+                        // then completed fine. EMPTY keeps the movie polling.
+                        Datum::String("".to_owned())
                     }
                 }
             };

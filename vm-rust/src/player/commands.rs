@@ -331,10 +331,37 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 warn!("Timeout triggered but not playing");
                 return Ok(DatumRef::Void);
             }
+            let timeout_name_for_args = timeout_name.clone();
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
             let args = vec![ref_datum];
-            if target_ref != DatumRef::Void {
+            // Director 11.5 Scripting Dictionary, `new()` (Timeout): the
+            // targetObject "indicates which CHILD OBJECT's handler should be
+            // called ... If you omit this parameter, Director looks for the
+            // specified handler in the movie script."
+            //
+            // A target that is NOT an object can't receive a method call, so
+            // Director falls back to the movie script and passes the target
+            // through as the first argument. AreaZero's Event Manager relies on
+            // this: it creates
+            //     timeout().new(tName, pDelay, #DelayEventTimeOut, pevent)
+            // with pevent a STRING, and its handler is declared
+            //     on DelayEventTimeOut tEvent, tTimeOut
+            // i.e. (target, timeoutObject). Dispatching the handler ON the
+            // string raised "No handler DelayEventTimeOut for string datum".
+            let target_is_object = reserve_player_ref(|player| {
+                matches!(
+                    player.get_datum(&target_ref),
+                    Datum::ScriptInstanceRef(_)
+                )
+            });
+            if target_is_object {
                 player_dispatch_callback_event(target_ref, &handler_name, &args);
+            } else if target_ref != DatumRef::Void {
+                let mut args = vec![target_ref];
+                args.extend(
+                    [player_alloc_datum(Datum::TimeoutRef(timeout_name_for_args))]
+                );
+                player_dispatch_global_event(&handler_name, &args);
             } else {
                 player_dispatch_global_event(&handler_name, &args);
             }

@@ -998,6 +998,53 @@ impl StringChunkHandlers {
         })
     }
 
+    /// `put expression before chunkExpression` — Director 11.5 Scripting
+    /// Dictionary, `put...before`: "inserts the resulting string before a
+    /// specified chunk in a container, WITHOUT replacing the container's
+    /// contents". Its example is
+    ///   put "fox dog cat" into animalList
+    ///   put "elk " before word 2 of animalList   -- "fox elk dog cat"
+    ///
+    /// Implemented as a replace of the chunk with (new ++ existing), so the
+    /// surrounding text and the chunk itself both survive — the same splice
+    /// `setContents` performs, just with the original chunk text preserved.
+    /// AreaZero's `[M] String Evaluator` builds its substitutions this way.
+    fn set_contents_before(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::set_contents_relative(datum, args, true)
+    }
+
+    /// `put expression after chunkExpression` — the mirror of `put...before`
+    /// (same dictionary section, `put...after`): insert after the chunk,
+    /// leaving the container's other contents intact.
+    fn set_contents_after(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::set_contents_relative(datum, args, false)
+    }
+
+    fn set_contents_relative(
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+        before: bool,
+    ) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
+            // The chunk's CURRENT text — `StringChunk::string_value` resolves it.
+            let existing = player.get_datum(datum).string_value()?;
+            let insert = player.get_datum(&args[0]).string_value()?;
+            let new_str = if before {
+                format!("{}{}", insert, existing)
+            } else {
+                format!("{}{}", existing, insert)
+            };
+            StringChunkUtils::set_contents(
+                player,
+                &original_str_ref.clone(),
+                &chunk_expr.clone(),
+                new_str,
+            )?;
+            Ok(DatumRef::Void)
+        })
+    }
+
     fn set_contents(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
@@ -1075,6 +1122,8 @@ impl StringChunkHandlers {
             "getPropRef" => Self::get_prop_ref(datum, args),
             "delete" => Self::delete(datum, args),
             "setContents" => Self::set_contents(datum, args),
+            "setContentsBefore" => Self::set_contents_before(datum, args),
+            "setContentsAfter" => Self::set_contents_after(datum, args),
             "hilite" => Self::hilite(datum, args),
             // `chunk[N]` — index access. Director treats this as the Nth
             // character of the chunk's text (1-based). Movies that wrap a

@@ -19,7 +19,15 @@ string_interior =  {
 }
 WHITESPACE      = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
-symbol         = ${ "#" ~ WHITESPACE* ~ ident }
+// Symbol names may START WITH A DIGIT, unlike ordinary identifiers.
+// AreaZero stores animation event tables as `[#0: "Fire_XM8", #1: "SpawnShell_XM8"]`
+// (frame number -> event name), and `#0` cannot match `ident`, which is
+// `!digit ~ ...`. The whole list literal then failed to parse, `value()` fell
+// back to the raw string, and the movie alerted "Property list suspected, but
+// couldn't create it" for every one. Keep `ident` strict — only the symbol
+// name is permissive, and the leading "#" keeps it unambiguous against numbers.
+symbol_name    = @{ (alpha | digit | "_")+ }
+symbol         = ${ "#" ~ WHITESPACE* ~ symbol_name }
 nohash_symbol  =  { (ident) }
 quote          = _{ "\"" }
 string         = ${ quote ~ (string_interior) ~ quote }
