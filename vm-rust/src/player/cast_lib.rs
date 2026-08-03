@@ -509,6 +509,20 @@ impl CastLib {
                 number,
                 CastMemberType::Movie(MovieMember::new()),
             )),
+            // `new(#physics)` creates an empty Physics cast member. `#physics` is
+            // a documented member type (Director 11.5 Scripting Dictionary,
+            // `type (Member)` — the value list includes `#physics`), supplied by
+            // the AGEIA Physics Xtra that ships with 11.5. The script then calls
+            // `member.init(...)` / `createRigidBody(...)` on it, exactly as the
+            // authored Physics members in Agent Free Ride are used. AreaZero's
+            // `[M] Member.createMember` builds its "MenuCharacter_Physics" member
+            // this way instead of authoring it in the cast.
+            "physics" => Ok(CastMember::new(
+                number,
+                CastMemberType::PhysXPhysics(crate::player::cast_member::PhysXPhysicsMember {
+                    state: crate::player::cast_member::PhysXPhysicsState::default(),
+                }),
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",
                 member_type
