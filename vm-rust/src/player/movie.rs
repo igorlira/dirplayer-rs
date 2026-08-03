@@ -236,7 +236,13 @@ impl Movie {
             "platform" => Ok(Datum::String("Windows,32".to_string())),
             "frame" => Ok(Datum::Int(self.current_frame as i32)),
             "productversion" => Ok(Datum::String("11.0".to_string())),
-            "moviename" | "movie" => Ok(Datum::String(self.file_name.to_owned())),
+            // `_movie.name` is the Movie object's form of `the movieName` — the
+            // Director 11.5 Scripting Dictionary uses it directly in its Window
+            // examples (`put("Just moved window containing" && _movie.name)`).
+            // AreaZero's `[M] Main.InitGlobals` builds its asset base with
+            // `gSystem.path & _movie.name`, and without the alias that raised
+            // "Cannot get movie prop name".
+            "moviename" | "movie" | "name" => Ok(Datum::String(self.file_name.to_owned())),
             "updatelock" => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             "path" => Ok(Datum::String(self.base_path.to_owned())),
             "mouseDownScript" | "mouseUpScript" | "keyDownScript" | "keyUpScript" | "timeoutScript" => {

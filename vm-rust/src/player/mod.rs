@@ -444,7 +444,11 @@ pub struct DirPlayer {
     /// which (when sprite 4 has no keyDown behavior) propagates back up to the
     /// movie script per the sendSprite hierarchy; without this guard it recurses
     /// into the same `on keyDown` forever (stack overflow).
-    pub active_static_event_handlers: Vec<(CastMemberRef, String)>,
+    /// Static-event re-entrancy guard: (script, handler, ARGS). The args are
+    /// part of the key — a handler legitimately re-entered with DIFFERENT
+    /// arguments is a nested dispatch, not a propagation loop. See
+    /// `player_invoke_static_event`.
+    pub active_static_event_handlers: Vec<(CastMemberRef, String, Vec<DatumRef>)>,
     /// Timestamp (Date.now ms) of the last frame update driven from updateStage()
     /// while `command_handler_yielding`. The frame loop is paused during a keyDown
     /// busy-wait loop, so updateStage() runs the frame's animation itself,
@@ -570,7 +574,14 @@ pub enum MovieFrameTarget {
 
 impl DirPlayer {
     pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>) -> DirPlayer {
-        let sound_manager = SoundManager::new(8).expect("Sound manager failed to initialize"); // 8 sound channels (Director standard)
+        // Director 11.5 Scripting Dictionary, Sound object: "The Director sound
+        // object controls audio playback in all SIXTEEN available sound channels."
+        // (The Sound Channel entry still says eight — legacy text from before the
+        // count was raised; the Sound object is the authority, and the Score UI
+        // exposing only two channels is a separate, authoring-only limit.)
+        // AreaZero's `[M] Sound Manager.SetupSoundManager` loops 1..16 setting
+        // `sound(i).volume` and raised "Invalid sound channel: 9" at eight.
+        let sound_manager = SoundManager::new(16).expect("Sound manager failed to initialize");
         let now = chrono::Local::now();
 
         let mut result = DirPlayer {
@@ -2520,7 +2531,7 @@ impl DirPlayer {
             .and_then(|t| t.film_loop.clone())
     }
 
-    fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
+    pub(crate) fn get_movie_prop(&mut self, prop: &str) -> Result<DatumRef, ScriptError> {
         match_ci!(prop, {
             "datumStats" => {
                 let stats = self.allocator.datum_type_stats();
@@ -2795,6 +2806,27 @@ impl DirPlayer {
             },
             "clickLoc" => {
                 Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
+            },
+            // Director 11.5 Scripting Dictionary, `timeoutList` (Movie property,
+            // read-only): "a linear list containing all currently active timeout
+            // objects", indexable — its own example is
+            // `_movie.timeoutList[3].forget()`. Built here rather than in
+            // `Movie::get_prop` because the elements need the allocator; the
+            // collection-query fallback in `datum_handlers/mod.rs` routes
+            // `.count` and `[n]` to this. AreaZero's `[M] Event Manager.DelayEvent`
+            // names each pending timeout by `_movie.timeoutList.count + 1`.
+            "timeoutList" => {
+                let names: Vec<String> = self
+                    .timeout_manager
+                    .timeouts
+                    .keys()
+                    .cloned()
+                    .collect();
+                let items: VecDeque<DatumRef> = names
+                    .into_iter()
+                    .map(|name| self.alloc_datum(Datum::TimeoutRef(name)))
+                    .collect();
+                Ok(self.alloc_datum(Datum::List(DatumType::List, items, false)))
             },
             "markerList" => {
                 // Director's `the markerList` is a property list keyed by FRAME

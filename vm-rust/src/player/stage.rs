@@ -196,6 +196,13 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
 
 pub fn get_stage_prop(player: &mut DirPlayer, prop: &str) -> Result<Datum, ScriptError> {
     match prop {
+        // A window's `movie` property is the Movie playing in it (Director 11.5
+        // Scripting Dictionary, Window object). The Stage is a window — see
+        // `windowList`: "The Stage is also considered a window" — and it plays
+        // the current movie, so `_player.windowList[1].movie` resolves to the
+        // Movie object. AreaZero's `[M] Main.InitGlobals` stores it as
+        // `gSystem[#parent]`.
+        "movie" => Ok(Datum::MovieRef),
         "rect" => Ok(Datum::Rect(stage_layout(player).stage_rect, 0)),
         "drawRect" => Ok(Datum::Rect(stage_layout(player).draw_rect, 0)),
         "sourceRect" => {

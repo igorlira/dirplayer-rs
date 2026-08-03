@@ -1384,6 +1384,49 @@ impl TypeHandlers {
         })
     }
 
+    /// `_system.time()` — Director 11.5 Scripting Dictionary, "time() (System)":
+    /// "System method; returns the current time in the system clock as a string.
+    /// The format of the time string depends on the computer's time settings."
+    /// Parameters: None.
+    ///
+    /// The locale-dependent format is the point of the entry, so defer to the
+    /// host's locale (the browser's) rather than hardcoding a US layout — that
+    /// is the closest analogue to Director reading the OS time settings.
+    pub fn time(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // Director returns the system SHORT time — hours and minutes only.
+            // Measured against Director on this machine: `21:23`, where our
+            // bare toLocaleTimeString gave `21:20:15`. Ask for 2-digit hour and
+            // minute explicitly and let the host locale decide the separator and
+            // 12/24-hour convention, matching the dictionary's note that "the
+            // format of the time string depends on the computer's time settings".
+            let opts = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&opts, &"hour".into(), &"2-digit".into());
+            let _ = js_sys::Reflect::set(&opts, &"minute".into(), &"2-digit".into());
+            let mut s = js_sys::Date::new_0()
+                .to_locale_time_string_with_options("default", &opts)
+                .as_string()
+                .unwrap_or_default();
+            // Director keeps Windows' short-time layout `HH:mm tt`, so a
+            // 24-hour locale leaves the AM/PM slot EMPTY but still emits its
+            // separator — measured in Director: `put _system.time()` -> "21:29 "
+            // (trailing space), while `put _system.date()` -> "03.08.2026" (none).
+            // AreaZero depends on it: its startup line concatenates the two with a
+            // plain `&` and no separator of its own.
+            //
+            // Only 24-hour locales get the space; a 12-hour locale fills that slot
+            // with AM/PM, so key off whether the formatted string has a day period.
+            // Normalise first: some hosts already emit a trailing separator for the
+            // empty slot, and blindly appending produced TWO spaces.
+            let has_day_period = s.chars().any(|c| c.is_alphabetic());
+            let mut s = s.trim_end().to_string();
+            if !has_day_period {
+                s.push(' ');
+            }
+            Ok(player.alloc_datum(Datum::String(s)))
+        })
+    }
+
     pub fn date(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let date_id = player.allocator.get_free_script_instance_id();

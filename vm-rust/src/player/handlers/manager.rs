@@ -1763,6 +1763,13 @@ impl BuiltInHandlerManager {
             "transform" => TypeHandlers::transform3d(args),
             "color" => TypeHandlers::color(args),
             "date" => TypeHandlers::date(args),
+            // `_system.time()` — Director 11.5 Scripting Dictionary, "time() (System)":
+            // "returns the current time in the system clock as a string. The format of
+            // the time string depends on the computer's time settings." No parameters.
+            // `_system` resolves to the movie datum here (get_set.rs), so the call lands
+            // in this built-in dispatcher; without it AreaZero's `[M] Init Game` raised
+            // "No handler time for datum <_movie>" on its startup log line.
+            "time" => TypeHandlers::time(args),
             "keypressed" => Self::key_pressed(args),
             // Legacy function-call forms of the modifier-key state properties (Director
             // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /
