@@ -99,7 +99,24 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             let mut iter = inner_pairs.into_iter();
             let first = iter.next()
                 .ok_or_else(|| ScriptError::new("Expected expression content".to_string()))?;
-            let mut result = eval_lingo_pair_static(first)?;
+            // A leading unary minus binds to the FIRST term only — negating the
+            // whole expression would turn `-a + b` into `-(a + b)`. Negate via
+            // `* -1` so vectors/points/lists work (see the runtime prefix arm).
+            let mut result = if first.as_rule() == Rule::neg_op {
+                let operand = iter.next().ok_or_else(|| {
+                    ScriptError::new("Expected operand after unary minus".to_string())
+                })?;
+                let operand_ref = eval_lingo_pair_static(operand)?;
+                reserve_player_mut(|player| {
+                    let minus_one = player.alloc_datum(Datum::Int(-1));
+                    let v = crate::player::datum_operations::multiply_datums(
+                        operand_ref.clone(), minus_one, player,
+                    )?;
+                    Ok(player.alloc_datum(v))
+                })?
+            } else {
+                eval_lingo_pair_static(first)?
+            };
             while let Some(op) = iter.next() {
                 let right = iter.next()
                     .ok_or_else(|| ScriptError::new("Expected right operand".to_string()))?;
@@ -719,6 +736,18 @@ fn parse_lingo_expr_runtime(
             Rule::not_op => {
                 let right = rhs?;
                 Ok(LingoExpr::Not(Box::new(right)))
+            }
+            // Unary minus. Expressed as `x * -1` rather than `0 - x` so it
+            // negates every type Director allows it on: `multiply` already
+            // recurses into vectors, points and lists, whereas `0 - vector`
+            // has no defined arm. Agent Free Ride's vehicle code is full of
+            // `-pWorldUp` / `-pLocalDown`.
+            Rule::neg_op => {
+                let right = rhs?;
+                Ok(LingoExpr::Multiply(
+                    Box::new(right),
+                    Box::new(LingoExpr::IntLiteral(-1)),
+                ))
             }
             _ => Err(ScriptError::new(format!(
                 "Invalid prefix operator {:?}",
@@ -2603,6 +2632,7 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
         .op(Op::infix(Rule::multiply, Assoc::Left)            // *, /, mod
             | Op::infix(Rule::divide, Assoc::Left)
             | Op::infix(Rule::mod_op, Assoc::Left))
+        .op(Op::prefix(Rule::neg_op))                         // unary minus
         .op(Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
             | Op::postfix(Rule::list_index))                  // and [index]
 }

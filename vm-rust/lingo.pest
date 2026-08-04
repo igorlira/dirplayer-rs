@@ -122,6 +122,10 @@ list_index = { "[" ~ expr ~ "]" }
 and_op = { ^"and" }
 or_op  = { ^"or" }
 not_op = { ^"not" }
+// Unary minus on an EXPRESSION (`-pWorldUp`). Ordered after `primitive` in
+// `term` so a signed literal (`-5`) still parses as one `number_int` rather
+// than a negation of 5; only a `-` followed by something non-numeric gets here.
+neg_op = { "-" }
 
 // Comparison operators
 eq_op = { "=" }
@@ -262,8 +266,8 @@ bin_op     = _{
 }
 postfix_op = _{ list_index }
 expr       =  { term ~ (bin_op ~ term | postfix_op)* }
-term       = _{ not_op ~ term | primitive | prop_name }
-term_arg   =  { not_op ~ term_arg | primitive }
+term       = _{ not_op ~ term | primitive | neg_op ~ term | prop_name }
+term_arg   =  { not_op ~ term_arg | primitive | neg_op ~ term_arg }
 
 command_eval_expr = _{ SOI ~ command ~ EOI }
 // Configuration key support - allows asterisks and dots in keys
