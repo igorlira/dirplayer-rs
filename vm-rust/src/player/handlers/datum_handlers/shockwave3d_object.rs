@@ -6623,6 +6623,33 @@ impl Shockwave3dObjectDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(node_name.to_string()))),
+            // `pointAtOrientation` is not model-only: the dictionary lists it for
+            // "3D model, group, light and camera". Groups reach this function
+            // instead of `get_model_prop`, so reading it back gave VOID even
+            // though the setter (which is object-type agnostic) had stored it —
+            // and `pointAt` then fell back to the default -Z/+Y look-at.
+            //
+            // Agent Free Ride rigs its boarder on a GROUP: the character root is
+            // `group("veh_player_1_root")`, set to [vector(0,1,0), vector(0,0,1)]
+            // (+Y forward, +Z up — this game's convention). Losing it rotated the
+            // rider 90°, so the board faced right and travelled sideways.
+            "pointAtOrientation" | "pointatorientation" => {
+                let orientation = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.point_at_orientations.get(node_name))
+                    .copied();
+                // Director's default when never set: -Z toward the target, +Y up.
+                let (front, up) = orientation.unwrap_or(([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]));
+                let v1 = player.alloc_datum(Datum::Vector(
+                    [front[0] as f64, front[1] as f64, front[2] as f64]));
+                let v2 = player.alloc_datum(Datum::Vector(
+                    [up[0] as f64, up[1] as f64, up[2] as f64]));
+                Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    vec![v1, v2].into(),
+                    false,
+                )))
+            },
             "parent" => {
                 // VOID while detached (removeFromWorld) — see get_model_prop.
                 let detached = player.movie.cast_manager.find_member_by_ref(member_ref)
