@@ -6633,6 +6633,14 @@ impl Shockwave3dObjectDatumHandlers {
             // `group("veh_player_1_root")`, set to [vector(0,1,0), vector(0,0,1)]
             // (+Y forward, +Z up — this game's convention). Losing it rotated the
             // rider 90°, so the board faced right and travelled sideways.
+            // `child` / `childCount` are node-generic (they only scan
+            // `parent_name`), but lived in get_model_prop, so a GROUP returned
+            // VOID for them — `group.child[1]` raised "Cannot index non-list
+            // type: Void". Agent Free Ride's rider is a group rig
+            // (root -> base -> model), so nothing could walk it.
+            "child" | "childCount" | "childcount" => {
+                Self::get_model_prop(player, scene, node_name, prop, member_ref)
+            },
             "pointAtOrientation" | "pointatorientation" => {
                 let orientation = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
