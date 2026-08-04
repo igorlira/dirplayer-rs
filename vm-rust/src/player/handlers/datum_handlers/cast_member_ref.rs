@@ -1332,6 +1332,73 @@ impl CastMemberRefHandlers {
                     })?;
                     // Now try setting the property again
                     BitmapMemberHandlers::set_prop(member_ref, prop, value)
+                } else if matches!(prop, "pattern" | "filled" | "lineSize")
+                    && member_type == CastMemberTypeId::Shape
+                {
+                    // Shape cast-member properties. Director 11.5 Scripting
+                    // Dictionary, `pattern`: "Cast member property; determines the
+                    // pattern associated with the specified shape … This property
+                    // can be tested and set." `filled`, `lineSize` and `shapeType`
+                    // are the sibling shape properties. dkbarrel's
+                    // `Generic Help Dialog box.HelpInit` does
+                    //   member(sprite(HelpScrollBgChan).member).pattern = 10
+                    // to tile its scrollbar track.
+                    reserve_player_mut(|player| {
+                        let n = value.int_value()?;
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(member_ref)
+                            .ok_or_else(|| ScriptError::new("Invalid member ref".to_string()))?;
+                        if let CastMemberType::Shape(shape) = &mut member.member_type {
+                            match prop {
+                                "pattern" => shape.shape_info.pattern = n as u16,
+                                "filled" => shape.shape_info.fill_type = if n != 0 { 1 } else { 0 },
+                                _ => shape.shape_info.line_thickness = n as u8,
+                            }
+                        }
+                        Ok(())
+                    })
+                } else if prop == "rect" {
+                    // `member.rect` on a graphic member. The 11.5 dictionary entry
+                    // for `rect (Member)` says "Read-only for all cast members,
+                    // read/write for field cast members only", but its own example
+                    // immediately after is headed "This statement sets the
+                    // coordinates of bitmap cast member Banner" — and Director does
+                    // accept the write for graphic members. dkbarrel's
+                    // `Generic Help Dialog box.HelpInit` sizes its scrollbar track
+                    // this way:
+                    //   member(sprite(HelpScrollBgChan).member).rect =
+                    //       rect(0, 0, brectangle[3], …)
+                    // on a Shape member, which previously raised.
+                    reserve_player_mut(|player| {
+                        let (l, t, r, b) = match value {
+                            Datum::Rect(vals, _) => {
+                                (vals[0] as i16, vals[1] as i16, vals[2] as i16, vals[3] as i16)
+                            }
+                            _ => return Err(ScriptError::new(
+                                "member.rect requires a rect".to_string(),
+                            )),
+                        };
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(member_ref)
+                            .ok_or_else(|| ScriptError::new("Invalid member ref".to_string()))?;
+                        match &mut member.member_type {
+                            CastMemberType::Shape(shape) => {
+                                shape.shape_info.rect_left = l;
+                                shape.shape_info.rect_top = t;
+                                shape.shape_info.rect_right = r;
+                                shape.shape_info.rect_bottom = b;
+                                Ok(())
+                            }
+                            // Other graphic types don't carry a resizable rect of
+                            // their own; accept the write rather than raising, as
+                            // Director does for read-only-ish members.
+                            _ => Ok(()),
+                        }
+                    })
                 } else {
                     Err(ScriptError::new(format!(
                         "Cannot set castMember prop {} for member of type {:?}",

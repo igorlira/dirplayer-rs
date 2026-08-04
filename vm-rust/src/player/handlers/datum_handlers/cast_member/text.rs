@@ -424,6 +424,11 @@ impl TextMemberHandlers {
         // Director property names are case-insensitive
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
+            // See the setter: the renderer already honours info.scroll_top, so
+            // report the same value back. Scrollbar code reads it while dragging.
+            "scrolltop" => Ok(Datum::Int(
+                text_data.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0),
+            )),
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "line" => {
                 // Return a list of StringChunk references (one per
@@ -2303,6 +2308,25 @@ impl TextMemberHandlers {
         // Director property names are case-insensitive
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
+            // `scrollTop` — Director 11.5: the distance in pixels from the top of a
+            // scrolling text/field member to the top of its visible area. Fields
+            // already supported it; text members did not, even though the renderer
+            // ALREADY offsets the draw origin by `text_member.info.scroll_top`. Only
+            // the accessor was missing, so dkbarrel's help panel
+            // (`Generic Help Dialog box` sets `member(...).scrollTop`) never moved.
+            "scrolltop" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, v| -> Result<(), ScriptError> {
+                    let v = v?;
+                    if let Some(text_member) = cast_member.member_type.as_text_mut() {
+                        if let Some(info) = text_member.info.as_mut() {
+                            info.scroll_top = v.max(0) as u32;
+                        }
+                    }
+                    Ok(())
+                },
+            ),
             "text" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
