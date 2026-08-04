@@ -2389,31 +2389,37 @@ impl WebGL2Renderer {
                     //    because the flag only catches Lingo writes) AND explicit
                     //    Lingo `sprite.color = rgb(...)` writes. Black is excluded
                     //    so a sprite at its RGB default doesn't shadow member.color.
-                    // 2. CastMember `.color` set to RGB. Coke Studios does
+                    // 2. Non-black RGB CastMember `.color`. Coke Studios does
                     //    `sprite.color = paletteIndex(255)` (default-marker) +
                     //    `member.color = rgb(...)`; member RGB wins over the
                     //    sprite's palette default.
+                    //
+                    //    Black is excluded for the same reason it is in rule 1:
+                    //    an RGB black is the member's DEFAULT, not an authored
+                    //    choice, and letting it match shadows a sprite colour
+                    //    that really was authored. dkbarrel draws its Help Text
+                    //    twice from ONE member (47, storing RGB black) as a drop
+                    //    shadow — sprite 975 carries palette index 4 (yellow),
+                    //    sprite 974 palette index 255 (black). With black
+                    //    excluded here, both fall through to the sprite colour
+                    //    and each copy keeps its own.
                     // 3. Sprite has_fore_color (Lingo touched it, palette index).
                     // 4. Non-default, non-black sprite.color (score palette index).
                     // 5. Single styled-span color (XMED/HTML).
                     // 6. Stored member.color (palette fallback).
                     // 7. sprite.color as final fallback.
-                    // A sprite foreColor that has been moved off the default
-                    // outranks the member's stored color — Director treats the
-                    // sprite's channel color as an override of the cast member's.
-                    // dkbarrel's Help Text sprite carries palette index 4
-                    // (yellow) while the member stores black; checking
-                    // member.color first rendered it black.
                     let text_fg_color = if matches!(fg_color, ColorRef::Rgb(..))
                         && fg_color != ColorRef::Rgb(0, 0, 0)
                     {
                         fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..))
+                        && member.color != ColorRef::Rgb(0, 0, 0)
+                    {
+                        member.color.clone()
                     } else if has_fore_color {
                         fg_color.clone()
                     } else if fg_color != ColorRef::PaletteIndex(255) && fg_color != ColorRef::Rgb(0, 0, 0) {
                         fg_color.clone()
-                    } else if matches!(member.color, ColorRef::Rgb(..)) {
-                        member.color.clone()
                     } else if text_member.html_styled_spans.len() == 1 {
                         let style_color = text_member.html_styled_spans[0].style.color;
                         if let Some(c) = style_color {
