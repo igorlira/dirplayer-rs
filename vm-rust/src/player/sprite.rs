@@ -102,6 +102,41 @@ pub struct Sprite {
     /// re-puppeted or given a new member (BrickOut re-puppets in the same
     /// handler, so it never reverts and keeps its makeStage member).
     pub pending_unpuppet_revert: bool,
+    /// Set when the initial-load `begin_all_sprites` pass has already applied
+    /// this channel's Score properties and then cleared `entered` so that
+    /// `beginSprite` re-fires once the movie actually plays. The second pass
+    /// must re-enter the span and rebuild behaviors, but must NOT re-apply the
+    /// Score properties: `prepareMovie` runs between the two passes, and
+    /// Director's rule is that script changes to a non-puppet sprite "last for
+    /// the life of the current sprite" (11.5 Scripting Dictionary,
+    /// puppetSprite()) — the span has not ended, so nothing should revert.
+    ///
+    /// dkbarrel's `prepareMovie` calls `codeInit` → `ShowText(1)`, which points
+    /// the placard channels 961/962 at member "pressplay" and moves them to
+    /// point(48,166). The second pass put member "blanktext" and point(200,184)
+    /// straight back and the title screen lost its "Press Play to Begin!" text.
+    /// `locZ`, written by a later loop in the same handler and absent from the
+    /// Score channel data, survived — which is what identified the culprit.
+    ///
+    /// The existing `!sprite.puppet` guard doesn't cover this: dkbarrel's
+    /// `puppetAll()` only puppets channels 1-150.
+    ///
+    /// On its own this is NOT enough to skip the second pass — see
+    /// `script_wrote_since_span_init`.
+    pub score_props_already_applied: bool,
+    /// Set by `sprite_set_prop` (every Lingo write path) and cleared by
+    /// `begin_sprites` right after it applies the Score properties, so it means
+    /// "script has written to this channel since the Score last initialised
+    /// it".
+    ///
+    /// The second `begin_all_sprites` pass skips re-applying Score properties
+    /// only when this is set as well as `score_props_already_applied`. Skipping
+    /// on `score_props_already_applied` alone regressed Habbo v1, whose sprite 2
+    /// shape stopped drawing: the first pass runs while the movie is still
+    /// loading, so a member whose cast isn't resolvable yet takes the non-shape
+    /// ink/blend path, and the second pass is what fixed it up once the cast was
+    /// there. Channels that no script touched must keep getting that fix-up.
+    pub script_wrote_since_span_init: bool,
     pub quad: Option<[(i32, i32); 4]>, // [topLeft, topRight, bottomRight, bottomLeft] -- TODO: Tie this to position and size
     pub fore_color: i32,
     pub has_fore_color: bool,
@@ -233,6 +268,8 @@ impl Sprite {
             entered: false,
             exited: false,
             pending_unpuppet_revert: false,
+            score_props_already_applied: false,
+            script_wrote_since_span_init: false,
             quad: None,
             fore_color: 255,
             has_fore_color: false,
@@ -318,6 +355,8 @@ impl Sprite {
         self.entered = false;
         self.exited = false;
         self.pending_unpuppet_revert = false;
+        self.score_props_already_applied = false;
+        self.script_wrote_since_span_init = false;
         self.quad = None;
         self.fore_color = 255;
         self.has_fore_color = false;

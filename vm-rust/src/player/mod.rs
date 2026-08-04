@@ -1377,6 +1377,13 @@ impl DirPlayer {
             for channel in &mut self.movie.score.channels {
                 channel.sprite.entered = false;
                 channel.sprite.script_instance_list.clear();
+                // The properties HAVE been applied — only the behavior
+                // lifecycle is being rewound. Mark them so the second pass
+                // (which runs after prepareMovie) re-enters the span without
+                // overwriting anything prepareMovie changed.
+                if channel.sprite.member.is_some() {
+                    channel.sprite.score_props_already_applied = true;
+                }
             }
             self.clear_script_instance_list_caches();
         }

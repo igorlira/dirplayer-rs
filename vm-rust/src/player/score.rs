@@ -926,7 +926,27 @@ impl Score {
                 }
             }
 
-            let is_sprite = span.channel_number > 0 && !sprite.puppet;
+            // The initial-load pass already applied this channel's Score
+            // properties and a script has written to it since (prepareMovie runs
+            // between the two passes) — re-enter the span and rebuild behaviors,
+            // but leave the properties alone, because the span never ended.
+            //
+            // BOTH conditions are required. Skipping whenever the first pass ran
+            // regressed Habbo v1's sprite 2: that pass happens while the movie is
+            // still loading, so a member whose cast isn't resolvable yet misses
+            // the shape ink/blend path, and the second pass is what repairs it.
+            // Only channels a script actually wrote to may skip.
+            //
+            // Both flags are consumed here so an ordinary later re-entry of the
+            // span (playhead leaves and comes back) reinitialises from the Score
+            // as Director does.
+            let already_applied =
+                std::mem::take(&mut sprite.score_props_already_applied);
+            let script_wrote = std::mem::take(&mut sprite.script_wrote_since_span_init);
+
+            let is_sprite = span.channel_number > 0
+                && !sprite.puppet
+                && !(already_applied && script_wrote);
             if is_sprite {
                 // Log spriteListIdx values for D6+ behavior debugging
                 let sprite_list_idx = data.sprite_list_idx();
@@ -1161,6 +1181,14 @@ impl Score {
                     sprite.bitmap_size_owned_by_sprite = false;
                 }
             }
+
+            // The Score has just had its say on this channel, so any script
+            // write is now older than it. Cleared AFTER the property block
+            // because that block's own `sprite_set_prop(.., "member", ..)` sets
+            // the flag — without this the initial-load pass would leave every
+            // span-backed channel looking script-written and the second pass
+            // would skip them all.
+            self.get_sprite_mut(sprite_num).script_wrote_since_span_init = false;
         }
 
         // D5 per-frame sprite property updates:
@@ -3612,7 +3640,7 @@ pub fn sprite_get_prop(
     player.last_sprite_prop_ref = None;
     // Use context-aware sprite lookup to support filmloop behaviors
     let sprite = get_sprite_in_context(player, sprite_id);
-    match prop_name {
+    match_ci!(prop_name, {
         "ilk" => Ok(Datum::Symbol("sprite".to_string())),
         "spriteNum" | "spriteNumber" => Ok(Datum::Int(
             sprite.map_or(sprite_id as i32, |x| x.number as i32),
@@ -3635,7 +3663,7 @@ pub fn sprite_get_prop(
                 concrete_sprite_hit_test(player, sprite, player.mouse_loc.0, player.mouse_loc.1)
             });
             Ok(Datum::Int(if hit { 1 } else { 0 }))
-        }
+        },
         "loc" => {
             let sprite = get_sprite_in_context(player, sprite_id);
             let (x, y) = sprite.map_or((0, 0), |sprite| (sprite.loc_h, sprite.loc_v));
@@ -3654,33 +3682,33 @@ pub fn sprite_get_prop(
         "width" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int((rect.2 - rect.0) as i32))
-        }
+        },
         "height" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int((rect.3 - rect.1) as i32))
-        }
+        },
         "blend" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.blend) as i32)),
         "ink" => Ok(Datum::Int(sprite.map_or(0, |sprite| sprite.ink) as i32)),
         "left" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.0 as i32))
-        }
+        },
         "top" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.1 as i32))
-        }
+        },
         "right" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.2 as i32))
-        }
+        },
         "bottom" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Int(rect.3 as i32))
-        }
+        },
         "rect" => {
             let rect = get_sprite_rect_in_context(player, sprite_id);
             Ok(Datum::Rect([rect.0 as f64, rect.1 as f64, rect.2 as f64, rect.3 as f64], 0))
-        }
+        },
         "color" => Ok(Datum::ColorRef(
             sprite.map_or(ColorRef::PaletteIndex(255), |sprite| sprite.color.clone()),
         )),
@@ -3714,7 +3742,7 @@ pub fn sprite_get_prop(
                 }
                 _ => Ok(Datum::Int(0)),
             }
-        }
+        },
         "camera" => {
             // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
             let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
@@ -3726,13 +3754,13 @@ pub fn sprite_get_prop(
                 object_type: "camera".to_string(),
                 name: cam_name,
             }))
-        }
+        },
         "cameraCount" => {
             let count = sprite.map_or(1, |s| {
                 1 + s.w3d_cameras.len() as i32
             });
             Ok(Datum::Int(count))
-        }
+        },
         "flipH" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_h))),
         "flipV" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.flip_v))),
         "rotation" => Ok(Datum::Float(sprite.map_or(0.0, |sprite| sprite.rotation))),
@@ -3757,7 +3785,7 @@ pub fn sprite_get_prop(
                 player.last_sprite_prop_ref = Some(list_ref);
                 Ok(list)
             }
-        }
+        },
         "memberNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_member)
         }))),
@@ -3788,7 +3816,7 @@ pub fn sprite_get_prop(
                 })
                 .map(|script_instance| script_instance.script.cast_member);
             Ok(Datum::Int(script_num.unwrap_or(0)))
-        }
+        },
         "visible" | "visibility" => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         "puppet" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
         "moveableSprite" | "moveable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.moveable))),
@@ -3816,7 +3844,7 @@ pub fn sprite_get_prop(
                 }
                 None => Ok(Datum::Int(0)),
             }
-        }
+        },
         "startFrame" => {
             let current_frame = player.movie.current_frame;
             let start_frame = player
@@ -3832,7 +3860,7 @@ pub fn sprite_get_prop(
                 .map(|span| span.start_frame)
                 .unwrap_or(0);
             Ok(Datum::Int(start_frame as i32))
-        }
+        },
         "endFrame" => {
             let current_frame = player.movie.current_frame;
             let end_frame = player
@@ -3848,7 +3876,7 @@ pub fn sprite_get_prop(
                 .map(|span| span.end_frame)
                 .unwrap_or(0);
             Ok(Datum::Int(end_frame as i32))
-        }
+        },
         "castLibNum" => Ok(Datum::Int(sprite.map_or(0, |x| {
             x.member.as_ref().map_or(0, |y| y.cast_lib)
         }))),
@@ -3860,7 +3888,7 @@ pub fn sprite_get_prop(
             } else {
                 Ok(datum_bool(false))
             }
-        }
+        },
         "frameCount" => {
             // Prefer the SWF header's FrameCount (parsed from the member bytes)
             // over asking Ruffle: the header is correct even while the instance
@@ -3884,7 +3912,7 @@ pub fn sprite_get_prop(
                 }
                 None => Ok(Datum::Int(0)),
             }
-        }
+        },
         "currentFrame" | "frame" => {
             // A behavior's own `property frame` / `property currentFrame` takes
             // precedence over the Flash playhead reading. Many behaviors track
@@ -3913,11 +3941,11 @@ pub fn sprite_get_prop(
                 }
                 None => Ok(Datum::Int(0)),
             }
-        }
+        },
         "actionsEnabled" | "buttonsEnabled" | "imageEnabled" | "sound" | "static" => {
             // Flash properties that default to true/1
             Ok(datum_bool(true))
-        }
+        },
         "quality" => Ok(Datum::String("high".to_string())),
         "scaleMode" => Ok(Datum::String("showAll".to_string())),
         "playBackMode" => Ok(Datum::Int(0)), // 0 = normal
@@ -3954,7 +3982,7 @@ pub fn sprite_get_prop(
             } else {
                 Ok(datum_bool(false))
             }
-        }
+        },
         "viewScale" => Ok(Datum::Float(100.0)),
         "originMode" => Ok(Datum::Int(0)),
         "originH" | "originV" => Ok(Datum::Int(0)),
@@ -3963,10 +3991,10 @@ pub fn sprite_get_prop(
             let w = sprite.map_or(0, |s| s.width);
             let h = sprite.map_or(0, |s| s.height);
             Ok(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0))
-        }
+        },
         "originPoint" | "viewPoint" => {
             Ok(Datum::Point([0.0, 0.0], 0))
-        }
+        },
         "bytesStreamed" | "bufferSize" | "streamSize" => Ok(Datum::Int(0)),
         "scale" => Ok(Datum::Float(100.0)),
         "editable" => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.editable))),
@@ -4010,8 +4038,8 @@ pub fn sprite_get_prop(
             }).collect();
 
             Ok(Datum::List(DatumType::List, items, false))
-        }
-        prop_name => {
+        },
+        _ => {
             let datum_ref = sprite.and_then(|sprite| {
                 let fallback = sprite.script_instance_list.clone();
                 reserve_player_mut(|player| {
@@ -4067,8 +4095,8 @@ pub fn sprite_get_prop(
                     Ok(Datum::Void)
                 }
             }
-        }
-    }
+        },
+    })
 }
 
 pub fn borrow_sprite_mut<T1, F1, T2, F2>(sprite_id: i16, player_f: F2, f: F1) -> T1
@@ -4151,7 +4179,7 @@ fn sprite_set_prop_is_noop(
             return Ok(false);
         };
 
-        match prop_name {
+        match_ci!(prop_name, {
             "visible" | "visibility" => Ok(sprite.visible == value.to_bool()?),
             "stretch" => Ok(sprite.stretch == value.int_value()?),
             "locH" => Ok(sprite.loc_h == value.int_value()?),
@@ -4162,33 +4190,33 @@ fn sprite_set_prop_is_noop(
                 } else {
                     Ok(sprite.loc_z == value.int_value()?)
                 }
-            }
+            },
             "width" => {
                 let width = value.int_value()?;
                 Ok(sprite.width == width && sprite.has_size_changed)
-            }
+            },
             "height" => {
                 let height = value.int_value()?;
                 Ok(sprite.height == height && sprite.has_size_changed)
-            }
+            },
             "left" => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 Ok(left == value.int_value()?)
-            }
+            },
             "top" => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 Ok(top == value.int_value()?)
-            }
+            },
             "right" => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 let width = value.int_value()? - left;
                 Ok(sprite.width == width && sprite.has_size_changed)
-            }
+            },
             "bottom" => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
                 let height = value.int_value()? - top;
                 Ok(sprite.height == height && sprite.has_size_changed)
-            }
+            },
             "ink" => Ok(sprite.ink == value.int_value()?),
             "blend" => Ok(sprite.blend == value.int_value()?),
             "rotation" => {
@@ -4198,7 +4226,7 @@ fn sprite_set_prop_is_noop(
                     0.0
                 };
                 Ok(sprite.rotation == rotation)
-            }
+            },
             "skew" => {
                 let skew = if value.is_number() {
                     value.to_float()?
@@ -4206,7 +4234,7 @@ fn sprite_set_prop_is_noop(
                     0.0
                 };
                 Ok(sprite.skew == skew)
-            }
+            },
             "flipH" => {
                 let flip_h = if value.is_number() {
                     value.to_bool()?
@@ -4214,7 +4242,7 @@ fn sprite_set_prop_is_noop(
                     false
                 };
                 Ok(sprite.flip_h == flip_h)
-            }
+            },
             "flipV" => {
                 let flip_v = if value.is_number() {
                     value.to_bool()?
@@ -4222,7 +4250,7 @@ fn sprite_set_prop_is_noop(
                     false
                 };
                 Ok(sprite.flip_v == flip_v)
-            }
+            },
             "backColor" | "backcolor" => {
                 let back_color = value.int_value()?;
                 Ok(
@@ -4230,7 +4258,7 @@ fn sprite_set_prop_is_noop(
                         && sprite.bg_color == ColorRef::PaletteIndex(back_color as u8)
                         && sprite.has_back_color,
                 )
-            }
+            },
             "bgColor" => {
                 let bg_color = value.to_color_ref()?.to_owned();
                 Ok(
@@ -4239,7 +4267,7 @@ fn sprite_set_prop_is_noop(
                             == bg_color.to_index(&SYSTEM_WIN_PALETTE) as i32
                         && sprite.has_back_color,
                 )
-            }
+            },
             "foreColor" | "forecolor" => {
                 let fore_color = value.int_value()?;
                 Ok(
@@ -4247,7 +4275,7 @@ fn sprite_set_prop_is_noop(
                         && sprite.color == ColorRef::PaletteIndex(fore_color as u8)
                         && sprite.has_fore_color,
                 )
-            }
+            },
             "color" => {
                 let color = value.to_color_ref()?.to_owned();
                 Ok(
@@ -4255,11 +4283,11 @@ fn sprite_set_prop_is_noop(
                         && sprite.fore_color == color.to_index(&SYSTEM_WIN_PALETTE) as i32
                         && sprite.has_fore_color,
                 )
-            }
+            },
             "member" => {
                 let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
                 Ok(sprite.member == mem_ref)
-            }
+            },
             "memberNum" => {
                 let value = value.int_value()?;
                 let actual_member_num = if value > 65535 {
@@ -4272,12 +4300,12 @@ fn sprite_set_prop_is_noop(
                     None => CastMemberRefHandlers::member_ref_from_slot_number(value as u32),
                 };
                 Ok(sprite.member.as_ref() == Some(&new_member_ref))
-            }
+            },
             "castNum" => {
                 let new_member_ref =
                     CastMemberRefHandlers::member_ref_from_slot_number(value.int_value()? as u32);
                 Ok(sprite.member.as_ref() == Some(&new_member_ref))
-            }
+            },
             "loc" => match value {
                 Datum::Point(vals, _) => {
                     Ok(sprite.loc_h == vals[0] as i32 && sprite.loc_v == vals[1] as i32)
@@ -4343,7 +4371,7 @@ fn sprite_set_prop_is_noop(
                         value.type_str()
                     ))),
                 }
-            }
+            },
             "scriptInstanceList" => {
                 let ref_list = value.to_list()?;
                 if ref_list.len() != sprite.script_instance_list.len() {
@@ -4361,7 +4389,7 @@ fn sprite_set_prop_is_noop(
                     }
                 }
                 Ok(true)
-            }
+            },
             "editable" => Ok(sprite.editable == value.to_bool()?),
             "quad" => {
                 let list = value
@@ -4379,13 +4407,13 @@ fn sprite_set_prop_is_noop(
                     points.push((vals[0] as i32, vals[1] as i32));
                 }
                 Ok(sprite.quad == Some([points[0], points[1], points[2], points[3]]))
-            }
+            },
             "puppet" => Ok(sprite.puppet == value.to_bool()?),
             "moveableSprite" | "moveable" => Ok(sprite.moveable == value.to_bool()?),
             "constraint" => Ok(sprite.constraint == value.int_value()?),
             "trails" => Ok(sprite.trails == value.to_bool()?),
             _ => Ok(false),
-        }
+        })
     })
 }
 
@@ -4432,7 +4460,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
     }
 
     reserve_player_mut(|player| { player.stage_dirty = true; });
-    let result = match prop_name {
+    let result = match_ci!(prop_name, {
         // Flash (SWF) sprite frame setter — `mySprite.frame = N` on a Flash
         // member must navigate that sprite's embedded Ruffle player, not be
         // treated as a behaviour-property assignment. Each Flash sprite has
@@ -4502,7 +4530,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
             }
             Ok(())
-        }
+        },
         "visible" | "visibility" => borrow_sprite_mut(
             sprite_id,
             |_| {},
@@ -4551,7 +4579,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     Ok(())
                 },
             )
-        }
+        },
         "width" => borrow_sprite_mut(
             sprite_id,
             |player| value.int_value(),
@@ -4753,7 +4781,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     Ok(())
                 },
             )
-        }
+        },
         // Member properties
         "member" => borrow_sprite_mut(
             sprite_id,
@@ -5079,7 +5107,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 }
                 Ok(())
             })
-        }
+        },
         "editable" => borrow_sprite_mut(
             sprite_id,
             |_| {},
@@ -5158,7 +5186,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                     Ok(())
                 },
             )
-        }
+        },
         "puppet" => borrow_sprite_mut(
             sprite_id,
             |_| {},
@@ -5192,7 +5220,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 Ok(())
             },
         ),       
-        prop_name => borrow_sprite_mut(
+        _ => borrow_sprite_mut(
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -5244,8 +5272,15 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 }
             },
         ),
-    };
+    });
     if result.is_ok() {
+        // Mark the channel as script-written. `begin_sprites` clears this right
+        // after it applies Score properties, so the Score's own internal
+        // `sprite_set_prop(.., "member", ..)` calls cancel themselves out and
+        // only genuine Lingo writes leave it set.
+        reserve_player_mut(|player| {
+            player.movie.score.get_sprite_mut(sprite_id).script_wrote_since_span_init = true;
+        });
         let affects_render_order = prop_name.eq_ignore_ascii_case("visible")
             || prop_name.eq_ignore_ascii_case("visibility")
             || prop_name.eq_ignore_ascii_case("locZ")
@@ -6130,7 +6165,26 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 })
             } else { None };
 
-            let stored_height = if info_height > sprite.height {
+            // Only `#adjust` grows to the member's laid-out height. `#fixed` /
+            // `#scroll` / `#limit` stay locked to the sprite's authored height and
+            // CLIP — that is what makes a scrolling viewport possible, and it is the
+            // rule the comment below already describes; the box type simply was not
+            // consulted, so the larger value always won.
+            //
+            // Not the score's stretch flag: measured on dkbarrel, stretch is 0 for
+            // both a #fixed help panel (sprite 128 vs member 816 — must clip to 128)
+            // and an #adjust caption (sprite 13 vs member 28 — must grow to 28), so
+            // it cannot discriminate. box_type does.
+            //
+            // dkbarrel's help panel: TextInfo 816 (the whole document) against an
+            // authored 128 (the visible page). Taking the larger gave an 820-tall
+            // sprite, so `Generic Help Dialog box` computed PageAmount=820 and
+            // MaxScroll = 816-820 = negative — nothing to scroll, and the text drew
+            // over the whole stage instead of inside the panel.
+            let text_box_grows = text_member.box_type.eq_ignore_ascii_case("adjust");
+            let stored_height = if info_height > sprite.height
+                && (text_box_grows || sprite.height <= 0)
+            {
                 info_height
             } else {
                 sprite.height
