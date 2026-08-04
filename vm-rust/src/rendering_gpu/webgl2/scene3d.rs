@@ -4467,7 +4467,12 @@ void main() {
         let motion = if let Some(name) = current_motion_name {
             scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(name))
         } else {
-            None // Don't apply a motion until the game explicitly calls play()
+            // Nothing played yet. Director does NOT leave a skinned rig in its bind
+            // pose here — it seeds the bonesPlayer with the rig's own motion at load,
+            // so the model stands in that clip's frame 0 rather than the authored
+            // T-pose. Agent Free Ride's boarder rode with his arms out because we
+            // fell through to no motion at all.
+            crate::director::chunks::w3d::skeleton::default_motion_for_model(scene, model_name)
         };
         // Manual per-bone overrides (bonesPlayer.bone[i].transform = t), keyed by
         // "modelname:boneindex". updateBoneRotation re-sets these each frame to

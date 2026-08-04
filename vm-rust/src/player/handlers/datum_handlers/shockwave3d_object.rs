@@ -2668,7 +2668,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 Datum::Symbol(s) if s == "synchronized" => -1.0f64,
                                 _ => d.to_float().unwrap_or(0.0),
                             }
-                        }).unwrap_or(0.0);
+                        }).unwrap_or(f64::NEG_INFINITY); // absent — distinct from an explicit 0
                         Some((motion_name, is_loop, start_time_ms, end_time_ms, scale, offset_ms))
                     };
 
@@ -2713,7 +2713,15 @@ impl Shockwave3dObjectDatumHandlers {
                                     bp.motion_ended = false;
 
                                     // Determine initial animation time from offset
-                                    if offset_ms >= 0.0 {
+                                    if offset_ms == f64::NEG_INFINITY {
+                                        // No offset argument: Director starts the motion AT its
+                                        // startTime, not at zero. Agent Free Ride poses its rider
+                                        // by play()ing narrow slices of one long clip (40..1960,
+                                        // 10000..12000, ...), so starting at 0 left the clock
+                                        // outside the requested slice entirely — Director reports
+                                        // currentTime inside [startTime, endTime], we did not.
+                                        bp.animation_time = bp.animation_start_time;
+                                    } else if offset_ms >= 0.0 {
                                         bp.animation_time = offset_ms as f32 / 1000.0;
                                     }
                                     // else: #synchronized — keep current relative position
@@ -6012,6 +6020,28 @@ impl Shockwave3dObjectDatumHandlers {
                                 rs.animation_end_time, rs.animation_scale, rs.animation_time, rs.motion_queue.clone()),
                         };
                         let mut list: Vec<crate::player::cast_member::QueuedMotion> = Vec::new();
+                        // Nothing played yet: Director still reports the rig's own motion
+                        // here, because it seeds a skinned model's playList at load. Games
+                        // read playList[1].name before ever calling play() — see
+                        // `default_motion_for_model`. Values match Director's own report
+                        // for an untouched bonesPlayer: loop 1, 0..100000, scale 1.
+                        // Times are held in SECONDS here and reported in ms, so
+                        // Director's 100000 ms end time is 100.0 in this struct.
+                        let cur = cur.or_else(|| {
+                            w3d.parsed_scene.as_ref().and_then(|scene| {
+                                crate::director::chunks::w3d::skeleton::default_motion_for_model(
+                                    scene, model_name,
+                                ).map(|m| m.name.clone())
+                            })
+                        });
+                        let seeded = !matches!(
+                            rs.bones_player(model_name), Some(b) if b.current_motion.is_some()
+                        ) && rs.current_motion.is_none();
+                        let (loop_, start, end, scale, time) = if seeded {
+                            (true, 0.0, 100.0, 1.0, 0.0)
+                        } else {
+                            (loop_, start, end, scale, time)
+                        };
                         if let Some(name) = cur {
                             list.push(crate::player::cast_member::QueuedMotion {
                                 name,

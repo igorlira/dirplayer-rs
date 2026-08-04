@@ -6,6 +6,32 @@ use std::collections::HashMap;
 
 const TRANSLATION_EPSILON: f32 = 1e-5;
 
+/// The motion Director pre-loads into a skinned model's `bonesPlayer.playList`.
+///
+/// Director attaches a #bonesPlayer to a skinned model with the rig's own motion
+/// ALREADY in the playList, before any script calls `play()`. Games rely on it:
+/// Agent Free Ride's `Character2.new` reads
+/// `getProp(lChild.bonesPlayer.playList[1], #name)` at construction to learn the
+/// clip's name, and if the list starts empty it stores VOID and every later
+/// `play(VOID, ...)` is a no-op — the rig then renders in its bind pose forever.
+///
+/// Pick the rig's own like-named motion, else the first real motion (more than
+/// one track, and not the built-in default).
+pub fn default_motion_for_model<'a>(scene: &'a W3dScene, model_name: &str) -> Option<&'a W3dMotion> {
+    let node = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(model_name))?;
+    let skeleton = scene.skeletons.iter().find(|s| {
+        s.bones.len() > 1
+            && (s.name.eq_ignore_ascii_case(&node.resource_name)
+                || s.name.eq_ignore_ascii_case(&node.model_resource_name)
+                || s.name.eq_ignore_ascii_case(&node.name))
+    })?;
+    scene.motions.iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&skeleton.name))
+        .or_else(|| scene.motions.iter().find(|m| {
+            m.tracks.len() > 1 && !m.name.eq_ignore_ascii_case("DefaultMotion")
+        }))
+}
+
 pub fn has_meaningful_translation(x: f32, y: f32, z: f32) -> bool {
     x.abs() > TRANSLATION_EPSILON || y.abs() > TRANSLATION_EPSILON || z.abs() > TRANSLATION_EPSILON
 }
