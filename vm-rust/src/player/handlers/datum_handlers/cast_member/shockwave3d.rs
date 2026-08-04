@@ -2744,6 +2744,7 @@ impl Shockwave3dMemberHandlers {
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,
                             texture_content_version: 0,
+                            model_root_com: HashMap::new(),
                         };
                         empty_scene.nodes.push(W3dNode {
                             name: "World".to_string(),

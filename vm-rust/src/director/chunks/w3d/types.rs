@@ -467,6 +467,12 @@ pub struct W3dScene {
     pub mesh_content_version: u64,
     /// Monotonically increasing counter; bumped whenever texture_images is mutated
     pub texture_content_version: u64,
+    /// Per skinned model (lowercased node name): the biped COM that Director folds
+    /// into the model node at import — the root bone's frame-0 pose from the model's
+    /// reference motion. Recorded here so the renderer strips exactly the matrix the
+    /// parser composed, and the two can never drift apart. See
+    /// `apply_root_com_to_model_nodes`.
+    pub model_root_com: HashMap<String, [f32; 16]>,
 }
 
 impl W3dScene {

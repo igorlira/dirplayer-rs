@@ -4547,8 +4547,17 @@ void main() {
         // Only models with an idle-rest motion (the biped actors/bots) are relativized;
         // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
         // relativization — so this can't regress them.
-        let root_relinv = match &idle_root_mats {
-            Some(m) if !m.is_empty() => affine_inv(&m[0]),
+        // The parser folds the biped COM into the model NODE at import, the way
+        // Director does (see `apply_root_com_to_model_nodes`), and records the exact
+        // matrix it used. Strip that same matrix here so the drawn mesh does not
+        // move: (node * R0) * inv(R0) * world * inv_bind == node * world * inv_bind.
+        // Taking R0 from the recorded value rather than recomputing it is what keeps
+        // the two sides from drifting apart.
+        let folded_com = scene.model_root_com.get(&model_name.to_ascii_lowercase())
+            .or_else(|| scene.model_root_com.get(&resource_name.to_ascii_lowercase()));
+        let root_relinv = match (folded_com, &idle_root_mats) {
+            (Some(r0), _) => affine_inv(r0),
+            (None, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
             _ => IDENTITY_4X4,
         };
 
