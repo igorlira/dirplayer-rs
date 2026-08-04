@@ -23,7 +23,9 @@ const W3D_HANDLER_LOG: bool = false;
 /// the camera accessor inserts DefaultView as camera[1]). Without it,
 /// e.g. Rasterwerks' `m.motion[3].name` returned the wrong (3rd authored) motion
 /// and every actor cloned a non-skeletal motion → T-pose.
-const DEFAULT_MOTION_NAME: &str = "Default Motion";
+// Director spells its built-in motion "DefaultMotion", with no space — scripts
+// that compare motion[1].name against it depend on the exact spelling.
+const DEFAULT_MOTION_NAME: &str = "DefaultMotion";
 
 fn log(msg: &str) {
     if W3D_HANDLER_LOG {
@@ -1493,7 +1495,7 @@ impl Shockwave3dMemberHandlers {
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
+                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons, src_motions) = {
                                 let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                                 let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
@@ -1553,7 +1555,12 @@ impl Shockwave3dMemberHandlers {
                                     .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
                                     .cloned().collect()).unwrap_or_default();
                                 let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
-                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons)
+                                // A skeleton without its motions is just a bind pose. Agent Free
+                                // Ride clones "player" out of member 5 into the member 1 scene it
+                                // actually renders, and the rider stood in his T-pose because the
+                                // clip stayed behind in the source member.
+                                let motions: Vec<_> = scene.map(|s| s.motions.clone()).unwrap_or_default();
+                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons, motions)
                             };
 
                             debug!(
@@ -1835,6 +1842,21 @@ impl Shockwave3dMemberHandlers {
                                                 let mut cloned = skeleton.clone();
                                                 cloned.name = skel_key.clone();
                                                 scene.skeletons.push(cloned);
+
+                                                // Bring the rig's clips across too — a skeleton with
+                                                // no motion is just a bind pose. Keep each clip's
+                                                // ORIGINAL name even though the skeleton is renamed
+                                                // to the clone's key: scripts play motions by the
+                                                // source name (Agent Free Ride clones "player" in as
+                                                // "veh_player_1" and then calls play("player")).
+                                                // Motion tracks address bones by name, so a copied
+                                                // clip drives the renamed skeleton unchanged.
+                                                for motion in &src_motions {
+                                                    if scene.motions.iter().any(|m| m.name.eq_ignore_ascii_case(&motion.name)) {
+                                                        continue;
+                                                    }
+                                                    scene.motions.push(motion.clone());
+                                                }
                                             }
                                         }
                                     }
