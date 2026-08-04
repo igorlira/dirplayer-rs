@@ -2002,6 +2002,24 @@ impl DirPlayer {
                     )
             });
 
+        // The message-channel cache is keyed on the same (frame, generation)
+        // pair but has a BROADER predicate (`is_active_sprite`: behaviors OR a
+        // cast member script), so it can't be patched with `should_include`.
+        // Drop it and let the next read rebuild.
+        //
+        // Without this it kept a stale entry for the whole time the playhead
+        // sat on one frame, because nothing here bumps the generation. Coke
+        // Studios' navigator builds its scrollbar at runtime —
+        //   puppetSprite(N, 1)                       -- no behaviors yet
+        //   sprite(N).scriptInstanceList = [new(script("scrollvert slider"),…)]
+        // — and the second line refreshed only the behavior cache below, while
+        // `dispatch_event_to_all_behaviors` walks the MESSAGE cache. The lift's
+        // `exitFrame` was therefore never dispatched: it kept its authored
+        // `.passive` member and ignored clicks, until an unrelated change
+        // finally bumped the generation. `active_stage_message_channels` was
+        // added later than the incremental refresh and was never wired into it.
+        self.active_stage_message_channels_cache = None;
+
         let Some((_, _, channels)) = self.active_stage_behavior_channels_cache.as_mut() else {
             return;
         };
