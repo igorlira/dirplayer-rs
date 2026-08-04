@@ -5555,7 +5555,43 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 }
             },
-            "visible" | "visibility" => Ok(player.alloc_datum(Datum::Int(1))),
+            // `visible` is the boolean show/hide shorthand — TRUE unless the
+            // model was hidden. `visibility` is Director's face-culling mode and
+            // is a SYMBOL, not a number: "#none … #front … #back … #both"
+            // (11.5 Scripting Dictionary, `visibility`), defaulting to #front.
+            // It was returning a hardcoded 1, so the value the setter had just
+            // stored in `node_visibility` was never read back, and any script
+            // comparing against a symbol saw an integer. Agent Free Ride's
+            // vehicle hover filters ray hits with
+            //   if lIntersectDetailsRef[1].visibility <> #none
+            // which passed only because `1 <> #none` happens to be true; an
+            // `= #front` test would have failed.
+            "visible" => {
+                let hidden = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.node_visibility.get(model_name).copied())
+                    .is_some_and(|mode| mode == 0);
+                Ok(player.alloc_datum(Datum::Int(if hidden { 0 } else { 1 })))
+            },
+            "visibility" => {
+                let mode = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.node_visibility.get(model_name).copied())
+                    .unwrap_or(1); // #front is the documented default
+                let name = match mode {
+                    0 => "none",
+                    1 => "front",
+                    2 => "back",
+                    _ => "both",
+                };
+                Ok(player.alloc_datum(Datum::Symbol(name.to_string())))
+            },
             "pointAtOrientation" | "pointatorientation" => {
                 let member = player.movie.cast_manager.find_member_by_ref(member_ref);
                 let orientation = member.and_then(|m| m.member_type.as_shockwave3d())
