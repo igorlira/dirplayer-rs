@@ -2727,6 +2727,19 @@ impl DirPlayer {
                     return Ok(self.alloc_datum(Datum::Int(self.member_script_sprite_num as i32)));
                 }
 
+                // Mouse events reach a member script through a different dispatch
+                // path than the frame events above, and that path doesn't stamp
+                // `member_script_sprite_num` — so `the currentSpriteNum` read 0 in
+                // an `on mouseDown` member script. Director answers with the sprite
+                // the click went to. dkbarrel's menu buttons are member scripts that
+                // identify themselves with
+                //     ind = getPos(btnspr, the currentSpriteNum)
+                // and 0 made getPos return 0, so `getAt(btnflash, 0)` raised
+                // "Index 0 out of bounds" when clicking HELP.
+                if self.click_on_sprite > 0 {
+                    return Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32)));
+                }
+
                 // Default: return 0 when no sprite context is available
                 Ok(self.alloc_datum(Datum::Int(0)))
             },
@@ -4222,6 +4235,10 @@ pub async fn player_call_script_handler_raw_args(
     // `copyPixels` tiling). Only the former should yield; yielding inside compute
     // loops fired ~15×/frame at ~4ms each and tanked the sub to ~3fps.
     let mut backjumps: u32 = 0;
+    // Watchdog counter — every backward jump, not just polling ones. 2^22 is far
+    // beyond any real Lingo loop but reached within a second or so when spinning.
+    const RUNAWAY_LOOP_REPORT_AT: u32 = 4_194_304;
+    let mut total_backjumps: u32 = 0;
 
     loop {
         // Single player access per op: read scope generation + bytecode_index and
@@ -4390,6 +4407,54 @@ pub async fn player_call_script_handler_raw_args(
                 // yields — a yield there only adds latency and was the source of
                 // the navigator stalls. Reading+clearing a bool is far cheaper
                 // than the old per-instruction scope lookup.
+                // Runaway-loop watchdog. The yield above is deliberately scoped to
+                // polling loops, so a loop that neither polls nor terminates hangs
+                // the whole tab with no diagnostic — dkbarrel's `RunAni2` walks an
+                // animation list with `repeat while lst[ani_index] <> cmd_frame`, and
+                // any index that never lands on the terminator spins forever.
+                //
+                // Count EVERY backward jump in this handler and report once past a
+                // threshold no legitimate loop should reach, naming the handler and
+                // bytecode position so the culprit is identifiable from the console
+                // instead of presenting as a dead browser tab. Reporting only — the
+                // loop is not aborted, since a long-but-finite loop is legal.
+                total_backjumps = total_backjumps.wrapping_add(1);
+                if total_backjumps == RUNAWAY_LOOP_REPORT_AT {
+                    let state = reserve_player_ref(|player| {
+                        // `scopes` is a pre-allocated POOL — the live frame is at
+                        // scope_count-1, not `.last()` (which is an unused slot).
+                        let active = player.scopes.get(
+                            player.scope_count.saturating_sub(1) as usize
+                        );
+                        match active {
+                            None => "<no scope>".to_string(),
+                            Some(s) => {
+                                // Locals are keyed by name id; print id=value pairs.
+                                // Even without the name table this shows which values
+                                // are stuck or cycling, which is what identifies the
+                                // non-advancing index.
+                                let mut locals: Vec<String> = s.locals.iter()
+                                    .map(|(id, r)| format!("#{}={}", id, format_datum(r, player)))
+                                    .collect();
+                                locals.sort();
+                                let stack: Vec<String> = s.stack.iter().rev().take(4)
+                                    .map(|r| format_datum(r, player))
+                                    .collect();
+                                format!(
+                                    "bytecode {} | locals [{}] | stack-top [{}]",
+                                    s.bytecode_index,
+                                    locals.join(", "),
+                                    stack.join(", ")
+                                )
+                            }
+                        }
+                    });
+                    console_warn!(
+                        "[RUNAWAY] handler '{}' looped {} times without returning — {}",
+                        handler_name, RUNAWAY_LOOP_REPORT_AT, state
+                    );
+                }
+
                 let polled = reserve_player_mut(|player| std::mem::take(&mut player.input_polled));
                 if polled {
                     backjumps = backjumps.wrapping_add(1);
