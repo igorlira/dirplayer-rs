@@ -399,7 +399,26 @@ pub fn box_vs_triangle(
     }
 
     let n = scale(best_axis, best_sign);
-    if dot(tri_normal, box_center) < dot(tri_normal, v0) - contact_dist {
+    // Back-face rejection, measured against the BOX rather than its centre.
+    //
+    // This exists so a body genuinely underneath one-sided terrain isn't
+    // yanked up through it. Testing the centre alone made it fire as soon as
+    // the centre dipped a hair below the triangle plane, even though the box
+    // still straddled the surface — so a resting body lost every contact the
+    // moment it settled and then free-fell with the mesh right there.
+    //
+    // Measured on Agent Free Ride: a chassis 61 units deep sliding down
+    // `l_t_d1_1` had contacts at centre +1.6 above the plane and NONE at -1.6
+    // below, after which its downward velocity ran away (-563 → -1036 → …).
+    // The allowance is the box's extent along the triangle normal, so the
+    // contact survives while any part of the box is still in front of the
+    // plane, and rejection only kicks in once the whole box is behind it.
+    let box_reach_along_n = box_half_extents[0] * dot(box_axis_x, tri_normal).abs()
+        + box_half_extents[1] * dot(box_axis_y, tri_normal).abs()
+        + box_half_extents[2] * dot(box_axis_z, tri_normal).abs();
+    if dot(tri_normal, box_center)
+        < dot(tri_normal, v0) - box_reach_along_n - contact_dist
+    {
         return None;
     }
     let sx = if dot(box_axis_x, n) >= 0.0 { -box_half_extents[0] } else { box_half_extents[0] };
@@ -416,6 +435,110 @@ pub fn box_vs_triangle(
         separation: -best_overlap,
         triangle_index: tri_index,
     })
+}
+
+/// Box-vs-triangle producing a MANIFOLD rather than a single point.
+///
+/// `box_vs_triangle` returns only the deepest vertex. One point at a long lever
+/// arm from the centre of mass is not enough to hold a box up: the effective
+/// mass along the normal is `1 / (invM + (ra×n)·I⁻¹·(ra×n))`, and for Agent
+/// Free Ride's chassis (half extents 138×181×61, invMass 0.01) the angular term
+/// is ~0.043 against invMass 0.01 — so `eff_mass` collapses from ≈100 to ≈19 and
+/// the contact returns about a fifth of the impulse needed to cancel gravity.
+/// Measured: gravity added −28.5/step while the solver gave back only +6.7, so
+/// the vehicle sank a little every step until it fell through entirely.
+///
+/// PhysX generates a patch (`PxcGenerateContacts` / GuContactBoxMesh) for this
+/// case. When the contact normal IS the triangle normal — the resting case —
+/// clip the box's incident face against the triangle and emit one contact per
+/// corner that lies over it. The corners straddle the centre of mass, so their
+/// rotational contributions cancel and the normal impulse recovers.
+///
+/// Falls back to the single deepest point for edge/corner contacts, where a
+/// face patch is not meaningful.
+pub fn box_vs_triangle_manifold(
+    box_center: [f32; 3], box_half_extents: [f32; 3],
+    box_axis_x: [f32; 3], box_axis_y: [f32; 3], box_axis_z: [f32; 3],
+    contact_dist: f32,
+    v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], tri_index: u32,
+    out: &mut Vec<GuTriContact>,
+) {
+    let Some(single) = box_vs_triangle(
+        box_center, box_half_extents, box_axis_x, box_axis_y, box_axis_z,
+        contact_dist, v0, v1, v2, tri_index,
+    ) else { return; };
+
+    let raw_n = cross(sub(v1, v0), sub(v2, v0));
+    if dot(raw_n, raw_n) <= 1e-12 {
+        out.push(single);
+        return;
+    }
+    // Triangle normal oriented the same way as the contact normal (mesh → box).
+    let tri_n = normalize(raw_n);
+    let tri_n = if dot(tri_n, single.normal) < 0.0 { scale(tri_n, -1.0) } else { tri_n };
+
+    // Only build a patch for a face-on contact; otherwise the deepest point is
+    // the right answer (cos 20° ≈ 0.94).
+    if dot(tri_n, single.normal) < 0.94 {
+        out.push(single);
+        return;
+    }
+
+    // The box face pressing into the triangle: the axis most aligned with the
+    // normal, stepped to the side facing the triangle.
+    let axes = [box_axis_x, box_axis_y, box_axis_z];
+    let mut fi = 0usize;
+    let mut best = -1.0f32;
+    for i in 0..3 {
+        let d = dot(axes[i], tri_n).abs();
+        if d > best { best = d; fi = i; }
+    }
+    let step = if dot(axes[fi], tri_n) > 0.0 { -box_half_extents[fi] } else { box_half_extents[fi] };
+    let face_c = add(box_center, scale(axes[fi], step));
+    let (i1, i2) = ((fi + 1) % 3, (fi + 2) % 3);
+    let e1 = scale(axes[i1], box_half_extents[i1]);
+    let e2 = scale(axes[i2], box_half_extents[i2]);
+    let corners = [
+        add(add(face_c, e1), e2),
+        add(sub(face_c, e1), e2),
+        sub(sub(face_c, e1), e2),
+        sub(add(face_c, e1), e2),
+    ];
+
+    let mut emitted = 0usize;
+    for c in corners.iter() {
+        // Signed height above the triangle plane along the contact normal;
+        // negative means penetrating, which is what the solver consumes.
+        let sep = dot(tri_n, sub(*c, v0));
+        if sep > contact_dist { continue; }
+        if !point_over_triangle(*c, v0, v1, v2, tri_n) { continue; }
+        out.push(GuTriContact {
+            normal: single.normal,
+            point: *c,
+            separation: sep,
+            triangle_index: tri_index,
+        });
+        emitted += 1;
+    }
+
+    // Box face wider than the triangle (or hanging off its edge): no corner sits
+    // over it, so keep the deepest-point contact rather than dropping the pair.
+    if emitted == 0 {
+        out.push(single);
+    }
+}
+
+/// Does `p`, projected along `n` onto the triangle's plane, lie inside it?
+fn point_over_triangle(p: [f32; 3], v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], n: [f32; 3]) -> bool {
+    let proj = sub(p, scale(n, dot(n, sub(p, v0))));
+    // Same-side test against each edge.
+    let e0 = sub(v1, v0);
+    let e1 = sub(v2, v1);
+    let e2 = sub(v0, v2);
+    let c0 = dot(cross(e0, sub(proj, v0)), n);
+    let c1 = dot(cross(e1, sub(proj, v1)), n);
+    let c2 = dot(cross(e2, sub(proj, v2)), n);
+    (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0)
 }
 
 fn test_axis(
@@ -513,9 +636,11 @@ pub fn box_vs_mesh(
     struct Cb<'a> { c: [f32;3], he: [f32;3], ax: [f32;3], ay: [f32;3], az: [f32;3], cd: f32, out: &'a mut Vec<GuTriContact> }
     impl<'a> MeshHitCallback for Cb<'a> {
         fn process(&mut self, ti: u32, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) -> bool {
-            if let Some(c) = box_vs_triangle(self.c, self.he, self.ax, self.ay, self.az, self.cd, v0, v1, v2, ti) {
-                self.out.push(c);
-            }
+            // Manifold, not a single point — see box_vs_triangle_manifold.
+            box_vs_triangle_manifold(
+                self.c, self.he, self.ax, self.ay, self.az, self.cd,
+                v0, v1, v2, ti, self.out,
+            );
             true
         }
     }
