@@ -260,6 +260,35 @@ impl BuiltInHandlerManager {
             return crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(&prop_ref, &prop_name);
         }
 
+        // `getAt(propList, #key)` — the dictionary describes `getAt(list, position)`
+        // but states "The getAt command works with linear and property lists", and
+        // Director accepts a PROPERTY as the second argument on a property list
+        // (dkbarrel's `Game Cod1.movePlayer` does `getAt(terrainWalls, #down)` on
+        // [#center: 300, #left: 300, #down: 300, …]). Coercing the symbol to an
+        // integer gave position 0 and raised "Index 0 out of bounds". A non-numeric
+        // key on a property list is a key lookup; integer keys keep their positional
+        // meaning, so `getAt(propList, 2)` is unchanged.
+        let prop_lookup = reserve_player_ref(|player| {
+            matches!(player.get_datum(&args[0]), Datum::PropList(..))
+                && !matches!(
+                    player.get_datum(&args[1]),
+                    Datum::Int(_) | Datum::Float(_)
+                )
+        });
+        if prop_lookup {
+            return reserve_player_mut(|player| {
+                let prop_list = match player.get_datum(&args[0]) {
+                    Datum::PropList(pl, ..) => pl.clone(),
+                    _ => unreachable!(),
+                };
+                crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
+                    &prop_list,
+                    &args[1],
+                    &player.allocator,
+                )
+            });
+        }
+
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
             let position = player.get_datum(&args[1]).int_value()?;

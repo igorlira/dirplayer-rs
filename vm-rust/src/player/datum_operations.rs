@@ -515,6 +515,35 @@ pub fn subtract_datums(
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
+        // List ± scalar applies element-wise, the same recursion `add_datums`
+        // already implements (and that this repo notes for list × scalar).
+        // dkbarrel's `Terrain Builder.Barrelchkcol` does
+        //     coldata = terrdata - playerY
+        // with terrdata a 9-element height list and playerY a number.
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = right.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let diff = subtract_datums(item_datum, scalar.clone(), player)?;
+                ref_list.push_back(player.alloc_datum(diff));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
+        // Scalar - list is NOT commutative: each element is subtracted FROM the
+        // scalar, so build `scalar - item` rather than reusing the arm above.
+        (Datum::Int(_) | Datum::Float(_), Datum::List(_, list, _)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = left.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let diff = subtract_datums(scalar.clone(), item_datum, player)?;
+                ref_list.push_back(player.alloc_datum(diff));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
         // Two property lists combine value-by-value, keeping the LEFT list's
         // property names — the same positional, shared-prefix rule as the
         // linear-list arm directly above. The Scripting Dictionary documents

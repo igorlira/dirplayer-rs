@@ -85,9 +85,13 @@ impl StringDatumUtils {
                         if !crate::player::handlers::types::is_expected_value_retry_fragment(
                             value, &cleaned,
                         ) {
-                            warn!(
-                                "[string.value] parse error → raw String — input={:?} cleaned={:?} err={}",
-                                value, cleaned, err.message
+                            // `warn!` never reaches the browser console, so every
+                            // `.value` parse failure was silent — the movie just gets
+                            // its raw string back with no explanation.
+                            crate::console_warn!(
+                                "[VALPROBE] .value FAILED err={} cleaned={:?}",
+                                err.message,
+                                cleaned.chars().take(300).collect::<String>()
                             );
                         }
                         Ok(Datum::String(value.to_owned()))
