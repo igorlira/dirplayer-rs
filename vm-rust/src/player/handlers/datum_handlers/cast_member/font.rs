@@ -677,6 +677,16 @@ impl FontMemberHandlers {
         ctx.set_fill_style_str("rgb(0,0,0)");
         ctx.fill_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
 
+        // Apply the vertical origin during LAYOUT rather than when blitting the
+        // canvas back to the bitmap. The canvas is only render_height tall, so
+        // laying out at y=0 and shifting at blit time can only slide the lines
+        // that were already rasterized — anything below the box was never drawn.
+        // For scrolled members (start_y = top_spacing - scrollTop, i.e. negative)
+        // that means the scroll moves text up and leaves blank space instead of
+        // pulling in the following lines. Translating the context lets those
+        // lines lay out into view and clips the scrolled-past ones above y=0.
+        let _ = ctx.translate(0.0, start_y as f64);
+
         // Set text baseline to top for consistent positioning
         ctx.set_text_baseline("top");
 
@@ -974,7 +984,19 @@ impl FontMemberHandlers {
         let mut y = top_spacing.max(0) as f64;
         let mut prev_par_idx: Option<u16> = None;
         for line in &lines {
-            if y >= canvas_height as f64 {
+            // `y` is a LAYOUT coordinate in logical (1x) units; the on-canvas
+            // top of the line is `y + start_y`, because ctx.translate(0,
+            // start_y) is applied before layout. Terminate once the line has
+            // scrolled past the BOTTOM of the visible box, in the same space.
+            //
+            // The old test (`y >= canvas_height`) was wrong twice over: it
+            // compared logical y against the 2x device height, and it ignored
+            // start_y completely. For a scrolled member (start_y negative, e.g.
+            // -279 on dkbarrel's Help dialog) the visible band is
+            // y ∈ [279, 411], but the loop stopped emitting at y = 264 — the
+            // box went blank mid-document. The stray 2x was the only reason any
+            // scrolled lines rendered at all.
+            if y + start_y as f64 >= render_height.max(1) as f64 {
                 break;
             }
 
@@ -1069,14 +1091,25 @@ impl FontMemberHandlers {
                 ctx.set_fill_style_str("rgb(255,255,255)");
                 let _ = ctx.fill_text(&segment.text, x, y);
 
-                // Record this segment's color region (logical coords, baseline
-                // is "top" so the glyph cell is [y, y+size_px]) for per-run
-                // color lookup during the downscale.
+                // Record this segment's color region for per-run color lookup
+                // during the downscale. These rects are matched against OUTPUT
+                // pixel coordinates, so they must be stored in canvas space,
+                // not layout space: `ctx.translate(0, start_y)` is baked into
+                // the drawing, so the glyph cell drawn at layout `y` lands on
+                // the canvas at `y + start_y`. Baseline is "top", so the cell
+                // is [y+start_y, y+start_y+size_px].
+                //
+                // Without the start_y term every lookup in a scrolled member is
+                // off by the scroll amount: pixels hit a neighbouring line's
+                // rect or miss entirely and fall back to `fallback_color`, so a
+                // single render comes out in two colors (dkbarrel's Help
+                // dialog, which is why it only broke once scrolling worked).
+                let canvas_y = y + start_y as f64;
                 seg_color_rects.push((
                     x,
                     x + segment.width,
-                    y,
-                    y + segment.style.size_px,
+                    canvas_y,
+                    canvas_y + segment.style.size_px,
                     segment.style.color,
                 ));
 
@@ -1185,7 +1218,8 @@ impl FontMemberHandlers {
         let sf = scale_factor as usize;
 
         for cy in 0..out_h {
-            let dest_y = start_y + cy as i32;
+            // start_y is already baked into the canvas via ctx.translate above.
+            let dest_y = cy as i32;
             if dest_y < 0 || dest_y >= bitmap.height as i32 {
                 continue;
             }

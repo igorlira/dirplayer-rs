@@ -2398,16 +2398,22 @@ impl WebGL2Renderer {
                     // 5. Single styled-span color (XMED/HTML).
                     // 6. Stored member.color (palette fallback).
                     // 7. sprite.color as final fallback.
+                    // A sprite foreColor that has been moved off the default
+                    // outranks the member's stored color — Director treats the
+                    // sprite's channel color as an override of the cast member's.
+                    // dkbarrel's Help Text sprite carries palette index 4
+                    // (yellow) while the member stores black; checking
+                    // member.color first rendered it black.
                     let text_fg_color = if matches!(fg_color, ColorRef::Rgb(..))
                         && fg_color != ColorRef::Rgb(0, 0, 0)
                     {
                         fg_color.clone()
-                    } else if matches!(member.color, ColorRef::Rgb(..)) {
-                        member.color.clone()
                     } else if has_fore_color {
                         fg_color.clone()
                     } else if fg_color != ColorRef::PaletteIndex(255) && fg_color != ColorRef::Rgb(0, 0, 0) {
                         fg_color.clone()
+                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                        member.color.clone()
                     } else if text_member.html_styled_spans.len() == 1 {
                         let style_color = text_member.html_styled_spans[0].style.color;
                         if let Some(c) = style_color {
@@ -2656,8 +2662,16 @@ impl WebGL2Renderer {
                         box_type_unwrapped == "adjust" && text_has_breaks;
                     let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    // A scrolled member must keep its authored height: the
+                    // shrink branch re-measures using effective_top_spacing,
+                    // which scroll_top has made negative, so the bitmap would
+                    // shrink by exactly the scrolled amount and crop the lines
+                    // the scroll was meant to expose. Same guard the field
+                    // path applies below.
+                    let scroll_active = text_scroll_top != 0;
                     cache_key.transform_active = transform_active;
                     cache_key.keep_authored_height = transform_active
+                        || scroll_active
                         || box_type_locked
                         || multi_par_adjust_locked;
 
