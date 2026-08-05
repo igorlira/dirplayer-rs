@@ -4036,7 +4036,13 @@ impl WebGL2Renderer {
                         }
                     }
                     ShapeType::Line => {
-                        let t = (shape_info.line_thickness as i32).max(1);
+                        // A #line member is nothing but its line, so it never
+                        // vanishes — Director draws lineSize 0 as a 1px hairline.
+                        // Floor at 1 AFTER the 1-based decode, so file 3 draws 2px
+                        // rather than 3px. (The floor itself is inferred: the
+                        // dictionary's `lineSize` entry documents the property as a
+                        // pixel thickness but says nothing about 0 on a #line.)
+                        let t = ((shape_info.line_thickness as i32) - 1).max(1);
                         if shape_info.line_direction == 6 {
                             shape_bitmap.draw_line_thick(0, h - 1, w - 1, 0, fg_color, &palettes, 1.0, t);
                         } else {
@@ -4045,6 +4051,53 @@ impl WebGL2Renderer {
                     }
                     ShapeType::Unknown => {
                         shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                    }
+                }
+
+                // Bake the bgColor key into the texture's alpha for the inks that
+                // treat the background colour as transparent.
+                //
+                // A shape rasterizes OPAQUE — a pattern writes `back` for its clear
+                // bits, a tile writes every source pixel, a solid fill covers the
+                // whole rect — so the only thing that could make the background
+                // disappear was the shader's runtime colour key. That key is
+                // unreliable here for two reasons:
+                //
+                // - Its `u_bg_color` is resolved against
+                //   `PaletteRef::BuiltIn(get_system_default_palette())`, because
+                //   that is what the ShapeBitmap arm reports as the source
+                //   "bitmap palette". The pixels above were resolved against the
+                //   FRAME palette (or, for a custom tile, the tile member's own
+                //   palette), so the same index yields two different RGBs and the
+                //   key silently misses.
+                // - `colorize_baked` forces the tolerance to 0 whenever colorize
+                //   params exist, but this arm never consumes `colorize_params` —
+                //   nothing is baked, so any shape sprite carrying a fore/back
+                //   colour lost the key outright.
+                //
+                // Keying here instead is exact: `bg_color` is the same value the
+                // fills above were drawn with. Foreground pixels that happen to
+                // equal bgColor drop out too, which is what Background Transparent
+                // means. The shader key still runs and is now a no-op for these
+                // texels (they fail `src.a < 0.01` first).
+                //
+                // The ink set is every ink whose shader discards on
+                // `dist < u_color_tolerance` against `u_bg_color` (see shaders.rs):
+                //   2/4  Reverse, Not Copy      33/34  Add Pin, Add
+                //   3    Ghost                  35/38  Sub Pin, Subtract
+                //   6    Not Reverse            36     Background Transparent
+                //   40   Lighten
+                // Ink 7 (Not Ghost) is deliberately excluded — it is the INVERSE
+                // key, discarding everything that does NOT match bgColor, so
+                // baking these texels away would leave it drawing nothing. Ink 41
+                // (Darken) does not key at all (it is a fore/back duotone remap),
+                // and 8/9 (Matte, Mask) resolve transparency by their own paths.
+                if matches!(ink, 2 | 3 | 4 | 6 | 33 | 34 | 35 | 36 | 38 | 40) {
+                    let (kr, kg, kb) = bg_color;
+                    for px in shape_bitmap.data.chunks_exact_mut(4) {
+                        if px[3] != 0 && px[0] == kr && px[1] == kg && px[2] == kb {
+                            px[3] = 0;
+                        }
                     }
                 }
 
