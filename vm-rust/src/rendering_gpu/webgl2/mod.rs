@@ -3967,11 +3967,19 @@ impl WebGL2Renderer {
 
                 let palettes = player.movie.cast_manager.palettes();
                 let filled = shape_info.fill_type != 0;
-                let thickness = if filled {
-                    (shape_info.line_thickness as i32).max(1)
-                } else {
-                    (shape_info.line_thickness as i32) - 1
-                };
+                // Director stores the border width 1-BASED: file 1 = no border,
+                // 2 = 1px, … 6 = 5px (max). That is the same encoding the Lingo
+                // `lineSize of member` getter already decodes with `raw - 1`
+                // (cast_member_ref.rs), verified against Director on a shape
+                // authored with no border.
+                //
+                // The decode does not depend on `filled` — it is one byte with one
+                // meaning. Applying `-1` only to unfilled shapes and `.max(1)` to
+                // filled ones gave every filled shape a 1px foreColor outline it
+                // was never authored with, which reads as a black border around
+                // each shape (summerresort's map tiles: filled, pattern-tiled, no
+                // authored border).
+                let thickness = (shape_info.line_thickness as i32) - 1;
 
                 match shape_info.shape_type {
                     ShapeType::Rect => {
