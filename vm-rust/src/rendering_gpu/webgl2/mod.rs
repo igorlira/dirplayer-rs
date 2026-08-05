@@ -3066,7 +3066,7 @@ impl WebGL2Renderer {
 
                     debug!(
                         "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} sprite.bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
-                        channel_num, &text[..text.len().min(30)], ink, field_member.font, field_member.font_size,
+                        channel_num, text.chars().take(30).collect::<String>(), ink, field_member.font, field_member.font_size,
                         fg_color, bg_color, field_member.fore_color, member.bg_color,
                         has_fore_color, has_back_color, effective_fg, effective_bg,
                         field_member.box_type, field_member.editable, field_member.border, width, height,
@@ -3561,7 +3561,7 @@ impl WebGL2Renderer {
                         "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
                         cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
                         tab_stops.len(), text.contains('\t'),
-                        &text[..text.len().min(40)]
+                        text.chars().take(40).collect::<String>()
                     );
                 }
                 // Check cache first
@@ -6156,7 +6156,7 @@ impl WebGL2Renderer {
                 debug!(
                     "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
                     font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
-                    &text[..text.len().min(30)], span_info,
+                    text.chars().take(30).collect::<String>(), span_info,
                 );
             }
         }

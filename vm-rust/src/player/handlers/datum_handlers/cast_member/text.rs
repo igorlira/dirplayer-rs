@@ -2342,7 +2342,7 @@ impl TextMemberHandlers {
                         "[text_setter] member='{}' old_color={} spans={} new_text='{}'",
                         cast_member.name, old_color,
                         text_member.html_styled_spans.len(),
-                        &new_text[..new_text.len().min(30)],
+                        new_text.chars().take(30).collect::<String>(),
                     );
 
 
@@ -2517,7 +2517,7 @@ impl TextMemberHandlers {
                     debug!(
                         "[html_setter] member='{}' old_color={} new_color={} new_spans={} html='{}'",
                         cast_member.name, old_color, new_color, spans.len(),
-                        &html_string[..html_string.len().min(80)],
+                        html_string.chars().take(80).collect::<String>(),
                     );
 
                     // Store original HTML source

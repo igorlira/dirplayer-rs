@@ -1181,8 +1181,11 @@ impl FontMemberHandlers {
 
         let pixels = image_data.data();
 
-        // Debug: check raw canvas pixels for non-black (text) content
-        {
+        // Debug: check raw canvas pixels for non-black (text) content.
+        // Gated on the log level: this scans every canvas pixel of every text
+        // sprite on every frame, which is pure waste when nothing consumes the
+        // output.
+        if log::log_enabled!(log::Level::Debug) {
             let total_px = (canvas_width * canvas_height) as usize;
             let mut nonblack = 0usize;
             let mut first_nb = String::new();
@@ -1202,7 +1205,14 @@ impl FontMemberHandlers {
                     }
                 }
             }
-            let text_preview = spans.first().map(|s| &s.text[..s.text.len().min(5)]).unwrap_or("?");
+            // Truncate by CHARS, not bytes. `&s.text[..5]` panics whenever a
+            // multi-byte character straddles the cut — Summer Resort's sign text
+            // uses a curly apostrophe (3 bytes), which took down the draw loop
+            // from inside a debug-only preview string.
+            let text_preview: String = spans
+                .first()
+                .map(|s| s.text.chars().take(5).collect())
+                .unwrap_or_else(|| "?".to_string());
             debug!(
                 "[canvas-debug] text='{}' canvas={}x{} nonblack={}/{} first={}",
                 text_preview, canvas_width, canvas_height, nonblack, total_px,

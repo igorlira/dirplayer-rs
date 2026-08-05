@@ -6360,7 +6360,7 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             debug!(
                 "[TEXT_RECT] sprite#{} text='{}' info={}x{} member={}x{} sprite={}x{} is_sys_font={} -> {}x{}",
                 sprite.number,
-                &text_member.text[..text_member.text.len().min(30)],
+                text_member.text.chars().take(30).collect::<String>(),
                 info_width, info_height,
                 text_member.width, text_member.height,
                 sprite.width, sprite.height,
