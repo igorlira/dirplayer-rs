@@ -1472,9 +1472,37 @@ impl BuiltInHandlerManager {
                         match ruffle_get_variable(sn as i32, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
-                                    return reserve_player_mut(|player| {
-                                        Ok(player.alloc_datum(Datum::String(s)))
-                                    });
+                                    // Ruffle's GetVariable coerces an AS OBJECT to
+                                    // "[object Object]" / "[type Object]" /
+                                    // "[object MovieClip]". For the OBJECT form the
+                                    // coercion text is not the variable's value and
+                                    // must not be returned as one — the dictionary
+                                    // is explicit that "if it is returned as a
+                                    // string, the string will not be a valid object
+                                    // reference" (getVariable(), 11.5). Fall through
+                                    // to the FlashObjectRef below instead.
+                                    //
+                                    // The sprite-METHOD form
+                                    // (`sprite(N).getVariable(path, 0)`) has guarded
+                                    // this since DGS; the top-level
+                                    // `getVariable(sprite(N), path, 0)` never did.
+                                    // Agent Free Ride's OffGame reads its root
+                                    // timeline that way and then calls
+                                    // `.mcLoading.gotoAndStop(pct)` on the result,
+                                    // which died with "No handler gotoAndStop for
+                                    // string datum". It only showed in the browser
+                                    // extension: there the sync bridge marshals the
+                                    // result through JSON and String(), so the
+                                    // MovieClip always arrives as that text, while
+                                    // the dev UI calls Ruffle directly and gets a
+                                    // non-string back.
+                                    let is_object_coercion = return_as_object
+                                        && (s.starts_with("[object ") || s.starts_with("[type "));
+                                    if !is_object_coercion {
+                                        return reserve_player_mut(|player| {
+                                            Ok(player.alloc_datum(Datum::String(s)))
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => warn!("getVariable error: {:?}", e),
