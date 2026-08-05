@@ -59,6 +59,16 @@ pub struct FieldMember {
     /// Empty when the field has uniform styling (older parser behaviour).
     pub formatting_runs: Vec<crate::director::chunks::text::StxtFormattingRun>,
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
+    /// FieldInfo `max_height` (bytes 22-23) — the field's authored BOX height.
+    ///
+    /// This is NOT redundant with `rect_bottom - rect_top`. Director keeps
+    /// `initialRect` at the height of the text the member CONTAINS, so a field
+    /// authored empty and filled at runtime stores a one-line rect no matter how
+    /// big its box is. Summer Resort's "sign.text" is the case: `#scroll`,
+    /// initialRect 221x16 (authored empty), max_height 134 — Director displays
+    /// 134. Its sibling "talk.text" was authored WITH content, so its two values
+    /// coincide (156/156), which is why only one of the two ever looked wrong.
+    pub max_height: u16,
     pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
     pub box_type: String,
@@ -273,6 +283,7 @@ impl FieldMember {
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: 100,
+            max_height: 0,
             fixed_line_space: 0,
             top_spacing: 0,
             box_type: "adjust".to_string(),
@@ -391,6 +402,7 @@ impl FieldMember {
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
+            max_height: field_info.max_height,
             fixed_line_space: 0,  // Use default line spacing for text rendering
             top_spacing: field_info.scroll as i16,
             box_type: field_info.box_type_str(),

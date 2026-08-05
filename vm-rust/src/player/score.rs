@@ -5993,27 +5993,32 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 (member_box_h, "adjust+member-height")
             } else if field_member.word_wrap && is_adjust && field_member.text_height > 0 {
                 ((field_member.text_height as i32 + extras).max(member_box_h), "wrap+adjust+text_height")
-            } else if field_member.word_wrap
-                && measured_plus_extras.is_some()
-                && sprite.height > 0
-                && {
-                    // #scroll/#fixed/#limit fields normally clip to the authored
-                    // height (handled by the `sprite.height>0` arm below), but a
-                    // short dialogue that overflows by only a few lines would then
-                    // lose text. This happens in Summer Resort: "sign.text" is an
-                    // authored 16px (one-line) #scroll field, but its messages wrap
-                    // to two lines because we substitute a wider font for the
-                    // authored "Osaka" — the second line ("…resort!") was clipped.
-                    // Grow to the measured content height, but only when the
-                    // overflow is small so genuinely large scrolling documents
-                    // (help panels wrapping to thousands of px) still clip + scroll
-                    // as authored. MAX_GROW caps the *extra* height (~10 lines).
-                    const MAX_GROW: i32 = 160;
-                    let m = measured_plus_extras.unwrap();
-                    m > sprite.height && (m - sprite.height) <= MAX_GROW
-                }
-            {
-                (measured_plus_extras.unwrap(), "wrap+scroll+grow-dialogue")
+            } else if !is_adjust && (field_member.max_height as i32) > sprite.height {
+                // Non-auto-sizing box types (#scroll / #fixed / #limit) take their
+                // height from the member's authored BOX, which lives in FieldInfo
+                // `max_height` — not in `initialRect`, whose bottom tracks the
+                // height of the text the member CONTAINS (see FieldMember::max_height).
+                //
+                // A field authored EMPTY and filled at runtime therefore stores a
+                // one-line initialRect, and the score channel inherits that
+                // collapsed box. Summer Resort's "sign.text": initialRect 221x16,
+                // max_height 134, and Director draws 134. Its sibling "talk.text"
+                // was authored with content so both values read 156 and it has
+                // always rendered correctly — which is why this looked like a
+                // one-member quirk rather than a missing field.
+                //
+                // This replaces a MAX_GROW workaround that grew the box to the
+                // MEASURED text height whenever a #scroll field overflowed by less
+                // than ~10 lines. That produced a box that hugged the text (2 lines
+                // here) instead of the authored box, and it fired on any movie
+                // whose text overflowed slightly, not just this one.
+                //
+                // Taking the larger of the two is deliberate: where the score
+                // carries a genuine authored height (talk.text: sprite 160 vs
+                // max_height 156) nothing changes. Whether Director adds the
+                // border/margin chrome on top of max_height is not established —
+                // no chrome is added here, which matches the observed 134.
+                ((field_member.max_height as i32).max(1), "non-adjust+authored-box")
             } else if sprite.height > 0 {
                 (sprite.height, "sprite.height>0")
             } else if field_member.text_height > 0 {
