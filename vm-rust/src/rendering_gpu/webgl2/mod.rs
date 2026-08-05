@@ -54,6 +54,15 @@ fn caret_blink_visible_now() -> bool {
 /// Selection-highlight color, matched to the CPU path's `SELECTION_COLOR`.
 const SELECTION_HIGHLIGHT: (u8, u8, u8) = (164, 205, 255);
 
+/// Width of the scrollbar Director draws inside a `#scroll` field's box.
+///
+/// 16px is the classic Mac/Windows scrollbar metric. The Scripting Dictionary
+/// documents `boxType` `#scroll` as adding a scrollbar but never states its
+/// width, so this is INFERRED — corroborated by Summer Resort's "talk.text",
+/// whose score channel width is exactly `authored text width 146 + chrome 6 +
+/// 16`.
+pub const FIELD_SCROLLBAR_WIDTH: i32 = 16;
+
 /// An in-progress score/puppet transition. `old_pixels` is the stage as it
 /// looked before the score change (captured from the preserved drawing buffer,
 /// top-left origin RGBA); `draw_frame` composites it over the freshly-rendered
@@ -1649,6 +1658,9 @@ impl WebGL2Renderer {
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
+                /// Scrollbar geometry for a #scroll field, with the `scrollTop`
+                /// the lift should sit at. `None` for every other member.
+                scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
                 tab_stops: Vec<crate::player::cast_member::TabStop>,
                 /// Per-text-line line_spacing override from XMED par_runs.
                 /// One entry per text-line (split by \r/\n). Empty when
@@ -2141,6 +2153,7 @@ impl WebGL2Renderer {
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
+                        scrollbar: None,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
                         per_line_par_idx: Vec::new(),
@@ -2791,6 +2804,7 @@ impl WebGL2Renderer {
                         word_wrap: effective_word_wrap,
                         border: 0,
                         box_drop_shadow: 0,
+                        scrollbar: None,
                         tab_stops: text_member.tab_stops.clone(),
                         per_line_spacings,
                         per_line_par_idx,
@@ -2819,6 +2833,21 @@ impl WebGL2Renderer {
                         (field_member.width as u32).min(width)
                     } else {
                         width
+                    };
+                    // A #scroll field's scrollbar lives INSIDE the box, so it
+                    // takes its width out of the text area rather than growing
+                    // the sprite. Summer Resort's "sign.text" shows both halves:
+                    // Director draws the same box we do, but wraps a word earlier
+                    // ("…the entrance / to the resort!" vs our "…the entrance to
+                    // the / resort!") because ~16px of the line is the scrollbar.
+                    let scrollbar_info = crate::player::score::field_scrollbar_for(
+                        player, field_member, sprite_rect.clone(),
+                    )
+                    .map(|sb| (sb, field_member.scroll_top as i32));
+                    let wrap_width = if scrollbar_info.is_some() {
+                        wrap_width.saturating_sub(FIELD_SCROLLBAR_WIDTH as u32).max(1)
+                    } else {
+                        wrap_width
                     };
 
                     // Check if this field has keyboard focus AND is editable.
@@ -3154,6 +3183,7 @@ impl WebGL2Renderer {
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
                         box_drop_shadow: field_member.box_drop_shadow,
+                        scrollbar: scrollbar_info,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
                         per_line_par_idx: Vec::new(),
@@ -3549,6 +3579,7 @@ impl WebGL2Renderer {
                 word_wrap,
                 border,
                 box_drop_shadow,
+                scrollbar,
                 ref tab_stops,
                 ref per_line_spacings,
                 ref per_line_par_idx,
@@ -3613,6 +3644,7 @@ impl WebGL2Renderer {
                         word_wrap,
                         border,
                         box_drop_shadow,
+                        scrollbar,
                         tab_stops,
                         per_line_spacings.as_slice(),
                         per_line_par_idx.as_slice(),
@@ -5742,6 +5774,7 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
+        scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
         tab_stops: &[crate::player::cast_member::TabStop],
         // Per-text-line line_spacing override from XMED par_run / par_info
         // tables. Length equals (count of \r/\n in `text`) + 1 — i.e. one
@@ -7565,6 +7598,61 @@ impl WebGL2Renderer {
                 text_bitmap.fill_rect(0, b, b, content_height - b, border_color, &palettes, 1.0);
                 // Right border
                 text_bitmap.fill_rect(content_width - b, b, content_width, content_height - b, border_color, &palettes, 1.0);
+            }
+        }
+
+        // Director draws a scrollbar inside the right edge of a #scroll field.
+        // It sits WITHIN the box (the text area was already narrowed by
+        // FIELD_SCROLLBAR_WIDTH via `wrap_width`), so the sprite does not grow.
+        //
+        // Chrome only: the thumb is not drawn and the arrows are not hit-tested,
+        // because nothing routes clicks to a field scrollbar yet. Movies scroll
+        // these fields from Lingo via `scrollTop` (Summer Resort sets
+        // `member("sign.text").scrollTop = 1` before writing the text), which the
+        // renderer already honours through its draw origin.
+        if let Some((sb, scroll_top)) = scrollbar {
+            let (x0, x1, y0, y1) = (sb.x0, sb.x1, sb.y0, sb.y1);
+            if x0 >= 0 && x1 <= render_width as i32 && y1 - y0 > 2 {
+                let frame = (0, 0, 0);
+                let face = (255, 255, 255);
+
+                // Trough, then a 1px rule down the left edge separating the bar
+                // from the text area.
+                text_bitmap.fill_rect(x0, y0, x1, y1, face, &palettes, 1.0);
+                text_bitmap.fill_rect(x0, y0, x0 + 1, y1, frame, &palettes, 1.0);
+
+                let box_h = sb.arrow_h;
+                if box_h > 2 {
+                    // Rules under the up box and over the down box.
+                    text_bitmap.fill_rect(x0, y0 + box_h - 1, x1, y0 + box_h, frame, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0, y1 - box_h, x1, y1 - box_h + 1, frame, &palettes, 1.0);
+
+                    // Arrow glyphs: hollow chevrons rather than solid triangles,
+                    // which is what Director's field scrollbar draws.
+                    let cx = (x0 + x1) / 2;
+                    let arrow_h = (box_h / 3).max(2);
+                    for r in 0..arrow_h {
+                        // Up: two pixels walking outward and down from the apex.
+                        let y = y0 + (box_h - arrow_h) / 2 + r;
+                        text_bitmap.fill_rect(cx - r, y, cx - r + 1, y + 1, frame, &palettes, 1.0);
+                        text_bitmap.fill_rect(cx + r, y, cx + r + 1, y + 1, frame, &palettes, 1.0);
+                        // Down: mirrored, walking inward toward the apex.
+                        let y = y1 - box_h + (box_h - arrow_h) / 2 + r;
+                        let half = arrow_h - 1 - r;
+                        text_bitmap.fill_rect(cx - half, y, cx - half + 1, y + 1, frame, &palettes, 1.0);
+                        text_bitmap.fill_rect(cx + half, y, cx + half + 1, y + 1, frame, &palettes, 1.0);
+                    }
+                }
+
+                // The lift. Director shows none while the text fits, which is
+                // what `thumb()` returns None for. Filled grey rather than the
+                // trough's white, or it would be invisible against it.
+                if let Some((ty0, ty1)) = sb.thumb(scroll_top) {
+                    let lift = (192, 192, 192);
+                    text_bitmap.fill_rect(x0 + 1, ty0, x1, ty1, lift, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0 + 1, ty0, x1, ty0 + 1, frame, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0 + 1, ty1 - 1, x1, ty1, frame, &palettes, 1.0);
+                }
             }
         }
 

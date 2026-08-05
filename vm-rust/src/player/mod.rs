@@ -303,6 +303,9 @@ pub struct DirPlayer {
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
     pub drag_offset: (i32, i32),
+    /// In-progress drag of a `#scroll` field's lift: (sprite number, grab offset
+    /// from the lift's top edge in local px). Cleared on mouse up.
+    pub field_scroll_drag: Option<(i16, i32)>,
     pub trails_bitmap: Option<bitmap::bitmap::Bitmap>,
     pub click_on_sprite: i16,
     /// Sprite whose CAST MEMBER script is currently executing. A member script
@@ -626,6 +629,7 @@ impl DirPlayer {
             is_double_click: false,
             mouse_down_sprite: 0,
             drag_offset: (0, 0),
+            field_scroll_drag: None,
             trails_bitmap: None,
             subscribed_member_refs: vec![],
             is_subscribed_to_channel_names: false,

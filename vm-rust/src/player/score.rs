@@ -5682,7 +5682,264 @@ pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> I
     )
 }
 
+/// Height in pixels of a field's laid-out text, wrapped at the box's inner
+/// content width (`field_width` minus `extras`). `None` when the field is empty
+/// or nothing could be measured.
+///
+/// Extracted from `get_concrete_sprite_rect` so the scrollbar (thumb geometry and
+/// the `scrollTop` clamp) measures a field exactly the way its layout does — a
+/// second, slightly-different measurement would let the thumb disagree with the
+/// text it represents.
+pub fn measure_field_text_height(
+    player: &DirPlayer,
+    field_member: &crate::player::cast_member::FieldMember,
+    field_width: i32,
+    extras: i32,
+) -> Option<i32> {
+    if field_width <= 0 || field_member.text.is_empty() {
+        return None;
+    }
+    use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
+    use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
+
+    let cache_key = FontManager::cache_key(&field_member.font);
+    let bitmap_font = player.font_manager.font_cache.get(&cache_key).cloned();
+    let inner_width = (field_width - extras).max(1) as u16;
+
+    // A fixed_line_space wildly larger than the font size is a mis-parsed field
+    // box-height (STXT run height), not a real per-line stride. Used as the line
+    // height it makes a one-line field measure thousands of px tall, stretching
+    // an #adjust box (and its filled background) to the stage bottom. The render
+    // path already rejects it the same way (render_text_to_texture); apply the
+    // guard here so the measured height agrees.
+    let natural_lh = if field_member.font_size > 0 { field_member.font_size } else { 12 };
+    let sane_fls = if field_member.fixed_line_space as u32 > (natural_lh as u32) * 5 / 2 {
+        0
+    } else {
+        field_member.fixed_line_space
+    };
+
+    let from_bitmap = bitmap_font.as_ref().map(|f| {
+        if field_member.word_wrap {
+            measure_text_wrapped(
+                &field_member.text,
+                f,
+                inner_width,
+                true,
+                sane_fls,
+                field_member.top_spacing,
+                0,
+                0,
+            ).1 as i32
+        } else {
+            measure_text(
+                &field_member.text,
+                f,
+                None,
+                sane_fls,
+                field_member.top_spacing,
+                0,
+            ).1 as i32
+        }
+    }).filter(|h| *h > 0);
+
+    from_bitmap.or_else(|| {
+        let font_name = if !field_member.font.is_empty() {
+            field_member.font.as_str()
+        } else {
+            "Arial"
+        };
+        let font_size = if field_member.font_size > 0 { field_member.font_size } else { 12 };
+        // Build the bold/italic/underline bitflag the same way the renderer does
+        // (see webgl2/mod.rs Field branch) so the Canvas2D measurement uses the
+        // same glyph widths.
+        let style_lc = field_member.font_style.to_lowercase();
+        let mut style: u8 = 0;
+        if style_lc.contains("bold") { style |= 1; }
+        if style_lc.contains("italic") { style |= 2; }
+        if style_lc.contains("underline") { style |= 4; }
+        let (_, h) = FontMemberHandlers::measure_text_native_styled(
+            &field_member.text,
+            font_name,
+            font_size,
+            if style == 0 { None } else { Some(style) },
+            field_member.word_wrap,
+            if field_member.word_wrap { inner_width as i32 } else { 0 },
+            field_member.top_spacing,
+            0,
+            sane_fls,
+        );
+        if h > 0 { Some(h as i32) } else { None }
+    })
+}
+
+/// Geometry of a `#scroll` field's scrollbar, in coordinates local to the
+/// sprite's rect. Shared by the renderer (which draws it) and the mouse handler
+/// (which hit-tests it) so the two can't drift.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldScrollbar {
+    /// Scrollbar column: [x0, x1) local to the sprite rect.
+    pub x0: i32,
+    pub x1: i32,
+    /// Full bar span: [y0, y1) local to the sprite rect.
+    pub y0: i32,
+    pub y1: i32,
+    /// Height of each square arrow box at the ends.
+    pub arrow_h: i32,
+    /// Visible text height (Director's `pageHeight`).
+    pub page_height: i32,
+    /// Full laid-out text height.
+    pub content_height: i32,
+    /// Largest legal `scrollTop` (0 when the text fits).
+    pub max_scroll: i32,
+}
+
+impl FieldScrollbar {
+    /// The thumb ("lift") span within the trough, as [y0, y1).
+    /// `None` when the content fits and Director shows no thumb.
+    pub fn thumb(&self, scroll_top: i32) -> Option<(i32, i32)> {
+        let trough_y0 = self.y0 + self.arrow_h;
+        let trough_y1 = self.y1 - self.arrow_h;
+        let trough_h = trough_y1 - trough_y0;
+        if self.max_scroll <= 0 || trough_h < 4 || self.content_height <= 0 {
+            return None;
+        }
+        // Proportional thumb: visible / total, floored so it stays grabbable.
+        let raw = (trough_h as i64 * self.page_height as i64) / self.content_height as i64;
+        let thumb_h = (raw as i32).clamp(8.min(trough_h), trough_h);
+        let travel = trough_h - thumb_h;
+        let scroll = scroll_top.clamp(0, self.max_scroll);
+        let off = if self.max_scroll > 0 {
+            ((travel as i64 * scroll as i64) / self.max_scroll as i64) as i32
+        } else {
+            0
+        };
+        Some((trough_y0 + off, trough_y0 + off + thumb_h))
+    }
+
+    /// Inverse of `thumb`: the `scrollTop` that puts the thumb's TOP at local
+    /// y `thumb_top`. Used while dragging the lift.
+    pub fn scroll_for_thumb_top(&self, thumb_top: i32) -> i32 {
+        let trough_y0 = self.y0 + self.arrow_h;
+        let trough_y1 = self.y1 - self.arrow_h;
+        let trough_h = trough_y1 - trough_y0;
+        if self.max_scroll <= 0 || trough_h < 4 || self.content_height <= 0 {
+            return 0;
+        }
+        let raw = (trough_h as i64 * self.page_height as i64) / self.content_height as i64;
+        let thumb_h = (raw as i32).clamp(8.min(trough_h), trough_h);
+        let travel = trough_h - thumb_h;
+        if travel <= 0 {
+            return 0;
+        }
+        let off = (thumb_top - trough_y0).clamp(0, travel);
+        (((off as i64) * self.max_scroll as i64) / travel as i64) as i32
+    }
+}
+
+/// Resolve a sprite's `#scroll` field scrollbar geometry, or `None` when the
+/// sprite is not a scrolling field.
+pub fn get_field_scrollbar(player: &DirPlayer, sprite: &Sprite) -> Option<FieldScrollbar> {
+    let member = sprite
+        .member
+        .as_ref()
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))?;
+    let field = match &member.member_type {
+        CastMemberType::Field(f) => f,
+        _ => return None,
+    };
+    let rect = get_concrete_sprite_rect(player, sprite);
+    field_scrollbar_for(player, field, rect)
+}
+
+/// Topmost `#scroll` field whose scrollbar contains the stage point, with its
+/// geometry. Returns the sprite number so the caller can act on the member.
+///
+/// Deliberately NOT routed through `get_sprite_at`: that applies
+/// `is_click_transparent_sprite`, which treats a non-editable field as
+/// click-through so clicks reach whatever is behind the text. That rule is right
+/// for the text area and wrong for the scrollbar — the bar is player chrome and
+/// is always live, exactly as Director's is on a read-only scrolling field
+/// (Summer Resort's "sign.text" is non-editable, so every click on its bar was
+/// being handed to the sprite underneath).
+pub fn find_field_scrollbar_at(
+    player: &DirPlayer,
+    x: i32,
+    y: i32,
+) -> Option<(i16, FieldScrollbar)> {
+    for channel in player
+        .movie
+        .score
+        .get_sorted_channels(player.movie.current_frame)
+        .iter()
+        .rev()
+    {
+        let sprite = &channel.sprite;
+        let Some(sb) = get_field_scrollbar(player, sprite) else {
+            continue;
+        };
+        let rect = get_concrete_sprite_rect(player, sprite);
+        let lx = x - rect.left;
+        let ly = y - rect.top;
+        if lx >= sb.x0 && lx < sb.x1 && ly >= sb.y0 && ly < sb.y1 {
+            return Some((sprite.number as i16, sb));
+        }
+    }
+    None
+}
+
+/// `get_field_scrollbar` for callers that already hold the field and its rect
+/// (the renderer), so both paths derive identical geometry.
+pub fn field_scrollbar_for(
+    player: &DirPlayer,
+    field: &crate::player::cast_member::FieldMember,
+    rect: IntRect,
+) -> Option<FieldScrollbar> {
+    use crate::rendering_gpu::webgl2::FIELD_SCROLLBAR_WIDTH;
+
+    if field.box_type != "scroll" {
+        return None;
+    }
+
+    let w = rect.width();
+    let h = rect.height();
+    let b = field.border as i32;
+    let shadow = field.box_drop_shadow as i32;
+    let content_width = if shadow > 0 { w - shadow } else { w };
+    let content_height_box = if shadow > 0 { h - shadow } else { h };
+
+    let x0 = content_width - b - FIELD_SCROLLBAR_WIDTH;
+    let x1 = content_width - b;
+    let y0 = b;
+    let y1 = content_height_box - b;
+    if x0 <= b || y1 - y0 < 4 {
+        return None;
+    }
+
+    let extras = (2 * field.border as i32)
+        + (2 * field.margin as i32)
+        + (4 * field.box_drop_shadow as i32);
+    let content_height = measure_field_text_height(player, field, w, extras).unwrap_or(0);
+    // Director's `pageHeight`: "the height, in pixels, of the area of the field
+    // cast member that is visible on the Stage."
+    let page_height = (y1 - y0 - 2 * b).max(1);
+    let max_scroll = (content_height - page_height).max(0);
+
+    Some(FieldScrollbar {
+        x0,
+        x1,
+        y0,
+        y1,
+        arrow_h: FIELD_SCROLLBAR_WIDTH.min((y1 - y0) / 2),
+        page_height,
+        content_height,
+        max_scroll,
+    })
+}
+
 pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect {
+    use crate::rendering_gpu::webgl2::FIELD_SCROLLBAR_WIDTH;
+
     let member = sprite
         .member
         .as_ref()
@@ -5866,8 +6123,26 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let chrome_w = (2 * field_member.border as i32)
                 + (2 * field_member.margin as i32)
                 + (field_member.box_drop_shadow as i32);
+            let is_scroll = field_member.box_type == "scroll";
             let field_width = if is_adjust_for_width && member_authored_w > 0 {
                 member_authored_w + chrome_w
+            } else if is_scroll && member_authored_w > 0 {
+                // A #scroll field reserves a scrollbar inside the right edge of
+                // its box, so its displayed width is the authored TEXT width plus
+                // the chrome plus the scrollbar — the text area itself is
+                // unaffected (the renderer still wraps at `field.width`).
+                //
+                // Measured on Summer Resort's "talk.text": authored width 146,
+                // chrome 6, and the score channel carries 146 + 6 + 16 = 168
+                // exactly. Its sibling "sign.text" carries a bare 221 with no
+                // chrome and no scrollbar, i.e. the same collapsed authoring the
+                // height shows (see the max_height branch below), which is why it
+                // rendered with no room for a scrollbar.
+                //
+                // 16px is the classic Mac/Windows scrollbar metric Director uses;
+                // it is not stated in the Scripting Dictionary, and the 168 above
+                // is what pins it.
+                member_authored_w + chrome_w + FIELD_SCROLLBAR_WIDTH
             } else {
                 sprite.width
             };
@@ -5882,81 +6157,8 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // Canvas2D native measurement otherwise. Wrap at the inner content
             // width (field_width minus border/margin/shadow) so multi-line
             // wrapped text reports the real height.
-            let measured_height: Option<i32> = if field_width > 0 && !field_member.text.is_empty() {
-                use crate::player::font::{measure_text, measure_text_wrapped, FontManager};
-                use crate::player::handlers::datum_handlers::cast_member::font::FontMemberHandlers;
-
-                let cache_key = FontManager::cache_key(&field_member.font);
-                let bitmap_font = player.font_manager.font_cache.get(&cache_key).cloned();
-                let inner_width = (field_width - extras).max(1) as u16;
-
-                // A fixed_line_space wildly larger than the font size is a
-                // mis-parsed field box-height (STXT run height), not a real
-                // per-line stride. Used as the line height it makes a one-line
-                // field measure thousands of px tall, stretching an #adjust box
-                // (and its filled background) to the stage bottom. The render
-                // path already rejects it the same way (render_text_to_texture);
-                // apply the guard here so the measured height agrees.
-                let natural_lh = if field_member.font_size > 0 { field_member.font_size } else { 12 };
-                let sane_fls = if field_member.fixed_line_space as u32 > (natural_lh as u32) * 5 / 2 {
-                    0
-                } else {
-                    field_member.fixed_line_space
-                };
-
-                let from_bitmap = bitmap_font.as_ref().map(|f| {
-                    if field_member.word_wrap {
-                        measure_text_wrapped(
-                            &field_member.text,
-                            f,
-                            inner_width,
-                            true,
-                            sane_fls,
-                            field_member.top_spacing,
-                            0,
-                            0,
-                        ).1 as i32
-                    } else {
-                        measure_text(
-                            &field_member.text,
-                            f,
-                            None,
-                            sane_fls,
-                            field_member.top_spacing,
-                            0,
-                        ).1 as i32
-                    }
-                }).filter(|h| *h > 0);
-
-                from_bitmap.or_else(|| {
-                    let font_name = if !field_member.font.is_empty() {
-                        field_member.font.as_str()
-                    } else {
-                        "Arial"
-                    };
-                    let font_size = if field_member.font_size > 0 { field_member.font_size } else { 12 };
-                    // Build the bold/italic/underline bitflag the same way the
-                    // renderer does (see webgl2/mod.rs Field branch) so the
-                    // Canvas2D measurement uses the same glyph widths.
-                    let style_lc = field_member.font_style.to_lowercase();
-                    let mut style: u8 = 0;
-                    if style_lc.contains("bold") { style |= 1; }
-                    if style_lc.contains("italic") { style |= 2; }
-                    if style_lc.contains("underline") { style |= 4; }
-                    let (_, h) = FontMemberHandlers::measure_text_native_styled(
-                        &field_member.text,
-                        font_name,
-                        font_size,
-                        if style == 0 { None } else { Some(style) },
-                        field_member.word_wrap,
-                        if field_member.word_wrap { inner_width as i32 } else { 0 },
-                        field_member.top_spacing,
-                        0,
-                        sane_fls,
-                    );
-                    if h > 0 { Some(h as i32) } else { None }
-                })
-            } else { None };
+            let measured_height: Option<i32> =
+                measure_field_text_height(player, field_member, field_width, extras);
 
             let measured_plus_extras = measured_height.map(|h| h + extras);
 
