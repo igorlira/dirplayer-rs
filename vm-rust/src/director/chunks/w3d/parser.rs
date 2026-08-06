@@ -205,6 +205,7 @@ impl W3dFileParser {
             });
         }
 
+        self.bind_light_resources_to_nodes();
         self.apply_root_com_to_model_nodes();
 
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
@@ -434,9 +435,19 @@ impl W3dFileParser {
     fn parse_light_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
         let name = r.read_ifx_string()?;
         let parent = r.read_ifx_string()?;
-        let resource = r.read_ifx_string()?;
+        let mut resource = r.read_ifx_string()?;
         let transform = self.parse_node_header(r, has_bounds)?;
-        if r.remaining() >= 2 { let _light_res = r.read_ifx_string()?; }
+        // The trailing string is the LIGHT_RESOURCE this node instantiates. It is
+        // usually the node's own name, which is why dropping it went unnoticed —
+        // but exporters do emit e.g. node "RZAmbientLight" → resource
+        // "AmbientLightResource" (car.w3d, mirror.w3d), and the whole engine keys
+        // lights by resource name, so those nodes matched nothing.
+        if r.remaining() >= 2 {
+            let light_res = r.read_ifx_string()?;
+            if !light_res.trim().is_empty() {
+                resource = light_res;
+            }
+        }
 
         self.scene.nodes.push(W3dNode {
             name,
@@ -447,6 +458,36 @@ impl W3dFileParser {
             ..Default::default()
         });
         Ok(())
+    }
+
+    /// Give every light node a resource carrying its own name.
+    ///
+    /// Lights are identified by name everywhere downstream (the renderer matches
+    /// `scene.nodes` to `scene.lights` by name, and `member.light("x")` looks up the
+    /// resource), so a node whose resource is named differently contributed no light
+    /// and could not be found from Lingo. Clone rather than rename, since several
+    /// nodes may share one resource.
+    fn bind_light_resources_to_nodes(&mut self) {
+        let mut clones: Vec<W3dLight> = Vec::new();
+        for node in self.scene.nodes.iter() {
+            if node.node_type != W3dNodeType::Light { continue; }
+            if node.resource_name.is_empty() || node.resource_name.eq_ignore_ascii_case(&node.name) {
+                continue;
+            }
+            if self.scene.lights.iter().any(|l| l.name.eq_ignore_ascii_case(&node.name)) {
+                continue;
+            }
+            if let Some(res) = self.scene.lights.iter()
+                .find(|l| l.name.eq_ignore_ascii_case(&node.resource_name))
+            {
+                log(&format!(
+                    "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
+                    node.name, node.resource_name
+                ));
+                clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+            }
+        }
+        self.scene.lights.extend(clones);
     }
 
     fn parse_model_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
