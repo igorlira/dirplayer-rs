@@ -153,6 +153,12 @@ export function initVmCallbacks() {
       store.dispatch(debugContentAdded(content));
     },
     onScheduleTimeout: (timeoutName: string, periodMs: number) => {
+      // Handles are keyed by name, so a re-schedule under a live name would
+      // orphan the previous interval — it keeps firing with no way to reach it.
+      const previous = store.getState().vm.timeoutHandles[timeoutName];
+      if (previous) {
+        clearInterval(previous as Parameters<typeof clearInterval>[0]);
+      }
       const handle = setInterval(() => {
         trigger_timeout(timeoutName)
       }, periodMs);

@@ -197,6 +197,18 @@ impl TimeoutDatumHandlers {
             None => DatumRef::Void,
         };
 
+        // A negative period must not wrap through `as u32` into ~49 days of silence.
+        // Scripts compute periods arithmetically (AreaZero: `(motion.duration / 0.5) - 100`)
+        // and a short or zero duration goes negative; Director treats a non-positive
+        // period as dormant, so clamp and say so rather than fail invisibly.
+        if timeout_period < 0 {
+            crate::console_warn!(
+                "timeout(\"{}\").new: negative period {} — clamped to 0 (dormant)",
+                timeout_name, timeout_period
+            );
+        }
+        let timeout_period = timeout_period.max(0);
+
         reserve_player_mut(|player| {
             let mut timeout = Timeout {
                 handler: timeout_handler,
@@ -206,6 +218,13 @@ impl TimeoutDatumHandlers {
                 is_scheduled: false,
                 next_fire_ms: 0.0,
             };
+            // Retire any same-named timeout BEFORE scheduling the replacement.
+            // The JS host keys interval handles by name, so scheduling first stored
+            // the new handle under that name and the subsequent cancel then cleared
+            // the NEW interval while leaking the old one — every re-creation of a
+            // self-rescheduling timeout (AreaZero's MenuCameraNextAnimation chain)
+            // killed its own replacement.
+            player.timeout_manager.forget_timeout(&timeout.name);
             timeout.schedule();
             player.timeout_manager.add_timeout(timeout);
             
