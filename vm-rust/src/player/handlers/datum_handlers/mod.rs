@@ -281,16 +281,45 @@ pub async fn player_call_datum_handler(
                         };
                         let prop_ref = player.alloc_datum(prop_datum);
                         if args.len() > 1 {
-                            let index = player.get_datum(&args[1]).int_value()?;
-                            let list_datum = player.get_datum(&prop_ref);
+                            let list_datum = player.get_datum(&prop_ref).clone();
                             match list_datum {
                                 Datum::List(_, items, _) => {
+                                    let index = player.get_datum(&args[1]).int_value()?;
                                     let idx = (index as usize).saturating_sub(1);
                                     if idx < items.len() {
                                         Ok(items[idx].clone())
                                     } else {
                                         Ok(DatumRef::Void)
                                     }
+                                }
+                                // A PROPERTY-list movie prop must index too. `markerList`
+                                // is the one that matters (Director 11.5: "a script
+                                // property list of the markers in the Score",
+                                // frameNumber: "markerName"), and it was falling into the
+                                // catch-all below — so `_movie.markerList[i]` handed back
+                                // the WHOLE list for every i, index silently discarded.
+                                //
+                                // AreaZero's `[M] Misc.goto` walks the markers to
+                                // validate a name before jumping:
+                                //     repeat with i = 1 to _movie.markerlist.count
+                                //       tListMarker = _movie.markerlist[i]
+                                //       if tMarker = tListMarker then exit repeat
+                                //       if (i = _movie.markerlist.count) and ... then
+                                //         tMarker = #none
+                                // Comparing "Game" against the whole list never matched,
+                                // so the marker was nulled and `_movie.go("Game")` never
+                                // ran. The movie stayed on frame 1 — whose score script
+                                // is a bare `go the frame` with no enterFrame handler —
+                                // so its per-frame script manager never ticked and the
+                                // menu sat frozen.
+                                //
+                                // PropListUtils::get_at applies Director's rule: an
+                                // integer indexes positionally, anything else is a key
+                                // lookup.
+                                Datum::PropList(pairs, ..) => {
+                                    crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
+                                        &pairs, &args[1], &player.allocator,
+                                    )
                                 }
                                 _ => Ok(prop_ref)
                             }
