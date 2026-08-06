@@ -1728,12 +1728,21 @@ impl WebGL2Renderer {
             Shockwave3dScene {
                 width: u32,
                 height: u32,
-                member_key: (i32, i32),
-                scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
-                runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
-                active_camera: Option<String>,
-                extra_cameras: Vec<String>,
+                /// One entry per camera in the sprite's camera list, in draw order
+                /// (lowest index first). Each carries the member whose world that
+                /// camera belongs to, so a sprite can composite cameras from several
+                /// members — Director's model, and what AreaZero's menu needs to draw
+                /// its skybox, 3D scene and orthographic UI layer into one sprite.
+                passes: Vec<Shockwave3dPass>,
             },
+        }
+
+        struct Shockwave3dPass {
+            member_key: (i32, i32),
+            scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
+            runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
+            /// `None` = let the renderer pick its default view.
+            camera: Option<String>,
         }
 
         // Set by filmloop logic: true when the stage sprite dimensions match the
@@ -3300,16 +3309,58 @@ impl WebGL2Renderer {
                                 );
                             }
                         }
-                        let extra_cams = w3d_extra_cams.clone();
-                        TextureSource::Shockwave3dScene {
-                            width: w,
-                            height: h,
-                            member_key: (member_ref.cast_lib, member_ref.cast_member),
-                            scene: parsed_scene.clone(),
-                            runtime_state: w3d.runtime_state.clone(),
-                            active_camera: w3d_camera.clone(),
-                            extra_cameras: extra_cams,
+                        // One pass per camera, in the sprite's camera order. Each camera
+                        // is resolved against the member that OWNS it, so a sprite can
+                        // composite worlds from several members the way Director does.
+                        use crate::director::chunks::w3d::types::W3dNodeType;
+                        let own_key = (member_ref.cast_lib, member_ref.cast_member);
+                        let mut cam_list: Vec<crate::player::sprite::SpriteCamera> =
+                            w3d_camera.iter().cloned().collect();
+                        cam_list.extend(w3d_extra_cams.iter().cloned());
+
+                        let mut passes: Vec<Shockwave3dPass> = Vec::new();
+                        for cam in &cam_list {
+                            let key = cam.member.unwrap_or(own_key);
+                            let resolved = if key == own_key {
+                                Some((parsed_scene.clone(), w3d.runtime_state.clone()))
+                            } else {
+                                let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
+                                player.movie.cast_manager.find_member_by_ref(&other)
+                                    .and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|o| o.parsed_scene.as_ref()
+                                        .map(|sc| (sc.clone(), o.runtime_state.clone())))
+                            };
+                            let (pass_scene, pass_state) = match resolved {
+                                Some(v) => v,
+                                // Owning member isn't loaded (or isn't 3D) yet — skip
+                                // rather than render this member's world through it.
+                                None => continue,
+                            };
+                            let exists = pass_scene.nodes.iter().any(|n| {
+                                n.node_type == W3dNodeType::View
+                                    && n.name.eq_ignore_ascii_case(&cam.name)
+                            });
+                            if !exists {
+                                continue;
+                            }
+                            passes.push(Shockwave3dPass {
+                                member_key: key,
+                                scene: pass_scene,
+                                runtime_state: pass_state,
+                                camera: Some(cam.name.clone()),
+                            });
                         }
+                        if passes.is_empty() {
+                            // No camera list, or none resolved: single default pass on
+                            // the sprite's own member (the renderer picks DefaultView).
+                            passes.push(Shockwave3dPass {
+                                member_key: own_key,
+                                scene: parsed_scene.clone(),
+                                runtime_state: w3d.runtime_state.clone(),
+                                camera: w3d_camera.as_ref().map(|c| c.name.clone()),
+                            });
+                        }
+                        TextureSource::Shockwave3dScene { width: w, height: h, passes }
                     } else {
                         return;
                     }
@@ -4201,60 +4252,52 @@ impl WebGL2Renderer {
                 }
                 texture
             }
-            TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
-                // Render primary camera. Camera backdrops (Director `addBackdrop`,
-                // e.g. the estate sky) are drawn inside render_scene_with_state_ex,
+            TextureSource::Shockwave3dScene { width, height, passes } => {
+                // Draw each camera pass in order (lowest index first, higher on top),
+                // every one against the member that owns its camera. Camera backdrops
+                // (Director `addBackdrop`) are drawn inside render_scene_with_state_ex,
                 // after its clear and before the models — see draw_backdrops_inline.
-                self.scene3d.active_camera = active_camera;
-                if let Err(e) = self.scene3d.render_scene_with_state(
-                    &self.context, member_key, &scene, width, height, Some(&runtime_state)
-                ) {
-                    web_sys::console::error_1(&format!(
-                        "[3D] Render failed for member {:?} primary camera {:?}: {:?}",
-                        member_key, self.scene3d.active_camera, e
-                    ).into());
-                    return;
-                }
-
-                // Render additional cameras on top (multi-camera: skybox + game world)
-                if extra_cameras.is_empty() {
-                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        warn!("[3D] No extra cameras — Main camera not added via addCamera");
-                    }
-                }
-                for cam_name in &extra_cameras {
-                    let should_clear = runtime_state.camera_clear_at_render
-                        .get(&cam_name.to_ascii_lowercase()).copied().unwrap_or(true);
-                    static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        debug!(
-                            "[W3D-MULTICAM] extra cam='{}' should_clear={} clear_map={:?}",
-                            cam_name, should_clear, runtime_state.camera_clear_at_render
-                        );
-                    }
-                    self.scene3d.active_camera = Some(cam_name.clone());
+                //
+                // The first pass always clears the FBO; later ones honour their own
+                // camera's `colorBuffer.clearAtRender`, which is how a movie layers a
+                // skybox, the 3D world and an orthographic UI pass into one sprite.
+                let member_key = passes.first().map(|p| p.member_key).unwrap_or((0, 0));
+                for (i, pass) in passes.iter().enumerate() {
+                    let clear = if i == 0 {
+                        true
+                    } else {
+                        pass.camera.as_ref()
+                            .and_then(|c| pass.runtime_state
+                                .camera_clear_at_render
+                                .get(&c.to_ascii_lowercase())
+                                .copied())
+                            .unwrap_or(true)
+                    };
+                    self.scene3d.active_camera = pass.camera.clone();
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
-                        &self.context, member_key, &scene, width, height,
-                        Some(&runtime_state), should_clear,
+                        &self.context, pass.member_key, &pass.scene, width, height,
+                        Some(&pass.runtime_state), clear,
                     ) {
-                        web_sys::console::error_1(&format!(
-                            "[3D] Render failed for member {:?} extra camera {:?}: {:?}",
-                            member_key, self.scene3d.active_camera, e
-                        ).into());
-                        return;
+                        // One bad pass must not abandon the whole sprite — the other
+                        // cameras (including the one showing the actual world) still
+                        // need to draw.
+                        crate::console_error!(
+                            "[3D] Render failed for member {:?} camera {:?}: {:?}",
+                            pass.member_key, pass.camera, e
+                        );
+                        continue;
                     }
                 }
 
-                // Backdrops were already drawn before the scene (see render_backdrops_to_fbo
-                // above). Overlays render on top of everything.
 
                 // Render overlays on top of everything
-                for (_, overlays) in &runtime_state.camera_overlays {
-                    if !overlays.is_empty() {
-                        self.scene3d.render_overlays_to_fbo(
-                            &self.context, &member_key, overlays, width, height,
-                        );
+                for pass in &passes {
+                    for (_, overlays) in &pass.runtime_state.camera_overlays {
+                        if !overlays.is_empty() {
+                            self.scene3d.render_overlays_to_fbo(
+                                &self.context, &pass.member_key, overlays, width, height,
+                            );
+                        }
                     }
                 }
 

@@ -3746,11 +3746,18 @@ pub fn sprite_get_prop(
         "camera" => {
             // Shockwave3D sprite camera — returns the active camera as a Shockwave3dObjectRef
             let member_ref = sprite.and_then(|s| s.member.as_ref()).cloned().unwrap_or(NULL_CAST_MEMBER_REF);
-            let cam_name = sprite.and_then(|s| s.w3d_camera.as_ref()).cloned()
+            let cam = sprite.and_then(|s| s.w3d_camera.as_ref());
+            // Report the camera against the member that OWNS it, so a script that
+            // reads `sprite.camera` back and calls `.transform` on it addresses the
+            // right member's node rather than the sprite member's.
+            let (cast_lib, cast_member) = cam
+                .and_then(|c| c.member)
+                .unwrap_or((member_ref.cast_lib, member_ref.cast_member));
+            let cam_name = cam.map(|c| c.name.clone())
                 .unwrap_or_else(|| "DefaultView".to_string());
             Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
-                cast_lib: member_ref.cast_lib,
-                cast_member: member_ref.cast_member,
+                cast_lib,
+                cast_member,
                 object_type: "camera".to_string(),
                 name: cam_name,
             }))
@@ -4768,16 +4775,27 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
         ),
         // Shockwave3D camera assignment
         "camera" => {
-            let cam_name = match &value {
-                Datum::Shockwave3dObjectRef(r) => r.name.clone(),
-                Datum::String(s) => s.clone(),
-                _ => "DefaultView".to_string(),
+            // A camera REFERENCE carries its owning member; a bare string names a
+            // camera in the sprite's own member (member = None).
+            let cam = match &value {
+                Datum::Shockwave3dObjectRef(r) => crate::player::sprite::SpriteCamera {
+                    member: Some((r.cast_lib, r.cast_member)),
+                    name: r.name.clone(),
+                },
+                Datum::String(s) => crate::player::sprite::SpriteCamera {
+                    member: None,
+                    name: s.clone(),
+                },
+                _ => crate::player::sprite::SpriteCamera {
+                    member: None,
+                    name: "DefaultView".to_string(),
+                },
             };
             borrow_sprite_mut(
                 sprite_id,
-                |_player| Ok(cam_name.clone()),
-                |sprite, name: Result<String, ScriptError>| {
-                    sprite.w3d_camera = Some(name.unwrap_or_default());
+                |_player| Ok(cam.clone()),
+                |sprite, cam: Result<crate::player::sprite::SpriteCamera, ScriptError>| {
+                    sprite.w3d_camera = cam.ok();
                     Ok(())
                 },
             )

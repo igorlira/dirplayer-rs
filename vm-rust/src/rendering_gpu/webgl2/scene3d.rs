@@ -5390,29 +5390,64 @@ fn row_major_to_column_major(m: &[f32; 16]) -> [f32; 16] {
 ///   m[8..11] = column 2 (Z-axis), m[12..15] = column 3 (translation)
 /// Used for view matrix: view = inverse(camera_world_transform).
 fn invert_transform(m: &[f32; 16]) -> [f32; 16] {
-    // Column-major: R[row][col] = m[col*4 + row]
-    // R as a math matrix:
-    //   R[0][0]=m[0]  R[0][1]=m[4]  R[0][2]=m[8]
-    //   R[1][0]=m[1]  R[1][1]=m[5]  R[1][2]=m[9]
-    //   R[2][0]=m[2]  R[2][1]=m[6]  R[2][2]=m[10]
+    // Column-major: element (row, col) = m[col * 4 + row].
+    //
+    // This must be a GENERAL affine inverse, not the transpose. Transposing only
+    // inverts an orthonormal rotation; for a scaled basis R = s·Q the true inverse
+    // is Rᵀ/s², so a transpose is off by s². Director scripts routinely scale a
+    // camera's transform — AreaZero's [PS] Camera does
+    //     t.camera.transform.scale = vector(1, 1, 1) * t.scale   -- 0.1
+    // every frame. At s = 0.1 the view matrix came out 100× too small, collapsing
+    // the scene to a fraction of a unit in front of the camera, where hither = 1.0
+    // clipped it: the robot was sliced and the panorama vanished. The projection
+    // itself is scale-invariant (x, y and z scale together), so getting the inverse
+    // right restores the framing without changing the apparent image.
+    let (m00, m01, m02) = (m[0], m[4], m[8]);
+    let (m10, m11, m12) = (m[1], m[5], m[9]);
+    let (m20, m21, m22) = (m[2], m[6], m[10]);
     let tx = m[12]; let ty = m[13]; let tz = m[14];
 
-    // R^T: swap rows and columns
-    // R^T[0][0]=m[0]  R^T[0][1]=m[1]  R^T[0][2]=m[2]
-    // R^T[1][0]=m[4]  R^T[1][1]=m[5]  R^T[1][2]=m[6]
-    // R^T[2][0]=m[8]  R^T[2][1]=m[9]  R^T[2][2]=m[10]
+    let c00 = m11 * m22 - m12 * m21;
+    let c01 = m12 * m20 - m10 * m22;
+    let c02 = m10 * m21 - m11 * m20;
+    let det = m00 * c00 + m01 * c01 + m02 * c02;
 
-    // -R^T * t (using R^T rows)
-    let itx = -(m[0] * tx + m[1] * ty + m[2] * tz);
-    let ity = -(m[4] * tx + m[5] * ty + m[6] * tz);
-    let itz = -(m[8] * tx + m[9] * ty + m[10] * tz);
+    if det.abs() < 1e-12 {
+        // Degenerate basis (zero scale) — fall back to the transpose so a broken
+        // transform yields something finite rather than NaNs.
+        let itx = -(m00 * tx + m10 * ty + m20 * tz);
+        let ity = -(m01 * tx + m11 * ty + m21 * tz);
+        let itz = -(m02 * tx + m12 * ty + m22 * tz);
+        return [
+            m00, m01, m02, 0.0,
+            m10, m11, m12, 0.0,
+            m20, m21, m22, 0.0,
+            itx, ity, itz, 1.0,
+        ];
+    }
 
-    // Output column-major: columns of R^T
+    let inv_det = 1.0 / det;
+    // inv[row][col]
+    let i00 = c00 * inv_det;
+    let i01 = (m02 * m21 - m01 * m22) * inv_det;
+    let i02 = (m01 * m12 - m02 * m11) * inv_det;
+    let i10 = c01 * inv_det;
+    let i11 = (m00 * m22 - m02 * m20) * inv_det;
+    let i12 = (m02 * m10 - m00 * m12) * inv_det;
+    let i20 = c02 * inv_det;
+    let i21 = (m01 * m20 - m00 * m21) * inv_det;
+    let i22 = (m00 * m11 - m01 * m10) * inv_det;
+
+    // translation = -M⁻¹ · t
+    let itx = -(i00 * tx + i01 * ty + i02 * tz);
+    let ity = -(i10 * tx + i11 * ty + i12 * tz);
+    let itz = -(i20 * tx + i21 * ty + i22 * tz);
+
     [
-        m[0], m[4], m[8],  0.0,  // R^T column 0
-        m[1], m[5], m[9],  0.0,  // R^T column 1
-        m[2], m[6], m[10], 0.0,  // R^T column 2
-        itx,  ity,  itz,   1.0,  // translation
+        i00, i10, i20, 0.0, // column 0
+        i01, i11, i21, 0.0, // column 1
+        i02, i12, i22, 0.0, // column 2
+        itx, ity, itz, 1.0,
     ]
 }
 

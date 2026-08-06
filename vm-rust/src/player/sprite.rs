@@ -64,6 +64,22 @@ pub enum CursorRef {
     Member(Vec<i32>),
 }
 
+/// One entry in a Shockwave3D sprite's camera list.
+///
+/// Director's `addCamera` takes a camera REFERENCE, and that reference carries the
+/// cast member owning the camera — it need not be the sprite's own member. AreaZero's
+/// menu sprite mixes four: `Skybox1_Camera` (member "Skyboxes"), `Player1_Camera`
+/// (MenuCharacter), `Menu_Camera` (member "Menu", the orthographic UI layer) and
+/// `Fade_Camera` (member "DefaultFade"). Each pass must render ITS OWN member's world,
+/// so the owning member travels with the name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpriteCamera {
+    /// (cast_lib, cast_member) owning this camera. `None` = the sprite's own member,
+    /// which is what a bare `sprite.camera = "Name"` string assignment means.
+    pub member: Option<(i32, i32)>,
+    pub name: String,
+}
+
 #[derive(Clone)]
 pub struct Sprite {
     pub number: usize,
@@ -163,10 +179,10 @@ pub struct Sprite {
     pub base_skew: f64,
     pub base_color: ColorRef,
     pub base_bg_color: ColorRef,
-    /// Active camera name(s) for Shockwave3D sprites (set via sprite.camera(1) = ...)
-    pub w3d_camera: Option<String>,
+    /// Active camera for Shockwave3D sprites (set via `sprite.camera = ...`)
+    pub w3d_camera: Option<SpriteCamera>,
     /// Additional cameras for multi-camera rendering (index 2+)
-    pub w3d_cameras: Vec<String>,
+    pub w3d_cameras: Vec<SpriteCamera>,
     /// Last on-screen rect captured when this sprite left its span. Director
     /// keeps a score channel's `the rect of sprite` at its last value even
     /// after the member clears to 0 (empty channel between two spans), so init
