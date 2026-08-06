@@ -278,6 +278,13 @@ pub struct W3dNode {
     pub node_type: W3dNodeType,
     pub transform: [f32; 16],
     pub shader_name: String,
+    /// Authored `model.visibility` — the `IFXModel::SetVisibility` bitmask stored
+    /// in the MODEL_NODE block (`gs_uFrontFaceVisibility = 1<<0`,
+    /// `gs_uBackFaceVisibility = 1<<1`): 0=#none, 1=#front, 2=#back, 3=#both.
+    /// Exporters mark helper/proxy nodes #none — camera-carrier dummies, physics
+    /// proxies, skybox stand-ins — and double-sided alpha foliage #both.
+    /// Model nodes only; other node types leave this at the #front default.
+    pub visibility: u8,
     pub near_plane: f32,
     pub far_plane: f32,
     pub fov: f32,
@@ -295,6 +302,7 @@ impl Default for W3dNode {
             node_type: W3dNodeType::Group,
             transform: [0.0; 16],
             shader_name: String::new(),
+            visibility: 1, // #front — Director's documented default
             near_plane: 1.0,
             far_plane: 1000.0,
             fov: 30.0,

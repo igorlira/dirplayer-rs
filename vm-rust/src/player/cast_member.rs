@@ -608,6 +608,7 @@ impl TextMember {
             model_resource_name: "Text".to_string(),
             shader_name: "DefaultShader".to_string(),
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
         });
@@ -1738,6 +1739,20 @@ impl Shockwave3dRuntimeState {
         }
         if let Some(bg) = info.bg_color {
             state.background_color = Some(bg);
+        }
+        // Seed authored model.visibility from the file. The renderer already honors
+        // node_visibility (0 skips the draw, 2/3 flip culling) but the map was only
+        // ever written by Lingo setters, so exporter-hidden helper nodes rendered and
+        // authored #both foliage was drawn single-sided. Only non-default modes are
+        // inserted, so a script reading .visibility on an ordinary model still gets
+        // the #front fallback rather than a materialized entry.
+        if let Some(scene) = scene {
+            use crate::director::chunks::w3d::types::W3dNodeType;
+            for node in scene.nodes.iter() {
+                if node.node_type == W3dNodeType::Model && node.visibility != 1 {
+                    state.node_visibility.insert(node.name.clone(), node.visibility);
+                }
+            }
         }
         // Note: animationEnabled auto-start is handled in the rendering path
         // when the sprite first appears on stage, not here at parse time.
@@ -4068,6 +4083,7 @@ impl CastMember {
             resource_name: String::new(),
             model_resource_name: String::new(),
             shader_name: String::new(),
+            visibility: 1,
             near_plane: 1.0,
             far_plane: 10000.0,
             fov: 34.516,
@@ -4103,6 +4119,7 @@ impl CastMember {
             resource_name: "DefaultDirectional".to_string(),
             model_resource_name: String::new(),
             shader_name: String::new(),
+            visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
             // Rotation: Z-axis points toward (0.5, 1.0, 0.7) normalized

@@ -506,11 +506,19 @@ impl W3dFileParser {
         };
 
         if r.remaining() >= 2 { node.model_resource_name = r.read_ifx_string()?; }
-        if r.remaining() >= 2 { let _style = r.read_ifx_string()?; }
-        if r.remaining() >= 4 { let _render_pass = r.read_u32()?; }
+        if r.remaining() >= 2 { let _style = r.read_ifx_string()?; } // IFXModel::SetStyleName
+        // IFXModel::SetVisibility, NOT a render pass: the gs_uFrontFaceVisibility /
+        // gs_uBackFaceVisibility bitmask from IFXModel.h, i.e. Director's
+        // model.visibility (0=#none, 1=#front, 2=#back, 3=#both). Only 0/1/3 occur
+        // in the wild. Dropping it drew helper nodes the exporter marked invisible —
+        // AreaZero's menu hangs its 9 fly-through cameras off "Dummy Animation Node
+        // CameraN" carriers, each a single triangle of bounding radius 1732 wearing a
+        // pure-red untextured material, which covered the whole menu.
+        if r.remaining() >= 4 { node.visibility = (r.read_u32()? & 0x3) as u8; }
         if r.remaining() >= 2 { node.shader_name = r.read_ifx_string()?; }
 
-        log(&format!("  ModelNode: \"{}\" resource=\"{}\"", name, node.model_resource_name));
+        log(&format!("  ModelNode: \"{}\" resource=\"{}\" visibility={}",
+            name, node.model_resource_name, node.visibility));
         self.scene.nodes.push(node);
         Ok(())
     }
