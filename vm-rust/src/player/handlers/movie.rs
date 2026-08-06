@@ -1030,23 +1030,37 @@ impl MovieHandlers {
     pub async fn execute_frame_update() -> Result<(), ScriptError> {
         player_wait_available().await;
 
-        // Prevent re-entrant calls
-        let already_updating = reserve_player_mut(|player| {
-            if player.is_in_frame_update {
-                return true;
-            }
-            player.is_in_frame_update = true;
-            false
-        });
+        // Prevent re-entrant calls, and skip the update when the playhead already
+        // moved this tick.
+        //
+        // Both conditions must be tested BEFORE claiming `is_in_frame_update`.
+        // Claiming first and then bailing on `has_player_frame_changed` leaked the
+        // claim — the flag is only cleared on the normal path at the end of this
+        // function — so from the first tick where the playhead had moved, every
+        // later call saw `already_updating` and returned immediately. Frame scripts
+        // then never ran again for the rest of the movie: no enterFrame, no
+        // exitFrame, no stepFrame. AreaZero's menu goes through
+        // `[FS] Hold Frame And Loop And Update`, whose enterFrame drives
+        // `gSystem.ScriptManager.enterFrame()` — and with that dead, its camera
+        // rig, timers, triggers and handler list all stopped updating while the
+        // frame loop and timeout intervals kept running, so the movie looked alive
+        // but frozen.
+        let (proceed, already_updating, frame_changed, current_frame) =
+            reserve_player_mut(|player| {
+                let already_updating = player.is_in_frame_update;
+                let frame_changed = player.has_player_frame_changed;
+                let current_frame = player.movie.current_frame;
+                if already_updating || frame_changed {
+                    return (false, already_updating, frame_changed, current_frame);
+                }
+                player.is_in_frame_update = true;
+                (true, already_updating, frame_changed, current_frame)
+            });
 
-        let (has_player_frame_changed, current_frame) = reserve_player_ref(|player| {
-            (player.has_player_frame_changed, player.movie.current_frame)
-        });
-
-        if already_updating || has_player_frame_changed {
-            debug!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})", 
-                already_updating, has_player_frame_changed, current_frame);
-            return Ok(());  // Exit early if already updating
+        if !proceed {
+            debug!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})",
+                already_updating, frame_changed, current_frame);
+            return Ok(());
         }
 
         player_wait_available().await;
