@@ -1963,7 +1963,24 @@ void main() {
             // Evaluate motion animations each frame
             self.motion_transforms.clear();
             self.motion_replace_transforms.clear();
-            let multi_player = runtime_state.map(|rs| rs.bones_players.len() > 1).unwrap_or(false);
+            // Per-model semantics apply as soon as any model OWNS a motion, not only
+            // when two players happen to exist. Director 11.5 Scripting Dictionary,
+            // `keyframePlayer (modifier)`: "the motions managed by the keyframePlayer
+            // modifier animate the ENTIRE MODEL at once" — i.e. a motion drives the
+            // model running it. The legacy branch instead applies a single-track motion
+            // to whatever node the track is NAMED after, which is wrong whenever an
+            // exporter hoists a node's animation onto a carrier: AreaZero's
+            // "Dummy Animation Node Camera1" runs motion "Camera1-Key" whose one track
+            // is named "Camera1" (the camera parented UNDER that dummy), so the legacy
+            // path moved the child camera and left the carrier — the node the game
+            // actually mimics — standing still. Multi-track (skeletal) motions land in
+            // motion_transforms by bone name in either branch, so they are unaffected.
+            let multi_player = runtime_state
+                .map(|rs| {
+                    rs.bones_players.len() > 1
+                        || rs.bones_players.values().any(|bp| bp.current_motion.is_some())
+                })
+                .unwrap_or(false);
             if !scene.motions.is_empty() && multi_player {
                 // Multiple per-model keyframe/bones players animating at once
                 // (Splat pac-man: footA plays "footA-Key", footB plays "footB-Key").
@@ -5302,21 +5319,7 @@ const IDENTITY_4X4: [f32; 16] = [
 
 /// Convert a W3dKeyframe (quaternion + position + scale) to a column-major 4x4 matrix
 fn keyframe_to_column_major_matrix(kf: &crate::director::chunks::w3d::types::W3dKeyframe) -> [f32; 16] {
-    let (qx, qy, qz, qw) = (kf.rot_x, kf.rot_y, kf.rot_z, kf.rot_w);
-    let (sx, sy, sz) = (kf.scale_x, kf.scale_y, kf.scale_z);
-
-    // Quaternion to rotation matrix (column-major)
-    let x2 = qx + qx; let y2 = qy + qy; let z2 = qz + qz;
-    let xx = qx * x2; let xy = qx * y2; let xz = qx * z2;
-    let yy = qy * y2; let yz = qy * z2; let zz = qz * z2;
-    let wx = qw * x2; let wy = qw * y2; let wz = qw * z2;
-
-    [
-        (1.0 - (yy + zz)) * sx,  (xy + wz) * sx,           (xz - wy) * sx,           0.0,  // col 0
-        (xy - wz) * sy,           (1.0 - (xx + zz)) * sy,  (yz + wx) * sy,           0.0,  // col 1
-        (xz + wy) * sz,           (yz - wx) * sz,           (1.0 - (xx + yy)) * sz,  0.0,  // col 2
-        kf.pos_x,                 kf.pos_y,                 kf.pos_z,                 1.0,  // col 3
-    ]
+    kf.to_column_major_matrix()
 }
 
 /// Case-insensitive lookup in node_transforms (Director is case-insensitive for node names).

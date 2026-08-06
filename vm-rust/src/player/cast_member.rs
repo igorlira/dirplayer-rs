@@ -1152,6 +1152,80 @@ impl Shockwave3dMember {
     pub fn scene_mut(&mut self) -> Option<&mut crate::director::chunks::w3d::types::W3dScene> {
         self.parsed_scene.as_mut().map(|rc| std::rc::Rc::make_mut(rc))
     }
+
+    /// Load `model_name`'s authored keyframe motion into its keyframePlayer if the
+    /// player has nothing loaded yet.
+    ///
+    /// Director pre-loads each model's keyframePlayer with the keyframe motion
+    /// authored for that node, so a script can drive it with `currentTime` /
+    /// `playRate` without ever calling `play()`. dirplayer only ever set
+    /// `current_motion` in `play()`, so touching a keyframePlayer materialized an
+    /// UNBOUND player — and once two exist the renderer switches to its per-model
+    /// path (`bones_players.len() > 1`), where an unbound player is skipped. Every
+    /// animation in the member then froze: AreaZero's menu ran camera 1's fly-through
+    /// once (off the member-level auto-play) and stuck the moment the script touched
+    /// camera 2's carrier node.
+    ///
+    /// Falls back to the member-level motion so a model with no motion of its own
+    /// still binds to something rather than poisoning the whole member.
+    pub fn bind_keyframe_motion(&mut self, model_name: &str) {
+        if self
+            .runtime_state
+            .bones_players
+            .get(&model_name.to_ascii_lowercase())
+            .is_some_and(|bp| bp.current_motion.is_some())
+        {
+            return;
+        }
+        let resolved = self.parsed_scene.as_ref().and_then(|scene| {
+            // Is `name` the model itself, or somewhere in its subtree? An exporter
+            // that hoists a node's animation onto a carrier names the track after the
+            // ORIGINAL node, which ends up a child of the carrier: AreaZero's
+            // "Dummy Animation Node Camera1" carries motion "Camera1-Key", whose one
+            // track is named "Camera1" — the camera parented under that dummy.
+            let in_subtree = |name: &str| -> bool {
+                if name.eq_ignore_ascii_case(model_name) {
+                    return true;
+                }
+                let mut current = name.to_string();
+                for _ in 0..20 {
+                    let parent = match scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(&current)) {
+                        Some(n) => n.parent_name.clone(),
+                        None => return false,
+                    };
+                    if parent.is_empty() || parent.eq_ignore_ascii_case("World") {
+                        return false;
+                    }
+                    if parent.eq_ignore_ascii_case(model_name) {
+                        return true;
+                    }
+                    current = parent;
+                }
+                false
+            };
+            // A single-track object keyframe drives one node; prefer an exact name
+            // match, then anything in the model's subtree.
+            scene
+                .motions
+                .iter()
+                .find(|m| m.tracks.len() == 1 && m.tracks[0].bone_name.eq_ignore_ascii_case(model_name))
+                .or_else(|| scene.motions.iter()
+                    .find(|m| m.tracks.len() == 1 && in_subtree(&m.tracks[0].bone_name)))
+                // Otherwise fall back to a motion named after the model.
+                .or_else(|| scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(model_name)))
+                .map(|m| m.name.clone())
+        });
+        let motion = match resolved.or_else(|| self.runtime_state.current_motion.clone()) {
+            Some(m) => m,
+            None => return,
+        };
+        let loops = self.info.loops;
+        let bp = self.runtime_state.bones_player_mut(model_name);
+        bp.current_motion = Some(motion);
+        bp.animation_playing = true;
+        bp.animation_loop = loops;
+        bp.motion_ended = false;
+    }
 }
 
 #[derive(Clone, Debug)]

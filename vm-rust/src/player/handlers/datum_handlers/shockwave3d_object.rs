@@ -992,6 +992,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.bind_keyframe_motion(&model_name);
                             w3d.runtime_state.bones_player_mut(&model_name).play_rate = rate;
                             w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
@@ -1007,6 +1008,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.bind_keyframe_motion(&model_name);
                             w3d.runtime_state.bones_player_mut(&model_name).animation_blend_time = ms;
                             w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
@@ -1018,6 +1020,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.bind_keyframe_motion(&model_name);
                             w3d.runtime_state.bones_player_mut(&model_name).root_lock = locked;
                             w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
@@ -1033,7 +1036,13 @@ impl Shockwave3dObjectDatumHandlers {
                     let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.bones_player_mut(&model_name).animation_time = time;
+                            w3d.bind_keyframe_motion(&model_name);
+                            let bp = w3d.runtime_state.bones_player_mut(&model_name);
+                            bp.animation_time = time;
+                            // A non-looping motion latches motion_ended to hold its final
+                            // frame; seeking back inside the motion must un-latch it or the
+                            // rewind is a no-op and playback stays frozen at the last frame.
+                            bp.motion_ended = false;
                             w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
                     }
@@ -1044,6 +1053,7 @@ impl Shockwave3dObjectDatumHandlers {
                     let model_name = s3d_ref.name.clone();
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.bind_keyframe_motion(&model_name);
                             w3d.runtime_state.bones_player_mut(&model_name).animation_loop = looping;
                             w3d.runtime_state.sync_legacy_from_bones_player(&model_name);
                         }
@@ -3100,6 +3110,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         parent_name: "World".to_string(),
                                         resource_name: String::new(), model_resource_name: String::new(),
                                         shader_name: String::new(),
+                                        visibility: 1,
                                         near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                         screen_width: 640, screen_height: 480,
                                         transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
@@ -7159,6 +7170,51 @@ fn find_skeleton_for_model<'a>(
     scene.skeletons.first()
 }
 
+/// The local matrix a playing per-model keyframePlayer imposes on `node_name`, for
+/// single-track object keyframes (the motion drives the node itself rather than a
+/// skeleton). Returns None when nothing is animating that node.
+///
+/// A playing keyframePlayer owns its model's transform in Director, so
+/// `getWorldTransform()` / `worldPosition` must report the ANIMATED pose. dirplayer
+/// evaluated motions only inside the renderer, so script-side readers saw the static
+/// rest pose: AreaZero's menu camera mimics an animated dummy via
+/// `camera.transform.interpolateTo(target.getWorldTransform(), 100)` and therefore
+/// snapped to the dummy's rest pose once and then never moved again.
+fn keyframe_motion_matrix(
+    w3d: &crate::player::cast_member::Shockwave3dMember,
+    node_name: &str,
+) -> Option<[f32; 16]> {
+    let bp = w3d.runtime_state.bones_players.get(&node_name.to_ascii_lowercase())?;
+    if !bp.animation_playing {
+        return None;
+    }
+    let motion_name = bp.current_motion.as_deref()?;
+    let scene = w3d.parsed_scene.as_ref()?;
+    let motion = scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name))?;
+    // Multi-track motions drive bones, not the node — that path stays renderer-side.
+    if motion.tracks.len() != 1 {
+        return None;
+    }
+    // Same clamp/wrap the renderer uses, so both agree on the pose for this frame.
+    let duration = motion.duration();
+    let eff_end = if bp.animation_end_time >= 0.0 { bp.animation_end_time.min(duration) } else { duration };
+    let eff_start = bp.animation_start_time.min(eff_end);
+    let range = eff_end - eff_start;
+    if range <= 0.0 {
+        return None;
+    }
+    let t = if bp.animation_loop {
+        eff_start + ((bp.animation_time - eff_start) % range + range) % range
+    } else {
+        bp.animation_time.clamp(eff_start, eff_end)
+    };
+    let mut kf = motion.tracks[0].evaluate(t);
+    if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
+    if kf.scale_y.abs() < 1e-6 { kf.scale_y = 1.0; }
+    if kf.scale_z.abs() < 1e-6 { kf.scale_z = 1.0; }
+    Some(kf.to_column_major_matrix())
+}
+
 fn get_node_transform(
     player: &crate::player::DirPlayer,
     member_ref: &crate::player::cast_lib::CastMemberRef,
@@ -7166,20 +7222,28 @@ fn get_node_transform(
 ) -> [f32; 16] {
     if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d() {
+            let motion = keyframe_motion_matrix(w3d, node_name);
             // Check runtime override first (exact match, then case-insensitive fallback)
-            if let Some(m) = w3d.runtime_state.node_transforms.get(node_name) {
-                return *m;
-            }
-            // Case-insensitive fallback for runtime transforms (Director is case-insensitive)
-            for (key, val) in &w3d.runtime_state.node_transforms {
-                if key.eq_ignore_ascii_case(node_name) {
-                    return *val;
-                }
+            let override_t = w3d.runtime_state.node_transforms.get(node_name).copied()
+                .or_else(|| w3d.runtime_state.node_transforms.iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(node_name))
+                    .map(|(_, val)| *val));
+            // Compose exactly as the renderer does: an explicitly placed model keeps
+            // its runtime placement and takes the keyframe locally; otherwise the
+            // keyframe applies relative to the authored rest pose.
+            if let Some(rt) = override_t {
+                return match motion {
+                    Some(km) => mat4_mul_f32(&rt, &km),
+                    None => rt,
+                };
             }
             // Fall back to parsed scene (case-insensitive)
             if let Some(scene) = &w3d.parsed_scene {
                 if let Some(node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(node_name)) {
-                    return node.transform;
+                    return match motion {
+                        Some(km) => mat4_mul_f32(&km, &node.transform),
+                        None => node.transform,
+                    };
                 }
             }
         }
@@ -7343,7 +7407,15 @@ fn get_node_transform_live(
         if let Datum::Transform3d(m) = player.get_datum(&dr) {
             let mut out = [0.0f32; 16];
             for i in 0..16 { out[i] = m[i] as f32; }
-            return out;
+            // The persistent datum is the script's placement; a playing keyframePlayer
+            // still applies on top of it, same as get_node_transform's override branch.
+            let motion = player.movie.cast_manager.find_member_by_ref(member_ref)
+                .and_then(|m| m.member_type.as_shockwave3d())
+                .and_then(|w3d| keyframe_motion_matrix(w3d, node_name));
+            return match motion {
+                Some(km) => mat4_mul_f32(&out, &km),
+                None => out,
+            };
         }
     }
     get_node_transform(player, member_ref, node_name)

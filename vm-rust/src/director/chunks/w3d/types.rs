@@ -157,6 +157,26 @@ impl Default for W3dKeyframe {
     }
 }
 
+impl W3dKeyframe {
+    /// Column-major 4x4 local transform for this keyframe (quaternion + position + scale).
+    pub fn to_column_major_matrix(&self) -> [f32; 16] {
+        let (qx, qy, qz, qw) = (self.rot_x, self.rot_y, self.rot_z, self.rot_w);
+        let (sx, sy, sz) = (self.scale_x, self.scale_y, self.scale_z);
+
+        let x2 = qx + qx; let y2 = qy + qy; let z2 = qz + qz;
+        let xx = qx * x2; let xy = qx * y2; let xz = qx * z2;
+        let yy = qy * y2; let yz = qy * z2; let zz = qz * z2;
+        let wx = qw * x2; let wy = qw * y2; let wz = qw * z2;
+
+        [
+            (1.0 - (yy + zz)) * sx,  (xy + wz) * sx,          (xz - wy) * sx,          0.0, // col 0
+            (xy - wz) * sy,          (1.0 - (xx + zz)) * sy,  (yz + wx) * sy,          0.0, // col 1
+            (xz + wy) * sz,          (yz - wx) * sz,          (1.0 - (xx + yy)) * sz,  0.0, // col 2
+            self.pos_x,              self.pos_y,              self.pos_z,              1.0, // col 3
+        ]
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct W3dMotionTrack {
     pub bone_name: String,

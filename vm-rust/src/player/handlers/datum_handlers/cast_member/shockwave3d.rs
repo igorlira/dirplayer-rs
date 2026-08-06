@@ -1922,6 +1922,7 @@ impl Shockwave3dMemberHandlers {
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
                                             shader_name: effective_shader_name,
+                                            visibility: 1,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
@@ -2083,10 +2084,12 @@ impl Shockwave3dMemberHandlers {
                             }
                         } else { String::new() };
 
-                        // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type)
+                        // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type),
+                        // newShader(name, #type)
                         let new_res_type = if (handler_name.eq_ignore_ascii_case("newModelResource")
                             || handler_name.eq_ignore_ascii_case("newMesh")
-                            || handler_name.eq_ignore_ascii_case("newLight")) && args.len() >= 2
+                            || handler_name.eq_ignore_ascii_case("newLight")
+                            || handler_name.eq_ignore_ascii_case("newShader")) && args.len() >= 2
                         {
                             player.get_datum(&args[1]).string_value().unwrap_or_default()
                         } else { String::new() };
@@ -2108,6 +2111,7 @@ impl Shockwave3dMemberHandlers {
                                                 resource_name: String::new(),
                                                 model_resource_name: new_model_resource_name.clone(),
                                                 shader_name: String::new(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
@@ -2119,6 +2123,7 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
@@ -2130,6 +2135,7 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
@@ -2160,14 +2166,29 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: "World".to_string(),
                                                 resource_name: String::new(), model_resource_name: String::new(),
                                                 shader_name: String::new(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
                                         "shader" => {
+                                            // newShader(name, #type). The type arg was
+                                            // dropped, so a #normalMap shader was read with
+                                            // #standard layer order and rendered its NORMAL
+                                            // map as the base texture — AreaZero's menu robot
+                                            // came out blue/purple.
+                                            let shader_type = match_ci!(new_res_type.as_str(), {
+                                                "normalmap" => W3dShaderType::NormalMap,
+                                                "painter" => W3dShaderType::Painter,
+                                                "inker" => W3dShaderType::Inker,
+                                                "engraver" => W3dShaderType::Engraver,
+                                                "newsprint" => W3dShaderType::Newsprint,
+                                                _ => W3dShaderType::LitTexture,
+                                            });
                                             scene.shaders.push(W3dShader {
                                                 name: obj_name.clone(),
+                                                shader_type,
                                                 ..Default::default()
                                             });
                                         }
@@ -2775,6 +2796,7 @@ impl Shockwave3dMemberHandlers {
                             resource_name: String::new(),
                             model_resource_name: String::new(),
                             shader_name: String::new(),
+                            visibility: 1,
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
@@ -2787,6 +2809,7 @@ impl Shockwave3dMemberHandlers {
                             resource_name: String::new(),
                             model_resource_name: String::new(),
                             shader_name: String::new(),
+                            visibility: 1,
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
