@@ -59,7 +59,7 @@ impl Default for W3dTextureLayer {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum W3dShaderType {
     LitTexture,
     Painter,
@@ -67,6 +67,10 @@ pub enum W3dShaderType {
     Engraver,
     Newsprint,
     Particle,
+    /// `#normalMap` — script-created only (no W3D block type writes one). Its
+    /// texture layers are NOT the standard "layer 1 is the base map" order:
+    /// 1 = normal map, 2 = diffuse, 3 = specular.
+    NormalMap,
 }
 
 impl Default for W3dShaderType {

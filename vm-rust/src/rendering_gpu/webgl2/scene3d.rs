@@ -1589,7 +1589,7 @@ void main() {
             let mut bound_tex_mode: u8 = 0;
             for w3d_shader in &scene.shaders {
                 if tex_bound { break; }
-                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                 if layers.diffuse.is_some() {
                     bound_tex_mode = layers.diffuse_tex_mode;
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
@@ -3755,6 +3755,7 @@ void main() {
     fn find_texture_layers<'a>(
         layers: &[crate::director::chunks::w3d::types::W3dTextureLayer],
         gpu_data: &'a MemberGpuData,
+        shader_type: W3dShaderType,
     ) -> TextureBindResult<'a> {
         let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
         let mut result = TextureBindResult {
@@ -3769,8 +3770,16 @@ void main() {
 
         let mut diffuse_name = String::new();
 
+        // A #normalMap shader fixes its layer roles by slot: 1 = normal map,
+        // 2 = diffuse, 3 = specular. Tangent-space normal mapping isn't
+        // implemented, so drop slot 1 rather than let the generic "first usable
+        // layer wins" rule paint the model with its blue/purple normal map, and
+        // route slot 3 to the specular slot the standard path already honors.
+        let normal_map_shader = shader_type == W3dShaderType::NormalMap;
+
         for (layer_idx, layer) in layers.iter().enumerate() {
             if layer.name.is_empty() { continue; }
+            if normal_map_shader && layer_idx == 0 { continue; }
             let lower = layer.name.to_lowercase();
             let tex = gpu_data.textures.get(&lower);
             let tex = match tex {
@@ -3788,7 +3797,7 @@ void main() {
             }
 
             // tex_mode 6 = specular map
-            if layer.tex_mode == 6 {
+            if layer.tex_mode == 6 || (normal_map_shader && layer_idx == 2) {
                 if result.specular.is_none() {
                     result.specular = Some(tex);
                 }
@@ -4058,7 +4067,7 @@ void main() {
 
                 // Bind texture layers
                 if let Some(gpu_data) = self.member_data.get(member_key) {
-                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
             }
@@ -4082,7 +4091,7 @@ void main() {
                         // Bind texture layers from shader binding
                         if !tex_bound {
                             if let Some(gpu_data) = self.member_data.get(member_key) {
-                                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                             }
                         }
@@ -4182,7 +4191,7 @@ void main() {
                 let mut tex_bound = false;
                 let mut has_lightmap_layer = false;
                 if let Some(gpu_data) = self.member_data.get(member_key) {
-                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                     has_lightmap_layer = !layers.extra_layers.is_empty();
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
@@ -4293,7 +4302,7 @@ void main() {
 
             let mut tex_bound = false;
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
-                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data);
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
