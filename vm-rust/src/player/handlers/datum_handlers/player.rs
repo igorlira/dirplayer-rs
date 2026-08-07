@@ -84,9 +84,20 @@ impl PlayerDatumHandlers {
         reserve_player_mut(|player| {
             let subject = player.get_datum(&args[0]).string_value().unwrap();
             match subject.as_str() {
-                // The Stage counts as a window (see `windowList` above), so the
-                // list is never empty even with no MIAWs open.
-                "windowList" => Ok(player.alloc_datum(Datum::Int(1))),
+                // EMPTY, matching `the windowList` in movie.rs: dirplayer opens no
+                // MIAWs, and movies use a zero count as the "not in a window"
+                // signal. Habbo v31 opens with
+                //     if _player.windowList.count > 0 then return stopMovie()
+                // so a count of 1 refuses to start the movie outright, and
+                // Merlin's Revenge accepts mouse input only when
+                // `(the windowList).getPos(the frontWindow)` is 0 on both sides.
+                //
+                // The dictionary does say "The Stage is also considered a
+                // window", but that describes what window() operations accept,
+                // not what a plugin with no MIAWs enumerates — and two shipping
+                // movies read it as empty. Indexing still yields the Stage (see
+                // the getProp arm above) so `windowList[1].movie` keeps working.
+                "windowList" => Ok(player.alloc_datum(Datum::Int(0))),
                 _ => Err(ScriptError::new(
                     format!("Invalid call _player.count({subject})").to_string(),
                 )),
