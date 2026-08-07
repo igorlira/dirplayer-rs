@@ -2181,7 +2181,18 @@ void main() {
                     // an opaque texture, so the `!has_opaque_texture` test dropped all 28
                     // of them into the OPAQUE pass, where they wrote depth and drew
                     // nothing.
-                    let is_additive = self.model_is_additive(scene, model_node, runtime_state);
+                    // An #add TEXTURE LAYER is a multi-texture blend INSIDE the
+                    // material - that layer adds onto the layers beneath it. It does
+                    // not mean the surface composites additively against the
+                    // framebuffer. The additive idiom this test exists for is the
+                    // one named above: shader.blend driven to 0 (opacity ~0), which
+                    // would otherwise make the model invisible.
+                    //
+                    // age-of-speed's car chassis is opacity 1.0 with an additive
+                    // detail layer; treating it as framebuffer-additive drew every
+                    // car blown-out white. Require the idiom, not just the layer.
+                    let is_additive = opacity < 0.999
+                        && self.model_is_additive(scene, model_node, runtime_state);
                     let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
                         || opacity < 0.999
                         || has_soft_alpha
