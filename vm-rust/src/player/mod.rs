@@ -3238,6 +3238,38 @@ impl DirPlayer {
 
     fn set_movie_prop(&mut self, prop: &str, value: Datum) -> Result<(), ScriptError> {
         match_ci!(prop, {
+            // Director 11.5 Scripting Dictionary lists `timeoutList` as a
+            // READ-ONLY Movie property: "a linear list containing all currently
+            // active timeout objects… Use the forget() method to delete a timeout
+            // object". Director does not RAISE on assignment though, and movies use
+            // `_movie.timeoutList = []` as a clear-all idiom — AreaZero's
+            // `[M] Misc Handlers.ClearTimeOutList` is exactly that, invoked from the
+            // reset event beside DeleteAllButtons / DeleteAllScripts / stop-all-sound.
+            // Erroring there aborted the reset and the game never started.
+            //
+            // Accept the write and give it the meaning the documented property
+            // implies: make the live set match the assigned list, forgetting every
+            // timeout it does not name (so `[]` cancels all). forget_timeout also
+            // cancels the underlying JS interval, which plain clearing would leak.
+            "timeoutList" => {
+                let keep: Vec<String> = match &value {
+                    Datum::List(_, items, _) => items
+                        .iter()
+                        .filter_map(|r| match self.get_datum(r) {
+                            Datum::TimeoutRef(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let existing: Vec<String> = self.timeout_manager.timeouts.keys().cloned().collect();
+                for name in existing {
+                    if !keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+                        self.timeout_manager.forget_timeout(&name);
+                    }
+                }
+                Ok(())
+            },
             "keyboardFocusSprite" => {
                 // TODO switch focus
                 self.keyboard_focus_sprite = value.int_value()? as i16;
