@@ -998,10 +998,12 @@ impl BitmapDatumHandlers {
 
             // Read the filter PropList. Lookup is case-insensitive on symbol /
             // string keys to match Director's convention.
-            let (filter_type, props) = match player.get_datum(&args[0]) {
+            let (filter_type, props, filter_color) = match player.get_datum(&args[0]) {
                 Datum::PropList(items, _) => {
                     let mut filter_type: Option<String> = None;
                     let mut props: HashMap<String, f64> = HashMap::new();
+                    // #color is a colour, not a number — glow/dropShadow need it.
+                    let mut filter_color: Option<(u8, u8, u8)> = None;
                     for (k, v) in items.iter() {
                         let key = match player.get_datum(k) {
                             Datum::Symbol(s) | Datum::String(s) => s.to_lowercase(),
@@ -1011,13 +1013,24 @@ impl BitmapDatumHandlers {
                             if let Datum::Symbol(s) | Datum::String(s) = player.get_datum(v) {
                                 filter_type = Some(s.to_lowercase());
                             }
+                        } else if key == "color" {
+                            if let Datum::ColorRef(cr) = player.get_datum(v) {
+                                let palettes = player.movie.cast_manager.palettes();
+                                filter_color = Some(crate::player::bitmap::bitmap::resolve_color_ref(
+                                    &palettes, cr,
+                                    &crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                                        crate::player::bitmap::bitmap::get_system_default_palette(),
+                                    ),
+                                    32,
+                                ));
+                            }
                         } else {
                             // Numeric properties for AdjustColor.
                             let val = player.get_datum(v).float_value().unwrap_or(0.0);
                             props.insert(key, val);
                         }
                     }
-                    (filter_type, props)
+                    (filter_type, props, filter_color)
                 }
                 _ => {
                     return Err(ScriptError::new(
@@ -1037,6 +1050,45 @@ impl BitmapDatumHandlers {
                     let saturation = props.get("saturation").copied().unwrap_or(0.0).clamp(-100.0, 100.0);
                     let hue = props.get("hue").copied().unwrap_or(0.0).clamp(-180.0, 180.0);
                     apply_adjust_color_filter(bitmap, brightness, contrast, saturation, hue);
+                    bitmap.mark_dirty();
+                }
+                // Outer glow / drop shadow. Both composite a blurred, coloured
+                // copy of the source's ALPHA *behind* the original; a drop shadow
+                // is just a glow offset by (distance, angle). Director/Flash
+                // measure `angle` clockwise from +x with y pointing DOWN, so the
+                // default 45 puts the shadow down-right.
+                //
+                // AreaZero's whole UI depends on these: every text style carries
+                // `#filters: [<colour>OuterGlow, <colour>DropShadow]`, and without
+                // them the baked strings have no dark edge and wash out against the
+                // bright 3D scene behind the menu.
+                "glowfilter" | "dropshadowfilter" => {
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).ok_or_else(
+                        || ScriptError::new("applyFilter: invalid bitmap".to_string()),
+                    )?;
+                    let blur_x = props.get("blurx").copied().unwrap_or(4.0).max(0.0);
+                    let blur_y = props.get("blury").copied().unwrap_or(4.0).max(0.0);
+                    // Director expresses strength as a percentage.
+                    let strength = props
+                        .get("strengthpercent")
+                        .copied()
+                        .or_else(|| props.get("strength").map(|v| v * 100.0))
+                        .unwrap_or(100.0)
+                        / 100.0;
+                    let quality = props.get("quality").copied().unwrap_or(1.0).clamp(1.0, 3.0) as u32;
+                    let (mut off_x, mut off_y) = (0.0f64, 0.0f64);
+                    if kind == "dropshadowfilter" {
+                        let distance = props.get("distance").copied().unwrap_or(4.0);
+                        let angle = props.get("angle").copied().unwrap_or(45.0);
+                        let rad = angle.to_radians();
+                        off_x = distance * rad.cos();
+                        off_y = distance * rad.sin();
+                    }
+                    let color = filter_color.unwrap_or((0, 0, 0));
+                    apply_glow_shadow_filter(
+                        bitmap, color, blur_x, blur_y, quality, strength,
+                        off_x.round() as i32, off_y.round() as i32,
+                    );
                     bitmap.mark_dirty();
                 }
                 "" => {
@@ -1183,6 +1235,116 @@ impl BitmapDatumHandlers {
 /// 16-bit bitmaps (the common cases for textures); 8-bit / palette bitmaps
 /// would need a roundtrip through the palette and are out of scope for now —
 /// the function emits a debug-log warning and skips paletted images.
+/// Composite a blurred, coloured copy of `bitmap`'s alpha BEHIND the image.
+///
+/// This is the shared core of Director's `#glowFilter` (no offset) and
+/// `#dropShadowFilter` (offset by distance/angle). Flash-family semantics:
+/// the source's ALPHA is blurred, multiplied by `strength`, tinted with
+/// `color`, and the original is drawn over the top.
+///
+/// The blur is a separable box blur repeated `quality` times — three passes of
+/// a box blur is the standard cheap approximation of a Gaussian, and is what
+/// the Flash filters themselves do.
+///
+/// Only meaningful for 32-bit images with an alpha channel; a paletted source
+/// has no alpha to blur, so it is left alone.
+fn apply_glow_shadow_filter(
+    bitmap: &mut Bitmap,
+    color: (u8, u8, u8),
+    blur_x: f64,
+    blur_y: f64,
+    quality: u32,
+    strength: f64,
+    offset_x: i32,
+    offset_y: i32,
+) {
+    if bitmap.bit_depth != 32 {
+        log::warn!(
+            "applyFilter(#glow/#dropShadow): bitmap is {}-bit; needs alpha, skipped",
+            bitmap.bit_depth
+        );
+        return;
+    }
+    let w = bitmap.width as usize;
+    let h = bitmap.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    // Source alpha, normalised.
+    let mut a: Vec<f32> = (0..w * h)
+        .map(|i| bitmap.data[i * 4 + 3] as f32 / 255.0)
+        .collect();
+
+    // Separable box blur. Radius is half the Flash blur amount (blurX is the
+    // full extent of the kernel, not its radius).
+    let rx = (blur_x / 2.0).round().max(0.0) as usize;
+    let ry = (blur_y / 2.0).round().max(0.0) as usize;
+    let mut tmp = vec![0.0f32; w * h];
+    for _ in 0..quality.max(1) {
+        if rx > 0 {
+            for y in 0..h {
+                for x in 0..w {
+                    let lo = x.saturating_sub(rx);
+                    let hi = (x + rx).min(w - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi {
+                        sum += a[y * w + s];
+                    }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+        if ry > 0 {
+            for x in 0..w {
+                for y in 0..h {
+                    let lo = y.saturating_sub(ry);
+                    let hi = (y + ry).min(h - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi {
+                        sum += a[s * w + x];
+                    }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+    }
+
+    // Composite the tinted, offset blur under the original (dest-over).
+    let (sr, sg, sb) = (color.0 as f32, color.1 as f32, color.2 as f32);
+    let src = bitmap.data.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let di = (y * w + x) * 4;
+            // Sample the blur at the shadow offset.
+            let sx = x as i32 - offset_x;
+            let sy = y as i32 - offset_y;
+            let shadow_a = if sx >= 0 && sy >= 0 && (sx as usize) < w && (sy as usize) < h {
+                (a[sy as usize * w + sx as usize] * strength as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if shadow_a <= 0.0 {
+                continue;
+            }
+            let fa = src[di + 3] as f32 / 255.0;
+            let out_a = fa + shadow_a * (1.0 - fa);
+            if out_a <= 0.0 {
+                continue;
+            }
+            for (c, sc) in [(0usize, sr), (1, sg), (2, sb)] {
+                let fc = src[di + c] as f32;
+                let out_c = (fc * fa + sc * shadow_a * (1.0 - fa)) / out_a;
+                bitmap.data[di + c] = out_c.round().clamp(0.0, 255.0) as u8;
+            }
+            bitmap.data[di + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    bitmap.use_alpha = true;
+}
+
 fn apply_adjust_color_filter(
     bitmap: &mut Bitmap,
     brightness: f64, contrast: f64, saturation: f64, hue_deg: f64,
