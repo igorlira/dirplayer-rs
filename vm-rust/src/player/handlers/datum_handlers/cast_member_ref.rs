@@ -480,8 +480,18 @@ impl CastMemberRefHandlers {
             {
                 Some(m) => m,
                 None => {
-                    // preload/unload on non-existent members are no-ops in Director
-                    if handler_name == "preload" || handler_name == "unload" {
+                    // preload/unload on non-existent members are no-ops in Director.
+                    // Compare case-INSENSITIVELY: Lingo handler names are not
+                    // case-sensitive, and movies write the camelCase spellings
+                    // (`member(x).unLoad()`). The lowercase-only compare here let
+                    // `unLoad`/`preLoad` fall through to the error below —
+                    // "Cannot call unLoad on non-existent member (-1, -1)" when a
+                    // movie unloads an empty member ref (Habbo v31 catalogue).
+                    // The no-op `matches!` further down already lists both
+                    // spellings; this guard was the odd one out.
+                    if handler_name.eq_ignore_ascii_case("preload")
+                        || handler_name.eq_ignore_ascii_case("unload")
+                    {
                         return Ok(DatumRef::Void);
                     }
                     return Err(ScriptError::new(format!(
