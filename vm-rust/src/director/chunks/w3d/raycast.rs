@@ -66,6 +66,63 @@ pub fn screen_to_ray(
 /// `width`/`height` are the current viewport (sprite) dimensions.
 /// `original_width`/`original_height` are the member's default_rect dimensions
 /// (used for distToProj and pixelAspect, matching IFX CIFXView).
+/// Pick ray for an ORTHOGRAPHIC camera (`camera.projection = #orthographic`).
+///
+/// Under a perspective camera every ray fans out from the camera position; under
+/// an orthographic one they are all parallel to the camera's forward axis and it
+/// is the ORIGIN that slides across the film plane. Feeding an orthographic
+/// camera through `screen_to_ray_shockwave` therefore aims almost every pixel
+/// somewhere it should not go, and picking misses entirely — AreaZero's menu is
+/// drawn by an orthographic camera, so none of its buttons could be hit.
+///
+/// Matches the renderer's projection exactly: `orthoHeight` world units span the
+/// viewport vertically and the horizontal extent follows the viewport aspect, so
+/// one world unit maps to `height / ortho_height` pixels.
+pub fn screen_to_ray_orthographic(
+    screen_x: f32,
+    screen_y: f32,
+    width: f32,
+    height: f32,
+    original_width: f32,
+    original_height: f32,
+    ortho_height: f32,
+    camera_world_matrix: &[f32; 16],
+) -> Ray {
+    // Same film-plane convention as the perspective path: centre origin, Y up.
+    //
+    // NO pixel-aspect correction here, unlike the perspective path. The renderer
+    // builds the orthographic frustum as `half_w = half_h * (width / height)`, so
+    // world-units-per-pixel is `ortho_height / height` on BOTH axes and the
+    // member's original (default_rect) aspect never enters. Applying the
+    // perspective path's `pixel_aspect` skewed X by that ratio — with a 320x240
+    // member on an 800x450 stage it displaced the pick by 4/3, so a click at
+    // x=305 probed x=274 and the menu buttons never registered.
+    let _ = (original_width, original_height);
+    let film_x = screen_x - (width - 1.0) * 0.5;
+    let film_y = (height - 1.0) * 0.5 - screen_y;
+
+    // Pixels -> world units. `ortho_height` spans the viewport vertically.
+    let units_per_px = if height > 0.0 { ortho_height / height } else { 1.0 };
+
+    // Origin: the film point itself, placed on the camera's near plane.
+    let origin = transform_point_4x4(
+        camera_world_matrix,
+        film_x * units_per_px,
+        film_y * units_per_px,
+        0.0,
+    );
+
+    // Direction: the camera's forward axis (-Z in camera space), rotation only.
+    let fwd = transform_point_4x4(camera_world_matrix, 0.0, 0.0, -1.0);
+    let dir = normalize([
+        fwd[0] - camera_world_matrix[12],
+        fwd[1] - camera_world_matrix[13],
+        fwd[2] - camera_world_matrix[14],
+    ]);
+
+    Ray { origin, direction: dir }
+}
+
 pub fn screen_to_ray_shockwave(
     screen_x: f32,
     screen_y: f32,
