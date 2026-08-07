@@ -1313,7 +1313,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     "ambient" => mat.ambient = color,
                                     "emissive" => {
                                         mat.emissive = color;
-                                        if s3d_ref.name.as_str().contains("overlay") {
+                                        if s3d_ref.name.as_lower_str().contains("overlay") {
                                             static EM_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                                             if EM_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
                                                 log(&format!(
@@ -4275,7 +4275,7 @@ impl Shockwave3dObjectDatumHandlers {
                                                 if mesh_idx < binding.mesh_bindings.len() {
                                                     let name = binding.mesh_bindings[mesh_idx];
                                                     if !name.is_empty() && scene.shaders.iter().any(|s| s.name == name) {
-                                                        let is_default = binding.name.as_str() == "default" || name.as_str() == "defaultshader";
+                                                        let is_default = binding.name.as_lower_str() == "default" || name.as_lower_str() == "defaultshader";
                                                         if is_default {
                                                             if default_name.is_empty() { default_name = name; }
                                                         } else {
@@ -5657,7 +5657,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 if !binding.mesh_bindings.is_empty() && !binding.mesh_bindings[0].is_empty() {
                                     // Prefer non-DefaultShader bindings
                                     let name = binding.mesh_bindings[0];
-                                    if name.as_str() != "defaultshader" {
+                                    if name.as_lower_str() != "defaultshader" {
                                         shader_name = name;
                                         break;
                                     } else if shader_name.is_empty() {
@@ -5724,7 +5724,7 @@ impl Shockwave3dObjectDatumHandlers {
                         for binding in &res_info.shader_bindings {
                             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
                                 let name = binding.mesh_bindings[mesh_idx];
-                                let is_default = binding.name.as_str() == "default" || name.as_str() == "defaultshader";
+                                let is_default = binding.name.as_lower_str() == "default" || name.as_lower_str() == "defaultshader";
                                 if is_default {
                                     if default_name.is_empty() { default_name = name; }
                                 } else {
@@ -7362,7 +7362,7 @@ fn get_persistent_node_transform(
     member_ref: &crate::player::cast_lib::CastMemberRef,
     node_name: Symbol,
 ) -> DatumRef {
-    if node_name.as_str().contains("overlay") {
+    if node_name.as_lower_str().contains("overlay") {
         static PNT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if PNT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
             log(&format!("[PNT] get_persistent_node_transform('{}')", node_name));

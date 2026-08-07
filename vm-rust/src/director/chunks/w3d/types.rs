@@ -799,7 +799,7 @@ impl W3dScene {
         }
         // Fallback: if there's only one non-default material, use it
         let non_default: Vec<_> = self.materials.iter()
-            .filter(|m| !m.name.as_str().contains("Default"))
+            .filter(|m| !m.name.as_lower_str().contains("default"))
             .collect();
         if non_default.len() == 1 {
             return Some(non_default[0].name.clone());

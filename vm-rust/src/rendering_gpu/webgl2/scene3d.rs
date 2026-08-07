@@ -1574,7 +1574,7 @@ void main() {
 
             // Try to find and bind material + texture from scene shaders
             let mut tex_bound = false;
-            if let Some(mat) = scene.materials.iter().find(|m| !m.name.as_str().contains("Default")) {
+            if let Some(mat) = scene.materials.iter().find(|m| !m.name.as_lower_str().contains("default")) {
                 self.set_material_uniforms(gl, shader, mat);
             } else {
                 self.bind_default_material(gl, shader, scene);
@@ -2101,7 +2101,7 @@ void main() {
                 // Sort: skybox nodes first so they render before scene geometry
                 let mut sorted_model_nodes: Vec<&W3dNode> = model_nodes.iter().copied().collect();
                 sorted_model_nodes.sort_by_key(|n| {
-                    if n.name.as_str().starts_with("SB_") && n.parent_name.as_str().contains("SkyBox") { 0 } else { 1 }
+                    if n.name.as_lower_str().starts_with("sb_") && n.parent_name.as_lower_str().contains("skybox") { 0 } else { 1 }
                 });
 
                 // PASS 1: Render opaque geometry (skybox first, then scene)
