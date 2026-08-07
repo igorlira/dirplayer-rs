@@ -4810,12 +4810,19 @@ void main() {
         // configure it directly (e.g. `w.light(1).color = rgb(255,255,255)`) as the
         // scene's base fill. Dropping it left ambient-lit scenes (unicraft's galaxy)
         // fully black.
+        // Match on the CASE-NORMALISED spelling with lowercase literals.
+        // `Symbol::as_str()` returns whichever casing was interned FIRST, so
+        // `matches!(name, "UIAmbient")` silently stopped matching once anything
+        // interned another casing. When `is_fallback_directional` missed, the
+        // synthetic fallback key light was no longer suppressed for a movie that
+        // lights itself and washed the scene; when `is_fallback_light` missed,
+        // `has_movie_light` counted a fallback as a real movie light.
         let is_fallback_light = |name: &str| matches!(name,
-            "DefaultAmbient" | "DefaultDirectional" | "UIAmbient" | "UIDirectional");
+            "defaultambient" | "defaultdirectional" | "uiambient" | "uidirectional");
         let is_fallback_directional = |name: &str| matches!(name,
-            "DefaultDirectional" | "UIDirectional");
+            "defaultdirectional" | "uidirectional");
         let has_movie_light = scene.lights.iter().any(|l|
-            l.enabled && !is_fallback_light(&l.name.as_str())
+            l.enabled && !is_fallback_light(l.name.as_lower_str())
             && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
 
         if scene.lights.is_empty() {
@@ -4851,7 +4858,7 @@ void main() {
                 }
                 // Suppress only the synthetic fallback *directional* key when the movie
                 // lights itself; keep the ambient fallback as Director's base fill.
-                if has_movie_light && is_fallback_directional(&light.name.as_str()) {
+                if has_movie_light && is_fallback_directional(light.name.as_lower_str()) {
                     continue;
                 }
                 // Skip lights that have been removed from world
