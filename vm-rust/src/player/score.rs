@@ -4821,6 +4821,20 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: &str, value: Datum) -> Result<
                 // Initialize size and reset rotation/skew ONLY if:
                 //  - member actually changed
                 if member_changed {
+                    // A Shockwave3D sprite's camera list belongs to the sprite+member
+                    // pairing: `sprite.camera` defaults to the new member's own first
+                    // camera, and any camera a script added with addCamera()/
+                    // AddCameraToSprite belonged to the OUTGOING member's scene.
+                    // Carrying them across a member swap kept rendering the previous
+                    // member through stale passes — AreaZero reuses channel 1 for the
+                    // menu (MenuCharacter) and then the level (Level1), so the menu's
+                    // Player1_Camera and Menu_Camera stayed attached and drew the menu
+                    // panorama and UI straight over the hangar (a white screen with the
+                    // menu's vignette). `[PS] Camera.on delete me` never detaches them,
+                    // so the member swap is the only thing that can.
+                    sprite.w3d_camera = None;
+                    sprite.w3d_cameras.clear();
+
                     if sprite.puppet {
                         sprite.reset_for_member_change();
                     }
