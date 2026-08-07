@@ -56,6 +56,10 @@ struct MemberGpuData {
     texture_content_version: u64,
     /// Texture names (lowercase) that contain alpha < 250 (need alpha blending)
     alpha_textures: std::collections::HashSet<String>,
+    /// Subset of `alpha_textures` whose alpha is a smooth ramp rather than a
+    /// binary cutout mask — these must be drawn in the blended transparent pass,
+    /// never alpha-tested. See `SOFT_ALPHA_FRACTION`.
+    soft_alpha_textures: std::collections::HashSet<String>,
 }
 
 /// 3D shader program with uniform locations
@@ -1387,6 +1391,7 @@ void main() {
         let mut textures = HashMap::new();
         let mut texture_sizes: HashMap<String, (u32, u32)> = HashMap::new();
         let mut alpha_textures = std::collections::HashSet::new();
+        let mut soft_alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
             let lower = tex_name.to_lowercase();
             // The SkyLine* textures in this game are authored vertically inverted in
@@ -1395,10 +1400,13 @@ void main() {
             // as everything else, and the texture declarations carry no orientation
             // flag, so flip these on upload to render the horizon the right way up.
             let flip_v = lower.contains("skyline");
-            if let Some((tex, w, h, has_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
+            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
                 texture_sizes.insert(lower.clone(), (w, h));
                 if has_alpha {
                     alpha_textures.insert(lower.clone());
+                }
+                if soft_alpha {
+                    soft_alpha_textures.insert(lower.clone());
                 }
                 textures.insert(lower, tex);
             }
@@ -1426,6 +1434,7 @@ void main() {
             texture_versions,
             texture_content_version: scene.texture_content_version,
             alpha_textures,
+            soft_alpha_textures,
         });
         Ok(())
     }
@@ -1477,7 +1486,7 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
         decode_and_upload_texture_impl(context, data, flip_v)
     }
 
@@ -1494,12 +1503,17 @@ void main() {
             };
             if needs_upload {
                 let flip_v = lower.contains("skyline");
-                if let Some((tex, w, h, has_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
+                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
                     gpu_data.texture_sizes.insert(lower.clone(), (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(lower.clone());
                     } else {
                         gpu_data.alpha_textures.remove(&lower);
+                    }
+                    if soft_alpha {
+                        gpu_data.soft_alpha_textures.insert(lower.clone());
+                    } else {
+                        gpu_data.soft_alpha_textures.remove(&lower);
                     }
                     gpu_data.textures.insert(lower.clone(), tex);
                     gpu_data.texture_versions.insert(lower, data_len);
@@ -1513,6 +1527,7 @@ void main() {
         gpu_data.textures.retain(|k, _| scene_keys.contains(k));
         gpu_data.texture_sizes.retain(|k, _| scene_keys.contains(k));
         gpu_data.alpha_textures.retain(|k| scene_keys.contains(k));
+        gpu_data.soft_alpha_textures.retain(|k| scene_keys.contains(k));
         gpu_data.texture_versions.retain(|k, _| scene_keys.contains(k));
 
         gpu_data.texture_content_version = scene.texture_content_version;
@@ -1704,6 +1719,8 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         clear_fbo: bool,
     ) -> Result<Option<&WebGlTexture>, JsValue> {
+        // Liveness marker: proves the running wasm carries the soft-alpha pass
+        // classification. Printed once per page load.
         self.ensure_shader(context)?;
         self.ensure_fbo(context, width, height)?;
         self.ensure_member_data(context, member_key, scene, runtime_state)?;
@@ -2150,10 +2167,35 @@ void main() {
                     //     so warehouse boxes/coils rendered as floating dark solids.
                     // Genuine translucents (galaxy glow's alpha texture, plain-colour water)
                     // have no opaque texture, so they stay in the transparent pass.
+                    //
+                    // A soft-alpha texture (a smooth alpha ramp, not a cutout mask) is
+                    // translucent on its own account, whatever the material opacity says:
+                    // the alpha-tested cutout pass would snap its ramp to on/off. AreaZero's
+                    // MenuScanLines camera filter is exactly this — opacity 1.0, but 55% of
+                    // its atlas texels carry intermediate alpha, so it was rendering as solid
+                    // black bars instead of a vignette.
+                    let has_soft_alpha = self.model_has_soft_alpha_texture(scene, model_node, &member_key, runtime_state);
+                    // An additive surface is never opaque, whatever its texture looks
+                    // like: it ADDS to the framebuffer, so it must be drawn blended and
+                    // after the geometry it sits on top of. AreaZero's MenuCharacter FX
+                    // (MuzzleFlash, BulletStreak*, Particle*, Smoke*, VisorAdd, …) bind
+                    // an opaque texture, so the `!has_opaque_texture` test dropped all 28
+                    // of them into the OPAQUE pass, where they wrote depth and drew
+                    // nothing.
+                    let is_additive = self.model_is_additive(scene, model_node, runtime_state);
                     let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
-                        || opacity < 0.999;
+                        || opacity < 0.999
+                        || has_soft_alpha
+                        || is_additive;
                     let is_transparent = wants_transparent
-                        && !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state);
+                        && (has_soft_alpha
+                            || is_additive
+                            || !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state));
+
+                    // One-shot per (member, model): which of the three passes this
+                    // model lands in, and the inputs that decided it. Deduped through
+                    // a thread-local because `shader` holds a shared borrow of `self`
+                    // for the whole of this function.
                     if is_transparent {
                         let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
                         let dx = world_matrix[12] - camera_pos[0];
@@ -3113,11 +3155,38 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> bool {
+        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, false)
+    }
+
+    /// True when a texture bound to this model has a smooth alpha ramp (not a
+    /// binary cutout mask). Such a model must go to the blended transparent pass
+    /// even at material opacity 1.0 — alpha-testing it would quantise the ramp.
+    fn model_has_soft_alpha_texture(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, true)
+    }
+
+    /// Shared walk of every shader that can affect `model_node`, testing whether
+    /// any of its texture layers names a texture in the alpha (or soft-alpha) set.
+    fn model_binds_texture_in(
+        &self,
+        scene: &W3dScene,
+        model_node: &W3dNode,
+        member_key: &(i32, i32),
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        soft_only: bool,
+    ) -> bool {
         let gpu_data = match self.member_data.get(member_key) {
             Some(d) => d,
             None => return false,
         };
-        if gpu_data.alpha_textures.is_empty() { return false; }
+        let set = if soft_only { &gpu_data.soft_alpha_textures } else { &gpu_data.alpha_textures };
+        if set.is_empty() { return false; }
 
         // Collect all shader names that affect this model
         let mut shader_names: Vec<String> = Vec::new();
@@ -3150,7 +3219,7 @@ void main() {
         for shader_name in &shader_names {
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name) {
                 for layer in &w3d_shader.texture_layers {
-                    if gpu_data.alpha_textures.contains(&layer.name.to_lowercase()) {
+                    if set.contains(&layer.name.to_lowercase()) {
                         return true;
                     }
                 }
@@ -3809,7 +3878,24 @@ void main() {
             // shifts its base texture to textureList[2] (slot 0 in the layer
             // array left empty); a strict "position 0 only" rule misses it
             // and the model renders as if untextured.
-            let is_baked_lighting = lower.contains("lightmap") || lower.contains("shadow");
+            // A baked lighting layer is one that ACCOMPANIES a diffuse, never the
+            // only texture on the shader. The name test alone misfires whenever a
+            // model's actual surface art happens to be called "...Shadow..." —
+            // AreaZero's `MenuPlayerShadow_Material` binds a single texture,
+            // `MenuPlayerShadow_Texture`, which is the blob-shadow/decal ATLAS for
+            // the player shadow, bullet holes and blast marks. Rejecting it left
+            // `result.diffuse` empty, so `bind_texture_layers` returned false, the
+            // caller fell through to its material-only path with
+            // `u_has_texture = 0`, and the quads rendered as flat WHITE mats on the
+            // floor with the decals missing entirely.
+            //
+            // Require corroboration from position: only a layer AFTER the first
+            // usable one can be baked lighting. Phosphor's lightmap sits in a later
+            // slot, so its case is unaffected; a lone texture is always the diffuse.
+            let is_baked_lighting = (lower.contains("lightmap") || lower.contains("shadow"))
+                && (result.diffuse.is_some() || layers.iter().skip(layer_idx + 1).any(|l| {
+                    !l.name.is_empty() && gpu_data.textures.contains_key(&l.name.to_lowercase())
+                }));
             if !is_baked_lighting && result.diffuse.is_none() {
                 result.diffuse = Some(tex);
                 diffuse_name = lower;
@@ -4073,27 +4159,66 @@ void main() {
             }
         }
 
-        // If no shader on node, try model resource shader bindings
-        if !mat_found {
+        // Fall back to the model resource's shader bindings when the node's own
+        // shader produced no MATERIAL *or* no TEXTURE.
+        //
+        // Gating this on `!mat_found` alone was wrong: a node whose shader_name is
+        // "DefaultShader" resolves DefaultMaterial, so mat_found went true and the
+        // fallback was skipped even though nothing textured the model. Director
+        // binds the real material through the resource's per-mesh bindings, and
+        // AreaZero leaves the node field at "DefaultShader" for its whole
+        // MenuCharacter cast — PlayerShadow001-004, BulletHole*, BlastMark* all
+        // drew as untextured white quads on the floor.
+        //
+        // Also try EVERY binding group, not just the first: the first is usually
+        // the generic "default"/DefaultShader group, with the model's real
+        // material in a later one. DefaultShader is therefore considered last.
+        if !mat_found || !tex_bound {
             let resource = if !model_node.model_resource_name.is_empty() {
                 &model_node.model_resource_name
             } else {
                 &model_node.resource_name
             };
             if let Some(res_info) = scene.model_resources.get(resource) {
-                if let Some(binding) = res_info.shader_bindings.first() {
-                    // Resolve binding name → shader → material
-                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, &binding.name) {
-                        if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name) {
+                let mut candidates: Vec<String> = Vec::new();
+                for binding in &res_info.shader_bindings {
+                    for mb in binding.mesh_bindings.iter().filter(|b| !b.is_empty()) {
+                        candidates.push(mb.clone());
+                    }
+                    if !binding.name.is_empty() {
+                        candidates.push(binding.name.clone());
+                    }
+                }
+                // Stable partition: specific shaders first, DefaultShader last.
+                candidates.sort_by_key(|c| c.eq_ignore_ascii_case("DefaultShader"));
+
+                for cand in &candidates {
+                    if tex_bound {
+                        break;
+                    }
+                    let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, cand) else { continue };
+                    let bound = if let Some(gpu_data) = self.member_data.get(member_key) {
+                        let layers = Self::find_texture_layers(
+                            &w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type,
+                        );
+                        Self::bind_texture_layers(gl, shader, &layers)
+                    } else {
+                        false
+                    };
+                    if bound {
+                        tex_bound = true;
+                        // The shader that supplied the texture owns the material too —
+                        // otherwise the model keeps DefaultMaterial's colours.
+                        if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name)
+                            .or_else(|| Self::find_material_ci(&scene.materials, &w3d_shader.name))
+                        {
                             self.set_material_uniforms(gl, shader, mat);
                             mat_found = true;
                         }
-                        // Bind texture layers from shader binding
-                        if !tex_bound {
-                            if let Some(gpu_data) = self.member_data.get(member_key) {
-                                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
-                                tex_bound = Self::bind_texture_layers(gl, shader, &layers);
-                            }
+                    } else if !mat_found {
+                        if let Some(mat) = Self::find_material_ci(&scene.materials, &w3d_shader.material_name) {
+                            self.set_material_uniforms(gl, shader, mat);
+                            mat_found = true;
                         }
                     }
                 }
@@ -4146,14 +4271,110 @@ void main() {
 
     /// Get the first texture layer's blend_func for a model node
     fn get_first_blend_func(&self, scene: &W3dScene, node: &W3dNode, runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>) -> u8 {
-        let effective_shader = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, &node.name, None))
-            .cloned()
-            .unwrap_or_else(|| node.shader_name.clone());
-        Self::find_shader_ci(&scene.shaders, &effective_shader)
-            .and_then(|s| s.texture_layers.first())
-            .map(|l| l.blend_func)
-            .unwrap_or(0)
+        // Consider EVERY shader that can affect this model, not just the node's
+        // own `shader_name`. Director binds a material through the model
+        // RESOURCE's per-mesh shader bindings; the node field is frequently left
+        // at "DefaultShader" (all of AreaZero's MenuCharacter FX are like this).
+        // Reading only the node field returned DefaultShader's blend func, so an
+        // additive surface never reached the additive branch of
+        // `apply_blend_mode` — and with `shader.blend = 0` the draw was then
+        // multiplied to nothing, which is why the muzzle flash, bullet streaks
+        // and sparks stayed invisible even once the pass routing was right.
+        let mut names: Vec<String> = Vec::new();
+        if let Some(rs) = runtime_state {
+            if let Some(over) = Self::node_shader_override(rs, &node.name, None) {
+                names.push(over.clone());
+            }
+        }
+        if !node.shader_name.is_empty() {
+            names.push(node.shader_name.clone());
+        }
+        let resource = if !node.model_resource_name.is_empty() {
+            &node.model_resource_name
+        } else {
+            &node.resource_name
+        };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for binding in &res_info.shader_bindings {
+                names.extend(binding.mesh_bindings.iter().cloned());
+            }
+        }
+        // An #add layer on ANY contributing shader wins — the surface is additive.
+        let mut first = 0u8;
+        let mut seen = false;
+        for n in names.iter().filter(|n| !n.is_empty()) {
+            if let Some(sh) = Self::find_shader_ci(&scene.shaders, n) {
+                let bf = Self::effective_blend_func(sh);
+                if bf == 1 {
+                    return 1;
+                }
+                if !seen {
+                    first = bf;
+                    seen = true;
+                }
+            }
+        }
+        first
+    }
+
+    /// The blend function that actually decides how a shader composites.
+    ///
+    /// Normally that is texture layer 1's, but Director's standard ADDITIVE
+    /// idiom puts the additive contribution on a LATER layer. `[M] 3D Shaders`
+    /// `BlendShader` builds it like this:
+    ///
+    /// ```lingo
+    /// tShader.blend = 0.0                    -- base contributes nothing
+    /// tShader.blendFunctionList[1] = #blend
+    /// tShader.blendConstantList[1] = 0.0
+    /// tShader.textureList[2] = tShader.textureList[1]
+    /// tShader.blendFunctionList[2] = #add    -- SAME texture, added on top
+    /// ```
+    ///
+    /// Reading only layer 1 saw `#blend` at constant 0 and drew nothing, so
+    /// AreaZero's muzzle flash, bullet streaks, sparks and smoke never appeared
+    /// (defect 3.2). If ANY layer is `#add` (IFX blend func 1) the surface is
+    /// additive.
+    fn effective_blend_func(shader: &crate::director::chunks::w3d::types::W3dShader) -> u8 {
+        if shader.texture_layers.iter().any(|l| l.blend_func == 1) {
+            return 1;
+        }
+        shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0)
+    }
+
+    /// True when a model composites additively — its shader carries an `#add`
+    /// texture layer. Such a model must reach the blended pass regardless of
+    /// `shader.blend`, which the additive idiom deliberately sets to 0.
+    fn model_is_additive(
+        &self,
+        scene: &W3dScene,
+        node: &W3dNode,
+        runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+    ) -> bool {
+        let mut names: Vec<String> = Vec::new();
+        if let Some(rs) = runtime_state {
+            if let Some(map) = rs.node_shaders.get(&node.name) {
+                names.extend(map.values().cloned());
+            }
+        }
+        if !node.shader_name.is_empty() {
+            names.push(node.shader_name.clone());
+        }
+        let resource = if !node.model_resource_name.is_empty() {
+            &node.model_resource_name
+        } else {
+            &node.resource_name
+        };
+        if let Some(res_info) = scene.model_resources.get(resource) {
+            for binding in &res_info.shader_bindings {
+                names.extend(binding.mesh_bindings.iter().cloned());
+            }
+        }
+        names.iter().any(|n| {
+            Self::find_shader_ci(&scene.shaders, n)
+                .map(|s| s.texture_layers.iter().any(|l| l.blend_func == 1))
+                .unwrap_or(false)
+        })
     }
 
     /// Bind material for a specific mesh index using model resource shader bindings
@@ -4212,7 +4433,9 @@ void main() {
                 if tex_bound && !w3d_shader.use_diffuse_with_texture {
                     gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
                 }
-                let first_bf = w3d_shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0);
+                // effective_blend_func, not layer 0: Director's additive idiom puts
+                // the #add on a LATER layer (layer 0 is #blend at constant 0).
+                let first_bf = Self::effective_blend_func(w3d_shader);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return true;
@@ -4268,6 +4491,20 @@ void main() {
             }
         }
 
+        // DefaultShader last. It is the generic fallback every exporter writes into
+        // the "default" binding group, and it usually carries a DefaultTexture — so
+        // when it is tried FIRST it binds that placeholder and wins, and the model's
+        // real material is never reached. The `best_material` selection below
+        // already guards against DefaultShader; the TEXTURE search did not, so a
+        // member whose DefaultTexture happens to have image data rendered entirely
+        // in the placeholder. AreaZero's Level1 does exactly that — the whole hangar
+        // drew flat white while passes from other members on the same sprite (the
+        // FPS weapon view) looked correct.
+        //
+        // Stable sort: everything else keeps its authored order, DefaultShader moves
+        // to the end, and it still wins when it is the only candidate.
+        candidate_names.sort_by_key(|c| c.eq_ignore_ascii_case("DefaultShader"));
+
         let mut best_material: Option<&W3dMaterial> = None;
         let mut best_blend_func = 0u8;
 
@@ -4294,9 +4531,10 @@ void main() {
             // materials (e.g., cloned models with yellow emissive from their source member).
             if best_material.is_none() && !(candidate.eq_ignore_ascii_case("DefaultShader") && candidate_names.len() > 1) {
                 best_material = mat;
+                // See effective_blend_func: an #add layer anywhere makes the
+                // surface additive, and it is never layer 0 in Director's idiom.
                 best_blend_func = w3d_shader
-                    .and_then(|s| s.texture_layers.first())
-                    .map(|l| l.blend_func)
+                    .map(|s| Self::effective_blend_func(s))
                     .unwrap_or(0);
             }
 
@@ -4315,9 +4553,14 @@ void main() {
                 if !use_diffuse {
                     gl.uniform4f(shader.u_diffuse_color.as_ref(), 1.0, 1.0, 1.0, 1.0);
                 }
+                // effective_blend_func, not layer 0. This is the call that actually
+                // decides how AreaZero's MenuCharacter FX composite: their material
+                // is bound per-mesh through the model resource, and layer 0 is
+                // `#blend` at constant 0 with the `#add` on layer 1. Reading layer 0
+                // gave 3, so the additive branch never ran and the muzzle flash,
+                // bullet streaks and sparks drew nothing.
                 let first_bf = w3d_shader
-                    .and_then(|s| s.texture_layers.first())
-                    .map(|l| l.blend_func)
+                    .map(|s| Self::effective_blend_func(s))
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
@@ -4389,6 +4632,13 @@ void main() {
         // whose whole face is IFX_MODULATE), so `u_texture_unlit` stays off here.
         let _ = first_layer_blend_func;
         gl.uniform1i(shader.u_texture_unlit.as_ref(), 0);
+        // Director's additive idiom sets `shader.blend = 0` so the BASE layer
+        // contributes nothing, then adds the real contribution on an `#add`
+        // layer. That 0 must not be folded into the additive draw as well or it
+        // multiplies the result to nothing — the flash/sparks/streaks vanish.
+        if first_layer_blend_func == 1 {
+            gl.uniform1f(shader.u_opacity.as_ref(), 1.0);
+        }
         if opacity < 1.0 || first_layer_blend_func == 1 || force_blend {
             gl.enable(WebGl2RenderingContext::BLEND);
             if first_layer_blend_func == 1 {
@@ -4816,11 +5066,13 @@ void main() {
             .map(|&m| m == 1)
             .unwrap_or(false);
 
+        let stored_ortho_h = runtime_state
+            .and_then(|rs| rs.camera_ortho_height.get(&cam_name.to_ascii_lowercase()))
+            .copied();
+
         let mut proj = if is_ortho {
-            let ortho_h = runtime_state
-                .and_then(|rs| rs.camera_ortho_height.get(&cam_name.to_ascii_lowercase()))
-                .copied()
-                .unwrap_or(100.0);
+            // Director's documented default orthoHeight is 200.0 world units.
+            let ortho_h = stored_ortho_h.unwrap_or(200.0);
             let half_h = ortho_h * 0.5;
             let half_w = half_h * aspect;
             orthographic(-half_w, half_w, -half_h, half_h, near, far)
@@ -5030,7 +5282,13 @@ void main() {
 
 /// Decode image data (raw RGBA, DXT, JPEG/PNG) and upload as a WebGL2 texture.
 /// Free function to avoid borrow conflicts when called during incremental updates.
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool)> {
+/// Fraction of a texture's texels that must carry intermediate alpha before the
+/// texture counts as translucent rather than an alpha-keyed cutout mask. An
+/// anti-aliased cutout only spends its outline on partial alpha — a few percent
+/// even for fine foliage — so the gap between the two populations is wide.
+const SOFT_ALPHA_FRACTION: f32 = 0.20;
+
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -5185,7 +5443,18 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
     // Detect if texture has meaningful alpha (any pixel alpha < 250)
     let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
-    Some((texture, width, height, has_alpha))
+    // Distinguish a CUTOUT mask (alpha is essentially binary — foliage, decals,
+    // icon atlases; only anti-aliased edge texels sit in between) from a genuinely
+    // TRANSLUCENT texture (a broad spread of intermediate alpha). Director always
+    // alpha-blends; the alpha-tested cutout pass is our approximation and is only
+    // equivalent when the mask is binary. Applied to a soft texture it quantises
+    // every texel to fully-on/fully-off — AreaZero's MenuScanLines camera filter
+    // (55% of its texels are mid-alpha) came out as solid black bars.
+    let total = rgba_data.len() / 4;
+    let soft = rgba_data.chunks(4).filter(|p| p[3] >= 16 && p[3] < 240).count();
+    let soft_alpha = total > 0 && (soft as f32 / total as f32) > SOFT_ALPHA_FRACTION;
+
+    Some((texture, width, height, has_alpha, soft_alpha))
 }
 
 // ─── DXT texture decompression ───
