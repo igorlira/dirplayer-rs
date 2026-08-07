@@ -2695,7 +2695,7 @@ impl Shockwave3dObjectDatumHandlers {
             // IFX BlendFunction bytes: 0=replace(SELECT_ARG0), 1=add,
             // 2=multiply(MODULATE), 3=blend(INTERPOLATE). See IFXShaderLitTexture.h.
             let blend_val = match &value {
-                Datum::Symbol(s) => match s.as_str() {
+                Datum::Symbol(s) => match s.as_lower_str() {
                     "replace" => 0u8,
                     "add" => 1,
                     "blend" => 3,
@@ -4516,6 +4516,10 @@ impl Shockwave3dObjectDatumHandlers {
                     // args[0] = property name (symbol/string), args[1] = index
                     if args.len() >= 2 {
                         let prop_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
+                        // `string_value` on a `#shaderList` symbol yields its DISPLAY
+                        // spelling, which is whichever casing was interned first — so
+                        // match on the normalised form, as Director does.
+                        let prop_lc = prop_name.to_ascii_lowercase();
                         let index = player.get_datum(&args[1]).int_value()?;
                         let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
 
@@ -4534,8 +4538,8 @@ impl Shockwave3dObjectDatumHandlers {
 
                         // For collection props (shaderList, textureList, etc), directly get the Nth item
                         let idx = (index as usize).saturating_sub(1); // 1-based to 0-based
-                        let collection_result = match prop_name.as_str() {
-                            "shaderList" => {
+                        let collection_result = match prop_lc.as_str() {
+                            "shaderlist" => {
                                 // Check node_shaders first for per-mesh overrides
                                 // (set by Lingo: model.shaderList[i] = clonedShader)
                                 {
@@ -4623,7 +4627,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(player.alloc_datum(Datum::Void))
                                 }
                             }
-                            "textureList" => {
+                            "texturelist" => {
                                 // Read from persistent textureList, auto-extend if needed
                                 let list_ref = {
                                     let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -4706,7 +4710,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                             }
-                            "textureTransformList" | "wrapTransformList" => {
+                            "texturetransformlist" | "wraptransformlist" => {
                                 // Return persistent Transform3D from the texture transform list
                                 let list_ref = {
                                     let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -4765,7 +4769,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(transform_ref)
                                 }
                             }
-                            "blendFunctionList" => {
+                            "blendfunctionlist" => {
                                 // Return the blend function at index from texture layers
                                 let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
                                 if let Some(s) = shader {
@@ -4784,7 +4788,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(player.alloc_datum(Datum::Symbol(Symbol::from_str("multiply"))))
                                 }
                             }
-                            "textureModeList" => {
+                            "texturemodelist" => {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 let mode = member.and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|w3d| w3d.parsed_scene.as_ref())
@@ -4800,7 +4804,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     .unwrap_or("none");
                                 Some(player.alloc_datum(Datum::Symbol(Symbol::from_str(mode))))
                             }
-                            "textureRepeatList" => {
+                            "texturerepeatlist" => {
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 let val = member.and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|w3d| w3d.parsed_scene.as_ref())
@@ -4810,7 +4814,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     .unwrap_or(1);
                                 Some(player.alloc_datum(Datum::Int(val)))
                             }
-                            "blendSourceList" => {
+                            "blendsourcelist" => {
                                 // Return blend source for texture layer at index (default #constant)
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 let val = member.and_then(|m| m.member_type.as_shockwave3d())
@@ -4823,7 +4827,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     .unwrap_or("constant");
                                 Some(player.alloc_datum(Datum::Symbol(Symbol::from_str(val))))
                             }
-                            "blendConstantList" => {
+                            "blendconstantlist" => {
                                 // Return blend constant for texture layer at index (default 50.0)
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                                 let val = member.and_then(|m| m.member_type.as_shockwave3d())
@@ -4835,7 +4839,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 Some(player.alloc_datum(Datum::Float(val)))
                             }
                             // bonesPlayer.bone[n] — return bone ref
-                            "bone" if s3d_ref.object_type == "bonesPlayer" => {
+                            "bone" if s3d_ref.object_type == "bonesplayer" => {
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                                 Some(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                                     cast_lib: member_ref.cast_lib,
@@ -4845,7 +4849,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 })))
                             }
                             // meshDeform.mesh[n] — return meshDeformMesh ref directly
-                            "mesh" if s3d_ref.object_type == "meshDeform" => {
+                            "mesh" if s3d_ref.object_type == "meshdeform" => {
                                 use crate::director::lingo::datum::Shockwave3dObjectRef;
                                 // s3d_ref.name is the model name
                                 Some(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
@@ -4856,7 +4860,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 })))
                             }
                             // modelResource.face[n] — return item from persistent face list
-                            "face" if s3d_ref.object_type == "modelResource" => {
+                            "face" if s3d_ref.object_type == "modelresource" => {
                                 let face_key = Symbol::from_str(&format!("face:{}", s3d_ref.name));
                                 let list_ref = {
                                     let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -4902,7 +4906,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                             }
                             // meshDeformMesh.textureLayer[n] — return a meshDeformTexLayer ref
-                            "textureLayer" if s3d_ref.object_type == "meshDeformMesh" => {
+                            "texturelayer" if s3d_ref.object_type == "meshdeformmesh" => {
                                 let parts: Vec<&str> = s3d_ref.name.as_str().splitn(2, ':').collect();
                                 let model_name = parts.get(0).unwrap_or(&"").to_string();
                                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -4915,7 +4919,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 })))
                             }
                             // meshDeformMesh.vertexList[j] — return the j-th vertex vector
-                            "vertexList" if s3d_ref.object_type == "meshDeformMesh" => {
+                            "vertexlist" if s3d_ref.object_type == "meshdeformmesh" => {
                                 let parts: Vec<&str> = s3d_ref.name.as_str().splitn(2, ':').collect();
                                 let model_name_str = parts.get(0).unwrap_or(&"");
                                 let model_name = Symbol::from_str(model_name_str);
@@ -4955,7 +4959,7 @@ impl Shockwave3dObjectDatumHandlers {
                             // indices [v1,v2,v3] (Director's meshDeform face[] convention; the
                             // Director message-window shows e.g. [1,2,3],[4,5,6],…). Lets us diff
                             // dirplayer's decoded triangulation against Director's.
-                            "face" if s3d_ref.object_type == "meshDeformMesh" => {
+                            "face" if s3d_ref.object_type == "meshdeformmesh" => {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
                                 let model_name = parts.get(0).unwrap_or(&"").to_string();
                                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -5124,6 +5128,9 @@ impl Shockwave3dObjectDatumHandlers {
                     // allocating intermediate lists (avoids datum slot recycling)
                     if !args.is_empty() {
                         let prop_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
+                        // See the note in `getPropRef`: symbol display casing is
+                        // first-interned casing, so normalise before matching.
+                        let prop_lc = prop_name.to_ascii_lowercase();
                         let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                         let scene = {
                             let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
@@ -5136,8 +5143,8 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                         };
                         // Direct count computation for known collection properties
-                        let count = match prop_name.as_str() {
-                            "shaderList" => {
+                        let count = match prop_lc.as_str() {
+                            "shaderlist" => {
                                 // Count = number of meshes in the model resource
                                 let node = scene.nodes.iter().find(|n| n.name == s3d_ref.name);
                                 let resource_name: Option<&Symbol> = node.map(|n| {
@@ -5151,9 +5158,9 @@ impl Shockwave3dObjectDatumHandlers {
                                         .unwrap_or(0))
                                     .unwrap_or(if node.map(|n| !n.shader_name.is_empty()).unwrap_or(false) { 1 } else { 0 })
                             }
-                            "textureList" | "textureModeList" | "textureRepeatList"
-                            | "blendFunctionList" | "blendSourceList" | "blendConstantList"
-                            | "textureTransformList" | "wrapTransformList" => {
+                            "texturelist" | "texturemodelist" | "texturerepeatlist"
+                            | "blendfunctionlist" | "blendsourcelist" | "blendconstantlist"
+                            | "texturetransformlist" | "wraptransformlist" => {
                                 let shader = scene.shaders.iter().find(|s| s.name == s3d_ref.name);
                                 shader.map(|s| s.texture_layers.len().max(1)).unwrap_or(1)
                             }
@@ -5176,7 +5183,7 @@ impl Shockwave3dObjectDatumHandlers {
                             "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).count(),
                             "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count(),
                             "motion" => scene.motions.len(),
-                            "modelResource" => scene.model_resources.len(),
+                            "modelresource" => scene.model_resources.len(),
                             "bone" => {
                                 // bonesPlayer.bone.count / resource.bone.count — the
                                 // owning model's (or resource's) skeleton bone count.
@@ -5184,7 +5191,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     .map(|s| s.bones.len())
                                     .unwrap_or(0)
                             }
-                            "playList" => {
+                            "playlist" => {
                                 // Director's playList includes the currently playing motion
                                 // as entry [1], then the queued motions.
                                 let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
@@ -5214,7 +5221,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     })
                                     .unwrap_or(0)
                             }
-                            "vertexList" => {
+                            "vertexlist" => {
                                 // meshDeformMesh.vertexList.count — get vertex count from mesh data
                                 let parts: Vec<&str> = s3d_ref.name.as_str().splitn(2, ':').collect();
                                 let mdl_name = Symbol::from_str(parts.get(0).unwrap_or(&""));
@@ -5316,7 +5323,7 @@ impl Shockwave3dObjectDatumHandlers {
                             // `repeat with i = 1 to ....count` loop never ran, so the
                             // rescaled list written back was empty even though the
                             // getter itself returns the UVs correctly.
-                            "textureCoordinateList" => {
+                            "texturecoordinatelist" => {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
                                 let mdl_name = parts.get(0).unwrap_or(&"").to_string();
                                 let m_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -5351,7 +5358,7 @@ impl Shockwave3dObjectDatumHandlers {
                             "child" => {
                                 scene.nodes.iter().filter(|n| n.parent_name == s3d_ref.name).count()
                             }
-                            "textureLayer" => {
+                            "texturelayer" => {
                                 // meshDeformMesh.count(#textureLayer) — read from persistent list
                                 let parts: Vec<&str> = s3d_ref.name.as_str().splitn(2, ':').collect();
                                 let mdl_name = Symbol::from_str(parts.get(0).unwrap_or(&""));
@@ -8132,7 +8139,7 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
         let modes: Vec<u8> = if let Datum::List(_, items, _) = player.get_datum(&list_ref) {
             items.iter().map(|item_ref| {
                 match player.get_datum(item_ref) {
-                    Datum::Symbol(s) => match s.as_str() {
+                    Datum::Symbol(s) => match s.as_lower_str() {
                         "none" => 0u8,
                         "reflection" => 4,
                         "wrapplanar" => 5,

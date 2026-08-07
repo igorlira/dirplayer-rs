@@ -189,23 +189,23 @@ impl Transform3dDatumHandlers {
     }
 
     pub fn call(datum: &DatumRef, handler_name: Symbol, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name.as_lower_str() {
             "identity" => Self::identity(datum),
             "translate" => Self::translate(datum, args, true),    // Director translate = pre-multiply (moves in local space)
-            "preTranslate" => Self::translate(datum, args, false),
+            "pretranslate" => Self::translate(datum, args, false),
             "rotate" => Self::rotate(datum, args, true),     // Director rotate = pre-multiply (R*M, transforms position)
-            "preRotate" => Self::rotate(datum, args, false), // Director preRotate = post-multiply (M*R, doesn't transform position)
+            "prerotate" => Self::rotate(datum, args, false), // Director preRotate = post-multiply (M*R, doesn't transform position)
             "scale" => Self::scale(datum, args, true),
-            "preScale" => Self::scale(datum, args, false),
+            "prescale" => Self::scale(datum, args, false),
             "inverse" => Self::inverse(datum),
             "invert" => Self::invert(datum),
             "duplicate" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
             "interpolate" => Self::interpolate(datum, args),
-            "interpolateTo" => Self::interpolate_to(datum, args),
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
-            "getProp" | "getPropRef" => {
+            "interpolateto" => Self::interpolate_to(datum, args),
+            "getat" => Self::get_at(datum, args),
+            "setat" => Self::set_at(datum, args),
+            "getprop" | "getpropref" => {
                 // transform.rotation[3] → getProp(#rotation, 3)
                 reserve_player_mut(|player| {
                     let prop_name = player.get_datum(&args[0]).symbol_value()?;

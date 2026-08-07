@@ -66,33 +66,33 @@ impl VoidDatumHandlers {
         _: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("void")))),
             "count" | "length" => Ok(player.alloc_datum(Datum::Int(0))),
             "x" | "y" | "z" | "magnitude" => Ok(player.alloc_datum(Datum::Float(0.0))),
             "position" | "rotation" | "scale" => Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]))),
             "string" => Ok(player.alloc_datum(Datum::String("".to_owned()))),
-            "childNodes" => {
+            "childnodes" => {
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List,
                     VecDeque::new(),
                     false,
                 )))
             }
-            "firstChild" | "lastChild" | "parentNode" | "nextSibling" | "previousSibling" => {
+            "firstchild" | "lastchild" | "parentnode" | "nextsibling" | "previoussibling" => {
                 Ok(player.alloc_datum(Datum::Void))
             }
-            "nodeName" | "nodeValue" => {
+            "nodename" | "nodevalue" => {
                 Ok(player.alloc_datum(Datum::String("".to_owned())))
             }
             "attributes" => {
                 Ok(player.alloc_datum(Datum::Void))
             }
             "name" | "type" | "number" | "member"
-            | "transform" | "parent" | "shader" | "shaderList"
+            | "transform" | "parent" | "shader" | "shaderlist"
             | "visibility" | "visible" | "blend" | "resource"
-            | "texture" | "textureList" | "renderFormat"
-            | "locH" | "locV" => {
+            | "texture" | "texturelist" | "renderformat"
+            | "loch" | "locv" => {
                 Ok(player.alloc_datum(Datum::Void))
             }
             "char" | "word" | "line" | "item" => {

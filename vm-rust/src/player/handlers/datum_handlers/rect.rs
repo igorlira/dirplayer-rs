@@ -38,9 +38,9 @@ impl RectDatumHandlers {
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
+        match handler_name.as_lower_str() {
+            "getat" => Self::get_at(datum, args),
+            "setat" => Self::set_at(datum, args),
             "intersect" => Self::intersect(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             "offset" => Self::offset(datum, args),
@@ -49,7 +49,7 @@ impl RectDatumHandlers {
             // four elements here: left, top, right, bottom.
             "count" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(4)))),
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for rect"
+                "no handler {handler_name} for rect"
             ))),
         }
     }
@@ -174,7 +174,7 @@ impl RectDatumHandlers {
         let right = vals[2];
         let bottom = vals[3];
 
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "ilk" => Ok(Datum::Symbol(Symbol::from_str("rect"))),
             "width" => Ok(Datum::from_f64(right - left)),
             "height" => Ok(Datum::from_f64(bottom - top)),
@@ -187,7 +187,7 @@ impl RectDatumHandlers {
     }
 
     pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
-        let idx = match prop.as_str() {
+        let idx = match prop.as_lower_str() {
             "left" => 0usize,
             "top" => 1usize,
             "right" => 2usize,

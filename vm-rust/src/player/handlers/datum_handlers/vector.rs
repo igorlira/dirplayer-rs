@@ -196,7 +196,7 @@ impl VectorDatumHandlers {
             .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
             super::transform3d::mark_transform_dirty(&parent_ref);
             if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
-                match sub_prop.as_str() {
+                match sub_prop.as_lower_str() {
                     "position" => {
                         m[12] = vec[0]; m[13] = vec[1]; m[14] = vec[2];
                     }

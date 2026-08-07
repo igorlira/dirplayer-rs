@@ -309,7 +309,7 @@ impl TimeoutDatumHandlers {
         match timeout_datum {
             Datum::TimeoutRef(timeout_name) => {
                 let timeout = player.timeout_manager.get_timeout(timeout_name);
-                match prop.as_str() {
+                match prop.as_lower_str() {
                     "name" => Ok(player.alloc_datum(Datum::String(timeout_name.to_owned()))),
                     "target" => Ok(timeout.map_or(DatumRef::Void, |x| x.target_ref.clone())),
                     "period" => {
@@ -323,7 +323,7 @@ impl TimeoutDatumHandlers {
                 }
             }
             Datum::TimeoutInstance(ti) => {
-                match prop.as_str() {
+                match prop.as_lower_str() {
                     "name" => Ok(player.alloc_datum(Datum::String(ti.name.to_owned()))),
                     "target" => Ok(ti.target.clone()),
                     "period" => {

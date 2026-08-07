@@ -10,11 +10,11 @@ pub struct ScriptDatumHandlers {}
 
 impl ScriptDatumHandlers {
     pub fn has_async_handler(obj_ref: &DatumRef, name: Symbol) -> bool {
-        match name.as_str() {
+        match name.as_lower_str() {
             "new" => true,
             // `birth` on a ScriptRef is the Director 6 constructor (see `birth`).
             "birth" => true,
-            "rawNew" => false,
+            "rawnew" => false,
             "handler" => false,
             _ => {
                 reserve_player_ref(|player| {
@@ -41,10 +41,10 @@ impl ScriptDatumHandlers {
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
+        match handler_name.as_lower_str() {
             "new" => Self::new(obj_ref, args).await,
             "birth" => Self::birth(obj_ref, args).await,
-            "rawNew" => Self::raw_new(obj_ref),
+            "rawnew" => Self::raw_new(obj_ref),
             _ => {
                 // Try to call a handler defined in the script itself
                 let handler_ref = reserve_player_ref(|player| {
@@ -100,8 +100,8 @@ impl ScriptDatumHandlers {
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
-            "rawNew" => Self::raw_new(datum),
+        match handler_name.as_lower_str() {
+            "rawnew" => Self::raw_new(datum),
             "handler" => Self::handler(datum, args),
             "handlers" => Self::handlers(datum, args),
             // A movie script's static properties are addressable through the
@@ -109,7 +109,7 @@ impl ScriptDatumHandlers {
             // data store: `g.levellist = []`, `g.levellist.add(...)`, etc.).
             // getPropRef returns the property's shared DatumRef so in-place list
             // mutation persists, mirroring the ScriptInstance handler.
-            "getProp" | "getPropRef" | "getaProp" => reserve_player_mut(|player| {
+            "getprop" | "getpropref" | "getaprop" => reserve_player_mut(|player| {
                 let script_ref = match player.get_datum(datum) {
                     Datum::ScriptRef(s) => s.clone(),
                     _ => return Err(ScriptError::new("Expected script reference".to_string())),
@@ -128,7 +128,7 @@ impl ScriptDatumHandlers {
                     Ok(prop_ref)
                 }
             }),
-            "setProp" | "setaProp" => reserve_player_mut(|player| {
+            "setprop" | "setaprop" => reserve_player_mut(|player| {
                 let script_ref = match player.get_datum(datum) {
                     Datum::ScriptRef(s) => s.clone(),
                     _ => return Err(ScriptError::new("Expected script reference".to_string())),
@@ -151,7 +151,7 @@ impl ScriptDatumHandlers {
                 }
             }),
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for script datum"
+                "no handler {handler_name} for script datum"
             ))),
         }
     }

@@ -13,7 +13,7 @@ impl IntDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let int_value = player.get_datum(datum_ref).int_value()?;
 
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "abs" => Ok(player.alloc_datum(Datum::Int(int_value.abs()))),
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("integer")))),
             "integer" => Ok(datum_ref.clone()),

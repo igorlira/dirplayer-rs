@@ -83,7 +83,9 @@ impl PlayerDatumHandlers {
     fn count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let subject = player.get_datum(&args[0]).string_value().unwrap();
-            match subject.as_str() {
+            // `_player.count(#windowList)` — the symbol arrives as its display
+            // spelling, so compare case-insensitively as Director does.
+            match_ci!(subject, {
                 // EMPTY, matching `the windowList` in movie.rs: dirplayer opens no
                 // MIAWs, and movies use a zero count as the "not in a window"
                 // signal. Habbo v31 opens with
@@ -100,8 +102,8 @@ impl PlayerDatumHandlers {
                 "windowList" => Ok(player.alloc_datum(Datum::Int(0))),
                 _ => Err(ScriptError::new(
                     format!("Invalid call _player.count({subject})").to_string(),
-                )),
-            }
+                ))
+            })
         })
     }
 }

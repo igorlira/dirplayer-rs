@@ -368,7 +368,7 @@ pub async fn player_call_datum_handler(
             // off-screen, and the mouse→rotation math divided by zero → endless spin).
             // Resolve the property via get_stage_prop and index Rect/Point/List results.
             match handler_name.as_lower_str() {
-                "getprop" | "getat" | "getPropRef" if !args.is_empty() => {
+                "getprop" | "getat" | "getpropref" if !args.is_empty() => {
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
                         let prop_name = player.get_datum(&args[0]).symbol_value()?;

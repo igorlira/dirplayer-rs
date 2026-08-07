@@ -12,9 +12,9 @@ impl PointDatumHandlers {
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
-            "getAt" => Self::get_at(datum, args),
-            "setAt" => Self::set_at(datum, args),
+        match handler_name.as_lower_str() {
+            "getat" => Self::get_at(datum, args),
+            "setat" => Self::set_at(datum, args),
             "inside" => Self::inside(datum, args),
             "duplicate" => Self::duplicate(datum, args),
             // A point is addressable like a two-element linear list —
@@ -26,7 +26,7 @@ impl PointDatumHandlers {
             // erroring here killed the handler that positions map tiles.
             "count" => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(2)))),
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for point"
+                "no handler {handler_name} for point"
             ))),
         }
     }
@@ -98,9 +98,9 @@ impl PointDatumHandlers {
     ) -> Result<Datum, ScriptError> {
         let (vals, flags) = player.get_datum(datum).to_point_inline()?;
 
-        match prop.as_str() {
-            "locH" => Ok(Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(flags, 0))),
-            "locV" => Ok(Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(flags, 1))),
+        match prop.as_lower_str() {
+            "loch" => Ok(Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(flags, 0))),
+            "locv" => Ok(Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(flags, 1))),
             "ilk"  => Ok(Datum::Symbol(Symbol::from_str("point"))),
             // `(expr).float` is the property form of `float(expr)` (Director 11.5
             // Scripting Dictionary, "float()": Usage `(expression).float`).
@@ -121,9 +121,9 @@ impl PointDatumHandlers {
         let new_val = player.get_datum(value_ref).clone();
         let (val, is_float) = Datum::datum_to_inline_component(&new_val)?;
 
-        let idx = match prop.as_str() {
-            "locH" => 0usize,
-            "locV" => 1usize,
+        let idx = match prop.as_lower_str() {
+            "loch" => 0usize,
+            "locv" => 1usize,
             _ => return Err(ScriptError::new(format!("Cannot set point property {}", prop))),
         };
 

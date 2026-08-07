@@ -12,7 +12,7 @@ impl FloatDatumHandlers {
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let float_value = player.get_datum(datum_ref).float_value()?;
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "abs" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("float")))),
             "integer" => Ok(player.alloc_datum(Datum::Int(float_value.round() as i32))),

@@ -766,17 +766,17 @@ impl StringChunkHandlers {
         prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop.as_lower_str() {
             // All per-run style props target ONLY the chunk's character range
             // (via apply_styled_span_range). fontSize previously set the whole
             // member + every span, so `member.line[2].fontSize = 18` blew the
             // size up for the entire member — spectral-wizard's help_text set
             // its body to 14 then only line 2 (the "> Story" header) to 18, but
             // the whole body rendered at 18.
-            "font" | "fontStyle" | "color" | "hyperlink" | "fontSize" => {
+            "font" | "fontstyle" | "color" | "hyperlink" | "fontsize" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
             }
-            "charSpacing" => {
+            "charspacing" => {
                 // Update the source member's char_spacing
                 // Walk the source chain to find the originating member
                 let new_val = player.get_datum(value_ref).int_value()?;
@@ -847,11 +847,11 @@ impl StringChunkHandlers {
             Hyperlink(String),
         }
         let value_datum = player.get_datum(value_ref).clone();
-        let change = match prop.as_str() {
+        let change = match prop.as_lower_str() {
             "font" => StyleChange::Font(value_datum.string_value()?),
-            "fontSize" => StyleChange::FontSize(value_datum.int_value()?),
+            "fontsize" => StyleChange::FontSize(value_datum.int_value()?),
             "hyperlink" => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
-            "fontStyle" => {
+            "fontstyle" => {
                 // Director accepts either a single symbol (#bold) or a list
                 // of symbols ([#bold, #underline]). #plain resets the style.
                 let mut bold = false;

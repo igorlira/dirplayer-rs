@@ -169,7 +169,7 @@ impl ScriptInstanceUtils {
                 ))
             }
         };
-        match key.as_str() {
+        match key.as_lower_str() {
             "ancestor" => {
                 let value_datum = player.get_datum(value).to_owned();
                 match value_datum {

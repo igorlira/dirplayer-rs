@@ -17,8 +17,8 @@ impl ColorDatumHandlers {
         handler_name: Symbol,
         _args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_str() {
-            "hexString" => reserve_player_mut(|player| {
+        match handler_name.as_lower_str() {
+            "hexstring" => reserve_player_mut(|player| {
                 let color_ref = player.get_datum(datum).to_color_ref()?;
                 let (r, g, b) = resolve_color_ref(
                     &player.movie.cast_manager.palettes(),
@@ -31,7 +31,7 @@ impl ColorDatumHandlers {
             }),
             "duplicate" => Ok(datum.clone()),
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for color"
+                "no handler {handler_name} for color"
             ))),
         }
     }
@@ -42,7 +42,7 @@ impl ColorDatumHandlers {
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let color_ref = player.get_datum(datum).to_color_ref()?;
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "red" => match color_ref {
                 ColorRef::Rgb(r, _, _) => Ok(player.alloc_datum(Datum::Int(*r as i32))),
                 ColorRef::PaletteIndex(i) => match i {
@@ -68,11 +68,11 @@ impl ColorDatumHandlers {
                 },
             },
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("color")))),
-            "colorType" => match color_ref {
+            "colortype" => match color_ref {
                 ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("rgb")))),
                 ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("paletteIndex")))),
             },
-            "paletteIndex" => match color_ref {
+            "paletteindex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
                 // Director 11.5 Scripting Dictionary p.832: `.paletteIndex` on
                 // an RGB color returns the nearest match in the current palette.
@@ -95,7 +95,7 @@ impl ColorDatumHandlers {
         prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "red" => {
                 let r = player.get_datum(value).int_value()?;
                 let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
@@ -138,10 +138,13 @@ impl ColorDatumHandlers {
                     }
                 }
             }
-            "colorType" => {
+            "colortype" => {
                 let symbol = player.get_datum(value).string_value()?;
                 let color_ref = player.get_datum(datum).to_color_ref()?.clone();
-                match symbol.as_str() {
+                // `the colorType of c = #paletteIndex` — the symbol's display
+                // spelling is whichever casing was interned first, so compare
+                // case-insensitively as Director does.
+                match_ci!(symbol, {
                     "rgb" => {
                         if let ColorRef::PaletteIndex(_) = color_ref {
                             let (r, g, b) = resolve_color_ref(
@@ -154,7 +157,7 @@ impl ColorDatumHandlers {
                             *color_mut = ColorRef::Rgb(r, g, b);
                         }
                         Ok(())
-                    }
+                    },
                     "paletteIndex" => {
                         if let ColorRef::Rgb(r, g, b) = color_ref {
                             let luminance = (r as u16 * 30 + g as u16 * 59 + b as u16 * 11) / 100;
@@ -163,11 +166,11 @@ impl ColorDatumHandlers {
                             *color_mut = ColorRef::PaletteIndex(index);
                         }
                         Ok(())
-                    }
+                    },
                     _ => Err(ScriptError::new(format!(
                         "Invalid colorType: {}. Expected #rgb or #paletteIndex", symbol
-                    ))),
-                }
+                    )))
+                })
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set color property {}",

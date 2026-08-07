@@ -40,20 +40,20 @@ impl BitmapDatumHandlers {
                 Ok::<(), ScriptError>(())
             })?;
         }
-        match handler_name.as_str() {
+        match handler_name.as_lower_str() {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
-            "setPixel" => Self::set_pixel(datum, args),
-            "extractAlpha" => Self::extract_alpha(datum, args),
+            "setpixel" => Self::set_pixel(datum, args),
+            "extractalpha" => Self::extract_alpha(datum, args),
             "duplicate" => Self::duplicate(datum, args),
-            "copyPixels" => Self::copy_pixels(datum, args),
-            "applyFilter" => Self::apply_filter(datum, args),
-            "createMatte" | "createMask" => Self::create_matte(datum, args),
-            "trimWhiteSpace" => Self::trim_whitespace(datum, args),
-            "getPixel" => Self::get_pixel(datum, args),
+            "copypixels" => Self::copy_pixels(datum, args),
+            "applyfilter" => Self::apply_filter(datum, args),
+            "creatematte" | "createmask" => Self::create_matte(datum, args),
+            "trimwhitespace" => Self::trim_whitespace(datum, args),
+            "getpixel" => Self::get_pixel(datum, args),
             "crop" => Self::crop(datum, args),
-            "setAlpha" => Self::set_alpha(datum, args),
-            "floodFill" => reserve_player_mut(|player| {
+            "setalpha" => Self::set_alpha(datum, args),
+            "floodfill" => reserve_player_mut(|player| {
                 // Args: point, color  OR  x, y, color
                 if args.len() != 2 && args.len() != 3 {
                     return Err(ScriptError::new(
@@ -110,9 +110,9 @@ impl BitmapDatumHandlers {
 
                 Ok(player.alloc_datum(Datum::Void))
             }),
-            "getProp" => Self::get_prop_handler(datum, args),
+            "getprop" => Self::get_prop_handler(datum, args),
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for bitmap datum"
+                "no handler {handler_name} for bitmap datum"
             ))),
         }
     }
@@ -612,28 +612,30 @@ impl BitmapDatumHandlers {
 
             let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).unwrap();
             let alpha = blend as f32 / 100.0;
-            match shape_type.as_str() {
+            // `#roundRect` arrives as its display spelling, so compare
+            // case-insensitively as Director does.
+            match_ci!(shape_type, {
                 "rect" => {
                     bitmap.stroke_rect(x1, y1, x2, y2, color, &palettes, alpha);
-                }
+                },
                 "oval" => {
                     bitmap.stroke_ellipse(x1, y1, x2, y2, color, &palettes, alpha, thickness);
-                }
+                },
                 "roundRect" => {
                     bitmap.stroke_round_rect(x1, y1, x2, y2, radius, color, &palettes, alpha, thickness);
-                }
+                },
                 "line" => {
                     // For #line, (x1,y1) and (x2,y2) are the line endpoints
                     // (rather than a bounding rect like the other shapes).
                     bitmap.draw_line_thick(x1, y1, x2, y2, color, &palettes, alpha, thickness);
-                }
+                },
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Invalid shapeType '#{}' for draw (expected #rect, #oval, #roundRect, #line)",
                         shape_type
                     )));
                 }
-            }
+            });
             Ok(datum.clone())
         })
     }
@@ -835,9 +837,9 @@ impl BitmapDatumHandlers {
             // holes into a grey overlay (`wmGreyBuffer.fill(dR, [#color:
             // rgb(255,255,255), #shapeType: #oval])`) then keying them out
             // with ink 36 — so without oval support the whole map stays grey.
-            match shape.as_str() {
+            match shape.as_lower_str() {
                 "oval" => bitmap.fill_ellipse(x1, y1, x2, y2, color, &palettes, 1.0),
-                "roundRect" => bitmap.fill_round_rect(x1, y1, x2, y2, 12, color, &palettes, 1.0),
+                "roundrect" => bitmap.fill_round_rect(x1, y1, x2, y2, 12, color, &palettes, 1.0),
                 _ => bitmap.fill_rect(x1, y1, x2, y2, color, &palettes, 1.0),
             }
             Ok(datum.clone())

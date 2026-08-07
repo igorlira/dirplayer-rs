@@ -22,7 +22,7 @@ impl SymbolDatumHandlers {
         _: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_str() {
+        match prop.as_lower_str() {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("symbol")))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get symbol property {}",

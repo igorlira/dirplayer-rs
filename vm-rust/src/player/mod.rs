@@ -6637,7 +6637,7 @@ async fn player_ext_call<'a>(
     //   args.iter().map(|datum_ref| format_datum(*datum_ref, player)).collect()
     // });
     // warn!("ext_call: {name}({})", formatted_args.join(", "));
-    let result = match name.as_str() {
+    let result = match name.as_lower_str() {
         "return" => {
             let return_value = if let Some(return_value) = args.first() {
                 reserve_player_mut(|player| {
