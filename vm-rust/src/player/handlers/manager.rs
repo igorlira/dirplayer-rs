@@ -2618,13 +2618,18 @@ impl BuiltInHandlerManager {
                 // form that reaches us as the symbolic name (e.g. spectral-
                 // wizard's `keyPressed("SPACE")` from `keyPressed(SPACE)`).
                 // Map the common names to Mac virtual key codes.
-                if let Some(code) = match key_str.to_ascii_uppercase().as_str() {
+                // Normalise to LOWERCASE and match lowercase literals. This
+                // upper-cased the input while the arms were written lower/mixed
+                // case, so only ESCAPE/ESC could ever match and `keyPressed(SPACE)`
+                // fell through to the single-character branch, failed `len() == 1`
+                // and raised "cannot parse string 'SPACE'".
+                if let Some(code) = match key_str.to_ascii_lowercase().as_str() {
                     "space" => Some(49u16),
                     "return" => Some(36),
                     "enter" => Some(76),
                     "tab" => Some(48),
-                    "backSpace" => Some(51),
-                    "ESCAPE" | "ESC" => Some(53),
+                    "backspace" => Some(51),
+                    "escape" | "esc" => Some(53),
                     _ => None,
                 } {
                     code
