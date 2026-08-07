@@ -4192,12 +4192,37 @@ void main() {
             None => return false,
         };
 
+        // Per-mesh shader candidates, SPECIFIC ONES FIRST.
+        //
+        // A resource usually carries two bindings: an auto-generated "default"
+        // one whose mesh entries are all DefaultShader, and the real one naming
+        // the mesh's actual shader (Rasterwerks dm_acheron_bluffs:
+        // `default=[DefaultShader,…]` and `_light_bunker=[si_fi_28_30C,…]`).
+        // `shader_bindings` lists default FIRST, and the loop below returns on
+        // the first candidate that binds a texture — so DefaultShader won every
+        // time it happened to hold textures and the mesh's real shader was never
+        // reached, leaving the whole map rendering with DefaultShader's
+        // leftovers (no VMtl/si_fi shader ever reached find_texture_layers).
+        //
+        // Same set as before, just ordered: DefaultShader entries go last so
+        // they still act as the fallback they were meant to be. Mirrors the
+        // "skip DefaultShader as best_material when there are more specific
+        // candidates" rule applied to material selection below.
         let mut candidate_names: Vec<Symbol> = Vec::new();
+        let mut default_candidates: Vec<Symbol> = Vec::new();
         for binding in &res_info.shader_bindings {
             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
-                candidate_names.push(binding.mesh_bindings[mesh_idx].clone());
+                let name = binding.mesh_bindings[mesh_idx].clone();
+                if name == BuiltInSymbol::DefaultShader
+                    || binding.name.as_str().eq_ignore_ascii_case("default")
+                {
+                    default_candidates.push(name);
+                } else {
+                    candidate_names.push(name);
+                }
             }
         }
+        candidate_names.extend(default_candidates);
 
         // If this mesh slot has no explicit shader, inherit the lowest-indexed
         // mesh's shader BEFORE falling back to the resource's auto-generated
