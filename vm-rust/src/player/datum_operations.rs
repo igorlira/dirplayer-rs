@@ -779,6 +779,28 @@ pub fn multiply_datums(
             let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x * y);
             Datum::Point(vals, flags)
         }
+        // List * List — element-wise over the shared prefix, matching the
+        // `(List, List)` arms `add_datums` / `subtract_datums` already have.
+        // Director pairs list operands positionally (the Scripting Dictionary
+        // describes the same rule for rects/points, which ARE lists: "each
+        // element of the first list [operates on] the corresponding element of
+        // the second list").
+        //
+        // AreaZero's `[M] Text Misc` GetAndSetTagTextureSize rescales a mesh's
+        // UVs with `tTCoord = (tTCoord * tPerc) + tdiff`, where BOTH operands are
+        // 2-element lists ([u,v] * [0.7715, 1.0]). Addition already worked, so
+        // only the multiply raised "Mul operator only works with ints and floats".
+        (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
+            let a_refs: Vec<DatumRef> = list_a.iter().cloned().collect();
+            let b_refs: Vec<DatumRef> = list_b.iter().cloned().collect();
+            let n = min(a_refs.len(), b_refs.len());
+            let mut result = VecDeque::with_capacity(n);
+            for i in 0..n {
+                let product = multiply_datums(a_refs[i].clone(), b_refs[i].clone(), player)?;
+                result.push_back(player.alloc_datum(product));
+            }
+            Datum::List(DatumType::List, result, false)
+        }
         (Datum::List(_, list, _), Datum::Float(right)) => {
             // Collect the element refs up front so the recursive multiply (for
             // nested lists) can borrow the player mutably without aliasing the
