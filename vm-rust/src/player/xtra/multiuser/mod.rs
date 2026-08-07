@@ -496,16 +496,33 @@ impl MultiuserXtraManager {
                         let content = static_datum_to_runtime(&message.content, &mut player.allocator);
                         let time_stamp = player.alloc_datum(Datum::Int(message.time_stamp as i32)); // TODO: i64
 
+                        // SYMBOL keys, not strings. The Multiuser Xtra delivers its
+                        // message as a prop list keyed by #errorCode / #recipients /
+                        // #senderID / #subject / #content / #timeStamp, and movies read
+                        // it that way — Habbo v7's Connection Instance Class does
+                        // `tNewMsg.getaProp(#errorCode)`, `pMsgStruct.getaProp(#content)`,
+                        // `tMsg[#content]`.
+                        //
+                        // Director never matches a STRING key against a SYMBOL probe
+                        // (measured: `["Foo":1].getaProp(#foo)` -> VOID), so building
+                        // these as strings made every such read miss. It only appeared
+                        // to work while our prop-list compare matched across the two
+                        // types — and that same cross-type leniency is what let a symbol
+                        // lookup alias onto a string registry key and send Habbo v7's
+                        // room teardown into the Object/Window Manager recursion.
+                        // Emitting the documented key type fixes the cause instead.
                         let error_code_key =
-                            player.alloc_datum(Datum::String("errorCode".to_string()));
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("errorCode")));
                         let recipients_key =
-                            player.alloc_datum(Datum::String("recipients".to_string()));
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("recipients")));
                         let sender_id_key =
-                            player.alloc_datum(Datum::String("senderID".to_string()));
-                        let subject_key = player.alloc_datum(Datum::String("subject".to_string()));
-                        let content_key = player.alloc_datum(Datum::String("content".to_string()));
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("senderID")));
+                        let subject_key =
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("subject")));
+                        let content_key =
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("content")));
                         let time_stamp_key =
-                            player.alloc_datum(Datum::String("timeStamp".to_string()));
+                            player.alloc_datum(Datum::Symbol(Symbol::from_str("timeStamp")));
 
                         Ok(player.alloc_datum(Datum::PropList(
                             VecDeque::from(vec![
