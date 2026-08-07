@@ -1236,6 +1236,14 @@ impl DirPlayer {
     }
 
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
+        // Start this movie from the builtin display-spelling baseline. A cast's
+        // name table claims the spelling for symbols it defines
+        // (`Symbol::from_str_authoritative`), and Director resets that per movie.
+        // Our interner is process-global and monotonic, so without this reset the
+        // first movie loaded would claim spellings for every movie after it —
+        // load-order-dependent behaviour, which matters for the e2e suite (~48
+        // movies in one process) and for any session that changes movie.
+        crate::player::symbols::symbol_table::reset_movie_symbol_display();
         // Pick the platform-correct default system palette before loading. Mac
         // movies (Director 4 titles like thead) default to System-Mac, Windows
         // movies to System-Win; these differ at high indices and decide how

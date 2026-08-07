@@ -352,8 +352,16 @@ impl CastLib {
         font_table: &HashMap<u16, String>,
     ) {
         self.lctx = cast_def.lctx.clone();
+        // AUTHORITATIVE: a cast's own name table claims the global display
+        // spelling for its names, overriding a builtin that interned the same
+        // name in different casing at startup. Director has no builtin spelling
+        // table seeded before the movie, so there the movie is always the first
+        // writer; `init_builtin_symbols()` makes us the first writer instead.
+        // Habbo v31: the XML builtin `nodeName` claimed the spelling, so the
+        // movie's `#nodename` reported as "nodeName" and the catalogue's
+        // `tdata.getaProp("nodename")` missed ("Malformed node data nodeName").
         self.name_symbols = self.lctx.as_ref()
-            .map(|lctx| lctx.names.iter().map(|n| Symbol::from_str(n)).collect())
+            .map(|lctx| lctx.names.iter().map(|n| Symbol::from_str_authoritative(n)).collect())
             .unwrap_or_default();
         self.capital_x = cast_def.capital_x;
         self.dir_version = cast_def.dir_version;

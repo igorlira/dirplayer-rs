@@ -90,6 +90,15 @@ impl Symbol {
         Self { spur }
     }
 
+    /// Like `from_str`, but this name CLAIMS the global display spelling even if
+    /// one was already recorded. Only for a cast's own name table (LNAM) — see
+    /// `SymbolTable::intern_authoritative` for the measured Director behaviour
+    /// this restores.
+    pub fn from_str_authoritative(s: &str) -> Self {
+        let spur = crate::player::symbols::symbol_table::get_symbol_spur_authoritative(s);
+        Self { spur }
+    }
+
     pub fn eq_builtin(&self, builtin: BuiltInSymbol) -> bool {
         self.into_builtin() == Some(builtin)
     }
