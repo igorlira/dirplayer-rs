@@ -198,7 +198,38 @@ pub async fn player_call_datum_handler(
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
                         let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                        let prop_datum = player.movie.get_prop(prop_name)?;
+                        // `_movie.castLib` is a COLLECTION — Director 11.5 Scripting
+                        // Dictionary, `castLib` (Movie property, read-only):
+                        // "provides named or indexed access to the cast libraries of a
+                        // movie". It can't be built in `Movie::get_prop` (no allocator
+                        // there), so answer the collection queries here, where the
+                        // player is in hand. AreaZero's `[M] Cast.GetInternalCasts`
+                        // opens with `tCount = _movie.castLib.count`.
+                        if prop_name.eq_ignore_ascii_case("castLib") {
+                            let count = player.movie.cast_manager.casts.len() as i32;
+                            return Ok(player.alloc_datum(Datum::Int(count)));
+                        }
+                        if prop_name.eq_ignore_ascii_case("markerList") {
+                            let count = player.movie.score.frame_labels.len() as i32;
+                            return Ok(player.alloc_datum(Datum::Int(count)));
+                        }
+                        // Collection queries must see the PLAYER-level movie props too.
+                        // `Movie::get_prop` covers only plain scalar properties; the
+                        // list-valued ones — `markerList` (Director 11.5: "a script
+                        // property list of the markers in the Score", frameNumber:
+                        // "markerName") and `xtraList` — are built in
+                        // `DirPlayer::get_movie_prop`, which needs the allocator. Try the
+                        // plain getter first, then fall back. AreaZero's `[M] Misc.goto`
+                        // opens with `_movie.markerList.count`, which previously raised
+                        // "Cannot get movie prop markerlist" even though markerList was
+                        // implemented — it just wasn't reachable from _movie.
+                        let prop_datum = match player.movie.get_prop(prop_name) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                let r = player.get_movie_prop(prop_name)?;
+                                player.get_datum(&r).clone()
+                            }
+                        };
                         let count = match &prop_datum {
                             Datum::List(_, items, _) => items.len() as i32,
                             Datum::PropList(items, _) => items.len() as i32,
@@ -212,19 +243,85 @@ pub async fn player_call_datum_handler(
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
                         let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                        let prop_datum = player.movie.get_prop(prop_name)?;
+                        // `_movie.castLib[castNameOrNum]` — the dictionary's documented
+                        // form takes "either a string that specifies the name ... or an
+                        // integer that specifies the number". Resolve both to the same
+                        // castLib reference the top-level `castLib()` yields.
+                        if prop_name.eq_ignore_ascii_case("castLib") && args.len() > 1 {
+                            let key = player.get_datum(&args[1]).clone();
+                            let number = match &key {
+                                Datum::String(name) => player
+                                    .movie
+                                    .cast_manager
+                                    .casts
+                                    .iter()
+                                    .find(|c| c.name.eq_ignore_ascii_case(name))
+                                    .map(|c| c.number as u32),
+                                _ => key.int_value().ok().map(|n| n as u32),
+                            };
+                            return Ok(match number {
+                                Some(n) => player.alloc_datum(Datum::CastLib(n)),
+                                None => DatumRef::Void,
+                            });
+                        }
+                        // Collection queries must see the PLAYER-level movie props too.
+                        // `Movie::get_prop` covers only plain scalar properties; the
+                        // list-valued ones — `markerList` (Director 11.5: "a script
+                        // property list of the markers in the Score", frameNumber:
+                        // "markerName") and `xtraList` — are built in
+                        // `DirPlayer::get_movie_prop`, which needs the allocator. Try the
+                        // plain getter first, then fall back. AreaZero's `[M] Misc.goto`
+                        // opens with `_movie.markerList.count`, which previously raised
+                        // "Cannot get movie prop markerlist" even though markerList was
+                        // implemented — it just wasn't reachable from _movie.
+                        let prop_datum = match player.movie.get_prop(prop_name) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                let r = player.get_movie_prop(prop_name)?;
+                                player.get_datum(&r).clone()
+                            }
+                        };
                         let prop_ref = player.alloc_datum(prop_datum);
                         if args.len() > 1 {
-                            let index = player.get_datum(&args[1]).int_value()?;
-                            let list_datum = player.get_datum(&prop_ref);
+                            let list_datum = player.get_datum(&prop_ref).clone();
                             match list_datum {
                                 Datum::List(_, items, _) => {
+                                    let index = player.get_datum(&args[1]).int_value()?;
                                     let idx = (index as usize).saturating_sub(1);
                                     if idx < items.len() {
                                         Ok(items[idx].clone())
                                     } else {
                                         Ok(DatumRef::Void)
                                     }
+                                }
+                                // A PROPERTY-list movie prop must index too. `markerList`
+                                // is the one that matters (Director 11.5: "a script
+                                // property list of the markers in the Score",
+                                // frameNumber: "markerName"), and it was falling into the
+                                // catch-all below — so `_movie.markerList[i]` handed back
+                                // the WHOLE list for every i, index silently discarded.
+                                //
+                                // AreaZero's `[M] Misc.goto` walks the markers to
+                                // validate a name before jumping:
+                                //     repeat with i = 1 to _movie.markerlist.count
+                                //       tListMarker = _movie.markerlist[i]
+                                //       if tMarker = tListMarker then exit repeat
+                                //       if (i = _movie.markerlist.count) and ... then
+                                //         tMarker = #none
+                                // Comparing "Game" against the whole list never matched,
+                                // so the marker was nulled and `_movie.go("Game")` never
+                                // ran. The movie stayed on frame 1 — whose score script
+                                // is a bare `go the frame` with no enterFrame handler —
+                                // so its per-frame script manager never ticked and the
+                                // menu sat frozen.
+                                //
+                                // PropListUtils::get_at applies Director's rule: an
+                                // integer indexes positionally, anything else is a key
+                                // lookup.
+                                Datum::PropList(pairs, ..) => {
+                                    crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
+                                        &pairs, &args[1], &player.allocator,
+                                    )
                                 }
                                 _ => Ok(prop_ref)
                             }
@@ -274,8 +371,8 @@ pub async fn player_call_datum_handler(
                 "getprop" | "getat" | "getPropRef" if !args.is_empty() => {
                     reserve_player_mut(|player| {
                         use crate::director::lingo::datum::Datum;
-                        let prop_name = player.get_datum(&args[0]).string_value()?;
-                        let prop_datum = crate::player::stage::get_stage_prop(player, Symbol::from_str(&prop_name))?;
+                        let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                        let prop_datum = crate::player::stage::get_stage_prop(player, prop_name)?;
                         if args.len() > 1 {
                             let index = player.get_datum(&args[1]).int_value()?;
                             let idx = (index as usize).saturating_sub(1);

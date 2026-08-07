@@ -2127,7 +2127,7 @@ fn create_styled_spans(
         let bg_hex = html_style.bg_color.map(|c| format!("#{:06X}", c & 0xFFFFFF)).unwrap_or_else(|| "none".to_string());
         debug!(
             "  StyledSpan[{}]: chars[{}..{}]='{}' style_index={} color={} bg={} font='{}' size={:?} bold={} italic={}",
-            i, start, end, &span_text[..span_text.len().min(40)],
+            i, start, end, span_text.chars().take(40).collect::<String>(),
             style_index, color_hex, bg_hex,
             html_style.font_face.as_deref().unwrap_or("?"),
             html_style.font_size,

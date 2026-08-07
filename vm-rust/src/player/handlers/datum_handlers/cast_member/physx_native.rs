@@ -54,6 +54,8 @@ struct ContactConstraint {
     impulse_n: f64,
     impulse_t1: f64,
     impulse_t2: f64,
+    /// Conclude-pass target (depenetration bias removed; restitution kept).
+    unbias_n: f64,
 }
 
 /// Step the world by `dt` seconds, sub-stepping `sub_steps` times.
@@ -72,8 +74,83 @@ pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32) {
         let is_last = substep == n - 1;
         sub_step(state, h, is_last);
     }
+    // Forces/torques accumulated by Lingo applyForce/applyTorque are consumed
+    // by exactly one simulate() (PxRigidBody::addForce lifetime).
+    for body in state.bodies.iter_mut() {
+        body.pending_force = [0.0; 3];
+        body.pending_torque = [0.0; 3];
+    }
     state.sim_time += dt;
 }
+
+/// Lingo `applyLinearImpulse(J [, localPoint])` — decompile ground truth
+/// (CPhysicsRigidBodyAGEIA::ApplyLinearImpulse): with a point it forwards to
+/// `PxRigidBodyExt::addForceAtLocalPos` in impulse mode, i.e. `Δv = J/m` PLUS
+/// the induced torque impulse `(R·(p − com)) × J` through the world-space
+/// inverse inertia. Without a point it is a plain central impulse.
+pub(crate) fn apply_lingo_linear_impulse(
+    rb: &mut crate::player::cast_member::PhysXRigidBody,
+    imp: [f64; 3],
+    local_point: Option<[f64; 3]>,
+) {
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    rb.linear_velocity = v_add(rb.linear_velocity, v_mul(imp, 1.0 / rb.mass));
+    if let Some(p) = local_point {
+        let q = axisangle_to_quat(rb.orientation);
+        let r_local = v_sub(p, rb.center_of_mass);
+        let r_world = q_rotate(q, r_local);
+        let torque = v_cross(r_world, imp);
+        let dw = mul_inv_inertia(rb, torque);
+        rb.angular_velocity = v_add(rb.angular_velocity, dw);
+    }
+    rb.cached_is_sleeping = false;
+}
+
+/// Lingo `applyAngularImpulse(L)` — decompile ground truth: forwards to
+/// `PxRigidBody::addTorque(L, PxForceMode::eIMPULSE)`, i.e. `Δω = I⁻¹·L`.
+/// Adding L raw onto ω (the previous behaviour) skipped the ~10⁴-scale
+/// inertia of a vehicle chassis: Agent Free Ride's per-frame steering
+/// impulses (up to 2·10⁷·coeff in `Snowboard Race Player.ls:667`) came out
+/// 10,000× too strong, flipping the boarder ±150° per frame and feeding the
+/// contact solver approach velocities of ~10⁷ at the next landing.
+pub(crate) fn apply_lingo_angular_impulse(
+    rb: &mut crate::player::cast_member::PhysXRigidBody,
+    imp: [f64; 3],
+) {
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    let dw = mul_inv_inertia(rb, imp);
+    rb.angular_velocity = v_add(rb.angular_velocity, dw);
+    rb.cached_is_sleeping = false;
+}
+
+/// Lingo `applyForce(F [, localPoint])` / `applyTorque(T)` accumulation —
+/// PxForceMode::eFORCE: lives until the next simulate() integrates it.
+/// A point adds the induced torque `(R·(p − com)) × F` to the torque
+/// accumulator (PxRigidBodyExt::addForceAtLocalPos with eFORCE).
+pub(crate) fn apply_lingo_force(
+    rb: &mut crate::player::cast_member::PhysXRigidBody,
+    force: [f64; 3],
+    local_point: Option<[f64; 3]>,
+) {
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    rb.pending_force = v_add(rb.pending_force, force);
+    if let Some(p) = local_point {
+        let q = axisangle_to_quat(rb.orientation);
+        let r_world = q_rotate(q, v_sub(p, rb.center_of_mass));
+        rb.pending_torque = v_add(rb.pending_torque, v_cross(r_world, force));
+    }
+    rb.cached_is_sleeping = false;
+}
+
+pub(crate) fn apply_lingo_torque(
+    rb: &mut crate::player::cast_member::PhysXRigidBody,
+    torque: [f64; 3],
+) {
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    rb.pending_torque = v_add(rb.pending_torque, torque);
+    rb.cached_is_sleeping = false;
+}
+
 
 /// Canonical (min, max) pair key for collision filter lookups. Mirrors C#'s
 /// `World.PairKey` so pairs added via `disableCollision(A,B)` find the same
@@ -83,6 +160,7 @@ fn pair_key_names(a: Symbol, b: Symbol) -> (Symbol, Symbol) {
 }
 
 fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
+
     // ---- 1. Apply gravity + damping to velocities ----
     let g = state.gravity;
     let lin_keep = (1.0 - state.linear_damping * dt).max(0.0);
@@ -92,6 +170,20 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
         if body.cached_is_sleeping { continue; }
         if matches!(body.body_type, PhysXBodyType::Dynamic) {
             body.linear_velocity = v_add(body.linear_velocity, v_mul(g, dt));
+        }
+        // Accumulated Lingo applyForce / applyTorque (PxForceMode::eFORCE):
+        // integrate over each substep; step_native clears them after the step,
+        // matching PxRigidBody::addForce/addTorque lifetime.
+        if body.mass > 0.0 && matches!(body.body_type, PhysXBodyType::Dynamic) {
+            let f = body.pending_force;
+            if f != [0.0; 3] {
+                body.linear_velocity = v_add(body.linear_velocity, v_mul(f, dt / body.mass));
+            }
+            let t = body.pending_torque;
+            if t != [0.0; 3] {
+                let dw = mul_inv_inertia(body, t);
+                body.angular_velocity = v_add(body.angular_velocity, v_mul(dw, dt));
+            }
         }
         let body_lin_keep = (1.0 - body.linear_damping * dt).max(0.0).min(lin_keep.max(1.0));
         let body_ang_keep = (1.0 - body.angular_damping * dt).max(0.0).min(ang_keep.max(1.0));
@@ -200,8 +292,16 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
     let baumgarte = 0.2;
     let slop = 0.005;
     let rest_threshold = 1.0;
+    // Cap the depenetration velocity the Baumgarte bias may inject, matching
+    // PhysX's maxDepenetrationVelocity default of 3 m/s. `scaling_factor` is
+    // the movie's worldScale (display units per metre⁻¹: Agent Free Ride
+    // passes 0.01 ⇒ 1 unit = 1 cm ⇒ cap = 300 units/s). Without the cap, a
+    // body that spawns or tunnels deep inside a mesh gets bias ≈ depth·0.2/dt
+    // — thousands of units/s — and is launched out of the world.
+    let world_scale = state.scaling_factor[0].abs().max(1e-9);
+    let max_pen_bias = 3.0 / world_scale;
     for c in constraints.iter_mut() {
-        prepare_constraint(c, &state.bodies, dt, baumgarte, slop, rest_threshold);
+        prepare_constraint(c, &state.bodies, dt, baumgarte, slop, rest_threshold, max_pen_bias);
     }
     let velocity_iterations = 4;
     if state.use_soa_solver {
@@ -210,9 +310,12 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
         // on the AoS path; everything else routes through PxsSolverSoa.
         run_soa_solver_step(state, &mut constraints, dt, baumgarte, slop, rest_threshold, velocity_iterations);
     } else {
-        for _ in 0..velocity_iterations {
+        for it in 0..velocity_iterations {
+            // PhysX conclude pass: the final iteration solves WITHOUT the
+            // depenetration bias so it never leaks into the exit velocity.
+            let use_bias = it + 1 < velocity_iterations;
             for c in constraints.iter_mut() {
-                solve_velocity(c, &mut state.bodies);
+                solve_velocity(c, &mut state.bodies, use_bias);
             }
             // Hard linear-joint rows mirror the C# PxsLinearJointConstraint —
             // these run inside the same iteration loop.
@@ -221,9 +324,23 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
     }
 
     // ---- 6. Integrate positions / orientations ----
+    // Sanity ceiling on solver output. A degenerate contact set (deep
+    // penetration at speed against a mesh edge) can make the iterated solver
+    // diverge; one runaway substep then poisons every later broadphase AABB
+    // and eventually NaNs the whole world. PhysX guards this with
+    // maxLinearVelocity/maxAngularVelocity; 1e5 display-units/s is far above
+    // any legitimate gameplay speed in the movies we run.
+    const MAX_LIN_VEL: f64 = 1.0e5;
+    const MAX_ANG_VEL: f64 = 1.0e3;
     for body in state.bodies.iter_mut() {
         if matches!(body.body_type, PhysXBodyType::Static) || body.pinned { continue; }
         if body.cached_is_sleeping { continue; }
+        if body.linear_velocity.iter().any(|v| !v.is_finite()) { body.linear_velocity = [0.0; 3]; }
+        if body.angular_velocity.iter().any(|v| !v.is_finite()) { body.angular_velocity = [0.0; 3]; }
+        let lv = v_len_sq(body.linear_velocity).sqrt();
+        if lv > MAX_LIN_VEL { body.linear_velocity = v_mul(body.linear_velocity, MAX_LIN_VEL / lv); }
+        let av = v_len_sq(body.angular_velocity).sqrt();
+        if av > MAX_ANG_VEL { body.angular_velocity = v_mul(body.angular_velocity, MAX_ANG_VEL / av); }
         body.position = v_add(body.position, v_mul(body.linear_velocity, dt));
         // Orientation: integrate via quaternion in axis-angle storage.
         let q = axisangle_to_quat(body.orientation);
@@ -238,6 +355,7 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
             body.cached_is_sleeping = true;
         }
     }
+
 }
 
 // ==========================================================================
@@ -250,6 +368,17 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
         PhysXShapeKind::Sphere => {
             let r = [body.radius; 3];
             (v_sub(body.position, r), v_add(body.position, r))
+        }
+        // Concave with cooked triangles: the cooked verts are already in the
+        // world basis and are NOT centred on the body position (a track tile
+        // spans local y 0..20000), so a ±half_extents box around `position`
+        // misses the pair over the far half of every tile. Use the mesh's own
+        // AABB offset by the position.
+        PhysXShapeKind::ConcaveShape if body.triangle_mesh.is_some() => {
+            let mesh = body.triangle_mesh.as_ref().unwrap();
+            let mn = [mesh.aabb_min[0] as f64, mesh.aabb_min[1] as f64, mesh.aabb_min[2] as f64];
+            let mx = [mesh.aabb_max[0] as f64, mesh.aabb_max[1] as f64, mesh.aabb_max[2] as f64];
+            (v_add(body.position, mn), v_add(body.position, mx))
         }
         PhysXShapeKind::Box | PhysXShapeKind::ConvexShape | PhysXShapeKind::ConcaveShape => {
             // Conservative AABB of an oriented box.
@@ -459,6 +588,7 @@ fn push_contact(
         tan1: [0.0; 3], tan2: [0.0; 3],
         ra: [0.0; 3], rb: [0.0; 3],
         impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+        unbias_n: 0.0,
     });
 }
 
@@ -485,7 +615,16 @@ fn build_mesh_contacts(
     let Some(mesh) = mesh_body.triangle_mesh.as_ref() else { return; };
 
     // Transform query shape into mesh-local space.
-    let mesh_q = axisangle_to_quat(mesh_body.orientation);
+    //
+    // The cooked triangle vertices (createRigidBody) are stored with the
+    // model's authored WORLD basis already applied — only the translation is
+    // left to the body's `position`. The body's `orientation` records that
+    // same authored basis (simulate()'s model write-back needs it), so
+    // rotating the query by orientation⁻¹ here would rotate the query into a
+    // frame the vertices are NOT in and displace every non-identity-oriented
+    // tile (Agent Free Ride's track tiles are authored at [0,0,-1]·60°).
+    // Mesh-local space is therefore translation-only.
+    let mesh_q = [0.0, 0.0, 0.0, 1.0];
     let mesh_qinv = q_inv(mesh_q);
     let to_local = |p: [f64; 3]| -> [f64; 3] { q_rotate(mesh_qinv, v_sub(p, mesh_body.position)) };
     let to_world_vec = |v: [f64; 3]| -> [f64; 3] { q_rotate(mesh_q, v) };
@@ -508,7 +647,14 @@ fn build_mesh_contacts(
             mp::capsule_vs_mesh(mesh, f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
                                 shape_body.radius as f32, 0.0)
         }
-        PhysXShapeKind::Box => {
+        // ConvexShape rides the box path: `createRigidBody` builds its hull
+        // with `polygonal_box(half_extents)`, so an OBB test against the mesh
+        // is exact for the hull we actually store. Skipping convex entirely
+        // (the previous behaviour) left dynamic #convexShape bodies — every
+        // vehicle chassis in the Vehicle-Base games — without ANY terrain
+        // narrowphase, so Agent Free Ride's boarder free-fell from the first
+        // simulate() and never generated a single contact.
+        PhysXShapeKind::Box | PhysXShapeKind::ConvexShape => {
             let c = f64_to_f32(to_local(shape_body.position));
             // Combined rotation: mesh^{-1} * shape ⇒ shape's local axes in mesh-local.
             let q_combined = q_mul(mesh_qinv, axisangle_to_quat(shape_body.orientation));
@@ -518,7 +664,7 @@ fn build_mesh_contacts(
             let he = f64_to_f32(shape_body.half_extents);
             mp::box_vs_mesh(mesh, c, he, ax, ay, az, 0.0)
         }
-        _ => return, // ConvexShape / ConcaveShape vs ConcaveShape: undefined per PhysX
+        _ => return, // ConcaveShape vs ConcaveShape: undefined per PhysX
     };
 
     let pair_friction = (mesh_body.friction * shape_body.friction).max(0.0).sqrt();
@@ -551,6 +697,7 @@ fn build_mesh_contacts(
             tan1: [0.0; 3], tan2: [0.0; 3],
             ra: [0.0; 3], rb: [0.0; 3],
             impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+            unbias_n: 0.0,
         });
     }
 }
@@ -631,6 +778,7 @@ fn build_terrain_contacts(
             tan1: [0.0; 3], tan2: [0.0; 3],
             ra: [0.0; 3], rb: [0.0; 3],
             impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+            unbias_n: 0.0,
         });
     }
 }
@@ -663,6 +811,7 @@ fn prepare_constraint(
     c: &mut ContactConstraint,
     bodies: &[crate::player::cast_member::PhysXRigidBody],
     dt: f64, baumgarte: f64, slop: f64, rest_threshold: f64,
+    max_pen_bias: f64,
 ) {
     let a = &bodies[c.body_a];
     let ghost; // optional storage for static-terrain ghost body
@@ -683,17 +832,36 @@ fn prepare_constraint(
     c.eff_mass_t2 = compute_eff_mass(a, b, c.tan2, c.ra, c.rb);
 
     let depth = (c.penetration - slop).max(0.0);
-    c.bias_n = -(baumgarte / dt) * depth;
-
     let vn = contact_velocity_along(a, b, c.ra, c.rb, c.normal);
-    if vn < -rest_threshold {
-        c.bias_n += c.restitution * vn;
+
+    // PhysX 3.3/3.4 target semantics (DyContactPrepShared.h,
+    // constructContactConstraint): restitution and the depenetration bias are
+    // MUTUALLY EXCLUSIVE per contact. A contact "bounces" when restitution is
+    // set, the approach speed exceeds the bounce threshold, AND the approach
+    // speed exceeds what the depenetration bias would inject (−vrel >
+    // penetration·invDt); then the target is −restitution·vrel and the
+    // Baumgarte bias is zeroed. Otherwise the target is the (clamped)
+    // depenetration bias alone. The old code ADDED restitution on top of the
+    // bias every substep — an energy pump.
+    //
+    // `unbias_n` is the conclude-pass target (solver's last iteration): PhysX
+    // drops the depenetration bias from the exit velocity (`solveConclude*`
+    // sets biasedErr = unbiasedErr) so penetration recovery never becomes real
+    // launch velocity; the restitution target survives the conclude.
+    let bouncing = c.restitution > 0.0 && vn < -rest_threshold && (-vn) > depth / dt;
+    if bouncing {
+        c.bias_n = c.restitution * vn;
+        c.unbias_n = c.bias_n;
+    } else {
+        c.bias_n = -((baumgarte / dt) * depth).min(max_pen_bias);
+        c.unbias_n = 0.0;
     }
 }
 
 fn solve_velocity(
     c: &mut ContactConstraint,
     bodies: &mut [crate::player::cast_member::PhysXRigidBody],
+    use_bias: bool,
 ) {
     let is_terrain = c.body_b_is_static_terrain;
     let ghost = static_ghost_body();
@@ -705,7 +873,8 @@ fn solve_velocity(
 
     // Normal axis.
     let (a_clone, b_clone) = read_ab(bodies);
-    let vn = contact_velocity_along(&a_clone, &b_clone, c.ra, c.rb, c.normal) + c.bias_n;
+    let bias = if use_bias { c.bias_n } else { c.unbias_n };
+    let vn = contact_velocity_along(&a_clone, &b_clone, c.ra, c.rb, c.normal) + bias;
     let mut dlambda = -vn * c.eff_mass_n;
     let old = c.impulse_n;
     c.impulse_n = (old + dlambda).max(0.0);
@@ -792,7 +961,7 @@ fn inverse_inertia_diag(body: &crate::player::cast_member::PhysXRigidBody) -> [f
     }
 }
 
-fn mul_inv_inertia(
+pub(crate) fn mul_inv_inertia(
     body: &crate::player::cast_member::PhysXRigidBody, v: [f64; 3],
 ) -> [f64; 3] {
     let q = axisangle_to_quat(body.orientation);
@@ -876,7 +1045,9 @@ fn run_soa_solver_step(
     let warm = std::collections::HashMap::new(); // no warm-start cache yet
     solver.build_with_offsets(&body_inputs, &soa_inputs, dt, baumgarte, _slop, _rest_threshold, &warm);
 
-    for _ in 0..velocity_iterations {
+    for it in 0..velocity_iterations {
+        // Mirror the AoS conclude pass: last iteration drops the bias.
+        let use_bias = it + 1 < velocity_iterations;
         solver.solve_one_iteration(true);
 
         // Run terrain (AoS) and joint constraints in the same iteration loop.
@@ -887,7 +1058,7 @@ fn run_soa_solver_step(
             state.bodies[i].angular_velocity = b.angular_state;
         }
         for &idx in &terrain_constraints {
-            solve_velocity(&mut constraints[idx], &mut state.bodies);
+            solve_velocity(&mut constraints[idx], &mut state.bodies, use_bias);
         }
         // Push the AoS-updated velocities back into the SoA buffers so the
         // next SoA iteration sees the post-terrain state.

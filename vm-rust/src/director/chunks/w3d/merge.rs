@@ -229,6 +229,9 @@ impl W3dScene {
         self.model_resources.extend(src.model_resources);
         self.clod_meshes.extend(src.clod_meshes);
         self.clod_decoders.extend(src.clod_decoders);
+        // Carry the folded biped COM across, or a merged-in skinned model would keep
+        // the composed node transform while the renderer stopped stripping it.
+        self.model_root_com.extend(src.model_root_com);
 
         // Force the renderer to re-upload geometry and textures.
         self.mesh_content_version = self.mesh_content_version.wrapping_add(1);

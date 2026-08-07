@@ -235,7 +235,13 @@ impl Movie {
             BuiltInSymbol::Platform => Ok(Datum::String("Windows,32".to_string())),
             BuiltInSymbol::Frame => Ok(Datum::Int(self.current_frame as i32)),
             BuiltInSymbol::ProductVersion => Ok(Datum::String("11.0".to_string())),
-            BuiltInSymbol::MovieName | BuiltInSymbol::Movie => Ok(Datum::String(self.file_name.to_owned())),
+            // `_movie.name` is the Movie object's form of `the movieName` — the
+            // Director 11.5 Scripting Dictionary uses it directly in its Window
+            // examples (`put("Just moved window containing" && _movie.name)`).
+            // AreaZero's `[M] Main.InitGlobals` builds its asset base with
+            // `gSystem.path & _movie.name`, and without the alias that raised
+            // "Cannot get movie prop name".
+            BuiltInSymbol::MovieName | BuiltInSymbol::Movie | BuiltInSymbol::Name => Ok(Datum::String(self.file_name.to_owned())),
             BuiltInSymbol::UpdateLock => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
             BuiltInSymbol::Path => Ok(Datum::String(self.base_path.to_owned())),
             BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
@@ -357,7 +363,14 @@ impl Movie {
             // canvas is true-color, so report 32. Setting it is a no-op
             // (see set_prop), matching a monitor that can't change depth.
             BuiltInSymbol::ColorDepth => Ok(Datum::Int(32)),
-            BuiltInSymbol::Active3dRenderer => Ok(Datum::String("#openGL".to_string())),
+            // A SYMBOL, per the Scripting Dictionary: "The possible values of the
+            // active3dRenderer property are #openGL, #directX7_0, #directx9,
+            // #directX5_2, and #software". Returning the string "#openGL" made
+            // `_movie.active3dRenderer = #openGL` compare false, so AreaZero's
+            // `[M] 3D Shaders` BlendShader took its DirectX branch and built the
+            // additive material with THREE stacked copies of the same texture
+            // instead of the two-layer OpenGL form.
+            BuiltInSymbol::Active3dRenderer => Ok(Datum::Symbol(Symbol::from_str("openGL"))),
             BuiltInSymbol::ScriptExecutionStyle => Ok(Datum::Int(9)),
             BuiltInSymbol::XtraList => {
                 // Return a list of prop lists, each with #name and #fileName

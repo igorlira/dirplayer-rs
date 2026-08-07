@@ -419,6 +419,11 @@ impl TextMemberHandlers {
         // Director property names are case-insensitive
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
+            // See the setter: the renderer already honours info.scroll_top, so
+            // report the same value back. Scrollbar code reads it while dragging.
+            "scrolltop" => Ok(Datum::Int(
+                text_data.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0),
+            )),
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "line" => {
                 // Return a list of StringChunk references (one per
@@ -1705,9 +1710,20 @@ impl TextMemberHandlers {
                                 }
                             }
                         }
+                        // Fall back to the MEMBER's charSpacing when there are no HTML
+                        // styled spans to carry one. A plain text member set from Lingo
+                        // (`member.charSpacing = -1`) has no spans at all, so defaulting
+                        // to 0 silently dropped the authored tracking.
+                        //
+                        // AreaZero's menu styles all carry `#kerning: -1`, which
+                        // `[M] Text Director` assigns as `tTextMember.charSpacing`.
+                        // Losing it made every baked string 1px per character too wide:
+                        // "[MEDIUM]" overflowed its 105px member (the mesh is exactly
+                        // 105 wide) and lost the closing bracket, and "PLAY MORE GAMES"
+                        // came out 15px wide of where Director centres it.
                         let cs_px: i32 = text_data.html_styled_spans.first()
                             .map(|s| s.style.char_spacing)
-                            .unwrap_or(0);
+                            .unwrap_or(text_data.char_spacing);
                         let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
                         match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
                             &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
@@ -2294,6 +2310,25 @@ impl TextMemberHandlers {
         // Director property names are case-insensitive
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
+            // `scrollTop` — Director 11.5: the distance in pixels from the top of a
+            // scrolling text/field member to the top of its visible area. Fields
+            // already supported it; text members did not, even though the renderer
+            // ALREADY offsets the draw origin by `text_member.info.scroll_top`. Only
+            // the accessor was missing, so dkbarrel's help panel
+            // (`Generic Help Dialog box` sets `member(...).scrollTop`) never moved.
+            "scrolltop" => borrow_member_mut(
+                member_ref,
+                |_player| value.int_value(),
+                |cast_member, v| -> Result<(), ScriptError> {
+                    let v = v?;
+                    if let Some(text_member) = cast_member.member_type.as_text_mut() {
+                        if let Some(info) = text_member.info.as_mut() {
+                            info.scroll_top = v.max(0) as u32;
+                        }
+                    }
+                    Ok(())
+                },
+            ),
             "text" => borrow_member_mut(
                 member_ref,
                 |player| value.string_value(),
@@ -2309,7 +2344,7 @@ impl TextMemberHandlers {
                         "[text_setter] member='{}' old_color={} spans={} new_text='{}'",
                         cast_member.name, old_color,
                         text_member.html_styled_spans.len(),
-                        &new_text[..new_text.len().min(30)],
+                        new_text.chars().take(30).collect::<String>(),
                     );
 
 
@@ -2481,7 +2516,7 @@ impl TextMemberHandlers {
                     debug!(
                         "[html_setter] member='{}' old_color={} new_color={} new_spans={} html='{}'",
                         cast_member.name, old_color, new_color, spans.len(),
-                        &html_string[..html_string.len().min(80)],
+                        html_string.chars().take(80).collect::<String>(),
                     );
 
                     // Store original HTML source

@@ -4064,14 +4064,14 @@ impl Bitmap {
         );
 
         let filled = shape_info.fill_type != 0;
-        // Per ScummVM: for outlined shapes, line_thickness of 1 means invisible (subtract 1)
-        let thickness = if filled {
-            // Filled shapes: outline is optional, drawn at actual thickness
-            shape_info.line_thickness as i32
-        } else {
-            // Outlined shapes: thickness 1 = invisible per ScummVM convention
-            (shape_info.line_thickness as i32) - 1
-        };
+        // Director stores the border width 1-BASED: file 1 = no border, 2 = 1px,
+        // … 6 = 5px (max) — the encoding the Lingo `lineSize of member` getter
+        // decodes with `raw - 1` (cast_member_ref.rs), verified against Director.
+        //
+        // One byte, one meaning: the decode does not depend on `filled`. Reading
+        // it raw for filled shapes gave them a 1px foreColor outline they were
+        // never authored with (a black border around each shape).
+        let thickness = (shape_info.line_thickness as i32) - 1;
 
         // Convert blend percentage to alpha (0.0-1.0)
         let alpha = (sprite.blend as f32 / 100.0).clamp(0.0, 1.0);
@@ -4124,7 +4124,10 @@ impl Bitmap {
                     }
                 }
                 ShapeType::Line => {
-                    let t = (shape_info.line_thickness as i32).max(1);
+                    // Floor at 1 AFTER the 1-based decode — a #line member is
+                    // nothing but its line, so it never vanishes. See the webgl2
+                    // Line arm.
+                    let t = ((shape_info.line_thickness as i32) - 1).max(1);
                     if shape_info.line_direction == 6 {
                         self.draw_line_thick(x1, y2 - 1, x2 - 1, y1, fg_rgb, palettes, alpha, t);
                     } else {
@@ -4174,7 +4177,7 @@ impl Bitmap {
                     }
                 }
                 ShapeType::Line => {
-                    let t = (shape_info.line_thickness as i32).max(1);
+                    let t = ((shape_info.line_thickness as i32) - 1).max(1);
                     if shape_info.line_direction == 6 {
                         temp.draw_line_thick(0, h - 1, w - 1, 0, fg_rgb, palettes, 1.0, t);
                     } else {

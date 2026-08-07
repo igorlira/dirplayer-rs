@@ -3,6 +3,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::director::lingo::datum::Datum;
 
+use crate::player::symbols::builtin::BuiltInSymbol;
 use crate::player::symbols::symbol::Symbol;
 use crate::player::{
     cast_member::CastMemberType,
@@ -15,6 +16,65 @@ use crate::player::{
 };
 
 use super::script_instance::ScriptInstanceUtils;
+
+/// The sprite's Shockwave3D camera list as one ordered vec (index 1 first).
+///
+/// Director gives every 3D sprite a camera list that ALREADY contains the cast
+/// member's default camera at index 1 — `cameraCount()` is 1 before a script has
+/// touched it, and `addCamera(cam)` with no index appends *after* that camera. We
+/// store the list as `w3d_camera` (index 1) + `w3d_cameras` (2+), and both start
+/// empty, so seed index 1 with the member's own default view.
+///
+/// Without the seed, SuperSonic RC's
+///     tSprite.addCamera(p3d.camera("overlays"))
+/// made the in-scene overlay camera index 1 — it replaced the game world's default
+/// camera instead of layering over it, and since it clears on render the sprite
+/// came out black.
+fn sprite_camera_list(
+    player: &DirPlayer,
+    sprite_num: i16,
+) -> Vec<crate::player::sprite::SpriteCamera> {
+    let Some(sprite) = player.movie.score.get_sprite(sprite_num) else {
+        return vec![];
+    };
+    let mut cams: Vec<_> = sprite.w3d_camera.iter().cloned().collect();
+    cams.extend(sprite.w3d_cameras.iter().cloned());
+    if cams.is_empty() {
+        // Same default the renderer picks when no camera is active: the member's
+        // "DefaultView", else its first view node.
+        use crate::director::chunks::w3d::types::W3dNodeType;
+        let name = sprite
+            .member
+            .as_ref()
+            .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+            .and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|o| o.parsed_scene.as_ref())
+            .and_then(|sc| {
+                sc.nodes
+                    .iter()
+                    .find(|n| {
+                        n.node_type == W3dNodeType::View
+                            && n.name.eq_ignore_ascii_case("DefaultView")
+                    })
+                    .or_else(|| sc.nodes.iter().find(|n| n.node_type == W3dNodeType::View))
+                    .map(|n| n.name.as_str().to_string())
+            })
+            .unwrap_or_else(|| "DefaultView".to_string());
+        cams.push(crate::player::sprite::SpriteCamera { member: None, name });
+    }
+    cams
+}
+
+/// Write an ordered camera list back to the sprite's primary + extras split.
+fn set_sprite_camera_list(
+    player: &mut DirPlayer,
+    sprite_num: i16,
+    mut cams: Vec<crate::player::sprite::SpriteCamera>,
+) {
+    let sprite = player.movie.score.get_sprite_mut(sprite_num);
+    sprite.w3d_camera = if cams.is_empty() { None } else { Some(cams.remove(0)) };
+    sprite.w3d_cameras = cams;
+}
 
 // JS bridge names use the `dirplayer_` prefix so this fork's globals don't
 // collide with stock Ruffle if both are loaded on the same page (e.g. via a
@@ -236,7 +296,13 @@ impl SpriteDatumHandlers {
             "newobject" |
             "hittest" | "getflashproperty" | "setflashproperty" | "telltarget" |
             "findlabel" | "flashtostage" | "stagetoflash" | "mapstagetomember" | "getpropref" |
-            "addcamera" | "removecamera" | "cameracount"
+            // `camera` belongs with the other 3D camera-list accessors: it must reach
+            // SpriteDatumHandlers::call so `sprite(n).camera(i)` indexes the list.
+            // Left off, it fell to the async path (sprite behaviours, then global
+            // handlers) and the index was lost — every camera(i) answered with the
+            // primary camera, so [PS] Fade's teardown never matched its own camera
+            // and never removed it.
+            "addcamera" | "removecamera" | "deletecamera" | "cameracount" | "camera"
         );
         if is_sync_handler {
             return Ok(false);
@@ -313,12 +379,49 @@ impl SpriteDatumHandlers {
                     Ok(player.alloc_datum(Datum::Int(if intersects { 1 } else { 0 })))
                 })
             }
+            // `sprite(n).camera(i)` — INDEXED access into the sprite's camera list.
+            // Without it the index was ignored and every `camera(i)` answered with the
+            // primary camera, so [PS] Fade's teardown
+            //     repeat with i = 1 to tCount
+            //       if tSprite.camera(i).name = p.camera.name then tIndex = i
+            //     if tIndex > 0 then tSprite.deleteCamera(tIndex)
+            // never found its own camera and never removed it. Every fade then left
+            // another Fade_Camera pass on the sprite; they stacked up, and one whose
+            // clearAtRender defaulted to TRUE wiped the skybox, the 3D world and the
+            // menu UI that had already been drawn that frame.
+            "camera" => {
+                reserve_player_mut(|player| {
+                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                    let index = if !args.is_empty() {
+                        player.get_datum(&args[0]).int_value().unwrap_or(1)
+                    } else { 1 };
+                    let own = player.movie.score.get_sprite(sprite_num)
+                        .and_then(|s| s.member.as_ref())
+                        .cloned()
+                        .unwrap_or(crate::player::cast_lib::NULL_CAST_MEMBER_REF);
+                    let cams = sprite_camera_list(player, sprite_num as i16);
+                    let idx = (index.max(1) as usize) - 1;
+                    match cams.get(idx) {
+                        Some(c) => {
+                            let (cast_lib, cast_member) =
+                                c.member.unwrap_or((own.cast_lib, own.cast_member));
+                            Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                                crate::director::lingo::datum::Shockwave3dObjectRef {
+                                    cast_lib,
+                                    cast_member,
+                                    object_type: BuiltInSymbol::Camera,
+                                    name: Symbol::from_str(&c.name),
+                                },
+                            )))
+                        }
+                        None => Ok(DatumRef::Void),
+                    }
+                })
+            }
             "cameracount" => {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let count = if let Some(sprite) = player.movie.score.get_sprite(sprite_num) {
-                        1 + sprite.w3d_cameras.len() as i32
-                    } else { 1 };
+                    let count = sprite_camera_list(player, sprite_num as i16).len().max(1) as i32;
                     Ok(player.alloc_datum(Datum::Int(count)))
                 })
             }
@@ -327,51 +430,92 @@ impl SpriteDatumHandlers {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
                     // addCamera(cameraRef, index)
                     // index 1 = primary camera, 2+ = additional cameras rendered on top
-                    let cam_name = if !args.is_empty() {
+                    // A camera reference carries the member that owns it; that member
+                    // may differ from the sprite's own (Director composites each camera
+                    // against its own member's world).
+                    let cam_entry = if !args.is_empty() {
                         match player.get_datum(&args[0]) {
-                            Datum::Shockwave3dObjectRef(r) => Some(r.name.clone()),
-                            Datum::String(s) => Some(Symbol::from_str(s)),
+                            Datum::Shockwave3dObjectRef(r) => Some(crate::player::sprite::SpriteCamera {
+                                member: Some((r.cast_lib, r.cast_member)),
+                                name: r.name.as_str().to_string(),
+                            }),
+                            Datum::String(s) if !s.is_empty() => Some(crate::player::sprite::SpriteCamera {
+                                member: None,
+                                name: s.clone(),
+                            }),
                             _ => None,
                         }
                     } else { None };
                     let index = if args.len() >= 2 {
                         Some(player.get_datum(&args[1]).int_value().unwrap_or(1) as usize)
                     } else { None };
-                    if let Some(cam_name) = cam_name {
-                        let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
-                        if let Some(index) = index {
-                            // addCamera(cam, index) — insert at specific position
-                            if index <= 1 {
-                                sprite.w3d_camera = Some(cam_name);
-                            } else {
-                                let extra_idx = index.saturating_sub(2);
-                                if extra_idx >= sprite.w3d_cameras.len() {
-                                    sprite.w3d_cameras.push(cam_name);
-                                } else {
-                                    sprite.w3d_cameras.insert(extra_idx, cam_name);
-                                }
-                            }
-                        } else {
-                            // addCamera(cam) — append to camera list
-                            sprite.w3d_cameras.push(cam_name);
-                        }
+                    if let Some(cam_entry) = cam_entry {
+                        // Director 11.5 Scripting Dictionary, `addCamera`: "adds a camera
+                        // to the list of cameras for the sprite … index … specifies the
+                        // index in the list of cameras at which whichCamera is ADDED. If
+                        // index is greater than the value of cameraCount(), the camera is
+                        // added to the end of the list." Its example "inserts the camera
+                        // named FlightCam at the fifth index position" — so an existing
+                        // camera at that index shifts down, it is NOT replaced.
+                        //
+                        // Index 1 used to overwrite the primary camera outright, which
+                        // silently DISCARDED it. AreaZero's [PS] Camera does
+                        //     p.sprite.camera = Player1_Camera
+                        //     p.sprite.addCamera(tSkyboxCamera, 1)
+                        // so the camera the whole menu is framed through was thrown away
+                        // the moment the skybox camera was added, and the sprite rendered
+                        // through an unrelated fallback view that never moved.
+                        //
+                        // The sprite stores the list as primary + extras; treat them as
+                        // one ordered list so an insert anywhere shifts correctly. The
+                        // list already holds the member's default camera at index 1 (see
+                        // sprite_camera_list), so a plain append layers over the world
+                        // rather than replacing it.
+                        let mut cams = sprite_camera_list(player, sprite_num as i16);
+                        let at = match index {
+                            Some(i) => i.saturating_sub(1).min(cams.len()),
+                            None => cams.len(), // addCamera(cam) — append
+                        };
+                        cams.insert(at, cam_entry);
+                        set_sprite_camera_list(player, sprite_num as i16, cams);
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 })
             }
-            "removecamera" => {
+            // Director 11.5 Scripting Dictionary, `deleteCamera`:
+            // "sprite(whichSprite).deleteCamera(cameraOrIndex) … removes the camera
+            // from the sprite's list of cameras. The camera is not deleted from the
+            // cast member." The argument is "a string or an integer that specifies the
+            // name or index position", and the doc's own example also passes a camera
+            // REFERENCE — so accept all three. Only `removeCamera` existed before, so
+            // the documented `deleteCamera` fell through to the async path and did
+            // nothing: [PS] Fade could never drop its camera.
+            "deletecamera" | "removecamera" => {
                 reserve_player_mut(|player| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let index = if !args.is_empty() {
-                        player.get_datum(&args[0]).int_value().unwrap_or(1) as usize
-                    } else { 1 };
-                    let sprite = player.movie.score.get_sprite_mut(sprite_num as i16);
-                    if index >= 2 {
-                        let idx = index - 2;
-                        if idx < sprite.w3d_cameras.len() {
-                            sprite.w3d_cameras.remove(idx);
+                    let target = args.first().map(|a| player.get_datum(a).clone());
+                    // Mirror addCamera: one ordered list, so removing index 1 promotes
+                    // the next camera instead of being a silent no-op.
+                    let mut cams = sprite_camera_list(player, sprite_num as i16);
+                    let at = match &target {
+                        Some(Datum::Shockwave3dObjectRef(r)) => cams
+                            .iter()
+                            .position(|c| r.name.eq_ignore_ascii_case(&c.name)),
+                        Some(Datum::String(name)) => cams
+                            .iter()
+                            .position(|c| c.name.eq_ignore_ascii_case(name)),
+                        Some(other) => other
+                            .int_value()
+                            .ok()
+                            .map(|i| (i.max(1) as usize) - 1),
+                        None => None,
+                    };
+                    if let Some(at) = at {
+                        if at < cams.len() {
+                            cams.remove(at);
                         }
                     }
+                    set_sprite_camera_list(player, sprite_num as i16, cams);
                     Ok(player.alloc_datum(Datum::Void))
                 })
             }

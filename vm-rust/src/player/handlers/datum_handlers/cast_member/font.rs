@@ -692,6 +692,16 @@ impl FontMemberHandlers {
         ctx.set_fill_style_str("rgb(0,0,0)");
         ctx.fill_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
 
+        // Apply the vertical origin during LAYOUT rather than when blitting the
+        // canvas back to the bitmap. The canvas is only render_height tall, so
+        // laying out at y=0 and shifting at blit time can only slide the lines
+        // that were already rasterized — anything below the box was never drawn.
+        // For scrolled members (start_y = top_spacing - scrollTop, i.e. negative)
+        // that means the scroll moves text up and leaves blank space instead of
+        // pulling in the following lines. Translating the context lets those
+        // lines lay out into view and clips the scrolled-past ones above y=0.
+        let _ = ctx.translate(0.0, start_y as f64);
+
         // Set text baseline to top for consistent positioning
         ctx.set_text_baseline("top");
 
@@ -989,7 +999,19 @@ impl FontMemberHandlers {
         let mut y = top_spacing.max(0) as f64;
         let mut prev_par_idx: Option<u16> = None;
         for line in &lines {
-            if y >= canvas_height as f64 {
+            // `y` is a LAYOUT coordinate in logical (1x) units; the on-canvas
+            // top of the line is `y + start_y`, because ctx.translate(0,
+            // start_y) is applied before layout. Terminate once the line has
+            // scrolled past the BOTTOM of the visible box, in the same space.
+            //
+            // The old test (`y >= canvas_height`) was wrong twice over: it
+            // compared logical y against the 2x device height, and it ignored
+            // start_y completely. For a scrolled member (start_y negative, e.g.
+            // -279 on dkbarrel's Help dialog) the visible band is
+            // y ∈ [279, 411], but the loop stopped emitting at y = 264 — the
+            // box went blank mid-document. The stray 2x was the only reason any
+            // scrolled lines rendered at all.
+            if y + start_y as f64 >= render_height.max(1) as f64 {
                 break;
             }
 
@@ -1084,14 +1106,25 @@ impl FontMemberHandlers {
                 ctx.set_fill_style_str("rgb(255,255,255)");
                 let _ = ctx.fill_text(&segment.text, x, y);
 
-                // Record this segment's color region (logical coords, baseline
-                // is "top" so the glyph cell is [y, y+size_px]) for per-run
-                // color lookup during the downscale.
+                // Record this segment's color region for per-run color lookup
+                // during the downscale. These rects are matched against OUTPUT
+                // pixel coordinates, so they must be stored in canvas space,
+                // not layout space: `ctx.translate(0, start_y)` is baked into
+                // the drawing, so the glyph cell drawn at layout `y` lands on
+                // the canvas at `y + start_y`. Baseline is "top", so the cell
+                // is [y+start_y, y+start_y+size_px].
+                //
+                // Without the start_y term every lookup in a scrolled member is
+                // off by the scroll amount: pixels hit a neighbouring line's
+                // rect or miss entirely and fall back to `fallback_color`, so a
+                // single render comes out in two colors (dkbarrel's Help
+                // dialog, which is why it only broke once scrolling worked).
+                let canvas_y = y + start_y as f64;
                 seg_color_rects.push((
                     x,
                     x + segment.width,
-                    y,
-                    y + segment.style.size_px,
+                    canvas_y,
+                    canvas_y + segment.style.size_px,
                     segment.style.color,
                 ));
 
@@ -1163,8 +1196,11 @@ impl FontMemberHandlers {
 
         let pixels = image_data.data();
 
-        // Debug: check raw canvas pixels for non-black (text) content
-        {
+        // Debug: check raw canvas pixels for non-black (text) content.
+        // Gated on the log level: this scans every canvas pixel of every text
+        // sprite on every frame, which is pure waste when nothing consumes the
+        // output.
+        if log::log_enabled!(log::Level::Debug) {
             let total_px = (canvas_width * canvas_height) as usize;
             let mut nonblack = 0usize;
             let mut first_nb = String::new();
@@ -1184,7 +1220,14 @@ impl FontMemberHandlers {
                     }
                 }
             }
-            let text_preview = spans.first().map(|s| &s.text[..s.text.len().min(5)]).unwrap_or("?");
+            // Truncate by CHARS, not bytes. `&s.text[..5]` panics whenever a
+            // multi-byte character straddles the cut — Summer Resort's sign text
+            // uses a curly apostrophe (3 bytes), which took down the draw loop
+            // from inside a debug-only preview string.
+            let text_preview: String = spans
+                .first()
+                .map(|s| s.text.chars().take(5).collect())
+                .unwrap_or_else(|| "?".to_string());
             debug!(
                 "[canvas-debug] text='{}' canvas={}x{} nonblack={}/{} first={}",
                 text_preview, canvas_width, canvas_height, nonblack, total_px,
@@ -1200,7 +1243,8 @@ impl FontMemberHandlers {
         let sf = scale_factor as usize;
 
         for cy in 0..out_h {
-            let dest_y = start_y + cy as i32;
+            // start_y is already baked into the canvas via ctx.translate above.
+            let dest_y = cy as i32;
             if dest_y < 0 || dest_y >= bitmap.height as i32 {
                 continue;
             }
@@ -1535,6 +1579,26 @@ impl FontMemberHandlers {
             seg.iter().map(|&(c, _)| advance_of(glyph_byte_for(c))).sum()
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == BuiltInSymbol::Right);
+
+        // Director places a line by its baseline at `lineTop + fixedLineSpace`.
+        // For an ordinary member fixedLineSpace is at least the font's ascent, so
+        // that is just the natural ascender and nothing changes. But a
+        // fixedLineSpace SMALLER than the ascent is a deliberate squeeze — the
+        // line box cannot hold the glyph, and Director lets the glyph overflow
+        // UPWARD out of it rather than pushing it down by a full ascender.
+        //
+        // AreaZero's `[M] Text Director` bakes every 3D UI string that way:
+        // `topSpacing = 10, fixedLineSpace = 1` on a 32px strip pulls the
+        // copyright line hard against the top, because the quad sampling it is
+        // authored hanging 13px off the bottom of the stage. Using the full
+        // ascender put the baseline at 22 and the ink at rows 13-24, so the
+        // stage edge cut the line in half; clamping it to fixedLineSpace puts
+        // the baseline at 11 and the ink at ~0-14, inside the visible band.
+        let baseline = if fixed_line_space > 0 {
+            baseline.min(fixed_line_space as f64)
+        } else {
+            baseline
+        };
 
         let mut y_top = top_spacing as f64;
         for line in &lines {

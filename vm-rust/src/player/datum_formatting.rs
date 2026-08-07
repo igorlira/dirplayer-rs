@@ -171,8 +171,26 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::SoundRef(_) => {
             format!("<_sound>")
         }
-        Datum::DateRef(_) => {
-            format!("<date>")
+        Datum::DateRef(id) => {
+            // Director 11.5 Scripting Dictionary, `date() (System)`: "_system.date()
+            // returns the current date in the system clock", and its own example
+            // indexes the result as text (`_system.date().char[1..4] = "1/1/"`), so a
+            // date must render as a DATE STRING, not a type placeholder. AreaZero's
+            // startup log printed "Movie started at @ 18:02:17<date>." because we
+            // emitted the placeholder into the concatenation.
+            //
+            // The dictionary notes the format follows the machine's date settings, so
+            // defer to the host locale rather than hardcoding a layout.
+            // Measured in Director: `put _system.date()` -> "03.08.2026" — no
+            // leading space. The space that separates time from date in a
+            // concatenation belongs to _system.time() (Windows short-time keeps an
+            // empty AM/PM slot in 24-hour locales); see TypeHandlers::time.
+            player.date_objects.get(id)
+                .map(|d| js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(d.timestamp_ms as f64))
+                    .to_locale_date_string("default", &date_opts())
+                    .as_string()
+                    .unwrap_or_default())
+                .unwrap_or_else(|| "<date>".to_string())
         }
         Datum::Media(_) => {
             format!("<media>")
@@ -289,4 +307,18 @@ pub fn format_numeric_value(datum: &Datum, player: &DirPlayer) -> String {
         Datum::Float(f) => format_float_with_precision(*f, player),
         _ => format_concrete_datum(datum, player),
     }
+}
+
+/// Options for Director's system SHORT date: zero-padded day and month with a
+/// full year. Measured against Director on this machine: `03.08.2026`, where a
+/// bare toLocaleDateString gave `3.8.2026`. The locale still chooses the field
+/// ORDER and separator — only the padding is pinned, matching the dictionary's
+/// note that the date format "varies, depending on how the date is formatted on
+/// the computer".
+fn date_opts() -> js_sys::Object {
+    let o = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&o, &"day".into(), &"2-digit".into());
+    let _ = js_sys::Reflect::set(&o, &"month".into(), &"2-digit".into());
+    let _ = js_sys::Reflect::set(&o, &"year".into(), &"numeric".into());
+    o
 }

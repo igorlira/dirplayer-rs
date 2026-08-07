@@ -61,7 +61,7 @@ impl Default for W3dTextureLayer {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum W3dShaderType {
     LitTexture,
     Painter,
@@ -69,6 +69,10 @@ pub enum W3dShaderType {
     Engraver,
     Newsprint,
     Particle,
+    /// `#normalMap` — script-created only (no W3D block type writes one). Its
+    /// texture layers are NOT the standard "layer 1 is the base map" order:
+    /// 1 = normal map, 2 = diffuse, 3 = specular.
+    NormalMap,
 }
 
 impl Default for W3dShaderType {
@@ -156,6 +160,26 @@ impl Default for W3dKeyframe {
             scale_y: 1.0,
             scale_z: 1.0,
         }
+    }
+}
+
+impl W3dKeyframe {
+    /// Column-major 4x4 local transform for this keyframe (quaternion + position + scale).
+    pub fn to_column_major_matrix(&self) -> [f32; 16] {
+        let (qx, qy, qz, qw) = (self.rot_x, self.rot_y, self.rot_z, self.rot_w);
+        let (sx, sy, sz) = (self.scale_x, self.scale_y, self.scale_z);
+
+        let x2 = qx + qx; let y2 = qy + qy; let z2 = qz + qz;
+        let xx = qx * x2; let xy = qx * y2; let xz = qx * z2;
+        let yy = qy * y2; let yz = qy * z2; let zz = qz * z2;
+        let wx = qw * x2; let wy = qw * y2; let wz = qw * z2;
+
+        [
+            (1.0 - (yy + zz)) * sx,  (xy + wz) * sx,          (xz - wy) * sx,          0.0, // col 0
+            (xy - wz) * sy,          (1.0 - (xx + zz)) * sy,  (yz + wx) * sy,          0.0, // col 1
+            (xz + wy) * sz,          (yz - wx) * sz,          (1.0 - (xx + yy)) * sz,  0.0, // col 2
+            self.pos_x,              self.pos_y,              self.pos_z,              1.0, // col 3
+        ]
     }
 }
 
@@ -280,6 +304,13 @@ pub struct W3dNode {
     pub node_type: W3dNodeType,
     pub transform: [f32; 16],
     pub shader_name: Symbol,
+    /// Authored `model.visibility` — the `IFXModel::SetVisibility` bitmask stored
+    /// in the MODEL_NODE block (`gs_uFrontFaceVisibility = 1<<0`,
+    /// `gs_uBackFaceVisibility = 1<<1`): 0=#none, 1=#front, 2=#back, 3=#both.
+    /// Exporters mark helper/proxy nodes #none — camera-carrier dummies, physics
+    /// proxies, skybox stand-ins — and double-sided alpha foliage #both.
+    /// Model nodes only; other node types leave this at the #front default.
+    pub visibility: u8,
     pub near_plane: f32,
     pub far_plane: f32,
     pub fov: f32,
@@ -297,6 +328,7 @@ impl Default for W3dNode {
             node_type: W3dNodeType::Group,
             transform: [0.0; 16],
             shader_name: Symbol::empty(),
+            visibility: 1, // #front — Director's documented default
             near_plane: 1.0,
             far_plane: 1000.0,
             fov: 30.0,
@@ -469,6 +501,12 @@ pub struct W3dScene {
     pub mesh_content_version: u64,
     /// Monotonically increasing counter; bumped whenever texture_images is mutated
     pub texture_content_version: u64,
+    /// Per skinned model (lowercased node name): the biped COM that Director folds
+    /// into the model node at import — the root bone's frame-0 pose from the model's
+    /// reference motion. Recorded here so the renderer strips exactly the matrix the
+    /// parser composed, and the two can never drift apart. See
+    /// `apply_root_com_to_model_nodes`.
+    pub model_root_com: HashMap<String, [f32; 16]>,
 }
 
 impl W3dScene {

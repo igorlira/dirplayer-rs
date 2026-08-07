@@ -60,6 +60,16 @@ pub struct FieldMember {
     /// Empty when the field has uniform styling (older parser behaviour).
     pub formatting_runs: Vec<crate::director::chunks::text::StxtFormattingRun>,
     pub text_height: u16,  // Text area height from FieldInfo (for dimension calculations)
+    /// FieldInfo `max_height` (bytes 22-23) — the field's authored BOX height.
+    ///
+    /// This is NOT redundant with `rect_bottom - rect_top`. Director keeps
+    /// `initialRect` at the height of the text the member CONTAINS, so a field
+    /// authored empty and filled at runtime stores a one-line rect no matter how
+    /// big its box is. Summer Resort's "sign.text" is the case: `#scroll`,
+    /// initialRect 221x16 (authored empty), max_height 134 — Director displays
+    /// 134. Its sibling "talk.text" was authored WITH content, so its two values
+    /// coincide (156/156), which is why only one of the two ever looked wrong.
+    pub max_height: u16,
     pub fixed_line_space: u16,  // Line spacing for text rendering
     pub top_spacing: i16,
     pub box_type: BuiltInSymbol,
@@ -280,6 +290,7 @@ impl FieldMember {
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: 100,
+            max_height: 0,
             fixed_line_space: 0,
             top_spacing: 0,
             box_type: BuiltInSymbol::Adjust,
@@ -398,6 +409,7 @@ impl FieldMember {
             font_id: None,
             formatting_runs: Vec::new(),
             text_height: field_info.text_height,  // Text area height for dimension calculations
+            max_height: field_info.max_height,
             fixed_line_space: 0,  // Use default line spacing for text rendering
             top_spacing: field_info.scroll as i16,
             box_type: field_info.box_type(),
@@ -603,6 +615,7 @@ impl TextMember {
             model_resource_name: BuiltInSymbol::Text.into(),
             shader_name: BuiltInSymbol::DefaultShader.into(),
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
         });
@@ -1145,6 +1158,83 @@ impl Shockwave3dMember {
     /// Get mutable access to the parsed scene (uses Rc::make_mut for copy-on-write)
     pub fn scene_mut(&mut self) -> Option<&mut crate::director::chunks::w3d::types::W3dScene> {
         self.parsed_scene.as_mut().map(|rc| std::rc::Rc::make_mut(rc))
+    }
+
+    /// Load `model_name`'s authored keyframe motion into its keyframePlayer if the
+    /// player has nothing loaded yet.
+    ///
+    /// Director pre-loads each model's keyframePlayer with the keyframe motion
+    /// authored for that node, so a script can drive it with `currentTime` /
+    /// `playRate` without ever calling `play()`. dirplayer only ever set
+    /// `current_motion` in `play()`, so touching a keyframePlayer materialized an
+    /// UNBOUND player — and once two exist the renderer switches to its per-model
+    /// path (`bones_players.len() > 1`), where an unbound player is skipped. Every
+    /// animation in the member then froze: AreaZero's menu ran camera 1's fly-through
+    /// once (off the member-level auto-play) and stuck the moment the script touched
+    /// camera 2's carrier node.
+    ///
+    /// Falls back to the member-level motion so a model with no motion of its own
+    /// still binds to something rather than poisoning the whole member.
+    pub fn bind_keyframe_motion(&mut self, model_name: Symbol) {
+        // Symbol identity is already case-insensitive (the interner lowercases),
+        // so the explicit case folding this needed while names were Strings is
+        // redundant — plain `==` is the case-insensitive compare.
+        if self
+            .runtime_state
+            .bones_players
+            .get(&model_name)
+            .is_some_and(|bp| bp.current_motion.is_some())
+        {
+            return;
+        }
+        let resolved = self.parsed_scene.as_ref().and_then(|scene| {
+            // Is `name` the model itself, or somewhere in its subtree? An exporter
+            // that hoists a node's animation onto a carrier names the track after the
+            // ORIGINAL node, which ends up a child of the carrier: AreaZero's
+            // "Dummy Animation Node Camera1" carries motion "Camera1-Key", whose one
+            // track is named "Camera1" — the camera parented under that dummy.
+            let in_subtree = |name: Symbol| -> bool {
+                if name == model_name {
+                    return true;
+                }
+                let mut current = name;
+                for _ in 0..20 {
+                    let parent = match scene.nodes.iter().find(|n| n.name == current) {
+                        Some(n) => n.parent_name.clone(),
+                        None => return false,
+                    };
+                    if parent.is_empty() || parent == BuiltInSymbol::World {
+                        return false;
+                    }
+                    if parent == model_name {
+                        return true;
+                    }
+                    current = parent;
+                }
+                false
+            };
+            // A single-track object keyframe drives one node; prefer an exact name
+            // match, then anything in the model's subtree.
+            scene
+                .motions
+                .iter()
+                .find(|m| m.tracks.len() == 1 && m.tracks[0].bone_name == model_name)
+                .or_else(|| scene.motions.iter()
+                    .find(|m| m.tracks.len() == 1 && in_subtree(m.tracks[0].bone_name)))
+                // Otherwise fall back to a motion named after the model.
+                .or_else(|| scene.motions.iter().find(|m| m.name == model_name))
+                .map(|m| m.name.clone())
+        });
+        let motion = match resolved.or_else(|| self.runtime_state.current_motion.clone()) {
+            Some(m) => m,
+            None => return,
+        };
+        let loops = self.info.loops;
+        let bp = self.runtime_state.bones_player_mut(model_name);
+        bp.current_motion = Some(motion);
+        bp.animation_playing = true;
+        bp.animation_loop = loops;
+        bp.motion_ended = false;
     }
 }
 
@@ -1733,6 +1823,20 @@ impl Shockwave3dRuntimeState {
         }
         if let Some(bg) = info.bg_color {
             state.background_color = Some(bg);
+        }
+        // Seed authored model.visibility from the file. The renderer already honors
+        // node_visibility (0 skips the draw, 2/3 flip culling) but the map was only
+        // ever written by Lingo setters, so exporter-hidden helper nodes rendered and
+        // authored #both foliage was drawn single-sided. Only non-default modes are
+        // inserted, so a script reading .visibility on an ordinary model still gets
+        // the #front fallback rather than a materialized entry.
+        if let Some(scene) = scene {
+            use crate::director::chunks::w3d::types::W3dNodeType;
+            for node in scene.nodes.iter() {
+                if node.node_type == W3dNodeType::Model && node.visibility != 1 {
+                    state.node_visibility.insert(node.name.clone(), node.visibility);
+                }
+            }
         }
         // Note: animationEnabled auto-start is handled in the rendering path
         // when the sprite first appears on stage, not here at parse time.
@@ -2486,6 +2590,14 @@ pub struct PhysXRigidBody {
     /// a model authored at anything other than 1x would snap to unit size on
     /// the first step. Mirrors `HavokRigidBody::sync_scale`.
     pub sync_scale: [f64; 3],
+
+    /// Accumulated Lingo `applyForce` (PxForceMode::eFORCE): integrated as
+    /// `v += F/m·dt` across the NEXT simulate() and then cleared, matching
+    /// PxRigidBody::addForce semantics (force lives until the step consumes it).
+    pub pending_force: [f64; 3],
+    /// Accumulated Lingo `applyTorque` / point-offset torque from
+    /// `applyForce(F, point)`: integrated as `ω += I⁻¹·T·dt`, then cleared.
+    pub pending_torque: [f64; 3],
 }
 
 impl Default for PhysXRigidBody {
@@ -2507,6 +2619,8 @@ impl Default for PhysXRigidBody {
             convex_hull: None,
             triangle_mesh: None,
             sync_scale: [1.0; 3],
+            pending_force: [0.0; 3],
+            pending_torque: [0.0; 3],
         }
     }
 }
@@ -4053,6 +4167,7 @@ impl CastMember {
             resource_name: Symbol::empty(),
             model_resource_name: Symbol::empty(),
             shader_name: Symbol::empty(),
+            visibility: 1,
             near_plane: 1.0,
             far_plane: 10000.0,
             fov: 34.516,
@@ -4088,6 +4203,7 @@ impl CastMember {
             resource_name: BuiltInSymbol::DefaultDirectional.into(),
             model_resource_name: Symbol::empty(),
             shader_name: Symbol::empty(),
+            visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
             // Rotation: Z-axis points toward (0.5, 1.0, 0.7) normalized

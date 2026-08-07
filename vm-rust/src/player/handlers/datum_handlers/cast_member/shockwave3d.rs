@@ -24,7 +24,9 @@ const W3D_HANDLER_LOG: bool = false;
 /// the camera accessor inserts DefaultView as camera[1]). Without it,
 /// e.g. Rasterwerks' `m.motion[3].name` returned the wrong (3rd authored) motion
 /// and every actor cloned a non-skeletal motion → T-pose.
-const DEFAULT_MOTION_NAME: &str = "Default Motion";
+// Director spells its built-in motion "DefaultMotion", with no space — scripts
+// that compare motion[1].name against it depend on the exact spelling.
+const DEFAULT_MOTION_NAME: &str = "DefaultMotion";
 
 fn log(msg: &str) {
     if W3D_HANDLER_LOG {
@@ -1497,7 +1499,7 @@ impl Shockwave3dMemberHandlers {
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons) = {
+                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons, src_motions) = {
                                 let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                                 let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
@@ -1557,7 +1559,12 @@ impl Shockwave3dMemberHandlers {
                                     .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
                                     .cloned().collect()).unwrap_or_default();
                                 let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
-                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons)
+                                // A skeleton without its motions is just a bind pose. Agent Free
+                                // Ride clones "player" out of member 5 into the member 1 scene it
+                                // actually renders, and the rider stood in his T-pose because the
+                                // clip stayed behind in the source member.
+                                let motions: Vec<_> = scene.map(|s| s.motions.clone()).unwrap_or_default();
+                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons, motions)
                             };
 
                             debug!(
@@ -1837,6 +1844,21 @@ impl Shockwave3dMemberHandlers {
                                                 let mut cloned = skeleton.clone();
                                                 cloned.name = Symbol::from_str(&skel_key.as_str());
                                                 scene.skeletons.push(cloned);
+
+                                                // Bring the rig's clips across too — a skeleton with
+                                                // no motion is just a bind pose. Keep each clip's
+                                                // ORIGINAL name even though the skeleton is renamed
+                                                // to the clone's key: scripts play motions by the
+                                                // source name (Agent Free Ride clones "player" in as
+                                                // "veh_player_1" and then calls play("player")).
+                                                // Motion tracks address bones by name, so a copied
+                                                // clip drives the renamed skeleton unchanged.
+                                                for motion in &src_motions {
+                                                    if scene.motions.iter().any(|m| m.name == motion.name) {
+                                                        continue;
+                                                    }
+                                                    scene.motions.push(motion.clone());
+                                                }
                                             }
                                         }
                                     }
@@ -1902,6 +1924,7 @@ impl Shockwave3dMemberHandlers {
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
                                             shader_name: effective_shader_name,
+                                            visibility: 1,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
@@ -2064,10 +2087,12 @@ impl Shockwave3dMemberHandlers {
                             }
                         } else { Symbol::empty() };
 
-                        // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type)
+                        // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type),
+                        // newShader(name, #type)
                         let new_res_type = if (handler_name.eq_builtin(BuiltInSymbol::NewModelResource)
                             || handler_name.eq_builtin(BuiltInSymbol::NewMesh)
-                            || handler_name.eq_builtin(BuiltInSymbol::NewLight)) && args.len() >= 2
+                            || handler_name.eq_builtin(BuiltInSymbol::NewLight)
+                            || handler_name.eq_builtin(BuiltInSymbol::NewShader)) && args.len() >= 2
                         {
                             player.get_datum(&args[1]).string_value().unwrap_or_default()
                         } else { String::new() };
@@ -2090,6 +2115,7 @@ impl Shockwave3dMemberHandlers {
                                                 resource_name: Symbol::empty(),
                                                 model_resource_name: new_model_resource_name,
                                                 shader_name: Symbol::empty(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
@@ -2101,6 +2127,7 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                                                 resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
@@ -2112,6 +2139,7 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                                                 resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
@@ -2142,14 +2170,29 @@ impl Shockwave3dMemberHandlers {
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                                                 resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
+                                                visibility: 1,
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
                                         BuiltInSymbol::Shader => {
+                                            // newShader(name, #type). The type arg was
+                                            // dropped, so a #normalMap shader was read with
+                                            // #standard layer order and rendered its NORMAL
+                                            // map as the base texture — AreaZero's menu robot
+                                            // came out blue/purple.
+                                            let shader_type = match_ci!(new_res_type.as_str(), {
+                                                "normalmap" => W3dShaderType::NormalMap,
+                                                "painter" => W3dShaderType::Painter,
+                                                "inker" => W3dShaderType::Inker,
+                                                "engraver" => W3dShaderType::Engraver,
+                                                "newsprint" => W3dShaderType::Newsprint,
+                                                _ => W3dShaderType::LitTexture,
+                                            });
                                             scene.shaders.push(W3dShader {
                                                 name: obj_sym,
+                                                shader_type,
                                                 ..Default::default()
                                             });
                                         }
@@ -2748,6 +2791,7 @@ impl Shockwave3dMemberHandlers {
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,
                             texture_content_version: 0,
+                            model_root_com: HashMap::new(),
                         };
                         empty_scene.nodes.push(W3dNode {
                             name: Symbol::builtin(BuiltInSymbol::World),
@@ -2756,6 +2800,7 @@ impl Shockwave3dMemberHandlers {
                             resource_name: Symbol::empty(),
                             model_resource_name: Symbol::empty(),
                             shader_name: Symbol::empty(),
+                            visibility: 1,
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
@@ -2768,6 +2813,7 @@ impl Shockwave3dMemberHandlers {
                             resource_name: Symbol::empty(),
                             model_resource_name: Symbol::empty(),
                             shader_name: Symbol::empty(),
+                            visibility: 1,
                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,

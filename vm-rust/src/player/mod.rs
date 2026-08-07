@@ -315,6 +315,9 @@ pub struct DirPlayer {
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
     pub drag_offset: (i32, i32),
+    /// In-progress drag of a `#scroll` field's lift: (sprite number, grab offset
+    /// from the lift's top edge in local px). Cleared on mouse up.
+    pub field_scroll_drag: Option<(i16, i32)>,
     pub trails_bitmap: Option<bitmap::bitmap::Bitmap>,
     pub click_on_sprite: i16,
     /// Sprite whose CAST MEMBER script is currently executing. A member script
@@ -456,7 +459,11 @@ pub struct DirPlayer {
     /// which (when sprite 4 has no keyDown behavior) propagates back up to the
     /// movie script per the sendSprite hierarchy; without this guard it recurses
     /// into the same `on keyDown` forever (stack overflow).
-    pub active_static_event_handlers: Vec<(CastMemberRef, String)>,
+    /// Static-event re-entrancy guard: (script, handler, ARGS). The args are
+    /// part of the key — a handler legitimately re-entered with DIFFERENT
+    /// arguments is a nested dispatch, not a propagation loop. See
+    /// `player_invoke_static_event`.
+    pub active_static_event_handlers: Vec<(CastMemberRef, String, Vec<DatumRef>)>,
     /// Timestamp (Date.now ms) of the last frame update driven from updateStage()
     /// while `command_handler_yielding`. The frame loop is paused during a keyDown
     /// busy-wait loop, so updateStage() runs the frame's animation itself,
@@ -582,7 +589,14 @@ pub enum MovieFrameTarget {
 
 impl DirPlayer {
     pub fn new<'a>(tx: Sender<PlayerVMExecutionItem>) -> DirPlayer {
-        let sound_manager = SoundManager::new(8).expect("Sound manager failed to initialize"); // 8 sound channels (Director standard)
+        // Director 11.5 Scripting Dictionary, Sound object: "The Director sound
+        // object controls audio playback in all SIXTEEN available sound channels."
+        // (The Sound Channel entry still says eight — legacy text from before the
+        // count was raised; the Sound object is the authority, and the Score UI
+        // exposing only two channels is a separate, authoring-only limit.)
+        // AreaZero's `[M] Sound Manager.SetupSoundManager` loops 1..16 setting
+        // `sound(i).volume` and raised "Invalid sound channel: 9" at eight.
+        let sound_manager = SoundManager::new(16).expect("Sound manager failed to initialize");
         let now = chrono::Local::now();
 
         let mut result = DirPlayer {
@@ -627,6 +641,7 @@ impl DirPlayer {
             is_double_click: false,
             mouse_down_sprite: 0,
             drag_offset: (0, 0),
+            field_scroll_drag: None,
             trails_bitmap: None,
             subscribed_member_refs: vec![],
             is_subscribed_to_channel_names: false,
@@ -1386,6 +1401,13 @@ impl DirPlayer {
             for channel in &mut self.movie.score.channels {
                 channel.sprite.entered = false;
                 channel.sprite.script_instance_list.clear();
+                // The properties HAVE been applied — only the behavior
+                // lifecycle is being rewound. Mark them so the second pass
+                // (which runs after prepareMovie) re-enters the span without
+                // overwriting anything prepareMovie changed.
+                if channel.sprite.member.is_some() {
+                    channel.sprite.score_props_already_applied = true;
+                }
             }
             self.clear_script_instance_list_caches();
         }
@@ -2017,6 +2039,24 @@ impl DirPlayer {
                     )
             });
 
+        // The message-channel cache is keyed on the same (frame, generation)
+        // pair but has a BROADER predicate (`is_active_sprite`: behaviors OR a
+        // cast member script), so it can't be patched with `should_include`.
+        // Drop it and let the next read rebuild.
+        //
+        // Without this it kept a stale entry for the whole time the playhead
+        // sat on one frame, because nothing here bumps the generation. Coke
+        // Studios' navigator builds its scrollbar at runtime —
+        //   puppetSprite(N, 1)                       -- no behaviors yet
+        //   sprite(N).scriptInstanceList = [new(script("scrollvert slider"),…)]
+        // — and the second line refreshed only the behavior cache below, while
+        // `dispatch_event_to_all_behaviors` walks the MESSAGE cache. The lift's
+        // `exitFrame` was therefore never dispatched: it kept its authored
+        // `.passive` member and ignored clicks, until an unrelated change
+        // finally bumped the generation. `active_stage_message_channels` was
+        // added later than the incremental refresh and was never wired into it.
+        self.active_stage_message_channels_cache = None;
+
         let Some((_, _, channels)) = self.active_stage_behavior_channels_cache.as_mut() else {
             return;
         };
@@ -2553,7 +2593,7 @@ impl DirPlayer {
             .and_then(|t| t.film_loop.clone())
     }
 
-    fn get_movie_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
+    pub(crate) fn get_movie_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
         let builtin_prop = prop.into_builtin_or_error()?;
         match builtin_prop {
             BuiltInSymbol::DatumStats => {
@@ -2750,6 +2790,19 @@ impl DirPlayer {
                     return Ok(self.alloc_datum(Datum::Int(self.member_script_sprite_num as i32)));
                 }
 
+                // Mouse events reach a member script through a different dispatch
+                // path than the frame events above, and that path doesn't stamp
+                // `member_script_sprite_num` — so `the currentSpriteNum` read 0 in
+                // an `on mouseDown` member script. Director answers with the sprite
+                // the click went to. dkbarrel's menu buttons are member scripts that
+                // identify themselves with
+                //     ind = getPos(btnspr, the currentSpriteNum)
+                // and 0 made getPos return 0, so `getAt(btnflash, 0)` raised
+                // "Index 0 out of bounds" when clicking HELP.
+                if self.click_on_sprite > 0 {
+                    return Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32)));
+                }
+
                 // Default: return 0 when no sprite context is available
                 Ok(self.alloc_datum(Datum::Int(0)))
             },
@@ -2829,6 +2882,27 @@ impl DirPlayer {
             },
             BuiltInSymbol::ClickLoc => {
                 Ok(self.alloc_datum(Datum::Point([self.movie.click_loc.0 as f64, self.movie.click_loc.1 as f64], 0)))
+            },
+            // Director 11.5 Scripting Dictionary, `timeoutList` (Movie property,
+            // read-only): "a linear list containing all currently active timeout
+            // objects", indexable — its own example is
+            // `_movie.timeoutList[3].forget()`. Built here rather than in
+            // `Movie::get_prop` because the elements need the allocator; the
+            // collection-query fallback in `datum_handlers/mod.rs` routes
+            // `.count` and `[n]` to this. AreaZero's `[M] Event Manager.DelayEvent`
+            // names each pending timeout by `_movie.timeoutList.count + 1`.
+            BuiltInSymbol::TimeoutList => {
+                let names: Vec<String> = self
+                    .timeout_manager
+                    .timeouts
+                    .keys()
+                    .cloned()
+                    .collect();
+                let items: VecDeque<DatumRef> = names
+                    .into_iter()
+                    .map(|name| self.alloc_datum(Datum::TimeoutRef(name)))
+                    .collect();
+                Ok(self.alloc_datum(Datum::List(DatumType::List, items, false)))
             },
             BuiltInSymbol::MarkerList => {
                 // Director's `the markerList` is a property list keyed by FRAME
@@ -3198,6 +3272,38 @@ impl DirPlayer {
 
     fn set_movie_prop(&mut self, prop: Symbol, value: Datum) -> Result<(), ScriptError> {
         match prop.into_builtin() {
+            // Director 11.5 Scripting Dictionary lists `timeoutList` as a
+            // READ-ONLY Movie property: "a linear list containing all currently
+            // active timeout objects… Use the forget() method to delete a timeout
+            // object". Director does not RAISE on assignment though, and movies use
+            // `_movie.timeoutList = []` as a clear-all idiom — AreaZero's
+            // `[M] Misc Handlers.ClearTimeOutList` is exactly that, invoked from the
+            // reset event beside DeleteAllButtons / DeleteAllScripts / stop-all-sound.
+            // Erroring there aborted the reset and the game never started.
+            //
+            // Accept the write and give it the meaning the documented property
+            // implies: make the live set match the assigned list, forgetting every
+            // timeout it does not name (so `[]` cancels all). forget_timeout also
+            // cancels the underlying JS interval, which plain clearing would leak.
+            Some(BuiltInSymbol::TimeoutList) => {
+                let keep: Vec<String> = match &value {
+                    Datum::List(_, items, _) => items
+                        .iter()
+                        .filter_map(|r| match self.get_datum(r) {
+                            Datum::TimeoutRef(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let existing: Vec<String> = self.timeout_manager.timeouts.keys().cloned().collect();
+                for name in existing {
+                    if !keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+                        self.timeout_manager.forget_timeout(&name);
+                    }
+                }
+                Ok(())
+            },
             Some(BuiltInSymbol::KeyboardFocusSprite) => {
                 // TODO switch focus
                 self.keyboard_focus_sprite = value.int_value()? as i16;
@@ -4277,6 +4383,10 @@ pub async fn player_call_script_handler_raw_args(
     // `copyPixels` tiling). Only the former should yield; yielding inside compute
     // loops fired ~15×/frame at ~4ms each and tanked the sub to ~3fps.
     let mut backjumps: u32 = 0;
+    // Watchdog counter — every backward jump, not just polling ones. 2^22 is far
+    // beyond any real Lingo loop but reached within a second or so when spinning.
+    const RUNAWAY_LOOP_REPORT_AT: u32 = 4_194_304;
+    let mut total_backjumps: u32 = 0;
 
     let transfer: FrameTransfer = loop {
         // Single player access per op: read scope generation + bytecode_index and
@@ -4488,6 +4598,55 @@ pub async fn player_call_script_handler_raw_args(
                 // yields — a yield there only adds latency and was the source of
                 // the navigator stalls. Reading+clearing a bool is far cheaper
                 // than the old per-instruction scope lookup.
+                // Runaway-loop watchdog. The yield above is deliberately scoped to
+                // polling loops, so a loop that neither polls nor terminates hangs
+                // the whole tab with no diagnostic — dkbarrel's `RunAni2` walks an
+                // animation list with `repeat while lst[ani_index] <> cmd_frame`, and
+                // any index that never lands on the terminator spins forever.
+                //
+                // Count EVERY backward jump in this handler and report once past a
+                // threshold no legitimate loop should reach, naming the handler and
+                // bytecode position so the culprit is identifiable from the console
+                // instead of presenting as a dead browser tab. Reporting only — the
+                // loop is not aborted, since a long-but-finite loop is legal.
+                total_backjumps = total_backjumps.wrapping_add(1);
+                if total_backjumps == RUNAWAY_LOOP_REPORT_AT {
+                    let state = reserve_player_ref(|player| {
+                        // `scopes` is a pre-allocated POOL — the live frame is at
+                        // scope_count-1, not `.last()` (which is an unused slot).
+                        let active = player.scopes.get(
+                            player.scope_count.saturating_sub(1) as usize
+                        );
+                        match active {
+                            None => "<no scope>".to_string(),
+                            Some(s) => {
+                                // Locals are keyed by name id; print id=value pairs.
+                                // Even without the name table this shows which values
+                                // are stuck or cycling, which is what identifies the
+                                // non-advancing index.
+                                let mut locals: Vec<String> = s.locals.iter()
+                                    .map(|(id, r)| format!("#{}={}", id, format_datum(r, player)))
+                                    .collect();
+                                locals.sort();
+                                let stack_items: Vec<_> = s.stack.iter().collect();
+                                let stack: Vec<String> = stack_items.iter().rev().take(4).copied()
+                                    .map(|r| format_datum(r, player))
+                                    .collect();
+                                format!(
+                                    "bytecode {} | locals [{}] | stack-top [{}]",
+                                    s.bytecode_index,
+                                    locals.join(", "),
+                                    stack.join(", ")
+                                )
+                            }
+                        }
+                    });
+                    console_warn!(
+                        "[RUNAWAY] handler '{}' looped {} times without returning — {}",
+                        handler_name, RUNAWAY_LOOP_REPORT_AT, state
+                    );
+                }
+
                 let polled = reserve_player_mut(|player| std::mem::take(&mut player.input_polled));
                 if polled {
                     backjumps = backjumps.wrapping_add(1);

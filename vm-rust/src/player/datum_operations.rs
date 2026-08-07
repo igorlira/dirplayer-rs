@@ -515,6 +515,35 @@ pub fn subtract_datums(
             }
             Ok(Datum::List(DatumType::List, result, false))
         }
+        // List ± scalar applies element-wise, the same recursion `add_datums`
+        // already implements (and that this repo notes for list × scalar).
+        // dkbarrel's `Terrain Builder.Barrelchkcol` does
+        //     coldata = terrdata - playerY
+        // with terrdata a 9-element height list and playerY a number.
+        (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = right.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let diff = subtract_datums(item_datum, scalar.clone(), player)?;
+                ref_list.push_back(player.alloc_datum(diff));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
+        // Scalar - list is NOT commutative: each element is subtracted FROM the
+        // scalar, so build `scalar - item` rather than reusing the arm above.
+        (Datum::Int(_) | Datum::Float(_), Datum::List(_, list, _)) => {
+            let item_refs: Vec<DatumRef> = list.iter().cloned().collect();
+            let scalar = left.clone();
+            let mut ref_list = VecDeque::with_capacity(item_refs.len());
+            for item in &item_refs {
+                let item_datum = player.get_datum(item).clone();
+                let diff = subtract_datums(scalar.clone(), item_datum, player)?;
+                ref_list.push_back(player.alloc_datum(diff));
+            }
+            Ok(Datum::List(DatumType::List, ref_list, false))
+        }
         // Two property lists combine value-by-value, keeping the LEFT list's
         // property names — the same positional, shared-prefix rule as the
         // linear-list arm directly above. The Scripting Dictionary documents
@@ -749,6 +778,28 @@ pub fn multiply_datums(
         (Datum::Point(a, af), Datum::Point(b, bf)) => {
             let (vals, flags) = inline_binop_2(*a, *af, *b, *bf, |x, y| x * y);
             Datum::Point(vals, flags)
+        }
+        // List * List — element-wise over the shared prefix, matching the
+        // `(List, List)` arms `add_datums` / `subtract_datums` already have.
+        // Director pairs list operands positionally (the Scripting Dictionary
+        // describes the same rule for rects/points, which ARE lists: "each
+        // element of the first list [operates on] the corresponding element of
+        // the second list").
+        //
+        // AreaZero's `[M] Text Misc` GetAndSetTagTextureSize rescales a mesh's
+        // UVs with `tTCoord = (tTCoord * tPerc) + tdiff`, where BOTH operands are
+        // 2-element lists ([u,v] * [0.7715, 1.0]). Addition already worked, so
+        // only the multiply raised "Mul operator only works with ints and floats".
+        (Datum::List(_, list_a, _), Datum::List(_, list_b, _)) => {
+            let a_refs: Vec<DatumRef> = list_a.iter().cloned().collect();
+            let b_refs: Vec<DatumRef> = list_b.iter().cloned().collect();
+            let n = min(a_refs.len(), b_refs.len());
+            let mut result = VecDeque::with_capacity(n);
+            for i in 0..n {
+                let product = multiply_datums(a_refs[i].clone(), b_refs[i].clone(), player)?;
+                result.push_back(player.alloc_datum(product));
+            }
+            Datum::List(DatumType::List, result, false)
         }
         (Datum::List(_, list, _), Datum::Float(right)) => {
             // Collect the element refs up front so the recursive multiply (for

@@ -19,7 +19,15 @@ string_interior =  {
 }
 WHITESPACE      = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
-symbol         = ${ "#" ~ WHITESPACE* ~ ident }
+// Symbol names may START WITH A DIGIT, unlike ordinary identifiers.
+// AreaZero stores animation event tables as `[#0: "Fire_XM8", #1: "SpawnShell_XM8"]`
+// (frame number -> event name), and `#0` cannot match `ident`, which is
+// `!digit ~ ...`. The whole list literal then failed to parse, `value()` fell
+// back to the raw string, and the movie alerted "Property list suspected, but
+// couldn't create it" for every one. Keep `ident` strict — only the symbol
+// name is permissive, and the leading "#" keeps it unambiguous against numbers.
+symbol_name    = @{ (alpha | digit | "_")+ }
+symbol         = ${ "#" ~ WHITESPACE* ~ symbol_name }
 nohash_symbol  =  { (ident) }
 quote          = _{ "\"" }
 string         = ${ quote ~ (string_interior) ~ quote }
@@ -114,6 +122,10 @@ list_index = { "[" ~ expr ~ "]" }
 and_op = { ^"and" }
 or_op  = { ^"or" }
 not_op = { ^"not" }
+// Unary minus on an EXPRESSION (`-pWorldUp`). Ordered after `primitive` in
+// `term` so a signed literal (`-5`) still parses as one `number_int` rather
+// than a negation of 5; only a `-` followed by something non-numeric gets here.
+neg_op = { "-" }
 
 // Comparison operators
 eq_op = { "=" }
@@ -254,8 +266,8 @@ bin_op     = _{
 }
 postfix_op = _{ list_index }
 expr       =  { term ~ (bin_op ~ term | postfix_op)* }
-term       = _{ not_op ~ term | primitive | prop_name }
-term_arg   =  { not_op ~ term_arg | primitive }
+term       = _{ not_op ~ term | primitive | neg_op ~ term | prop_name }
+term_arg   =  { not_op ~ term_arg | primitive | neg_op ~ term_arg }
 
 command_eval_expr = _{ SOI ~ command ~ EOI }
 // Configuration key support - allows asterisks and dots in keys

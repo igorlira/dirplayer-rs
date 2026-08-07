@@ -261,6 +261,35 @@ impl BuiltInHandlerManager {
             return crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::get_prop(&prop_ref, &prop_name);
         }
 
+        // `getAt(propList, #key)` — the dictionary describes `getAt(list, position)`
+        // but states "The getAt command works with linear and property lists", and
+        // Director accepts a PROPERTY as the second argument on a property list
+        // (dkbarrel's `Game Cod1.movePlayer` does `getAt(terrainWalls, #down)` on
+        // [#center: 300, #left: 300, #down: 300, …]). Coercing the symbol to an
+        // integer gave position 0 and raised "Index 0 out of bounds". A non-numeric
+        // key on a property list is a key lookup; integer keys keep their positional
+        // meaning, so `getAt(propList, 2)` is unchanged.
+        let prop_lookup = reserve_player_ref(|player| {
+            matches!(player.get_datum(&args[0]), Datum::PropList(..))
+                && !matches!(
+                    player.get_datum(&args[1]),
+                    Datum::Int(_) | Datum::Float(_)
+                )
+        });
+        if prop_lookup {
+            return reserve_player_mut(|player| {
+                let prop_list = match player.get_datum(&args[0]) {
+                    Datum::PropList(pl, ..) => pl.clone(),
+                    _ => unreachable!(),
+                };
+                crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
+                    &prop_list,
+                    &args[1],
+                    &player.allocator,
+                )
+            });
+        }
+
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
             let position = player.get_datum(&args[1]).int_value()?;
@@ -1445,9 +1474,37 @@ impl BuiltInHandlerManager {
                         match ruffle_get_variable(sn as i32, &path) {
                             Ok(val) => {
                                 if let Some(s) = val.as_string() {
-                                    return reserve_player_mut(|player| {
-                                        Ok(player.alloc_datum(Datum::String(s)))
-                                    });
+                                    // Ruffle's GetVariable coerces an AS OBJECT to
+                                    // "[object Object]" / "[type Object]" /
+                                    // "[object MovieClip]". For the OBJECT form the
+                                    // coercion text is not the variable's value and
+                                    // must not be returned as one — the dictionary
+                                    // is explicit that "if it is returned as a
+                                    // string, the string will not be a valid object
+                                    // reference" (getVariable(), 11.5). Fall through
+                                    // to the FlashObjectRef below instead.
+                                    //
+                                    // The sprite-METHOD form
+                                    // (`sprite(N).getVariable(path, 0)`) has guarded
+                                    // this since DGS; the top-level
+                                    // `getVariable(sprite(N), path, 0)` never did.
+                                    // Agent Free Ride's OffGame reads its root
+                                    // timeline that way and then calls
+                                    // `.mcLoading.gotoAndStop(pct)` on the result,
+                                    // which died with "No handler gotoAndStop for
+                                    // string datum". It only showed in the browser
+                                    // extension: there the sync bridge marshals the
+                                    // result through JSON and String(), so the
+                                    // MovieClip always arrives as that text, while
+                                    // the dev UI calls Ruffle directly and gets a
+                                    // non-string back.
+                                    let is_object_coercion = return_as_object
+                                        && (s.starts_with("[object ") || s.starts_with("[type "));
+                                    if !is_object_coercion {
+                                        return reserve_player_mut(|player| {
+                                            Ok(player.alloc_datum(Datum::String(s)))
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => warn!("getVariable error: {:?}", e),
@@ -1765,6 +1822,13 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::Transform) => TypeHandlers::transform3d(args),
             Some(BuiltInSymbol::Color) => TypeHandlers::color(args),
             Some(BuiltInSymbol::Date) => TypeHandlers::date(args),
+            // `_system.time()` — Director 11.5 Scripting Dictionary, "time() (System)":
+            // "returns the current time in the system clock as a string. The format of
+            // the time string depends on the computer's time settings." No parameters.
+            // `_system` resolves to the movie datum here (get_set.rs), so the call lands
+            // in this built-in dispatcher; without it AreaZero's `[M] Init Game` raised
+            // "No handler time for datum <_movie>" on its startup log line.
+            Some(BuiltInSymbol::Time) => TypeHandlers::time(args),
             Some(BuiltInSymbol::KeyPressed) => Self::key_pressed(args),
             // Legacy function-call forms of the modifier-key state properties (Director
             // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /

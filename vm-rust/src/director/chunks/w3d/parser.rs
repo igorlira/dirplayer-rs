@@ -207,12 +207,72 @@ impl W3dFileParser {
             });
         }
 
+        self.bind_light_resources_to_nodes();
+        self.apply_root_com_to_model_nodes();
+
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
             self.scene.materials.len(), self.scene.shaders.len(), self.scene.nodes.len(),
             self.scene.lights.len(), self.scene.texture_images.len(),
             self.scene.skeletons.len(), self.scene.motions.len(), self.scene.clod_meshes.len()));
 
         Ok(())
+    }
+
+    /// Director folds a skinned model's biped COM into its model node at import:
+    /// `model.transform = stored_node_transform * R0`, where R0 is the ROOT bone's
+    /// frame-0 pose from the model's reference motion.
+    ///
+    /// Measured on Agent Free Ride member 5, model "player": stored node 180 deg
+    /// about Z at (0.50580, -4.19230, -0.46611); R0 (motion "player", bone "Bip01",
+    /// frame 0) +90 deg about Z at (-0.50580, 2.49497, 22.91731); Director reports
+    /// -90 deg about Z at (1.01160, -6.68727, 22.45121) -- exactly the product.
+    /// Re-importing a scene Director itself exported composes R0 a SECOND time,
+    /// which is what proves this happens at import rather than being stored.
+    ///
+    /// This does NOT move the rendered mesh: the renderer strips the same R0 from
+    /// the skin (`root_relinv`), so `(node * R0) * inv(R0) * world * inv_bind`
+    /// draws exactly what `node * world * inv_bind` drew before. What it fixes is
+    /// the transform Lingo sees -- Agent Free Ride aims its rider with `pointAt`
+    /// off this node, so a base that is 90 deg out puts the boarder 90 deg out.
+    ///
+    /// R0 is recorded in `scene.model_root_com` so the renderer strips precisely
+    /// the matrix composed here and the two sides cannot drift apart.
+    fn apply_root_com_to_model_nodes(&mut self) {
+        let mut fixups: Vec<(usize, [f32; 16])> = Vec::new();
+
+        for (i, node) in self.scene.nodes.iter().enumerate() {
+            if node.node_type != W3dNodeType::Model { continue; }
+            // Match a skeleton the way the renderer's skinning path does, so only
+            // the model that OWNS the rig is touched.
+            let Some(skel) = self.scene.skeletons.iter().find(|s| {
+                s.bones.len() > 1
+                    && (s.name == node.resource_name
+                        || s.name == node.model_resource_name
+                        || s.name == node.name)
+            }) else { continue };
+
+            // Reference motion, in the same priority order the renderer uses to pick
+            // its relativization reference: an authored idle first (the bot rigs are
+            // modelled at Idle_Rest), otherwise the rig's own like-named motion.
+            let reference = self.scene.motions.iter()
+                .find(|m| m.name.as_lower_str().contains("idle_rest"))
+                .or_else(|| self.scene.motions.iter().find(|m| m.name.as_lower_str().contains("idle")))
+                .or_else(|| self.scene.motions.iter().find(|m| m.name == skel.name));
+            let Some(reference) = reference else { continue };
+
+            let posed = super::skeleton::build_bone_matrices(skel, Some(reference), 0.0);
+            let Some(r0) = posed.first() else { continue };
+            if is_identity_mat4(r0) { continue; }
+
+            fixups.push((i, *r0));
+        }
+
+        for (i, r0) in fixups {
+            let name = self.scene.nodes[i].name.to_ascii_lowercase();
+            log(&format!("  Root COM folded into model node {:?}", self.scene.nodes[i].name));
+            self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
+            self.scene.model_root_com.insert(name, r0);
+        }
     }
 
     fn parse_block(&mut self, block: &W3dBlock) -> Result<(), String> {
@@ -377,9 +437,19 @@ impl W3dFileParser {
     fn parse_light_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
         let name = Symbol::from_str(&r.read_ifx_string()?);
         let parent = Symbol::from_str(&r.read_ifx_string()?);
-        let resource = Symbol::from_str(&r.read_ifx_string()?);
+        let mut resource = Symbol::from_str(&r.read_ifx_string()?);
         let transform = self.parse_node_header(r, has_bounds)?;
-        if r.remaining() >= 2 { let _light_res = r.read_ifx_string()?; }
+        // The trailing string is the LIGHT_RESOURCE this node instantiates. It is
+        // usually the node's own name, which is why dropping it went unnoticed —
+        // but exporters do emit e.g. node "RZAmbientLight" → resource
+        // "AmbientLightResource" (car.w3d, mirror.w3d), and the whole engine keys
+        // lights by resource name, so those nodes matched nothing.
+        if r.remaining() >= 2 {
+            let light_res = r.read_ifx_string()?;
+            if !light_res.trim().is_empty() {
+                resource = Symbol::from_str(&light_res);
+            }
+        }
 
         self.scene.nodes.push(W3dNode {
             name,
@@ -390,6 +460,36 @@ impl W3dFileParser {
             ..Default::default()
         });
         Ok(())
+    }
+
+    /// Give every light node a resource carrying its own name.
+    ///
+    /// Lights are identified by name everywhere downstream (the renderer matches
+    /// `scene.nodes` to `scene.lights` by name, and `member.light("x")` looks up the
+    /// resource), so a node whose resource is named differently contributed no light
+    /// and could not be found from Lingo. Clone rather than rename, since several
+    /// nodes may share one resource.
+    fn bind_light_resources_to_nodes(&mut self) {
+        let mut clones: Vec<W3dLight> = Vec::new();
+        for node in self.scene.nodes.iter() {
+            if node.node_type != W3dNodeType::Light { continue; }
+            if node.resource_name.is_empty() || node.resource_name == node.name {
+                continue;
+            }
+            if self.scene.lights.iter().any(|l| l.name == node.name) {
+                continue;
+            }
+            if let Some(res) = self.scene.lights.iter()
+                .find(|l| l.name == node.resource_name)
+            {
+                log(&format!(
+                    "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
+                    node.name, node.resource_name
+                ));
+                clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+            }
+        }
+        self.scene.lights.extend(clones);
     }
 
     fn parse_model_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
@@ -408,11 +508,19 @@ impl W3dFileParser {
         };
 
         if r.remaining() >= 2 { node.model_resource_name = Symbol::from_str(&r.read_ifx_string()?); }
-        if r.remaining() >= 2 { let _style = r.read_ifx_string()?; }
-        if r.remaining() >= 4 { let _render_pass = r.read_u32()?; }
+        if r.remaining() >= 2 { let _style = r.read_ifx_string()?; } // IFXModel::SetStyleName
+        // IFXModel::SetVisibility, NOT a render pass: the gs_uFrontFaceVisibility /
+        // gs_uBackFaceVisibility bitmask from IFXModel.h, i.e. Director's
+        // model.visibility (0=#none, 1=#front, 2=#back, 3=#both). Only 0/1/3 occur
+        // in the wild. Dropping it drew helper nodes the exporter marked invisible —
+        // AreaZero's menu hangs its 9 fly-through cameras off "Dummy Animation Node
+        // CameraN" carriers, each a single triangle of bounding radius 1732 wearing a
+        // pure-red untextured material, which covered the whole menu.
+        if r.remaining() >= 4 { node.visibility = (r.read_u32()? & 0x3) as u8; }
         if r.remaining() >= 2 { node.shader_name = Symbol::from_str(&r.read_ifx_string()?); }
 
-        log(&format!("  ModelNode: \"{}\" resource=\"{}\"", name, node.model_resource_name));
+        log(&format!("  ModelNode: \"{}\" resource=\"{}\" visibility={}",
+            name, node.model_resource_name, node.visibility));
         self.scene.nodes.push(node);
         Ok(())
     }
@@ -1102,4 +1210,25 @@ impl W3dFileParser {
         self.pos += 4;
         v
     }
+}
+
+/// Column-major 4x4 multiply: `a * b`, i.e. b applied in a's local space.
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut o = [0.0f32; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            o[c * 4 + r] = a[r] * b[c * 4]
+                + a[4 + r] * b[c * 4 + 1]
+                + a[8 + r] * b[c * 4 + 2]
+                + a[12 + r] * b[c * 4 + 3];
+        }
+    }
+    o
+}
+
+fn is_identity_mat4(m: &[f32; 16]) -> bool {
+    const I: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    m.iter().zip(I.iter()).all(|(a, b)| (a - b).abs() < 1e-6)
 }

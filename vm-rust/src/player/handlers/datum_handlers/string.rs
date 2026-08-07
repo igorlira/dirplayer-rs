@@ -65,6 +65,18 @@ impl StringDatumUtils {
                 // Normalise (strip comments + trim unbalanced brackets) before
                 // parsing, then evaluate as a Lingo expression.
                 let cleaned = normalise_lingo_expr_for_value(value);
+                // Per the Director 11.5 Scripting Dictionary entry for
+                // `value()`: "The result is the value of the initial portion of
+                // the expression up to the first syntax error found in the
+                // string." So a leading list literal wins even when the member
+                // holds trailing prose. NabiscoWorld Mini Mini-Golf's Hole6Data
+                // is a Scanframes-generated list followed by authoring notes
+                // ("had to add, ... to remove startup glitch", "TEst case", and
+                // a second sample list); parsing the whole thing failed, `.value`
+                // fell back to the raw string, and `count(movie)` then raised
+                // "Cannot get count of non-list (type: string)". The `value()`
+                // FUNCTION path already did this — the property path did not.
+                let cleaned = crate::player::handlers::types::truncate_to_first_balanced_list(&cleaned);
                 match try_eval_lingo_expr_static(cleaned.clone()) {
                     Ok(datum_ref) => {
                         reserve_player_ref(|player| Ok(player.get_datum(&datum_ref).clone()))
@@ -73,9 +85,13 @@ impl StringDatumUtils {
                         if !crate::player::handlers::types::is_expected_value_retry_fragment(
                             value, &cleaned,
                         ) {
-                            warn!(
-                                "[string.value] parse error → raw String — input={:?} cleaned={:?} err={}",
-                                value, cleaned, err.message
+                            // `warn!` never reaches the browser console, so every
+                            // `.value` parse failure was silent — the movie just gets
+                            // its raw string back with no explanation.
+                            crate::console_warn!(
+                                "[VALPROBE] .value FAILED err={} cleaned={:?}",
+                                err.message,
+                                cleaned.chars().take(300).collect::<String>()
                             );
                         }
                         Ok(Datum::String(value.to_owned()))

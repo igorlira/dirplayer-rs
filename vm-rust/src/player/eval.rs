@@ -94,10 +94,37 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             let mut iter = inner_pairs.into_iter();
             let first = iter.next()
                 .ok_or_else(|| ScriptError::new("Expected expression content".to_string()))?;
-            let mut result = eval_lingo_pair_static(first)?;
+            // A leading unary minus binds to the FIRST term only — negating the
+            // whole expression would turn `-a + b` into `-(a + b)`. Negate via
+            // `* -1` so vectors/points/lists work (see the runtime prefix arm).
+            let mut result = if first.as_rule() == Rule::neg_op {
+                let operand = iter.next().ok_or_else(|| {
+                    ScriptError::new("Expected operand after unary minus".to_string())
+                })?;
+                let operand_ref = eval_lingo_pair_static(operand)?;
+                reserve_player_mut(|player| {
+                    let minus_one = player.alloc_datum(Datum::Int(-1));
+                    let v = crate::player::datum_operations::multiply_datums(
+                        operand_ref.clone(), minus_one, player,
+                    )?;
+                    Ok(player.alloc_datum(v))
+                })?
+            } else {
+                eval_lingo_pair_static(first)?
+            };
             while let Some(op) = iter.next() {
                 let right = iter.next()
                     .ok_or_else(|| ScriptError::new("Expected right operand".to_string()))?;
+                // `obj_prop`'s right operand is a property NAME, not a value — take its
+                // source text and skip evaluation (evaluating it would try to resolve
+                // e.g. `number` as a variable).
+                if op.as_rule() == Rule::obj_prop {
+                    let prop_name = right.as_str().trim().to_string();
+                    result = reserve_player_mut(|player| {
+                        crate::player::script::get_obj_prop(player, &result, Symbol::from_str(&prop_name))
+                    })?;
+                    continue;
+                }
                 let right_ref = eval_lingo_pair_static(right)?;
                 match op.as_rule() {
                     Rule::join => {
@@ -114,6 +141,31 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                             let left_str = player.get_datum(&result).string_value()?;
                             let right_str = player.get_datum(&right_ref).string_value()?;
                             Ok(player.alloc_datum(Datum::String(format!("{} {}", left_str, right_str))))
+                        })?;
+                    }
+                    // Arithmetic. `.value` on a text member is how movies ship data
+                    // tables, and those tables contain expressions, not just literals —
+                    // dkbarrel's animation lists start `[nam_DIDDYO+0, point(327, -63),
+                    // …]`, offsetting a base member number. Reuse the same datum
+                    // operations the runtime evaluator uses so Lingo's semantics
+                    // (int/float promotion, list and point recursion) stay identical
+                    // between the two paths.
+                    Rule::add | Rule::subtract | Rule::multiply | Rule::divide => {
+                        let rule = op.as_rule();
+                        result = reserve_player_mut(|player| {
+                            let v = match rule {
+                                Rule::add => {
+                                    let (l, r) = (player.get_datum(&result).clone(), player.get_datum(&right_ref).clone());
+                                    crate::player::datum_operations::add_datums(l, r, player)?
+                                }
+                                Rule::subtract => {
+                                    let (l, r) = (player.get_datum(&result).clone(), player.get_datum(&right_ref).clone());
+                                    crate::player::datum_operations::subtract_datums(l, r, player)?
+                                }
+                                Rule::multiply => crate::player::datum_operations::multiply_datums(result.clone(), right_ref.clone(), player)?,
+                                _ => crate::player::datum_operations::divide_datums(result.clone(), right_ref.clone(), player)?,
+                            };
+                            Ok(player.alloc_datum(v))
                         })?;
                     }
                     _ => {
@@ -290,6 +342,19 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 Ok(prop_value)
             })
         }
+        // `sprite(N)` — dkbarrel's score tables address the stage directly, e.g.
+        // `[cmd_Zset, sprite(guispr).locz-1, DKSPR, …]`, so a data table read with
+        // `.value` needs sprite references as well as member references. The sprite
+        // number is itself an expression (here the global `guispr`).
+        Rule::sprite_ref => {
+            let inner = pair.into_inner().next()
+                .ok_or_else(|| ScriptError::new("Expected sprite number".to_string()))?;
+            let num_ref = eval_lingo_pair_static(inner)?;
+            reserve_player_mut(|player| {
+                let n = player.get_datum(&num_ref).int_value()?;
+                Ok(player.alloc_datum(Datum::SpriteRef(n as i16)))
+            })
+        }
         Rule::member_ref => {
             let mut inner = pair.into_inner();
 
@@ -387,9 +452,58 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 "TAB" => reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::String("\t".to_owned())))
                 }),
-                _ => Err(ScriptError::new(format!(
-                    "Unknown identifier '{}' in static expression", name
-                ))),
+                // Otherwise it's a variable reference. Director's `value()`
+                // evaluates the string as Lingo, so identifiers resolve against
+                // the accessible context — NabiscoWorld Mini Mini-Golf stores
+                // score-driver data as `["staple 1", obstacle_spr, -1, ...]` in a
+                // text member and reads it with `member(nam).text.value`, where
+                // `obstacle_spr` is a declared global. Erroring on the identifier
+                // failed the whole expression, so `.value` handed back the raw
+                // string and `count()` then raised on a string.
+                //
+                // An identifier that isn't a known global yields VOID rather than
+                // an error: the 11.5 dictionary says of `value()` that
+                // expressions Lingo cannot parse "will produce unexpected
+                // results, but will not produce Lingo errors", and Director reads
+                // an unset global as VOID. Lingo identifiers are case-insensitive.
+                // Resolve like Director: `value()` evaluates in the CALLING context,
+                // so the calling handler's LOCALS are visible, not just globals —
+                // "Any Lingo expression that can be put in the Message window or set
+                // as the value of a variable can also be used with value()".
+                //
+                // dkbarrel depends on it. `Movie Driver.SetupSideMovies` does
+                //     loopDiddy = 1234567890            -- a LOCAL, no global decl
+                //     dlst = member("diddyKani").text.value
+                //     loopDiddy = getPos(dlst, 0.0) - 1
+                //     dlst = member("diddyKani").text.value
+                // so the parsed list embeds the loop-jump index. Resolving globals
+                // only put VOID there; `RunAni2`'s
+                //     repeat while lst[ani_index] <> cmd_frame
+                // then took `ani_index = lst[ani_index+1]` = VOID, walked off the end
+                // of the list and never matched the terminator — an infinite loop that
+                // froze the movie.
+                //
+                // get_eval_top_level_prop already implements the whole chain (locals,
+                // then `me`, then globals, then top-level props), so defer to it and
+                // keep VOID for a name that resolves nowhere.
+                _ => reserve_player_mut(|player| {
+                    // Locals first (the chain above), then a CASE-INSENSITIVE global
+                    // scan. Lingo identifiers are case-insensitive, but the globals map
+                    // is keyed by the casing first seen — dkbarrel's tables reference
+                    // `cmd_jamfrm` while the global was created as `cmd_JamFrm`, and an
+                    // exact-match lookup returned VOID for it.
+                    if let Some(r) = get_eval_top_level_prop(player, name).ok() {
+                        if !matches!(player.get_datum(&r), Datum::Void) {
+                            return Ok(r);
+                        }
+                    }
+                    let ci = player
+                        .globals
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| v.clone());
+                    Ok(ci.unwrap_or(DatumRef::Void))
+                }),
             }
         }
         Rule::config_key | Rule::config_ident_part => {
@@ -617,6 +731,18 @@ fn parse_lingo_expr_runtime(
             Rule::not_op => {
                 let right = rhs?;
                 Ok(LingoExpr::Not(Box::new(right)))
+            }
+            // Unary minus. Expressed as `x * -1` rather than `0 - x` so it
+            // negates every type Director allows it on: `multiply` already
+            // recurses into vectors, points and lists, whereas `0 - vector`
+            // has no defined arm. Agent Free Ride's vehicle code is full of
+            // `-pWorldUp` / `-pLocalDown`.
+            Rule::neg_op => {
+                let right = rhs?;
+                Ok(LingoExpr::Multiply(
+                    Box::new(right),
+                    Box::new(LingoExpr::IntLiteral(-1)),
+                ))
             }
             _ => Err(ScriptError::new(format!(
                 "Invalid prefix operator {:?}",
@@ -2504,6 +2630,7 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
         .op(Op::infix(Rule::multiply, Assoc::Left)            // *, /, mod
             | Op::infix(Rule::divide, Assoc::Left)
             | Op::infix(Rule::mod_op, Assoc::Left))
+        .op(Op::prefix(Rule::neg_op))                         // unary minus
         .op(Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
             | Op::postfix(Rule::list_index))                  // and [index]
 }
@@ -2551,3 +2678,6 @@ pub fn test_parse_config_key(key_str: &str) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| format!("{}", e))
 }
+
+
+

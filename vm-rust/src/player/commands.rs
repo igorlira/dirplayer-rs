@@ -142,6 +142,119 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
     }
 }
 
+/// Handle a mouse-down that landed on a `#scroll` field's scrollbar.
+///
+/// Returns true when the click was consumed. Director's field scrollbar is
+/// chrome owned by the player, not the movie: it scrolls the field and the click
+/// does not reach the sprite's behaviours or move the caret.
+///
+/// Click zones follow the standard scrollbar contract — the arrow boxes step by
+/// one line, the trough above/below the lift pages by the visible height
+/// (Director's `pageHeight`), and pressing the lift starts a drag. `scrollTop`
+/// is in pixels per the 11.5 Scripting Dictionary ("the distance, in pixels,
+/// from the top of a field cast member to the top of the field that is currently
+/// visible in the scrolling box"), so all three move it in pixels.
+fn handle_field_scrollbar_mouse_down(
+    player: &mut crate::player::DirPlayer,
+    x: i32,
+    y: i32,
+) -> bool {
+    use crate::player::score::{find_field_scrollbar_at, get_concrete_sprite_rect};
+
+    let Some((sprite_number, sb)) = find_field_scrollbar_at(player, x, y) else {
+        return false;
+    };
+    let Some(sprite) = player.movie.score.get_sprite(sprite_number) else {
+        return false;
+    };
+    let rect = get_concrete_sprite_rect(player, sprite);
+    let ly = y - rect.top;
+
+    let member_ref = sprite.member.clone();
+    let scroll_top = member_ref
+        .as_ref()
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .and_then(|m| match &m.member_type {
+            CastMemberType::Field(f) => Some(f.scroll_top as i32),
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    // One "line" for the arrow steps. Use the font size rather than a fixed
+    // constant so a large-text field steps by a visible amount.
+    let line_h = member_ref
+        .as_ref()
+        .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+        .and_then(|m| match &m.member_type {
+            CastMemberType::Field(f) => Some(if f.font_size > 0 { f.font_size as i32 } else { 12 }),
+            _ => None,
+        })
+        .unwrap_or(12);
+
+    let thumb = sb.thumb(scroll_top);
+    let new_scroll = if ly < sb.y0 + sb.arrow_h {
+        scroll_top - line_h
+    } else if ly >= sb.y1 - sb.arrow_h {
+        scroll_top + line_h
+    } else if let Some((ty0, ty1)) = thumb {
+        if ly < ty0 {
+            scroll_top - sb.page_height
+        } else if ly >= ty1 {
+            scroll_top + sb.page_height
+        } else {
+            // On the lift: start a drag, remembering where it was grabbed so it
+            // doesn't jump under the pointer.
+            player.field_scroll_drag = Some((sprite_number, ly - ty0));
+            scroll_top
+        }
+    } else {
+        scroll_top
+    };
+
+    set_field_scroll_top(player, sprite_number, new_scroll.clamp(0, sb.max_scroll));
+    true
+}
+
+/// Write a field's `scrollTop` and invalidate so the next frame re-rasterizes.
+fn set_field_scroll_top(player: &mut crate::player::DirPlayer, sprite_number: i16, scroll_top: i32) {
+    let member_ref = player
+        .movie
+        .score
+        .get_sprite(sprite_number)
+        .and_then(|s| s.member.clone());
+    let Some(member_ref) = member_ref else { return };
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+        if let CastMemberType::Field(field) = &mut member.member_type {
+            let new = scroll_top.max(0) as u16;
+            if field.scroll_top != new {
+                field.scroll_top = new;
+                player.movie.score.invalidate_render_channel_cache();
+            }
+        }
+    }
+}
+
+/// Continue an in-progress lift drag. Called from the mouse-move path.
+pub fn update_field_scrollbar_drag(player: &mut crate::player::DirPlayer, y: i32) {
+    use crate::player::score::{get_concrete_sprite_rect, get_field_scrollbar};
+
+    let Some((sprite_number, grab_offset)) = player.field_scroll_drag else {
+        return;
+    };
+    let Some(sprite) = player.movie.score.get_sprite(sprite_number) else {
+        player.field_scroll_drag = None;
+        return;
+    };
+    let Some(sb) = get_field_scrollbar(player, sprite) else {
+        player.field_scroll_drag = None;
+        return;
+    };
+    let rect = get_concrete_sprite_rect(player, sprite);
+    let ly = y - rect.top;
+    let scroll = sb.scroll_for_thumb_top(ly - grab_offset);
+    set_field_scroll_top(player, sprite_number, scroll.clamp(0, sb.max_scroll));
+}
+
 /// Check if a movie callback script (mouseDownScript, mouseUpScript, etc.)
 /// contains actual executable content. Comments like "--nothing" are stored
 /// but don't block event propagation in Director.
@@ -331,10 +444,37 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 warn!("Timeout triggered but not playing");
                 return Ok(DatumRef::Void);
             }
+            let timeout_name_for_args = timeout_name.clone();
             let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
             let args = vec![ref_datum];
-            if target_ref != DatumRef::Void {
+            // Director 11.5 Scripting Dictionary, `new()` (Timeout): the
+            // targetObject "indicates which CHILD OBJECT's handler should be
+            // called ... If you omit this parameter, Director looks for the
+            // specified handler in the movie script."
+            //
+            // A target that is NOT an object can't receive a method call, so
+            // Director falls back to the movie script and passes the target
+            // through as the first argument. AreaZero's Event Manager relies on
+            // this: it creates
+            //     timeout().new(tName, pDelay, #DelayEventTimeOut, pevent)
+            // with pevent a STRING, and its handler is declared
+            //     on DelayEventTimeOut tEvent, tTimeOut
+            // i.e. (target, timeoutObject). Dispatching the handler ON the
+            // string raised "No handler DelayEventTimeOut for string datum".
+            let target_is_object = reserve_player_ref(|player| {
+                matches!(
+                    player.get_datum(&target_ref),
+                    Datum::ScriptInstanceRef(_)
+                )
+            });
+            if target_is_object {
                 player_dispatch_callback_event(target_ref, handler_name, &args);
+            } else if target_ref != DatumRef::Void {
+                let mut args = vec![target_ref];
+                args.extend(
+                    [player_alloc_datum(Datum::TimeoutRef(timeout_name_for_args))]
+                );
+                player_dispatch_global_event(handler_name, &args);
             } else {
                 player_dispatch_global_event(handler_name, &args);
             }
@@ -430,6 +570,22 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // handlers firing regardless. See the post-sprite-dispatch
             // callback at the end of this branch.
             let _ = mouse_down_script_active;
+
+            // A click inside a #scroll field's scrollbar drives the scrollbar and
+            // goes no further — Director's field chrome consumes it rather than
+            // passing it to the sprite's scripts or moving the caret. Tested
+            // BEFORE the normal sprite lookup because that lookup applies
+            // `is_click_transparent_sprite`, which makes a non-editable field
+            // click-through; the scrollbar must stay live regardless.
+            let scrollbar_consumed = reserve_player_mut(|player| {
+                player.mouse_loc = (x, y);
+                player.movie.mouse_down = true;
+                player.movie.click_loc = (x, y);
+                handle_field_scrollbar_mouse_down(player, x, y)
+            });
+            if scrollbar_consumed {
+                return Ok(DatumRef::Void);
+            }
 
             // Use scripted=true so only sprites with scripts (behavior or cast member)
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
@@ -783,6 +939,21 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // mouseUp behaviors firing regardless. Without this, every
             // button in such movies is silent.
 
+            // A lift drag ends on release and swallows the mouseUp, matching the
+            // mouseDown that started it (the scrollbar is player chrome, not
+            // something the movie's scripts see).
+            let was_scroll_drag = reserve_player_mut(|player| {
+                if player.field_scroll_drag.take().is_some() {
+                    player.movie.mouse_down = false;
+                    true
+                } else {
+                    false
+                }
+            });
+            if was_scroll_drag {
+                return Ok(DatumRef::Void);
+            }
+
             // Update mouse state and determine which sprite to notify
             let result = reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
@@ -989,6 +1160,12 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
             reserve_player_mut(|player| {
                 player.mouse_loc = (x, y);
+
+                // Continue a field lift drag before anything else — it owns the
+                // pointer until release.
+                if player.field_scroll_drag.is_some() {
+                    update_field_scrollbar_drag(player, y);
+                }
 
                 // Drag moveable sprites (use click_on_sprite, not mouse_down_sprite,
                 // since moveable sprites don't need scripts to be draggable)

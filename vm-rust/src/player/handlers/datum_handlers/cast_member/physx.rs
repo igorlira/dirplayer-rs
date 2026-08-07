@@ -58,7 +58,7 @@ fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 /// rotation must leave the COM fixed while the origin orbits it. That gives a
 /// translation of `pos + com - R*com`. `scale` restores the model's authored
 /// size, since this overwrites the model's whole matrix.
-fn body_model_transform(
+pub(crate) fn body_model_transform(
     pos: [f64; 3],
     orientation_axis_angle: [f64; 4],
     com: [f64; 3],

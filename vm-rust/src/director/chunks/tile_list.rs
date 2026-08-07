@@ -31,23 +31,40 @@ impl TileListChunk {
     pub fn from_reader(reader: &mut BinaryReader, dir_version: u16) -> Result<TileListChunk, String> {
         reader.set_endian(Endian::Big);
         let mut tiles = Vec::with_capacity(8);
+        // Director only writes entries for the tiles the movie actually defines —
+        // NabiscoWorld Mini-Golf ships a 16-byte VWTL holding tile 1 alone. Reading
+        // a fixed 8 entries made the short chunk fail to parse, which dropped the
+        // WHOLE list and sent every pattern 57-64 to the built-in tile fallback
+        // (the grass background rendered as the blue-grey built-in tile 1).
+        // Stop at whatever the chunk holds and leave the rest undefined.
         for _ in 0..8 {
             // 4 unused bytes
-            let _unused = reader.read_u32().map_err(|e| format!("VWTL unused: {:?}", e))?;
+            let Ok(_unused) = reader.read_u32() else { break };
             // castLib only present in D5+; pre-D5 uses the default (internal) cast.
             let cast_lib = if dir_version >= 500 {
-                reader.read_u16().map_err(|e| format!("VWTL castLib: {:?}", e))? as i32
+                let Ok(v) = reader.read_u16() else { break };
+                v as i32
             } else {
                 1
             };
-            let member = reader.read_u16().map_err(|e| format!("VWTL member: {:?}", e))? as i32;
+            let Ok(member) = reader.read_u16() else { break };
             // Mac rect order: top, left, bottom, right.
-            let top = reader.read_u16().map_err(|e| format!("VWTL top: {:?}", e))? as i16;
-            let left = reader.read_u16().map_err(|e| format!("VWTL left: {:?}", e))? as i16;
-            let bottom = reader.read_u16().map_err(|e| format!("VWTL bottom: {:?}", e))? as i16;
-            let right = reader.read_u16().map_err(|e| format!("VWTL right: {:?}", e))? as i16;
-            tiles.push(TilePatternEntry { cast_lib, member, left, top, right, bottom });
+            let Ok(top) = reader.read_u16() else { break };
+            let Ok(left) = reader.read_u16() else { break };
+            let Ok(bottom) = reader.read_u16() else { break };
+            let Ok(right) = reader.read_u16() else { break };
+            tiles.push(TilePatternEntry {
+                cast_lib,
+                member: member as i32,
+                left: left as i16,
+                top: top as i16,
+                right: right as i16,
+                bottom: bottom as i16,
+            });
         }
+        // Pad to 8 so `custom_tiles[pattern - 57]` stays index-aligned; a default
+        // entry has member 0, so `is_custom()` is false and the built-in tile wins.
+        tiles.resize(8, TilePatternEntry::default());
         Ok(TileListChunk { tiles })
     }
 }

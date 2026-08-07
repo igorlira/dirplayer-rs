@@ -102,6 +102,12 @@ impl PointDatumHandlers {
             "locH" => Ok(Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(flags, 0))),
             "locV" => Ok(Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(flags, 1))),
             "ilk"  => Ok(Datum::Symbol(Symbol::from_str("point"))),
+            // `(expr).float` is the property form of `float(expr)` (Director 11.5
+            // Scripting Dictionary, "float()": Usage `(expression).float`).
+            // Director returns a point unchanged from float() — verified:
+            //   p = point(-342, 159); put float(p * p) -- point(116964, 25281)
+            // so both surfaces must agree. See TypeHandlers::float.
+            "float" => Ok(player.get_datum(datum).clone()),
             _ => Err(ScriptError::new(format!("Cannot get point property {}", prop))),
         }
     }

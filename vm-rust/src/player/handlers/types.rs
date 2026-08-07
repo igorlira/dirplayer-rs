@@ -706,6 +706,17 @@ impl TypeHandlers {
                     }
                 }
                 Datum::Void => Datum::Void,
+                // Director returns a point unchanged rather than converting or
+                // erroring — verified in Director:
+                //   p = point(-342, 159)
+                //   put float(p * p)  -- point(116964, 25281)
+                // (components stay integers). NabiscoWorld Mini Mini-Golf's
+                // Hole 18 `obstacle` handler relies on this: it computes
+                // `sqhv = float(dhv * dhv)` on a point and then reads
+                // `sqhv.locH` / `sqhv.locV`, so float() must yield a point.
+                // Same leniency as the String arm above, which returns the
+                // input unchanged when it doesn't parse as a number.
+                Datum::Point(..) => value.to_owned(),
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot convert datum of type {} to float",
@@ -1374,6 +1385,49 @@ impl TypeHandlers {
                 ])));
             }
             Err(ScriptError::new("transform() takes 0 arguments".into()))
+        })
+    }
+
+    /// `_system.time()` — Director 11.5 Scripting Dictionary, "time() (System)":
+    /// "System method; returns the current time in the system clock as a string.
+    /// The format of the time string depends on the computer's time settings."
+    /// Parameters: None.
+    ///
+    /// The locale-dependent format is the point of the entry, so defer to the
+    /// host's locale (the browser's) rather than hardcoding a US layout — that
+    /// is the closest analogue to Director reading the OS time settings.
+    pub fn time(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            // Director returns the system SHORT time — hours and minutes only.
+            // Measured against Director on this machine: `21:23`, where our
+            // bare toLocaleTimeString gave `21:20:15`. Ask for 2-digit hour and
+            // minute explicitly and let the host locale decide the separator and
+            // 12/24-hour convention, matching the dictionary's note that "the
+            // format of the time string depends on the computer's time settings".
+            let opts = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&opts, &"hour".into(), &"2-digit".into());
+            let _ = js_sys::Reflect::set(&opts, &"minute".into(), &"2-digit".into());
+            let mut s = js_sys::Date::new_0()
+                .to_locale_time_string_with_options("default", &opts)
+                .as_string()
+                .unwrap_or_default();
+            // Director keeps Windows' short-time layout `HH:mm tt`, so a
+            // 24-hour locale leaves the AM/PM slot EMPTY but still emits its
+            // separator — measured in Director: `put _system.time()` -> "21:29 "
+            // (trailing space), while `put _system.date()` -> "03.08.2026" (none).
+            // AreaZero depends on it: its startup line concatenates the two with a
+            // plain `&` and no separator of its own.
+            //
+            // Only 24-hour locales get the space; a 12-hour locale fills that slot
+            // with AM/PM, so key off whether the formatted string has a day period.
+            // Normalise first: some hosts already emit a trailing separator for the
+            // empty slot, and blindly appending produced TWO spaces.
+            let has_day_period = s.chars().any(|c| c.is_alphabetic());
+            let mut s = s.trim_end().to_string();
+            if !has_day_period {
+                s.push(' ');
+            }
+            Ok(player.alloc_datum(Datum::String(s)))
         })
     }
 
@@ -2291,7 +2345,7 @@ impl TypeHandlers {
 /// double quote (the `QUOTE` constant is used instead), so a simple in-string
 /// toggle is sufficient. If the brackets never balance, `s` is returned as-is
 /// so the normal parser still reports the error.
-fn truncate_to_first_balanced_list(s: &str) -> String {
+pub(crate) fn truncate_to_first_balanced_list(s: &str) -> String {
     let trimmed_start = s.len() - s.trim_start().len();
     let bytes = s.as_bytes();
     if bytes.get(trimmed_start) != Some(&b'[') {
@@ -2338,3 +2392,4 @@ pub fn is_expected_value_retry_fragment(input: &str, cleaned: &str) -> bool {
     }
     false
 }
+

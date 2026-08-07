@@ -181,6 +181,16 @@ impl WebGL2Context {
                 Some(data),
             )?;
 
+        // Build a mip chain so heavily MINIFIED sprites can be area-averaged
+        // instead of point-sampled. Director averages when it shrinks a bitmap:
+        // NabiscoWorld Mini-Golf draws its 624x350 hole art into a 111x71 menu
+        // card, and point-sampling that 5.6x reduction picks isolated pixels out
+        // of the dithered 8-bit source, which turns detail to mud. The filters
+        // above stay NEAREST — only `draw_sprite` opts a given draw into
+        // mipmapped minification, so 1:1 and magnified sprites remain
+        // pixel-exact. WebGL2 supports mipmaps on non-power-of-two textures.
+        self.gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
+
         self.gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
         Ok(())
     }

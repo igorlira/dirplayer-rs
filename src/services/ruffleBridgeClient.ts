@@ -189,7 +189,25 @@ export function bridgeGetVariableSync(
   path: string,
 ): string | null {
   const r = bridgeCallSync({ method: 'getVariableSync', playerId, args: [path] });
-  return r == null ? null : String(r);
+  if (r == null) return null;
+  // Only PRIMITIVES are real data here. A Flash variable holding an object
+  // (`getVariable(sprite, "_level0", 0)` — the standard idiom for grabbing a
+  // SWF's root timeline) cannot cross the world boundary: the host serialises
+  // sync results with JSON.stringify into a DOM node, so a MovieClip arrives as
+  // `{}`. Coercing that with String() produced "[object Object]", which the Rust
+  // getVariable handler then returned as the variable's VALUE — so the object
+  // form silently became a string and the next call on it died with
+  // "No handler gotoAndStop for string datum" (Agent Free Ride's OffGame
+  // loading bar). Extension-only: the dev UI calls Ruffle's GetVariable
+  // directly, gets a non-string back, and falls through to the object handle.
+  //
+  // Returning null lets that fallback run here too. It matches the documented
+  // contract — "If the value of the Flash variable is an object reference, you
+  // must set the returnValueOrReference parameter to FALSE ... If it is
+  // returned as a string, the string will not be a valid object reference."
+  // (Director 11.5 Scripting Dictionary, getVariable().)
+  if (typeof r === 'object') return null;
+  return String(r);
 }
 
 export function bridgeSetVariableSync(

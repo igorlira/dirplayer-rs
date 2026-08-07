@@ -45,6 +45,15 @@ fn caret_blink_visible_now() -> bool {
 /// Selection-highlight color, matched to the CPU path's `SELECTION_COLOR`.
 const SELECTION_HIGHLIGHT: (u8, u8, u8) = (164, 205, 255);
 
+/// Width of the scrollbar Director draws inside a `#scroll` field's box.
+///
+/// 16px is the classic Mac/Windows scrollbar metric. The Scripting Dictionary
+/// documents `boxType` `#scroll` as adding a scrollbar but never states its
+/// width, so this is INFERRED — corroborated by Summer Resort's "talk.text",
+/// whose score channel width is exactly `authored text width 146 + chrome 6 +
+/// 16`.
+pub const FIELD_SCROLLBAR_WIDTH: i32 = 16;
+
 /// An in-progress score/puppet transition. `old_pixels` is the stage as it
 /// looked before the score change (captured from the preserved drawing buffer,
 /// top-left origin RGBA); `draw_frame` composites it over the freshly-rendered
@@ -1640,6 +1649,9 @@ impl WebGL2Renderer {
                 word_wrap: bool,
                 border: u16,
                 box_drop_shadow: u16,
+                /// Scrollbar geometry for a #scroll field, with the `scrollTop`
+                /// the lift should sit at. `None` for every other member.
+                scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
                 tab_stops: Vec<crate::player::cast_member::TabStop>,
                 /// Per-text-line line_spacing override from XMED par_runs.
                 /// One entry per text-line (split by \r/\n). Empty when
@@ -1707,12 +1719,21 @@ impl WebGL2Renderer {
             Shockwave3dScene {
                 width: u32,
                 height: u32,
-                member_key: (i32, i32),
-                scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
-                runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
-                active_camera: Option<Symbol>,
-                extra_cameras: Vec<Symbol>,
+                /// One entry per camera in the sprite's camera list, in draw order
+                /// (lowest index first). Each carries the member whose world that
+                /// camera belongs to, so a sprite can composite cameras from several
+                /// members — Director's model, and what AreaZero's menu needs to draw
+                /// its skybox, 3D scene and orthographic UI layer into one sprite.
+                passes: Vec<Shockwave3dPass>,
             },
+        }
+
+        struct Shockwave3dPass {
+            member_key: (i32, i32),
+            scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
+            runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
+            /// `None` = let the renderer pick its default view.
+            camera: Option<Symbol>,
         }
 
         // Set by filmloop logic: true when the stage sprite dimensions match the
@@ -2132,6 +2153,7 @@ impl WebGL2Renderer {
                         word_wrap: false,
                         border: 0,
                         box_drop_shadow: 0,
+                        scrollbar: None,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
                         per_line_par_idx: Vec::new(),
@@ -2376,10 +2398,20 @@ impl WebGL2Renderer {
                     //    because the flag only catches Lingo writes) AND explicit
                     //    Lingo `sprite.color = rgb(...)` writes. Black is excluded
                     //    so a sprite at its RGB default doesn't shadow member.color.
-                    // 2. CastMember `.color` set to RGB. Coke Studios does
+                    // 2. Non-black RGB CastMember `.color`. Coke Studios does
                     //    `sprite.color = paletteIndex(255)` (default-marker) +
                     //    `member.color = rgb(...)`; member RGB wins over the
                     //    sprite's palette default.
+                    //
+                    //    Black is excluded for the same reason it is in rule 1:
+                    //    an RGB black is the member's DEFAULT, not an authored
+                    //    choice, and letting it match shadows a sprite colour
+                    //    that really was authored. dkbarrel draws its Help Text
+                    //    twice from ONE member (47, storing RGB black) as a drop
+                    //    shadow — sprite 975 carries palette index 4 (yellow),
+                    //    sprite 974 palette index 255 (black). With black
+                    //    excluded here, both fall through to the sprite colour
+                    //    and each copy keeps its own.
                     // 3. Sprite has_fore_color (Lingo touched it, palette index).
                     // 4. Non-default, non-black sprite.color (score palette index).
                     // 5. Single styled-span color (XMED/HTML).
@@ -2389,7 +2421,9 @@ impl WebGL2Renderer {
                         && fg_color != ColorRef::Rgb(0, 0, 0)
                     {
                         fg_color.clone()
-                    } else if matches!(member.color, ColorRef::Rgb(..)) {
+                    } else if matches!(member.color, ColorRef::Rgb(..))
+                        && member.color != ColorRef::Rgb(0, 0, 0)
+                    {
                         member.color.clone()
                     } else if has_fore_color {
                         fg_color.clone()
@@ -2643,8 +2677,16 @@ impl WebGL2Renderer {
                         box_type_unwrapped == BuiltInSymbol::Adjust && text_has_breaks;
                     let transform_active =
                         skew.abs() > 0.001 || rotation.abs() > 0.1;
+                    // A scrolled member must keep its authored height: the
+                    // shrink branch re-measures using effective_top_spacing,
+                    // which scroll_top has made negative, so the bitmap would
+                    // shrink by exactly the scrolled amount and crop the lines
+                    // the scroll was meant to expose. Same guard the field
+                    // path applies below.
+                    let scroll_active = text_scroll_top != 0;
                     cache_key.transform_active = transform_active;
                     cache_key.keep_authored_height = transform_active
+                        || scroll_active
                         || box_type_locked
                         || multi_par_adjust_locked;
 
@@ -2758,6 +2800,7 @@ impl WebGL2Renderer {
                         word_wrap: effective_word_wrap,
                         border: 0,
                         box_drop_shadow: 0,
+                        scrollbar: None,
                         tab_stops: text_member.tab_stops.clone(),
                         per_line_spacings,
                         per_line_par_idx,
@@ -2786,6 +2829,21 @@ impl WebGL2Renderer {
                         (field_member.width as u32).min(width)
                     } else {
                         width
+                    };
+                    // A #scroll field's scrollbar lives INSIDE the box, so it
+                    // takes its width out of the text area rather than growing
+                    // the sprite. Summer Resort's "sign.text" shows both halves:
+                    // Director draws the same box we do, but wraps a word earlier
+                    // ("…the entrance / to the resort!" vs our "…the entrance to
+                    // the / resort!") because ~16px of the line is the scrollbar.
+                    let scrollbar_info = crate::player::score::field_scrollbar_for(
+                        player, field_member, sprite_rect.clone(),
+                    )
+                    .map(|sb| (sb, field_member.scroll_top as i32));
+                    let wrap_width = if scrollbar_info.is_some() {
+                        wrap_width.saturating_sub(FIELD_SCROLLBAR_WIDTH as u32).max(1)
+                    } else {
+                        wrap_width
                     };
 
                     // Check if this field has keyboard focus AND is editable.
@@ -3033,7 +3091,7 @@ impl WebGL2Renderer {
 
                     debug!(
                         "[FIELD] sprite#{} text='{}' ink={} font='{}' fontSize={} fg={:?} sprite.bg={:?} member.fg={:?} member.bg={:?} has_fore={} has_back={} -> eff_fg={:?} eff_bg={:?} box_type='{}' editable={} border={} size={}x{}",
-                        channel_num, &text[..text.len().min(30)], ink, field_member.font, field_member.font_size,
+                        channel_num, text.chars().take(30).collect::<String>(), ink, field_member.font, field_member.font_size,
                         fg_color, bg_color, field_member.fore_color, member.bg_color,
                         has_fore_color, has_back_color, effective_fg, effective_bg,
                         field_member.box_type, field_member.editable, field_member.border, width, height,
@@ -3121,6 +3179,7 @@ impl WebGL2Renderer {
                         word_wrap: field_member.word_wrap,
                         border: field_member.border,
                         box_drop_shadow: field_member.box_drop_shadow,
+                        scrollbar: scrollbar_info,
                         tab_stops: Vec::new(),
                         per_line_spacings: Vec::new(),
                         per_line_par_idx: Vec::new(),
@@ -3237,16 +3296,58 @@ impl WebGL2Renderer {
                                 );
                             }
                         }
-                        let extra_cams = w3d_extra_cams.clone();
-                        TextureSource::Shockwave3dScene {
-                            width: w,
-                            height: h,
-                            member_key: (member_ref.cast_lib, member_ref.cast_member),
-                            scene: parsed_scene.clone(),
-                            runtime_state: w3d.runtime_state.clone(),
-                            active_camera: w3d_camera.clone(),
-                            extra_cameras: extra_cams,
+                        // One pass per camera, in the sprite's camera order. Each camera
+                        // is resolved against the member that OWNS it, so a sprite can
+                        // composite worlds from several members the way Director does.
+                        use crate::director::chunks::w3d::types::W3dNodeType;
+                        let own_key = (member_ref.cast_lib, member_ref.cast_member);
+                        let mut cam_list: Vec<crate::player::sprite::SpriteCamera> =
+                            w3d_camera.iter().cloned().collect();
+                        cam_list.extend(w3d_extra_cams.iter().cloned());
+
+                        let mut passes: Vec<Shockwave3dPass> = Vec::new();
+                        for cam in &cam_list {
+                            let key = cam.member.unwrap_or(own_key);
+                            let resolved = if key == own_key {
+                                Some((parsed_scene.clone(), w3d.runtime_state.clone()))
+                            } else {
+                                let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
+                                player.movie.cast_manager.find_member_by_ref(&other)
+                                    .and_then(|m| m.member_type.as_shockwave3d())
+                                    .and_then(|o| o.parsed_scene.as_ref()
+                                        .map(|sc| (sc.clone(), o.runtime_state.clone())))
+                            };
+                            let (pass_scene, pass_state) = match resolved {
+                                Some(v) => v,
+                                // Owning member isn't loaded (or isn't 3D) yet — skip
+                                // rather than render this member's world through it.
+                                None => continue,
+                            };
+                            let exists = pass_scene.nodes.iter().any(|n| {
+                                n.node_type == W3dNodeType::View
+                                    && n.name.eq_ignore_ascii_case(&cam.name)
+                            });
+                            if !exists {
+                                continue;
+                            }
+                            passes.push(Shockwave3dPass {
+                                member_key: key,
+                                scene: pass_scene,
+                                runtime_state: pass_state,
+                                camera: Some(Symbol::from_str(&cam.name)),
+                            });
                         }
+                        if passes.is_empty() {
+                            // No camera list, or none resolved: single default pass on
+                            // the sprite's own member (the renderer picks DefaultView).
+                            passes.push(Shockwave3dPass {
+                                member_key: own_key,
+                                scene: parsed_scene.clone(),
+                                runtime_state: w3d.runtime_state.clone(),
+                                camera: w3d_camera.as_ref().map(|c| Symbol::from_str(&c.name)),
+                            });
+                        }
+                        TextureSource::Shockwave3dScene { width: w, height: h, passes }
                     } else {
                         return;
                     }
@@ -3462,6 +3563,11 @@ impl WebGL2Renderer {
                 | TextureSource::ButtonBitmap { .. }
         );
 
+        // Native size of the source texture, when it comes from a bitmap member.
+        // Used below to decide whether this draw is minifying enough to warrant
+        // averaged (mipmapped) sampling instead of point sampling.
+        let mut tex_source_size: Option<(u32, u32)> = None;
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -3472,7 +3578,10 @@ impl WebGL2Renderer {
                 };
 
                 match self.get_or_create_texture(player, &member_ref, image_ref, ink, colorize_params, sprite_bg_for_matte, is_flash) {
-                    Some((tex, _w, _h)) => tex,
+                    Some((tex, w, h)) => {
+                        tex_source_size = Some((w, h));
+                        tex
+                    }
                     None => return,
                 }
             }
@@ -3508,6 +3617,7 @@ impl WebGL2Renderer {
                 word_wrap,
                 border,
                 box_drop_shadow,
+                scrollbar,
                 ref tab_stops,
                 ref per_line_spacings,
                 ref per_line_par_idx,
@@ -3520,7 +3630,7 @@ impl WebGL2Renderer {
                         "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
                         cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
                         tab_stops.len(), text.contains('\t'),
-                        &text[..text.len().min(40)]
+                        text.chars().take(40).collect::<String>()
                     );
                 }
                 // Check cache first
@@ -3572,6 +3682,7 @@ impl WebGL2Renderer {
                         word_wrap,
                         border,
                         box_drop_shadow,
+                        scrollbar,
                         tab_stops,
                         per_line_spacings.as_slice(),
                         per_line_par_idx.as_slice(),
@@ -3922,11 +4033,19 @@ impl WebGL2Renderer {
 
                 let palettes = player.movie.cast_manager.palettes();
                 let filled = shape_info.fill_type != 0;
-                let thickness = if filled {
-                    (shape_info.line_thickness as i32).max(1)
-                } else {
-                    (shape_info.line_thickness as i32) - 1
-                };
+                // Director stores the border width 1-BASED: file 1 = no border,
+                // 2 = 1px, … 6 = 5px (max). That is the same encoding the Lingo
+                // `lineSize of member` getter already decodes with `raw - 1`
+                // (cast_member_ref.rs), verified against Director on a shape
+                // authored with no border.
+                //
+                // The decode does not depend on `filled` — it is one byte with one
+                // meaning. Applying `-1` only to unfilled shapes and `.max(1)` to
+                // filled ones gave every filled shape a 1px foreColor outline it
+                // was never authored with, which reads as a black border around
+                // each shape (summerresort's map tiles: filled, pattern-tiled, no
+                // authored border).
+                let thickness = (shape_info.line_thickness as i32) - 1;
 
                 match shape_info.shape_type {
                     ShapeType::Rect => {
@@ -3991,7 +4110,13 @@ impl WebGL2Renderer {
                         }
                     }
                     ShapeType::Line => {
-                        let t = (shape_info.line_thickness as i32).max(1);
+                        // A #line member is nothing but its line, so it never
+                        // vanishes — Director draws lineSize 0 as a 1px hairline.
+                        // Floor at 1 AFTER the 1-based decode, so file 3 draws 2px
+                        // rather than 3px. (The floor itself is inferred: the
+                        // dictionary's `lineSize` entry documents the property as a
+                        // pixel thickness but says nothing about 0 on a #line.)
+                        let t = ((shape_info.line_thickness as i32) - 1).max(1);
                         if shape_info.line_direction == 6 {
                             shape_bitmap.draw_line_thick(0, h - 1, w - 1, 0, fg_color, &palettes, 1.0, t);
                         } else {
@@ -4000,6 +4125,53 @@ impl WebGL2Renderer {
                     }
                     ShapeType::Unknown => {
                         shape_bitmap.fill_rect(0, 0, w, h, fg_color, &palettes, 1.0);
+                    }
+                }
+
+                // Bake the bgColor key into the texture's alpha for the inks that
+                // treat the background colour as transparent.
+                //
+                // A shape rasterizes OPAQUE — a pattern writes `back` for its clear
+                // bits, a tile writes every source pixel, a solid fill covers the
+                // whole rect — so the only thing that could make the background
+                // disappear was the shader's runtime colour key. That key is
+                // unreliable here for two reasons:
+                //
+                // - Its `u_bg_color` is resolved against
+                //   `PaletteRef::BuiltIn(get_system_default_palette())`, because
+                //   that is what the ShapeBitmap arm reports as the source
+                //   "bitmap palette". The pixels above were resolved against the
+                //   FRAME palette (or, for a custom tile, the tile member's own
+                //   palette), so the same index yields two different RGBs and the
+                //   key silently misses.
+                // - `colorize_baked` forces the tolerance to 0 whenever colorize
+                //   params exist, but this arm never consumes `colorize_params` —
+                //   nothing is baked, so any shape sprite carrying a fore/back
+                //   colour lost the key outright.
+                //
+                // Keying here instead is exact: `bg_color` is the same value the
+                // fills above were drawn with. Foreground pixels that happen to
+                // equal bgColor drop out too, which is what Background Transparent
+                // means. The shader key still runs and is now a no-op for these
+                // texels (they fail `src.a < 0.01` first).
+                //
+                // The ink set is every ink whose shader discards on
+                // `dist < u_color_tolerance` against `u_bg_color` (see shaders.rs):
+                //   2/4  Reverse, Not Copy      33/34  Add Pin, Add
+                //   3    Ghost                  35/38  Sub Pin, Subtract
+                //   6    Not Reverse            36     Background Transparent
+                //   40   Lighten
+                // Ink 7 (Not Ghost) is deliberately excluded — it is the INVERSE
+                // key, discarding everything that does NOT match bgColor, so
+                // baking these texels away would leave it drawing nothing. Ink 41
+                // (Darken) does not key at all (it is a fore/back duotone remap),
+                // and 8/9 (Matte, Mask) resolve transparency by their own paths.
+                if matches!(ink, 2 | 3 | 4 | 6 | 33 | 34 | 35 | 36 | 38 | 40) {
+                    let (kr, kg, kb) = bg_color;
+                    for px in shape_bitmap.data.chunks_exact_mut(4) {
+                        if px[3] != 0 && px[0] == kr && px[1] == kg && px[2] == kb {
+                            px[3] = 0;
+                        }
                     }
                 }
 
@@ -4063,60 +4235,52 @@ impl WebGL2Renderer {
                 }
                 texture
             }
-            TextureSource::Shockwave3dScene { width, height, member_key, scene, runtime_state, active_camera, extra_cameras } => {
-                // Render primary camera. Camera backdrops (Director `addBackdrop`,
-                // e.g. the estate sky) are drawn inside render_scene_with_state_ex,
+            TextureSource::Shockwave3dScene { width, height, passes } => {
+                // Draw each camera pass in order (lowest index first, higher on top),
+                // every one against the member that owns its camera. Camera backdrops
+                // (Director `addBackdrop`) are drawn inside render_scene_with_state_ex,
                 // after its clear and before the models — see draw_backdrops_inline.
-                self.scene3d.active_camera = active_camera;
-                if let Err(e) = self.scene3d.render_scene_with_state(
-                    &self.context, member_key, &scene, width, height, Some(&runtime_state)
-                ) {
-                    web_sys::console::error_1(&format!(
-                        "[3D] Render failed for member {:?} primary camera {:?}: {:?}",
-                        member_key, self.scene3d.active_camera, e
-                    ).into());
-                    return;
-                }
-
-                // Render additional cameras on top (multi-camera: skybox + game world)
-                if extra_cameras.is_empty() {
-                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        warn!("[3D] No extra cameras — Main camera not added via addCamera");
-                    }
-                }
-                for cam_name in &extra_cameras {
-                    let should_clear = runtime_state.camera_clear_at_render
-                        .get(&cam_name).copied().unwrap_or(true);
-                    static CAM_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !CAM_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        debug!(
-                            "[W3D-MULTICAM] extra cam='{}' should_clear={} clear_map={:?}",
-                            cam_name, should_clear, runtime_state.camera_clear_at_render
-                        );
-                    }
-                    self.scene3d.active_camera = Some(cam_name.clone());
+                //
+                // The first pass always clears the FBO; later ones honour their own
+                // camera's `colorBuffer.clearAtRender`, which is how a movie layers a
+                // skybox, the 3D world and an orthographic UI pass into one sprite.
+                let member_key = passes.first().map(|p| p.member_key).unwrap_or((0, 0));
+                for (i, pass) in passes.iter().enumerate() {
+                    let clear = if i == 0 {
+                        true
+                    } else {
+                        pass.camera.as_ref()
+                            .and_then(|c| pass.runtime_state
+                                .camera_clear_at_render
+                                .get(c)
+                                .copied())
+                            .unwrap_or(true)
+                    };
+                    self.scene3d.active_camera = pass.camera.clone();
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
-                        &self.context, member_key, &scene, width, height,
-                        Some(&runtime_state), should_clear,
+                        &self.context, pass.member_key, &pass.scene, width, height,
+                        Some(&pass.runtime_state), clear,
                     ) {
-                        web_sys::console::error_1(&format!(
-                            "[3D] Render failed for member {:?} extra camera {:?}: {:?}",
-                            member_key, self.scene3d.active_camera, e
-                        ).into());
-                        return;
+                        // One bad pass must not abandon the whole sprite — the other
+                        // cameras (including the one showing the actual world) still
+                        // need to draw.
+                        crate::console_error!(
+                            "[3D] Render failed for member {:?} camera {:?}: {:?}",
+                            pass.member_key, pass.camera, e
+                        );
+                        continue;
                     }
                 }
 
-                // Backdrops were already drawn before the scene (see render_backdrops_to_fbo
-                // above). Overlays render on top of everything.
 
                 // Render overlays on top of everything
-                for (_, overlays) in &runtime_state.camera_overlays {
-                    if !overlays.is_empty() {
-                        self.scene3d.render_overlays_to_fbo(
-                            &self.context, &member_key, overlays, width, height,
-                        );
+                for pass in &passes {
+                    for (_, overlays) in &pass.runtime_state.camera_overlays {
+                        if !overlays.is_empty() {
+                            self.scene3d.render_overlays_to_fbo(
+                                &self.context, &pass.member_key, overlays, width, height,
+                            );
+                        }
                     }
                 }
 
@@ -4240,6 +4404,27 @@ impl WebGL2Renderer {
         if let Some(ref loc) = u_texture {
             gl.uniform1i(Some(loc), 0);
         }
+
+        // Director area-averages a bitmap it shrinks; point-sampling a big
+        // dithered 8-bit source into a small sprite rect samples isolated dither
+        // pixels and destroys the tone (NabiscoWorld Mini-Golf's 624x350 hole art
+        // in a 111x71 menu card read as washed out next to Shockwave Player).
+        // Only switch to mipmapped minification once the sprite is meaningfully
+        // smaller than its source; at or above native size MAG_FILTER (NEAREST)
+        // applies and every other movie stays pixel-exact.
+        let minifies = tex_source_size.map_or(false, |(sw, sh)| {
+            let (dw, dh) = (sprite_rect.width() as f32, sprite_rect.height() as f32);
+            dw > 0.0 && dh > 0.0 && (sw as f32 / dw > 1.2 || sh as f32 / dh > 1.2)
+        });
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+            if minifies {
+                WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32
+            } else {
+                WebGl2RenderingContext::NEAREST as i32
+            },
+        );
 
         // Set sprite rect uniform (x, y, width, height)
         if let Some(ref loc) = u_sprite_rect {
@@ -5615,6 +5800,7 @@ impl WebGL2Renderer {
         word_wrap: bool,
         border: u16,
         box_drop_shadow: u16,
+        scrollbar: Option<(crate::player::score::FieldScrollbar, i32)>,
         tab_stops: &[crate::player::cast_member::TabStop],
         // Per-text-line line_spacing override from XMED par_run / par_info
         // tables. Length equals (count of \r/\n in `text`) + 1 — i.e. one
@@ -6029,7 +6215,7 @@ impl WebGL2Renderer {
                 debug!(
                     "[render_text] font='{}' pfr={} native={} fg={:?} text='{}' spans=[{}]",
                     font_name, is_pfr_font, spans_for_native.is_some(), fg_color,
-                    &text[..text.len().min(30)], span_info,
+                    text.chars().take(30).collect::<String>(), span_info,
                 );
             }
         }
@@ -7433,6 +7619,61 @@ impl WebGL2Renderer {
                 text_bitmap.fill_rect(0, b, b, content_height - b, border_color, &palettes, 1.0);
                 // Right border
                 text_bitmap.fill_rect(content_width - b, b, content_width, content_height - b, border_color, &palettes, 1.0);
+            }
+        }
+
+        // Director draws a scrollbar inside the right edge of a #scroll field.
+        // It sits WITHIN the box (the text area was already narrowed by
+        // FIELD_SCROLLBAR_WIDTH via `wrap_width`), so the sprite does not grow.
+        //
+        // Chrome only: the thumb is not drawn and the arrows are not hit-tested,
+        // because nothing routes clicks to a field scrollbar yet. Movies scroll
+        // these fields from Lingo via `scrollTop` (Summer Resort sets
+        // `member("sign.text").scrollTop = 1` before writing the text), which the
+        // renderer already honours through its draw origin.
+        if let Some((sb, scroll_top)) = scrollbar {
+            let (x0, x1, y0, y1) = (sb.x0, sb.x1, sb.y0, sb.y1);
+            if x0 >= 0 && x1 <= render_width as i32 && y1 - y0 > 2 {
+                let frame = (0, 0, 0);
+                let face = (255, 255, 255);
+
+                // Trough, then a 1px rule down the left edge separating the bar
+                // from the text area.
+                text_bitmap.fill_rect(x0, y0, x1, y1, face, &palettes, 1.0);
+                text_bitmap.fill_rect(x0, y0, x0 + 1, y1, frame, &palettes, 1.0);
+
+                let box_h = sb.arrow_h;
+                if box_h > 2 {
+                    // Rules under the up box and over the down box.
+                    text_bitmap.fill_rect(x0, y0 + box_h - 1, x1, y0 + box_h, frame, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0, y1 - box_h, x1, y1 - box_h + 1, frame, &palettes, 1.0);
+
+                    // Arrow glyphs: hollow chevrons rather than solid triangles,
+                    // which is what Director's field scrollbar draws.
+                    let cx = (x0 + x1) / 2;
+                    let arrow_h = (box_h / 3).max(2);
+                    for r in 0..arrow_h {
+                        // Up: two pixels walking outward and down from the apex.
+                        let y = y0 + (box_h - arrow_h) / 2 + r;
+                        text_bitmap.fill_rect(cx - r, y, cx - r + 1, y + 1, frame, &palettes, 1.0);
+                        text_bitmap.fill_rect(cx + r, y, cx + r + 1, y + 1, frame, &palettes, 1.0);
+                        // Down: mirrored, walking inward toward the apex.
+                        let y = y1 - box_h + (box_h - arrow_h) / 2 + r;
+                        let half = arrow_h - 1 - r;
+                        text_bitmap.fill_rect(cx - half, y, cx - half + 1, y + 1, frame, &palettes, 1.0);
+                        text_bitmap.fill_rect(cx + half, y, cx + half + 1, y + 1, frame, &palettes, 1.0);
+                    }
+                }
+
+                // The lift. Director shows none while the text fits, which is
+                // what `thumb()` returns None for. Filled grey rather than the
+                // trough's white, or it would be invisible against it.
+                if let Some((ty0, ty1)) = sb.thumb(scroll_top) {
+                    let lift = (192, 192, 192);
+                    text_bitmap.fill_rect(x0 + 1, ty0, x1, ty1, lift, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0 + 1, ty0, x1, ty0 + 1, frame, &palettes, 1.0);
+                    text_bitmap.fill_rect(x0 + 1, ty1 - 1, x1, ty1, frame, &palettes, 1.0);
+                }
             }
         }
 
