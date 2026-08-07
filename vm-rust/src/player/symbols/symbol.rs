@@ -5,7 +5,24 @@ use lasso::Spur;
 
 use crate::player::{ScriptError, symbols::{builtin::BuiltInSymbol, symbol_table::{SYMBOL_TABLE, get_symbol_spur}}};
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Default)]
+/// The default Symbol is the EMPTY symbol, not `Spur::default()`.
+///
+/// Deriving `Default` gave the first interned spur, which is the first entry of
+/// `init_builtin_symbols()` — literally `"forget"`. Every `..Default::default()`
+/// on a struct with Symbol fields therefore produced a NON-empty name, and
+/// `is_empty()` (which tests against `EmptyString`) reported false for it. That
+/// silently broke code branching on "has no name yet": `newShader` built shaders
+/// whose `material_name` was `"forget"`, so the `shader.blend` setter took its
+/// "update the existing material" path, looked for a material called `forget`,
+/// found none, and dropped the write — frog01's collision proxies are hidden with
+/// `shader("clearS").blend = 0` and rendered as opaque boxes.
+impl Default for Symbol {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Symbol {
     pub spur: Spur,
 }
