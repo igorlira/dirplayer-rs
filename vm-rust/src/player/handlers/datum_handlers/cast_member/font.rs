@@ -1565,6 +1565,26 @@ impl FontMemberHandlers {
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == "right");
 
+        // Director places a line by its baseline at `lineTop + fixedLineSpace`.
+        // For an ordinary member fixedLineSpace is at least the font's ascent, so
+        // that is just the natural ascender and nothing changes. But a
+        // fixedLineSpace SMALLER than the ascent is a deliberate squeeze — the
+        // line box cannot hold the glyph, and Director lets the glyph overflow
+        // UPWARD out of it rather than pushing it down by a full ascender.
+        //
+        // AreaZero's `[M] Text Director` bakes every 3D UI string that way:
+        // `topSpacing = 10, fixedLineSpace = 1` on a 32px strip pulls the
+        // copyright line hard against the top, because the quad sampling it is
+        // authored hanging 13px off the bottom of the stage. Using the full
+        // ascender put the baseline at 22 and the ink at rows 13-24, so the
+        // stage edge cut the line in half; clamping it to fixedLineSpace puts
+        // the baseline at 11 and the ink at ~0-14, inside the visible band.
+        let baseline = if fixed_line_space > 0 {
+            baseline.min(fixed_line_space as f64)
+        } else {
+            baseline
+        };
+
         let mut y_top = top_spacing as f64;
         for line in &lines {
             if y_top >= render_height as f64 { break; }

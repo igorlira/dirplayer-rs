@@ -1719,9 +1719,20 @@ impl TextMemberHandlers {
                                 }
                             }
                         }
+                        // Fall back to the MEMBER's charSpacing when there are no HTML
+                        // styled spans to carry one. A plain text member set from Lingo
+                        // (`member.charSpacing = -1`) has no spans at all, so defaulting
+                        // to 0 silently dropped the authored tracking.
+                        //
+                        // AreaZero's menu styles all carry `#kerning: -1`, which
+                        // `[M] Text Director` assigns as `tTextMember.charSpacing`.
+                        // Losing it made every baked string 1px per character too wide:
+                        // "[MEDIUM]" overflowed its 105px member (the mesh is exactly
+                        // 105 wide) and lost the closing bracket, and "PLAY MORE GAMES"
+                        // came out 15px wide of where Director centres it.
                         let cs_px: i32 = text_data.html_styled_spans.first()
                             .map(|s| s.style.char_spacing)
-                            .unwrap_or(0);
+                            .unwrap_or(text_data.char_spacing);
                         let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
                         match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
                             &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
