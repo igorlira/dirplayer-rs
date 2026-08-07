@@ -332,7 +332,14 @@ pub fn try_execute_bytecode_sync(
     ctx: &BytecodeHandlerContext,
 ) -> Option<Result<HandlerExecutionResult, ScriptError>> {
     let opcode = {
-        let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
+        // The ACTIVE player, not PLAYER_OPT. PLAYER_OPT is always the host; a
+        // nested #movie runs with ACTIVE_PLAYER_ID != 0, so reading the scope
+        // from the host gave a DIFFERENT scope than the one being executed and
+        // dispatched whatever opcode sat at the host scope's bytecode_index.
+        // Neopets g349 (a #movie inside dgs_loader) died in its own prepareMovie
+        // with "jmp_if_zero: stack underflow … bytecode_index=0" — index 0 being
+        // the host scope, while the sub was mid-handler with an empty stack.
+        let player = unsafe { crate::player::player_ref() };
         let scope = player.scopes.get(ctx.scope_ref).unwrap();
         let handler = unsafe { &*ctx.handler_def_ptr };
         if scope.bytecode_index >= handler.bytecode_array.len() {

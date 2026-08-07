@@ -37,16 +37,21 @@ impl StackDatum {
         match self {
             StackDatum::Ref(dr) => dr,
             StackDatum::Void => DatumRef::Void,
+            // Allocate in the ACTIVE player's arena, not PLAYER_OPT's. A nested
+            // #movie runs with ACTIVE_PLAYER_ID != 0; allocating its stack values
+            // in the HOST arena while DatumRef::drop frees them against the active
+            // one corrupts both. Same de-globalisation gap the nested datum-leak
+            // fix closed on the free side.
             StackDatum::Int(n) => {
-                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                let player = unsafe { crate::player::player_mut() };
                 player.allocator.alloc_int(n)
             }
             StackDatum::Symbol(s) => {
-                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                let player = unsafe { crate::player::player_mut() };
                 player.allocator.alloc_symbol(s)
             }
             StackDatum::Float(f) => {
-                let player = unsafe { PLAYER_OPT.as_mut().unwrap() };
+                let player = unsafe { crate::player::player_mut() };
                 player.alloc_datum(Datum::Float(f))
             }
         }
