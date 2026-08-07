@@ -2094,10 +2094,13 @@ impl Shockwave3dMemberHandlers {
                             || handler_name.eq_builtin(BuiltInSymbol::NewLight)
                             || handler_name.eq_builtin(BuiltInSymbol::NewShader)) && args.len() >= 2
                         {
-                            player.get_datum(&args[1]).string_value().unwrap_or_default()
+                            // Lowercase at the source: this comes from a SYMBOL, whose
+                            // string form is the first-interned spelling, and every
+                            // downstream compare uses lowercase literals.
+                            player.get_datum(&args[1]).string_value().unwrap_or_default().to_ascii_lowercase()
                         } else { String::new() };
                         let new_res_facing = if handler_name.eq_builtin(BuiltInSymbol::NewModelResource) && args.len() >= 3 {
-                            player.get_datum(&args[2]).string_value().unwrap_or_default()
+                            player.get_datum(&args[2]).string_value().unwrap_or_default().to_ascii_lowercase()
                         } else { String::new() };
 
                         let obj_sym = Symbol::from_str(&obj_name);

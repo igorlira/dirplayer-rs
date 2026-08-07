@@ -1765,7 +1765,7 @@ impl Bitmap {
         let ink = param_list.get("ink");
         let mut ink = if let Some(ink) = ink {
             match ink {
-                Datum::Symbol(s) => match s.as_str() {
+                Datum::Symbol(s) => match s.as_lower_str() {
                     "copy" => 0,
                     "transparent" => 1,
                     "reverse" => 2,

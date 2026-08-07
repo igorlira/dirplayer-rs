@@ -729,7 +729,7 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("createRigidBody: type must be a symbol".to_string())),
         };
 
-        let shape = match shape_sym.as_str() {
+        let shape = match shape_sym.as_lower_str() {
             "box" => PhysXShapeKind::Box,
             "sphere" => PhysXShapeKind::Sphere,
             "capsule" => PhysXShapeKind::Capsule,
@@ -737,7 +737,7 @@ impl PhysXPhysicsMemberHandlers {
             "concaveshape" | "concave" => PhysXShapeKind::ConcaveShape,
             _ => return Err(ScriptError::new(format!("Unknown shape: {}", shape_sym))),
         };
-        let body_type = match type_sym.as_str() {
+        let body_type = match type_sym.as_lower_str() {
             "static" => PhysXBodyType::Static,
             "dynamic" => PhysXBodyType::Dynamic,
             "kinematic" => PhysXBodyType::Kinematic,
@@ -973,7 +973,7 @@ impl PhysXPhysicsMemberHandlers {
             Datum::String(s) => Symbol::from_str(&s),
             _ => return Err(ScriptError::new("createRigidBodyFromProxy: type must be a symbol".to_string())),
         };
-        let body_type = match type_sym.as_str() {
+        let body_type = match type_sym.as_lower_str() {
             "static" => PhysXBodyType::Static,
             "dynamic" => PhysXBodyType::Dynamic,
             "kinematic" => PhysXBodyType::Kinematic,
