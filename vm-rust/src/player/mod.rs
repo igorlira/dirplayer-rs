@@ -271,6 +271,9 @@ pub struct DirPlayer {
     pub step_mode: StepMode,
     pub step_scope_depth: u32,
     pub break_on_error: bool,
+    /// Run handlers through the register-IR compiler. Default OFF: this changes
+    /// how every Lingo handler executes, so it is opt-in until measured.
+    pub ir_enabled: bool,
     pub stage_size: (u32, u32),
     pub bitmap_manager: bitmap::manager::BitmapManager,
     pub cursor: CursorRef,
@@ -621,6 +624,9 @@ impl DirPlayer {
             step_mode: StepMode::None,
             step_scope_depth: 0,
             break_on_error: true,
+            // ON so the browser e2e suite exercises the IR path. `set_ir_enabled`
+            // still toggles it at runtime for A/B measurement.
+            ir_enabled: true,
             stage_size: (100, 100),
             bitmap_manager: bitmap::manager::BitmapManager::new(),
             cursor: CursorRef::System(0),
@@ -4148,7 +4154,18 @@ pub enum ScriptReceiver {
 /// suspend a caller (push a callee frame) and resume it without recursion or a
 /// boxed future. `_profile` keeps the handler's profiling frame open for the
 /// frame's lifetime (dropped on teardown).
+/// A frame's register-IR execution state. Lives on the frame (not the driver)
+/// so a suspended caller keeps its dense local file across a nested call.
+struct IrState {
+    compiled: std::rc::Rc<crate::player::compiled::CompiledHandler>,
+    locals: Vec<crate::player::scope::StackDatum>,
+    /// The last escape could write `scope.locals`, so read them back after the
+    /// interpreter has run that op.
+    pending_sync: bool,
+}
+
 struct HandlerFrame {
+    ir: Option<IrState>,
     ctx: BytecodeHandlerContext,
     scope_ref: ScopeRef,
     scope_generation: u64,
@@ -4323,7 +4340,33 @@ fn setup_handler_frame(
 
     let scope_generation = reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().generation);
 
+    // Compile to register IR on first call and cache it on the HandlerDef.
+    let ir = if reserve_player_ref(|player| player.ir_enabled) {
+        let handler_def = unsafe { &*ctx.handler_def_ptr };
+        let cached = {
+            let slot = handler_def.compiled_ir.borrow();
+            slot.clone()
+        };
+        let compiled = match cached {
+            Some(c) => c,
+            None => {
+                let c = crate::player::compiled::compile(handler_def, ctx.multiplier)
+                    .filter(crate::player::compiled::is_worth_compiling)
+                    .map(std::rc::Rc::new);
+                *handler_def.compiled_ir.borrow_mut() = Some(c.clone());
+                c
+            }
+        };
+        compiled.map(|c| {
+            let n = c.n_locals;
+            IrState { compiled: c, locals: vec![crate::player::scope::StackDatum::Void; n], pending_sync: false }
+        })
+    } else {
+        None
+    };
+
     Ok(FrameSetup::Frame(HandlerFrame {
+        ir,
         ctx, scope_ref, scope_generation, is_frame_script,
         script_member_ref, handler_name, push_return, _profile: _handler_scope,
     }))
@@ -4364,6 +4407,7 @@ pub async fn player_call_script_handler_raw_args(
     let mut handler_name = entry.handler_name;
     let mut _handler_scope = entry._profile;
     let mut cur_push_return = entry.push_return; // unused for entry (returned to caller)
+    let mut ir_state = entry.ir;
     let mut parents: Vec<HandlerFrame> = Vec::new();
 
     'driver: loop {
@@ -4406,6 +4450,70 @@ pub async fn player_call_script_handler_raw_args(
     let scope_ptr: *mut Scope = reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut Scope);
 
     let transfer: FrameTransfer = loop {
+        // Register-IR fast path. Runs the compiled op stream until it either
+        // finishes the handler, hits an opcode only the interpreter implements,
+        // or reaches a backward jump the driver must see. On an escape it leaves
+        // `scope.bytecode_index` on that opcode, and the ordinary path below
+        // executes exactly that one op and advances — then we re-enter here.
+        if let Some(ir) = ir_state.as_mut() {
+            if ir.pending_sync {
+                crate::player::compiled::sync_locals_in(&ir.compiled, scope_ref, &mut ir.locals);
+                ir.pending_sync = false;
+            }
+            match crate::player::compiled::run_handler_resumable(&ir.compiled, scope_ref, &mut ir.locals) {
+                Ok(crate::player::compiled::IrExit::Done) => break FrameTransfer::Done,
+                Ok(crate::player::compiled::IrExit::Escape { sync_locals }) => {
+                    ir.pending_sync = sync_locals;
+                }
+                // Run the SAME cooperative-yield logic the interpreter's
+                // `HandlerExecutionResult::Jump` arm does, then re-enter.
+                //
+                // `continue` here was a bug: it restarted this loop and went
+                // straight back into the IR, never reaching the Jump arm below,
+                // so the yield never fired. RollCall's `startMovie` shows its
+                // logo and then busy-waits — `repeat while (the ticks -
+                // temptime) < 150` with an empty body — for ~2.5s. Without the
+                // yield that blocked the JS event loop outright, so startMovie
+                // ran to completion before the harness could interleave, and the
+                // snapshot caught the instructions screen instead of the logo.
+                Ok(crate::player::compiled::IrExit::BackJump) => {
+                    total_backjumps = total_backjumps.wrapping_add(1);
+                    let polled = reserve_player_mut(|player| std::mem::take(&mut player.input_polled));
+                    if polled {
+                        backjumps = backjumps.wrapping_add(1);
+                        if backjumps >= 4096 {
+                            backjumps = 0;
+                            let now = chrono::Local::now().timestamp_millis();
+                            if now - last_yield_ms >= 16 {
+                                last_yield_ms = now;
+                                let _ = timeout(
+                                    Duration::from_millis(1),
+                                    future::pending::<()>(),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    reserve_player_mut(|player| {
+                        player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                        if is_frame_script { player.in_frame_script = false; }
+                        player.pop_scope();
+                    });
+                    while let Some(p) = parents.pop() {
+                        reserve_player_mut(|player| {
+                            player.handler_stack_depth = player.handler_stack_depth.saturating_sub(1);
+                            if p.is_frame_script { player.in_frame_script = false; }
+                            player.pop_scope();
+                        });
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
         // Direct slot read — no closure, no bounds check, no unwrap.
         let (current_gen, bytecode_index, debugger_active) = {
             let scope = unsafe { &*scope_ptr };
@@ -4742,6 +4850,7 @@ pub async fn player_call_script_handler_raw_args(
                     }
                     // Restore the caller frame's locals (drops the callee's
                     // profiling guard via reassignment).
+                    ir_state = p.ir;
                     ctx = p.ctx;
                     scope_ref = p.scope_ref;
                     scope_generation = p.scope_generation;
@@ -4773,10 +4882,12 @@ pub async fn player_call_script_handler_raw_args(
                 // Suspend the current frame, switch to the callee.
                 Ok(FrameSetup::Frame(f)) => {
                     parents.push(HandlerFrame {
+                        ir: ir_state.take(),
                         ctx, scope_ref, scope_generation, is_frame_script,
                         script_member_ref, handler_name,
                         push_return: cur_push_return, _profile: _handler_scope,
                     });
+                    ir_state = f.ir;
                     ctx = f.ctx;
                     scope_ref = f.scope_ref;
                     scope_generation = f.scope_generation;
@@ -6832,6 +6943,7 @@ pub fn run_bytecode_benchmark() -> String {
             argument_name_ids: vec![],
             local_name_ids: vec![],
             global_name_ids: vec![],
+            compiled_ir: std::cell::RefCell::new(None),
         };
         let names: Vec<Symbol> = Vec::new();
         let script = bench_minimal_script();
@@ -6887,6 +6999,7 @@ pub fn run_bytecode_benchmark() -> String {
             argument_name_ids: vec![],
             local_name_ids: vec![0], // one local: slot 0 -> name_id 0
             global_name_ids: vec![],
+            compiled_ir: std::cell::RefCell::new(None),
         };
         let names: Vec<Symbol> = Vec::new();
         let script = bench_minimal_script();
@@ -7076,6 +7189,7 @@ pub fn run_bytecode_benchmark() -> String {
         let handler = HandlerDef {
             name_id: 0, bytecode_array: bc, bytecode_index_map: fxhash::FxHashMap::default(),
             argument_name_ids: vec![], local_name_ids: vec![], global_name_ids: vec![],
+            compiled_ir: std::cell::RefCell::new(None),
         };
         let compiled_h = compiled::compile(&handler, 1).expect("eligible");
         let start = bench_now_ms();
@@ -7102,7 +7216,7 @@ pub fn run_bytecode_benchmark() -> String {
             compiled::IrOp::Ret,            // 11
         ];
         let loop_ops = (n as usize) * 9;
-        let compiled_loop = compiled::CompiledHandler { ops, n_locals: 1 };
+        let compiled_loop = compiled::CompiledHandler { ops, n_locals: 1, local_name_ids: vec![0] };
         let start = bench_now_ms();
         let _ = compiled::run(&compiled_loop, &[]);
         let ms = bench_now_ms() - start;

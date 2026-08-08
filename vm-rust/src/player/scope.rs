@@ -195,6 +195,13 @@ impl OperandStack {
     }
 
     // --- Inline push fast paths (no Datum/arena) ---
+    /// Push an already-formed `StackDatum` (inline value or ref) without
+    /// materializing it. The IR runner operates in `StackDatum` terms and shares
+    /// this stack with the interpreter, so it needs the untyped push.
+    #[inline]
+    pub fn push_value(&mut self, v: StackDatum) {
+        self.items.push(std::cell::UnsafeCell::new(v));
+    }
     #[inline]
     pub fn push_int(&mut self, n: i32) {
         self.items.push(std::cell::UnsafeCell::new(StackDatum::Int(n)));

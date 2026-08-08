@@ -42,11 +42,94 @@ pub enum IrOp {
     JmpIfZero(usize),
     Pop(usize),
     Ret,
+    /// Run this bytecode through the interpreter and come back.
+    ///
+    /// Because `compile` emits exactly ONE `IrOp` per bytecode, the IR pc IS the
+    /// bytecode index — so the escape carries no index, and resuming is just
+    /// reading `scope.bytecode_index` back after the interpreter advanced it.
+    /// That invariant also keeps `bytecode_index_map` valid as an IR jump table.
+    ///
+    /// `sync_locals`: whether this opcode can reach `scope.locals`, in which
+    /// case the dense local file must be written out before and read back after.
+    Escape { sync_locals: bool },
+}
+
+/// Can an escaped opcode read or write `scope.locals`?
+///
+/// Defaults to TRUE — a wrong answer must cost speed, never correctness. Only
+/// opcodes verified not to touch the local file opt out.
+///
+/// It has to default true because the reach is not obvious: `Put`/`Get`/`Set`
+/// go through `context_vars`, which does `scope.locals.insert`/`get` directly,
+/// and `ExtCall` covers `do`/`value`, where `eval` walks a scope's locals by
+/// name id.
+#[inline]
+fn escape_needs_local_sync(opcode: OpCode) -> bool {
+    !matches!(
+        opcode,
+        // Chunk expressions consume operands off the stack and push a string
+        // back; they never name a variable.
+        OpCode::GetChunk
+            | OpCode::JoinStr
+            | OpCode::JoinPadStr
+            | OpCode::ContainsStr
+            | OpCode::Contains0Str
+            | OpCode::Div
+            | OpCode::Mod
+            | OpCode::Inv
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Not
+            | OpCode::PushCons
+            | OpCode::PushSymb
+            | OpCode::PushFloat32
+            | OpCode::Swap
+            | OpCode::Peek
+            // Pure stack shuffling — builds a list/arglist from operands.
+            | OpCode::PushArgList
+            | OpCode::PushArgListNoRet
+            | OpCode::PushList
+            | OpCode::PushPropList
+            // Calls run the callee in its OWN scope, so they cannot reach this
+            // handler's locals. `eval` resolves names against
+            // `scopes[scope_count - 1]` — the innermost frame — so a `do` inside
+            // a callee sees the callee's locals, not ours. `ExtCall` is NOT here:
+            // that is how `do`/`value` are invoked in THIS scope.
+            | OpCode::ObjCall
+            | OpCode::ObjCallV4
+            | OpCode::LocalCall
+            // Property and global reads name no local.
+            | OpCode::GetMovieProp
+            | OpCode::TheBuiltin
+            | OpCode::GetObjProp
+            | OpCode::GetGlobal
+            | OpCode::GetGlobal2
+    )
 }
 
 pub struct CompiledHandler {
     pub ops: Vec<IrOp>,
     pub n_locals: usize,
+    /// Slot -> name id, for syncing the dense local file into `scope.locals`.
+    pub local_name_ids: Vec<u16>,
+}
+
+/// How a run of the IR ended.
+pub enum IrExit {
+    /// `Ret`, or the op array ran out.
+    Done,
+    /// An `Escape`: `scope.bytecode_index` is set to the op the interpreter must
+    /// run. The driver executes it, advances the index as usual, then re-enters.
+    Escape { sync_locals: bool },
+    /// A backward jump the DRIVER must see. `scope.bytecode_index` is the loop
+    /// target; the driver runs its `HandlerExecutionResult::Jump` handling and
+    /// re-enters.
+    ///
+    /// Without this the IR would swallow loops whole and never hand control
+    /// back, and the driver's cooperative yield — the thing that lets a
+    /// `repeat while keyPressed(" ")` ever see the key-up — would never fire,
+    /// hanging the tab. The runaway-loop watchdog counts these too.
+    BackJump,
 }
 
 /// Try to compile a handler to the pure-int IR. Returns `None` (→ interpreter
@@ -86,17 +169,40 @@ pub fn compile(handler: &HandlerDef, multiplier: u32) -> Option<CompiledHandler>
             }
             OpCode::Pop => IrOp::Pop(b.obj as usize),
             OpCode::Ret => IrOp::Ret,
-            // Anything else (calls, globals, params, strings, props, floats,
-            // symbols, ...) → ineligible.
-            _ => return None,
+            // Anything else runs through the interpreter in place. The hot
+            // arithmetic/branch/local cluster around it still gets the IR's
+            // tight loop, which is the whole point — a handler is no longer
+            // rejected outright because it contains one `getchunk` or `put`.
+            other => IrOp::Escape { sync_locals: escape_needs_local_sync(other) },
         };
         ops.push(op);
     }
+    debug_assert_eq!(
+        ops.len(),
+        bc.len(),
+        "IR must stay 1:1 with bytecode — pc doubles as the bytecode index and \
+         bytecode_index_map is reused as the jump table"
+    );
 
     Some(CompiledHandler {
         ops,
         n_locals: handler.local_name_ids.len(),
+        local_name_ids: handler.local_name_ids.clone(),
     })
+}
+
+/// Is compiling this handler likely to pay for itself?
+///
+/// A handler that is mostly escapes would run the IR loop only to bounce
+/// straight back into the interpreter for each op — strictly slower than just
+/// interpreting. Require a real op stream and a majority of natively-executed
+/// ops.
+pub fn is_worth_compiling(c: &CompiledHandler) -> bool {
+    if c.ops.len() < 8 {
+        return false;
+    }
+    let escapes = c.ops.iter().filter(|o| matches!(o, IrOp::Escape { .. })).count();
+    escapes * 2 < c.ops.len()
 }
 
 #[inline(always)]
@@ -136,6 +242,7 @@ pub fn run(compiled: &CompiledHandler, locals_init: &[StackDatum]) -> StackDatum
             IrOp::Jmp(t) => { pc = *t; }
             IrOp::Pop(n) => { for _ in 0..*n { st.pop(); } pc += 1; }
             IrOp::GetParam(_) => unreachable!("GetParam not used by the pure-int bench runner"),
+            IrOp::Escape { .. } => unreachable!("the pure-int bench runner compiles no escapes"),
             IrOp::Ret => return st.pop().unwrap_or(StackDatum::Void),
         }
     }
@@ -248,41 +355,166 @@ fn cow_on_assign(v: StackDatum) -> StackDatum {
 /// Run a fully-pure compiled handler against `scope_ref`. Returns Ok on the
 /// handler's `ret`; the caller's teardown reads `scope.return_value`.
 pub fn run_handler(compiled: &CompiledHandler, scope_ref: ScopeRef) -> Result<(), ScriptError> {
-    let mut st: Vec<StackDatum> = Vec::with_capacity(32);
     let mut locals: Vec<StackDatum> = vec![StackDatum::Void; compiled.n_locals];
+    match run_handler_resumable(compiled, scope_ref, &mut locals)? {
+        IrExit::Done => Ok(()),
+        IrExit::Escape { .. } | IrExit::BackJump => Err(ScriptError::new(
+            "run_handler: handler escaped; use run_handler_resumable".to_string(),
+        )),
+    }
+}
+
+/// Hand a backward jump back to the driver when it needs to see it: an
+/// input-polling iteration (so the cooperative yield can run) or every 4096
+/// iterations (so the runaway watchdog still counts). Returns `None` to stay in
+/// the IR, which is the overwhelmingly common case for compute loops.
+#[inline]
+fn back_jump(
+    scope_ptr: *mut crate::player::scope::Scope,
+    target: usize,
+    backjumps: &mut u32,
+) -> Option<IrExit> {
+    *backjumps = backjumps.wrapping_add(1);
+    let polled = reserve_player_ref(|player| player.input_polled);
+    if polled || (*backjumps & 0xFFF) == 0 {
+        unsafe { (*scope_ptr).bytecode_index = target };
+        return Some(IrExit::BackJump);
+    }
+    None
+}
+
+/// Read `scope.locals` back into the dense file after an escape that could have
+/// written them (see `escape_needs_local_sync`).
+pub fn sync_locals_in(
+    compiled: &CompiledHandler,
+    scope_ref: ScopeRef,
+    locals: &mut Vec<StackDatum>,
+) {
+    reserve_player_ref(|player| {
+        let scope = player.scopes.get(scope_ref).unwrap();
+        for (slot, name_id) in compiled.local_name_ids.iter().enumerate() {
+            if let Some(dr) = scope.locals.get(name_id) {
+                if slot < locals.len() {
+                    locals[slot] = StackDatum::Ref(dr.clone());
+                }
+            }
+        }
+    });
+}
+
+/// The IR loop, entered at `scope.bytecode_index` and returning how it stopped.
+///
+/// Operands live on the REAL `scope.stack` rather than a runner-owned Vec. That
+/// is what makes an escape free: the interpreter op it hands off to reads and
+/// writes the very same stack, so nothing has to be copied across. The measured
+/// justification is that `OperandStack` push/pop benches at 0.5 ns/op — the same
+/// as a plain Vec — so sharing it costs the IR nothing.
+///
+/// `locals` is the caller-owned dense file; it survives across escapes so a
+/// resumed run continues with the same values.
+pub fn run_handler_resumable(
+    compiled: &CompiledHandler,
+    scope_ref: ScopeRef,
+    locals: &mut Vec<StackDatum>,
+) -> Result<IrExit, ScriptError> {
+    if locals.len() < compiled.n_locals {
+        locals.resize(compiled.n_locals, StackDatum::Void);
+    }
+    // `scopes` is a fixed, pre-filled pool that never reallocates (see
+    // `push_scope`), so this slot address is stable for the run.
+    let scope_ptr: *mut crate::player::scope::Scope =
+        reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+    macro_rules! st_push {
+        ($v:expr) => {
+            unsafe { (*scope_ptr).stack.push_value($v) }
+        };
+    }
+    macro_rules! st_pop {
+        () => {
+            unsafe { (*scope_ptr).stack.pop_value() }.unwrap_or(StackDatum::Void)
+        };
+    }
+
     let ops = &compiled.ops;
-    let mut pc = 0usize;
+    let mut pc = unsafe { (*scope_ptr).bytecode_index };
+    let mut backjumps: u32 = 0;
     loop {
+        if pc >= ops.len() {
+            unsafe { (*scope_ptr).bytecode_index = pc };
+            return Ok(IrExit::Done);
+        }
         match &ops[pc] {
-            IrOp::PushInt(n) => { st.push(StackDatum::Int(*n)); pc += 1; }
-            IrOp::GetLocal(s) => { st.push(locals[*s as usize].clone()); pc += 1; }
-            IrOp::SetLocal(s) => { let v = cow_on_assign(st.pop().unwrap()); locals[*s as usize] = v; pc += 1; }
+            IrOp::Escape { sync_locals } => {
+                let sync_locals = *sync_locals;
+                // Hand the pc to the interpreter as a bytecode index (they are
+                // the same number by construction) and let the driver advance it.
+                unsafe { (*scope_ptr).bytecode_index = pc };
+                if sync_locals {
+                    let scope = unsafe { &mut *scope_ptr };
+                    for (slot, name_id) in compiled.local_name_ids.iter().enumerate() {
+                        if let Some(v) = locals.get(slot) {
+                            scope.locals.insert(*name_id, v.clone().into_ref());
+                        }
+                    }
+                }
+                return Ok(IrExit::Escape { sync_locals });
+            }
+            _ => {}
+        }
+        match &ops[pc] {
+            IrOp::PushInt(n) => { st_push!(StackDatum::Int(*n)); pc += 1; }
+            IrOp::GetLocal(s) => { st_push!(locals[*s as usize].clone()); pc += 1; }
+            IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); locals[*s as usize] = v; pc += 1; }
             IrOp::GetParam(s) => {
                 let s = *s as usize;
                 let dr = reserve_player_ref(|player| {
                     player.scopes.get(scope_ref).unwrap().args.get(s).cloned().unwrap_or(DatumRef::Void)
                 });
-                st.push(StackDatum::Ref(dr));
+                st_push!(StackDatum::Ref(dr));
                 pc += 1;
             }
-            IrOp::Add => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_add(a, b)?); pc += 1; }
-            IrOp::Sub => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_sub(a, b)?); pc += 1; }
-            IrOp::Mul => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_mul(a, b)?); pc += 1; }
-            IrOp::Lt => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 0)?); pc += 1; }
-            IrOp::LtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 1)?); pc += 1; }
-            IrOp::Gt => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 2)?); pc += 1; }
-            IrOp::GtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 3)?); pc += 1; }
-            IrOp::Eq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 4)?); pc += 1; }
-            IrOp::NtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(ir_cmp(a, b, 5)?); pc += 1; }
-            IrOp::JmpIfZero(t) => { let c = st.pop().unwrap(); if ir_is_zero(&c)? { pc = *t; } else { pc += 1; } }
-            IrOp::Jmp(t) => { pc = *t; }
-            IrOp::Pop(n) => { for _ in 0..*n { st.pop(); } pc += 1; }
+            IrOp::Add => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_add(a, b)?); pc += 1; }
+            IrOp::Sub => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_sub(a, b)?); pc += 1; }
+            IrOp::Mul => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_mul(a, b)?); pc += 1; }
+            IrOp::Lt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 0)?); pc += 1; }
+            IrOp::LtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 1)?); pc += 1; }
+            IrOp::Gt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 2)?); pc += 1; }
+            IrOp::GtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 3)?); pc += 1; }
+            IrOp::Eq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 4)?); pc += 1; }
+            IrOp::NtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 5)?); pc += 1; }
+            IrOp::JmpIfZero(t) => {
+                let c = st_pop!();
+                if ir_is_zero(&c)? {
+                    let t = *t;
+                    if t <= pc { if let Some(e) = back_jump(scope_ptr, t, &mut backjumps) { return Ok(e); } }
+                    pc = t;
+                } else { pc += 1; }
+            }
+            IrOp::Jmp(t) => {
+                let t = *t;
+                if t <= pc { if let Some(e) = back_jump(scope_ptr, t, &mut backjumps) { return Ok(e); } }
+                pc = t;
+            }
+            IrOp::Pop(n) => { for _ in 0..*n { let _ = st_pop!(); } pc += 1; }
+            IrOp::Escape { .. } => unreachable!("handled before this match"),
             IrOp::Ret => {
-                let rv = st.pop().map(|v| v.into_ref()).unwrap_or(DatumRef::Void);
-                reserve_player_mut(|player| {
-                    player.scopes.get_mut(scope_ref).unwrap().return_value = rv;
-                });
-                return Ok(());
+                // EXACTLY `FlowControlBytecodeHandler::ret`: VOID, and clear the
+                // stack. A handler's real return value comes from the `return`
+                // BUILTIN (`ExtCall("return")`), which writes `return_value` and
+                // stops the handler — so the `Ret` opcode is only ever reached by
+                // falling off the end, which yields VOID in Director.
+                //
+                // The PoC runner popped the stack top as the return value. Once
+                // the IR was actually wired into dispatch that handed callers a
+                // leftover operand instead of VOID, sending movies down the wrong
+                // branch (nintendo/rollcall rendered the instructions screen where
+                // the title belonged). Not clearing the stack also leaked operands
+                // into the pooled scope for its next use.
+                let scope = unsafe { &mut *scope_ptr };
+                scope.return_value = DatumRef::Void;
+                scope.stack.clear();
+                scope.bytecode_index = pc;
+                return Ok(IrExit::Done);
             }
         }
     }
@@ -294,6 +526,18 @@ mod tests {
     use crate::player::symbols::symbol_table::init_symbol_table;
     use crate::player::testing::{run_test, TestPlayer};
 
+    /// Top of the scope's operand stack, as an int. The IR shares the scope
+    /// stack with the interpreter, so a handler's computed value is read from
+    /// there — `Ret` itself yields VOID, exactly as the interpreter's does.
+    fn stack_top_int(scope_ref: ScopeRef) -> i32 {
+        reserve_player_ref(|player| {
+            let scope = player.scopes.get(scope_ref).unwrap();
+            let top = scope.stack.iter().last().cloned().unwrap_or(DatumRef::Void);
+            player.get_datum(&top).int_value().unwrap()
+        })
+    }
+
+    #[allow(dead_code)]
     fn ret_int(scope_ref: ScopeRef) -> i32 {
         reserve_player_ref(|player| {
             let rv = player.scopes.get(scope_ref).unwrap().return_value.clone();
@@ -314,11 +558,12 @@ mod tests {
             });
             // return param(0) + 1
             let compiled = CompiledHandler {
-                ops: vec![IrOp::GetParam(0), IrOp::PushInt(1), IrOp::Add, IrOp::Ret],
+                ops: vec![IrOp::GetParam(0), IrOp::PushInt(1), IrOp::Add],
                 n_locals: 0,
+                local_name_ids: vec![],
             };
             run_handler(&compiled, scope_ref).unwrap();
-            assert_eq!(ret_int(scope_ref), 6);
+            assert_eq!(stack_top_int(scope_ref), 6);
             reserve_player_mut(|player| player.pop_scope());
         });
     }
@@ -338,11 +583,76 @@ mod tests {
                 IrOp::GetLocal(0), IrOp::GetLocal(1), IrOp::Add, IrOp::SetLocal(0),    // 8-11 sum+=j
                 IrOp::GetLocal(1), IrOp::PushInt(1), IrOp::Add, IrOp::SetLocal(1),     // 12-15 j+=1
                 IrOp::Jmp(4),                              // 16  loop
-                IrOp::GetLocal(0), IrOp::Ret,              // 17,18  return sum
+                IrOp::GetLocal(0),                         // 17  leave sum on the stack
             ];
-            let compiled = CompiledHandler { ops, n_locals: 2 };
+            let compiled = CompiledHandler { ops, n_locals: 2, local_name_ids: vec![0, 1] };
             run_handler(&compiled, scope_ref).unwrap();
-            assert_eq!(ret_int(scope_ref), 55);
+            assert_eq!(stack_top_int(scope_ref), 55);
+            reserve_player_mut(|player| player.pop_scope());
+        });
+    }
+
+    /// An unsupported opcode must become an `Escape` that stops the IR at the
+    /// RIGHT bytecode index, and a resumed run must continue with the dense
+    /// local file intact. This is the whole premise of Stage 3: a handler is no
+    /// longer rejected because it contains one interpreter-only op.
+    #[test]
+    fn compile_escapes_unsupported_opcode_and_resumes() {
+        use crate::director::chunks::handler::{Bytecode, HandlerDef};
+        init_symbol_table();
+        run_test(async {
+            let _player = TestPlayer::new();
+
+            // local0 = 5 ; <getchunk: interpreter-only> ; return local0
+            let handler = HandlerDef {
+                name_id: 0,
+                bytecode_array: vec![
+                    Bytecode::new(OpCode::PushInt8, 5, 0),
+                    Bytecode::new(OpCode::SetLocal, 0, 1),
+                    Bytecode::new(OpCode::GetChunk, 0, 2),
+                    // No trailing Ret: `Ret` yields VOID and clears the stack
+                    // (Director semantics), so the computed value is asserted
+                    // from the stack, which the IR shares with the interpreter.
+                    Bytecode::new(OpCode::GetLocal, 0, 3),
+                ],
+                bytecode_index_map: fxhash::FxHashMap::default(),
+                argument_name_ids: vec![],
+                local_name_ids: vec![0],
+                global_name_ids: vec![],
+                compiled_ir: std::cell::RefCell::new(None),
+            };
+            let compiled = compile(&handler, 1).expect("escapes, never rejects");
+            assert_eq!(compiled.ops.len(), handler.bytecode_array.len(), "IR must be 1:1");
+            // GetChunk consumes stack operands only, so it must NOT force a sync.
+            assert!(matches!(compiled.ops[2], IrOp::Escape { sync_locals: false }));
+
+            let scope_ref = reserve_player_mut(|player| player.push_scope());
+            let mut locals: Vec<StackDatum> = vec![StackDatum::Void; compiled.n_locals];
+
+            // First run stops AT the escaped op (pc == its bytecode index).
+            match run_handler_resumable(&compiled, scope_ref, &mut locals).unwrap() {
+                IrExit::Escape { sync_locals } => assert!(!sync_locals),
+                other => panic!("expected an escape, got {}", match other {
+                    IrExit::Done => "Done", IrExit::BackJump => "BackJump", _ => "?" }),
+            }
+            assert_eq!(
+                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().bytecode_index),
+                2,
+                "escape must leave bytecode_index on the op the interpreter runs"
+            );
+
+            // The driver would run that op and advance; do just the advance.
+            reserve_player_mut(|player| {
+                player.scopes.get_mut(scope_ref).unwrap().bytecode_index = 3;
+            });
+
+            // Resuming continues with locals intact and returns 5.
+            match run_handler_resumable(&compiled, scope_ref, &mut locals).unwrap() {
+                IrExit::Done => {}
+                IrExit::Escape { .. } => panic!("expected completion, got Escape"),
+                IrExit::BackJump => panic!("expected completion, got BackJump"),
+            }
+            assert_eq!(stack_top_int(scope_ref), 5, "dense locals must survive the escape");
             reserve_player_mut(|player| player.pop_scope());
         });
     }

@@ -204,6 +204,17 @@ pub fn step_into_line(skip_bytecode_indices: Vec<usize>) {
 /// interpreter and return a human-readable report (ops/sec, ns/op). Call from
 /// the DevTools console after a movie has loaded to measure real WASM per-op
 /// cost. Requires an initialized player.
+/// Turn the register-IR execution path on or off at runtime, so a movie can be
+/// A/B'd in one session instead of one 6-minute wasm build per data point.
+/// Returns the value now in effect.
+#[wasm_bindgen]
+pub fn set_ir_enabled(enabled: bool) -> bool {
+    player::reserve_player_mut(|player| {
+        player.ir_enabled = enabled;
+        player.ir_enabled
+    })
+}
+
 #[wasm_bindgen]
 pub fn bench_bytecode_throughput() -> String {
     player::run_bytecode_benchmark()

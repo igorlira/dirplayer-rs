@@ -187,6 +187,12 @@ pub struct HandlerDef {
     pub argument_name_ids: Vec<u16>,
     pub local_name_ids: Vec<u16>,
     pub global_name_ids: Vec<u16>,
+    /// Lazily-compiled register IR, cached HERE rather than in a side map so it
+    /// lives and dies with the handler it was compiled from. A map keyed by
+    /// `handler_def_ptr` would risk an unloaded cast's address being reused by a
+    /// different handler, which is a correctness hazard, not just a stale cache.
+    /// `None` = not attempted yet; `Some(None)` = attempted and ineligible.
+    pub compiled_ir: std::cell::RefCell<Option<Option<std::rc::Rc<crate::player::compiled::CompiledHandler>>>>,
 }
 
 impl HandlerRecord {
@@ -303,6 +309,7 @@ impl HandlerRecord {
             bytecode_index_map,
             local_name_ids,
             global_name_ids,
+            compiled_ir: std::cell::RefCell::new(None),
         });
     }
 }
