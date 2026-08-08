@@ -143,19 +143,28 @@ pub fn script_get_prop_opt(
 
     let script_instance = player.allocator.get_script_instance(&script_instance_ref);
 
-    // Handle special "ancestor" property
-    if prop_name.eq_builtin(BuiltInSymbol::Ancestor) {
-        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-        if let Some(ancestor_id) = &script_instance.ancestor {
-            return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
-        } else {
-            return Some(DatumRef::Void);
+    // Resolve the builtin identity ONCE. `eq_builtin` calls `into_builtin`,
+    // which is a `spur_to_builtin` hash lookup — so testing ancestor/script/ilk
+    // separately cost three hash lookups on every property read, before the
+    // instance's own properties were even consulted. Most property names are
+    // not builtins, so this usually resolves to `None` and skips all three.
+    match prop_name.into_builtin() {
+        Some(BuiltInSymbol::Ancestor) => {
+            let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+            if let Some(ancestor_id) = &script_instance.ancestor {
+                return Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())));
+            } else {
+                return Some(DatumRef::Void);
+            }
         }
-    } else if prop_name.eq_builtin(BuiltInSymbol::Script) {
-        let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-        return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
-    } else if prop_name.eq_builtin(BuiltInSymbol::Ilk) {
-        return Some(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Instance))));
+        Some(BuiltInSymbol::Script) => {
+            let script_instance = player.allocator.get_script_instance(&script_instance_ref);
+            return Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())));
+        }
+        Some(BuiltInSymbol::Ilk) => {
+            return Some(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Instance))));
+        }
+        _ => {}
     }
 
     // Try to find the property on the current instance first

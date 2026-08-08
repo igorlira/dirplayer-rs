@@ -292,6 +292,14 @@ impl VirtualScriptRegistry {
         instance_ref: &ScriptInstanceRef,
         name: Symbol,
     ) -> Result<Option<DatumRef>, ScriptError> {
+        // Bail before touching the arena. This runs ahead of the ordinary
+        // instance-property lookup on EVERY `getprop`, and most movies register
+        // no virtual scripts at all — so the common path was paying an arena
+        // lookup, a CastMemberRef clone and a hash lookup to learn nothing.
+        // `getprop` is the single hottest opcode in Agent Free Ride (14.9%).
+        if player.virtual_scripts.is_empty() {
+            return Ok(None);
+        }
         let script_ref = player
             .allocator
             .get_script_instance(instance_ref)
@@ -311,6 +319,11 @@ impl VirtualScriptRegistry {
         name: Symbol,
         value: &DatumRef,
     ) -> Result<Option<()>, ScriptError> {
+        // See `try_get_instance_prop`: skip the arena + clone + hash when no
+        // virtual script is registered.
+        if player.virtual_scripts.is_empty() {
+            return Ok(None);
+        }
         let script_ref = player
             .allocator
             .get_script_instance(instance_ref)
