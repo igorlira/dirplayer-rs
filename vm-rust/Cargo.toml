@@ -180,9 +180,13 @@ wasm-opt = ["-O4"]
 # taken there compares profiles, not code.
 [profile.dev]
 opt-level = "s"
-# Debug info is the other half of the build time and doubles the .wasm; the
-# wasm-bindgen dwarf setting below is what actually gives usable symbols.
-debug = false
+# Line tables, NOT full debug info. This is what emits the wasm `name` section,
+# which is where Chrome's PERFORMANCE panel reads function names from — DWARF is
+# a separate thing, used by the C/C++ DevTools Support extension for source-level
+# stepping in the Sources panel. `debug = false` produced a wasm with neither, so
+# profiles showed `wasm-function[1234]`. `wasm-opt -g` and `dwarf-debug-info`
+# below only PRESERVE what rustc emitted; they cannot conjure it.
+debug = "line-tables-only"
 # Match release SEMANTICS. With these on, dev can panic where release wraps —
 # so a bug reproduced here might not exist in the shipping build, or vice versa.
 debug-assertions = false
@@ -194,15 +198,23 @@ incremental = true
 opt-level = 2
 
 [package.metadata.wasm-pack.profile.dev]
-# wasm-pack disables wasm-opt for --dev by default. `-O` (not `-O4`) keeps the
-# module reasonable without the long optimisation passes; `-g` preserves the
-# symbols that make a stack trace readable. If this build is still too slow,
-# `wasm-opt = false` is the next lever — it is the largest remaining cost, and
-# also the largest runtime regression.
+# `-O` (not `-O4`) keeps the module reasonable without the long optimisation
+# passes. `-g` is what PRESERVES the `name` section through wasm-opt — drop it
+# and every frame in Chrome's Performance panel becomes `wasm-function[1234]`.
 wasm-opt = ["-O", "-g"]
 
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
-dwarf-debug-info = true
+# DWARF OFF, names ON. These are separate things and it is worth being precise:
+#   - the wasm `name` section  -> function names in Chrome's PERFORMANCE panel
+#   - the `.debug_*` DWARF     -> source-level stepping in the Sources panel,
+#                                 via the C/C++ DevTools Support extension
+# `debug = "line-tables-only"` above makes rustc emit both. DWARF alone is
+# 42.8 MB of the 54 MB pre-link module — it blew the build up 7x and wasm-opt
+# could not even process the result. The name section is only 0.6 MB, so
+# stripping DWARF here keeps readable profiles at essentially no cost:
+#   names + DWARF : 54.6 MB, wasm-opt FAILS
+#   names only    :  8.2 MB, 42 s, 6931 named functions
+dwarf-debug-info = false
 
 [package.metadata.wasm-pack.profile.release.wasm-bindgen]
 dwarf-debug-info = false
