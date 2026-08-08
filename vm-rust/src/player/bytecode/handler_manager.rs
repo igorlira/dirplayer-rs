@@ -347,6 +347,17 @@ pub fn try_execute_bytecode_sync(
         }
         handler.bytecode_array[scope.bytecode_index].opcode
     };
+    try_execute_opcode_sync(opcode, ctx)
+}
+
+/// `try_execute_bytecode_sync` for a caller that has ALREADY decoded the
+/// opcode. The driver loop reads the scope's `bytecode_index` every op anyway,
+/// so having it re-read the scope here duplicated a lookup per opcode.
+#[inline(always)]
+pub fn try_execute_opcode_sync(
+    opcode: OpCode,
+    ctx: &BytecodeHandlerContext,
+) -> Option<Result<HandlerExecutionResult, ScriptError>> {
     if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
         None
     } else {

@@ -106,7 +106,7 @@ use crate::{
             datum::{Datum, DatumType, VarRef, datum_bool},
         },
     }, js_api::JsApi, player::{
-        bytecode::handler_manager::{BytecodeHandlerContext, player_execute_bytecode, try_execute_bytecode_sync}, datum_formatting::format_datum, events::{dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_event_to_instances, player_invoke_frame_and_movie_scripts, player_invoke_targeted_event}, geometry::IntRect, profiling::{get_profiler_report, ProfileScope}, scope::Scope, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::init_symbol_table}
+        bytecode::handler_manager::{BytecodeHandlerContext, player_execute_bytecode, try_execute_bytecode_sync, try_execute_opcode_sync}, datum_formatting::format_datum, events::{dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_event_to_instances, player_invoke_frame_and_movie_scripts, player_invoke_targeted_event}, geometry::IntRect, profiling::{get_profiler_report, ProfileScope}, scope::Scope, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::init_symbol_table}
     }, rendering::with_renderer_mut, utils::{get_base_url, get_elapsed_ticks}
 };
 use url::Url;
@@ -4388,16 +4388,32 @@ pub async fn player_call_script_handler_raw_args(
     const RUNAWAY_LOOP_REPORT_AT: u32 = 4_194_304;
     let mut total_backjumps: u32 = 0;
 
+    // Cache this frame's scope slot as a raw pointer. `scopes` is a fixed POOL —
+    // `Vec::with_capacity(MAX_STACK_SIZE)` pre-filled with exactly MAX_STACK_SIZE
+    // entries, and `push_scope` refuses to grow past it — so it never
+    // reallocates and a slot address is stable for the player's lifetime.
+    //
+    // This is the per-op cost that the interp bench cannot see: the bench calls
+    // `try_execute_bytecode_sync` directly, while real execution went through
+    // SIX `player.scopes.get(scope_ref).unwrap()` lookups in six closures per
+    // opcode (preamble, opcode fetch, the handler's bytecode read, the handler's
+    // stack access, the index advance, the stop_requested check). Measured in
+    // the browser, the same ops cost 30-45 ns/op through the bench but ~87 ns/op
+    // through this loop — the difference is this machinery.
+    //
+    // The `&mut Scope` is re-derived at each use and never held across a handler
+    // call, so it cannot alias the `&mut DirPlayer` the handlers take.
+    let scope_ptr: *mut Scope = reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut Scope);
+
     let transfer: FrameTransfer = loop {
-        // Single player access per op: read scope generation + bytecode_index and
-        // whether the debugger is active, in ONE closure and ONE scope-slot lookup
-        // (previously two). At ~1M ops/frame this per-op lookup is a real cost.
-        let (current_gen, bytecode_index, debugger_active) = reserve_player_ref(|player| {
-            let scope = player.scopes.get(scope_ref).unwrap();
+        // Direct slot read — no closure, no bounds check, no unwrap.
+        let (current_gen, bytecode_index, debugger_active) = {
+            let scope = unsafe { &*scope_ptr };
+            let player = unsafe { crate::player::player_ref() };
             let debugging = !player.breakpoint_manager.breakpoints.is_empty()
                 || !matches!(player.step_mode, StepMode::None);
             (scope.generation, scope.bytecode_index, debugging)
-        });
+        };
         // Scope was reused (generation changed = popped and re-pushed) → done.
         if current_gen != scope_generation {
             break FrameTransfer::Done;
@@ -4460,7 +4476,14 @@ pub async fn player_call_script_handler_raw_args(
         // the per-op async future/poll cost. Only the handful of genuinely-async
         // opcodes (calls, NewObj, SetObjProp) fall back to the awaited path.
         let mut took_async_path = false;
-        let exec_result = match try_execute_bytecode_sync(&ctx) {
+        // Decode the opcode from the index we already read above, rather than
+        // letting `try_execute_bytecode_sync` re-fetch the scope to do it.
+        let handler_def = unsafe { &*ctx.handler_def_ptr };
+        if bytecode_index >= handler_def.bytecode_array.len() {
+            break FrameTransfer::Done;
+        }
+        let opcode = handler_def.bytecode_array[bytecode_index].opcode;
+        let exec_result = match try_execute_opcode_sync(opcode, &ctx) {
             Some(r) => r,
             None => {
                 took_async_path = true;
@@ -4522,14 +4545,12 @@ pub async fn player_call_script_handler_raw_args(
         match result {
             HandlerExecutionResult::Advance => {
                 let handler = unsafe { &*ctx.handler_def_ptr };
-                reserve_player_mut(|player| {
-                    let scope = player.scopes.get_mut(scope_ref).unwrap();
-                    if scope.bytecode_index + 1 >= handler.bytecode_array.len() {
-                        should_return = true;
-                    } else {
-                        scope.bytecode_index += 1;
-                    }
-                });
+                let scope = unsafe { &mut *scope_ptr };
+                if scope.bytecode_index + 1 >= handler.bytecode_array.len() {
+                    should_return = true;
+                } else {
+                    scope.bytecode_index += 1;
+                }
             }
             HandlerExecutionResult::Stop => {
                 should_return = true;
@@ -4672,12 +4693,7 @@ pub async fn player_call_script_handler_raw_args(
         // `MovieHandlers::pass`. Checked here (rather than inside the builtin)
         // because a builtin returns a value and can't signal Stop itself.
         if !should_return {
-            should_return = reserve_player_ref(|player| {
-                player
-                    .scopes
-                    .get(scope_ref)
-                    .map_or(false, |scope| scope.stop_requested)
-            });
+            should_return = unsafe { (*scope_ptr).stop_requested };
         }
 
         if should_return {
