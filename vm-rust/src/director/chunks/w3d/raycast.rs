@@ -204,9 +204,21 @@ pub fn raycast_scene_multi(
         // ignored even if under the ray. Empty / None => no restriction (test all),
         // matching the dictionary's "if omitted, all models" wording.
         if let Some(included) = included_nodes {
-            if !included.is_empty()
-                && !included.iter().any(|n| n.eq_ignore_ascii_case(&node.name.as_str()))
-            {
+            // Hash lookup, not a linear scan. This is a `HashSet<Symbol>` — the
+            // `excluded` test above already uses `contains` — but the whitelist
+            // was being walked entry by entry with case-insensitive STRING
+            // compares, making the filter cost
+            // `all_nodes x modelList_len x name_length` per ray.
+            //
+            // Agent Free Ride passes `#modelList` from its culling manager on
+            // every hover-point raycast (4 per vehicle, per frame, plus
+            // character physics, shadows, bonuses and the track manager), so
+            // this ran constantly.
+            //
+            // `contains` stays case-insensitive for free: `intern` lowercases,
+            // so symbol identity is already case-folded and equality is a spur
+            // compare.
+            if !included.is_empty() && !included.contains(&node.name) {
                 continue;
             }
         }
