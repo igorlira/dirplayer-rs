@@ -193,6 +193,22 @@ pub fn raycast_scene_multi(
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
+    // Name -> node index, built once per call. The world transform of each model
+    // is accumulated by walking its parent chain, and each level did
+    // `scene.nodes.iter().find(|n| n.name == parent)` — a linear scan of every
+    // node in the scene. For N nodes at depth d that is O(N^2 * d) symbol
+    // comparisons per ray, before a single triangle is touched.
+    //
+    // Scoped to this call rather than cached on the scene: nodes are added and
+    // removed at runtime (clones, removeFromWorld), and a stale index would
+    // resolve a parent to the wrong node.
+    let node_index: std::collections::HashMap<Symbol, usize> = scene
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name, i))
+        .collect();
+
     // For each model node, find its mesh data and test
     for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
         // Skip excluded nodes (invisible or detached models)
@@ -230,13 +246,15 @@ pub fn raycast_scene_multi(
 
         // Get model WORLD transform by accumulating parent chain
         let world_transform = {
+            // No linear fallback: the map is keyed by `Symbol` and the old
+            // `.or_else(|| nt.iter().find(|(k, _)| **k == node.name))` compared
+            // symbols — the very same equality the hash lookup uses — so it could
+            // never find anything `get` missed. All it did was scan the whole map
+            // on every MISS, which is the common case (most nodes carry no
+            // override). Symbol identity is already case-insensitive: `intern`
+            // lowercases, so `get` is the case-insensitive lookup.
             let local = if let Some(nt) = node_transforms {
-                nt.get(&node.name).cloned()
-                    .or_else(|| {
-                        // Case-insensitive fallback
-                        nt.iter().find(|(k, _)| **k == node.name).map(|(_, v)| *v)
-                    })
-                    .unwrap_or(node.transform)
+                nt.get(&node.name).cloned().unwrap_or(node.transform)
             } else {
                 node.transform
             };
@@ -245,11 +263,9 @@ pub fn raycast_scene_multi(
             let mut current_parent = &node.parent_name;
             for _ in 0..20 {
                 if current_parent.is_empty() || *current_parent == BuiltInSymbol::World { break; }
-                if let Some(pn) = scene.nodes.iter().find(|n| n.name == *current_parent) {
+                if let Some(pn) = node_index.get(current_parent).map(|&i| &scene.nodes[i]) {
                     let pt = if let Some(nt) = node_transforms {
-                        nt.get(&pn.name).cloned()
-                            .or_else(|| nt.iter().find(|(k, _)| **k == pn.name).map(|(_, v)| *v))
-                            .unwrap_or(pn.transform)
+                        nt.get(&pn.name).cloned().unwrap_or(pn.transform)
                     } else {
                         pn.transform
                     };
@@ -259,20 +275,12 @@ pub fn raycast_scene_multi(
             }
             result
         };
-        // Debug: log MainA transform
-        if node.name == BuiltInSymbol::MainA {
-            static MA_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if MA_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
-                debug!(
-                    "[RAYCAST] MainA xform: pos=({:.1},{:.1},{:.1}) X=({:.4},{:.4},{:.4}) Y=({:.4},{:.4},{:.4}) Z=({:.4},{:.4},{:.4}) parent='{}'",
-                    world_transform[12], world_transform[13], world_transform[14],
-                    world_transform[0], world_transform[1], world_transform[2],
-                    world_transform[4], world_transform[5], world_transform[6],
-                    world_transform[8], world_transform[9], world_transform[10],
-                    node.parent_name
-                );
-            }
-        }
+        // (A one-shot `MainA` transform debug log lived here. `node.name ==
+        // BuiltInSymbol::MainA` goes through `PartialEq<BuiltInSymbol>`, which
+        // calls `into_builtin()` — a `spur_to_builtin` hash lookup — so it cost
+        // one hash lookup per model per ray forever, and in any scene without a
+        // `MainA` node it could never fire at all. Removed rather than gated;
+        // `git log` has it if the FinalDrive mirror work needs it again.)
         let inv_transform = invert_4x4(&world_transform);
         let local_ray = Ray {
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
