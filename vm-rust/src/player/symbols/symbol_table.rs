@@ -39,6 +39,27 @@ impl SymbolTable {
     }
 
     pub fn intern(&mut self, string: &str) -> Spur {
+        // Fast path: no allocation when the text is already lowercase, which
+        // every `Symbol::from_str("someliteral")` in the codebase is — and there
+        // are hundreds, many on hot paths (per-hit prop-list keys in
+        // modelsUnderRay, parent-chain walks, per-frame property names).
+        // `to_lowercase()` allocates a String unconditionally, so those all paid
+        // for a heap allocation to produce an identical string.
+        //
+        // Restricted to pure ASCII: a non-ASCII byte can still be uppercase in
+        // Unicode (`É`), and `to_lowercase()` is Unicode-aware, so only an
+        // all-ASCII string with no ASCII uppercase is guaranteed to lowercase to
+        // itself.
+        if string.is_ascii() && !string.bytes().any(|b| b.is_ascii_uppercase()) {
+            if let Some(spur) = self.interner.get(string) {
+                return spur;
+            }
+            let spur = self.interner.get_or_intern(string);
+            if !self.original_strings.contains_key(&spur) {
+                self.original_strings.insert(spur, string.to_owned());
+            }
+            return spur;
+        }
         let lower_string = string.to_lowercase();
         let spur = self.interner.get_or_intern(&lower_string);
         if !self.original_strings.contains_key(&spur) {

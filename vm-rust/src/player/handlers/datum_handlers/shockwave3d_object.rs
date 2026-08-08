@@ -3001,8 +3001,13 @@ impl Shockwave3dObjectDatumHandlers {
                                     let mut result = local;
                                     let mut current_parent = node.parent_name.clone();
                                     let mut depth = 0u32;
+                                    // Hoisted: `Symbol::from_str("world")` in the
+                                    // loop condition ran a `to_lowercase()`
+                                    // allocation plus an interner lookup on EVERY
+                                    // iteration of every worldTransform walk.
+                                    let world_sym = Symbol::builtin(BuiltInSymbol::World);
                                     for _ in 0..20 {
-                                        if current_parent.is_empty() || current_parent == Symbol::from_str("world") { break; }
+                                        if current_parent.is_empty() || current_parent == world_sym { break; }
                                         if let Some(pn) = scene.nodes.iter().find(|n| n.name == current_parent) {
                                             let pt = get_node_transform(player, &member_ref, pn.name);
                                             result = mat4_mul_f32(&pt, &result);
