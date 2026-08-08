@@ -136,6 +136,12 @@ impl CompareBytecodeHandler {
                 player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(r);
                 return Ok(HandlerExecutionResult::Advance);
             }
+            // See `eq`: same spur compare, negated.
+            if let (StackDatum::Symbol(a), StackDatum::Symbol(b)) = (&lv, &rv) {
+                let r = (a != b) as i32;
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(r);
+                return Ok(HandlerExecutionResult::Advance);
+            }
             let right = rv.into_ref();
             let left = lv.into_ref();
             let is_eq = datum_equals(player.get_datum(&left), player.get_datum(&right), &player.allocator)?;
@@ -191,6 +197,18 @@ impl CompareBytecodeHandler {
             let (lv, rv) = Self::pop2(player, ctx, "eq")?;
             if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
                 let r = (*a == *b) as i32;
+                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(r);
+                return Ok(HandlerExecutionResult::Advance);
+            }
+            // `#symbol = #symbol` is idiomatic Lingo and was taking the slow
+            // path: two `into_ref` (symbol-pool lookups), two arena `get_datum`,
+            // `datum_equals`, and an `alloc_datum` for the boolean result.
+            // `datum_equals` resolves this arm as `s == other` — a spur compare —
+            // so this is the same answer without touching the arena. Symbol
+            // identity is case-insensitive because `intern` lowercases, which is
+            // Director's rule.
+            if let (StackDatum::Symbol(a), StackDatum::Symbol(b)) = (&lv, &rv) {
+                let r = (a == b) as i32;
                 player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(r);
                 return Ok(HandlerExecutionResult::Advance);
             }
