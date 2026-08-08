@@ -27,6 +27,16 @@ pub enum StackDatum {
     Symbol(Symbol),
     Void,
     Ref(DatumRef),
+    /// A call's argument marker: its `count` arguments sit directly beneath it
+    /// on the stack, and `no_ret` records whether the call discards its result.
+    ///
+    /// `pusharglist` used to pop the arguments and allocate a
+    /// `Datum::List(ArgList, ..)` to hold them — a `VecDeque` heap allocation
+    /// plus an arena allocation — purely so the very next opcode could
+    /// destructure it again. Leaving the arguments in place and pushing this
+    /// instead removes both. Nesting is unaffected: the marker occupies the same
+    /// stack position the list did, so `foo(a, bar(b))` resolves identically.
+    ArgMarker { count: u16, no_ret: bool },
 }
 
 impl StackDatum {
@@ -54,6 +64,10 @@ impl StackDatum {
                 let player = unsafe { crate::player::player_mut() };
                 player.alloc_datum(Datum::Float(f))
             }
+            // A marker is consumed by the call opcode that follows it and is
+            // never a value. Degrade to Void rather than panic if some generic
+            // stack reader (debugger display, error unwinding) reaches one.
+            StackDatum::ArgMarker { .. } => DatumRef::Void,
         }
     }
 }
@@ -277,6 +291,25 @@ pub struct ScopeResult {
 }
 
 impl Scope {
+    /// Pop a call's `ArgMarker` and the arguments beneath it, in stack order.
+    /// Returns `(args, no_ret)`.
+    ///
+    /// `None` means the top of stack was not a marker, which would mean the
+    /// bytecode ran a call opcode without a preceding `pusharglist`. Callers
+    /// report that as a stack error rather than guessing.
+    pub fn pop_call_args(&mut self) -> Option<(Vec<DatumRef>, bool)> {
+        let (count, no_ret) = match self.stack.pop_value()? {
+            StackDatum::ArgMarker { count, no_ret } => (count as usize, no_ret),
+            // Not a marker: put nothing back — the caller errors out. Restoring
+            // it would need a push and the frame is being torn down anyway.
+            _ => return None,
+        };
+        if self.stack.len() < count {
+            return None;
+        }
+        Some((self.pop_n(count), no_ret))
+    }
+
     pub fn pop_n(&mut self, n: usize) -> Vec<DatumRef> {
         // Move the top `n` entries out of the stack rather than clone-then-pop.
         // `split_off` transfers ownership of the tail with zero ref-count churn,

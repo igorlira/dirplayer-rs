@@ -7083,7 +7083,12 @@ pub fn run_bytecode_benchmark() -> String {
         }
         b.push(Bytecode::new(OpCode::PushArgList, 4, pos));
         pos += 1;
-        b.push(Bytecode::new(OpCode::Pop, 1, pos));
+        // Discard the marker AND its 4 arguments. `pusharglist` no longer pops
+        // the arguments — it leaves them in place and pushes a marker, which the
+        // following call opcode consumes together with them. A bare `Pop 1` here
+        // would leak 4 entries per cycle (600k over the run) and the bench would
+        // be measuring stack growth.
+        b.push(Bytecode::new(OpCode::Pop, 5, pos));
         pos += 1;
     }
     let (ops, ms) = run(b);

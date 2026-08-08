@@ -34,50 +34,47 @@ impl StackBytecodeHandler {
         Ok(HandlerExecutionResult::Advance)
     }
 
+    /// Mark the top `n` stack entries as a call's arguments.
+    ///
+    /// This used to drain them into a `VecDeque` and allocate a
+    /// `Datum::List(ArgList, ..)` — a heap allocation plus an arena allocation —
+    /// for the sole benefit of the call opcode that immediately follows, which
+    /// took the list straight back apart. `pusharglistnoret` and `pusharglist`
+    /// together are ~17% of Agent Free Ride's profile and the most expensive ops
+    /// in the interpreter bench (85-91 ns/op). Leave the arguments where they
+    /// are and push a marker instead: no allocation at all.
     pub fn push_arglist(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
+        Self::push_arg_marker(ctx, false)
+    }
+
+    fn push_arg_marker(
+        ctx: &BytecodeHandlerContext,
+        no_ret: bool,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
+            let count = player.get_ctx_current_bytecode(ctx).obj as usize;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            if scope.stack.len() < bytecode_obj as usize {
+            if scope.stack.len() < count {
                 return Err(ScriptError::new(
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            let items = scope
-                .stack
-                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
-            let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgList, items, false));
-
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
+            scope.stack.push_value(crate::player::scope::StackDatum::ArgMarker {
+                count: count as u16,
+                no_ret,
+            });
             Ok(())
         })?;
         Ok(HandlerExecutionResult::Advance)
     }
 
+    /// As `push_arglist`, for a call whose result is discarded.
     pub fn push_arglist_no_ret(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
-            let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            if scope.stack.len() < bytecode_obj as usize {
-                return Err(ScriptError::new(
-                    "Not enough items in stack to create arglist".to_string(),
-                ));
-            }
-            let items = scope
-                .stack
-                .drain_top_into_deque(bytecode_obj as usize, VecDeque::new());
-            let datum_ref = player.alloc_datum(Datum::List(DatumType::ArgListNoRet, items, false));
-
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(datum_ref);
-            Ok(())
-        })?;
-        Ok(HandlerExecutionResult::Advance)
+        Self::push_arg_marker(ctx, true)
     }
 
     pub fn push_symb(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
