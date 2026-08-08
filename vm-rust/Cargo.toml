@@ -151,12 +151,18 @@ features = ["rust_backend"]
 default-features = false
 
 [profile.release]
-# Tell `rustc` to optimize for small code size.
-opt-level = "s"
+# Optimize for SPEED. The Lingo interpreter's hot loop is built out of
+# `#[inline(always)]` closures (`reserve_player_mut`) over a jump-table `match`;
+# `opt-level = "s"` is exactly the setting that suppresses that inlining, so the
+# per-op cost was paying for closure calls that were meant to vanish.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 
 [package.metadata.wasm-pack.profile.release]
-# default is ["-O"]; -g means to preserve debug symbols.
-wasm-opt = ["-O", "-g"]
+# -O4 rather than -O, and drop -g: debug symbols inhibit some wasm-opt passes
+# and roughly double the .wasm.
+wasm-opt = ["-O4"]
 
 [profile.dev]
 # Turn on a small amount of optimisation in Development mode.
@@ -169,4 +175,4 @@ opt-level = 2
 dwarf-debug-info = true
 
 [package.metadata.wasm-pack.profile.release.wasm-bindgen]
-dwarf-debug-info = true
+dwarf-debug-info = false
