@@ -242,29 +242,57 @@ impl StringBytecodeHandler {
         })
     }
 
+    /// Read a chunk operand off the stack as an int without touching the arena.
+    /// Only a non-inline entry (a real `DatumRef`) has to be materialized.
+    #[inline]
+    fn stack_int(
+        player: &mut DirPlayer,
+        sd: Option<crate::player::scope::StackDatum>,
+    ) -> Result<i32, ScriptError> {
+        use crate::player::scope::StackDatum;
+        match sd {
+            Some(StackDatum::Int(n)) => Ok(n),
+            // Underflow was previously an `unwrap()` panic; a missing operand
+            // means "chunk type not used", which is what 0 encodes.
+            Some(StackDatum::Void) | None => Ok(0),
+            Some(StackDatum::Float(f)) => Ok(f as i32),
+            Some(other) => {
+                let value_ref = other.into_ref();
+                player.get_datum(&value_ref).int_value()
+            }
+        }
+    }
+
     fn read_single_chunk_ref(player: &mut DirPlayer, ctx: &BytecodeHandlerContext) -> Result<StringChunkExpr, ScriptError> {
+        // Pop the eight chunk operands WITHOUT materializing them. `stack.pop()`
+        // runs `into_ref()`, which allocates an arena datum for an inline
+        // `StackDatum::Int` — so reading these eight integers cost 8 allocations
+        // + 8 arena lookups + 8 frees per chunk op, and `alloc_datum` measures
+        // ~30 ns/op under WASM (vs ~5 ns native — the worst tax on the board).
+        // Every one of them is a `pushzero`/`pushint8` already sitting inline on
+        // the stack. Same inline-aware pattern `jmp_if_zero` uses.
         let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let last_line = scope.stack.pop().unwrap();
-            let first_line = scope.stack.pop().unwrap();
-            let last_item = scope.stack.pop().unwrap();
-            let first_item = scope.stack.pop().unwrap();
-            let last_word = scope.stack.pop().unwrap();
-            let first_word = scope.stack.pop().unwrap();
-            let last_char = scope.stack.pop().unwrap();
-            let first_char = scope.stack.pop().unwrap();
+            let last_line = scope.stack.pop_value();
+            let first_line = scope.stack.pop_value();
+            let last_item = scope.stack.pop_value();
+            let first_item = scope.stack.pop_value();
+            let last_word = scope.stack.pop_value();
+            let first_word = scope.stack.pop_value();
+            let last_char = scope.stack.pop_value();
+            let first_char = scope.stack.pop_value();
             (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
         };
-        
-        let last_line = player.get_datum(&last_line).int_value()?;
-        let first_line = player.get_datum(&first_line).int_value()?;
-        let last_item = player.get_datum(&last_item).int_value()?;
-        let first_item = player.get_datum(&first_item).int_value()?;
-        let last_word = player.get_datum(&last_word).int_value()?;
-        let first_word = player.get_datum(&first_word).int_value()?;
-        let last_char = player.get_datum(&last_char).int_value()?;
-        let first_char = player.get_datum(&first_char).int_value()?;
-        
+
+        let last_line = Self::stack_int(player, last_line)?;
+        let first_line = Self::stack_int(player, first_line)?;
+        let last_item = Self::stack_int(player, last_item)?;
+        let first_item = Self::stack_int(player, first_item)?;
+        let last_word = Self::stack_int(player, last_word)?;
+        let first_word = Self::stack_int(player, first_word)?;
+        let last_char = Self::stack_int(player, last_char)?;
+        let first_char = Self::stack_int(player, first_char)?;
+
         if first_line != 0 || last_line != 0 {
             Ok(StringChunkExpr {
                 chunk_type: StringChunkType::Line,
@@ -299,28 +327,35 @@ impl StringBytecodeHandler {
     }
 
     fn read_all_chunks(player: &mut DirPlayer,ctx: &BytecodeHandlerContext) -> Result<Vec<StringChunkExpr>, ScriptError> {
+        // Pop the eight chunk operands WITHOUT materializing them. `stack.pop()`
+        // runs `into_ref()`, which allocates an arena datum for an inline
+        // `StackDatum::Int` — so reading these eight integers cost 8 allocations
+        // + 8 arena lookups + 8 frees per chunk op, and `alloc_datum` measures
+        // ~30 ns/op under WASM (vs ~5 ns native — the worst tax on the board).
+        // Every one of them is a `pushzero`/`pushint8` already sitting inline on
+        // the stack. Same inline-aware pattern `jmp_if_zero` uses.
         let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let last_line = scope.stack.pop().unwrap();
-            let first_line = scope.stack.pop().unwrap();
-            let last_item = scope.stack.pop().unwrap();
-            let first_item = scope.stack.pop().unwrap();
-            let last_word = scope.stack.pop().unwrap();
-            let first_word = scope.stack.pop().unwrap();
-            let last_char = scope.stack.pop().unwrap();
-            let first_char = scope.stack.pop().unwrap();
+            let last_line = scope.stack.pop_value();
+            let first_line = scope.stack.pop_value();
+            let last_item = scope.stack.pop_value();
+            let first_item = scope.stack.pop_value();
+            let last_word = scope.stack.pop_value();
+            let first_word = scope.stack.pop_value();
+            let last_char = scope.stack.pop_value();
+            let first_char = scope.stack.pop_value();
             (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
         };
-        
-        let last_line = player.get_datum(&last_line).int_value()?;
-        let first_line = player.get_datum(&first_line).int_value()?;
-        let last_item = player.get_datum(&last_item).int_value()?;
-        let first_item = player.get_datum(&first_item).int_value()?;
-        let last_word = player.get_datum(&last_word).int_value()?;
-        let first_word = player.get_datum(&first_word).int_value()?;
-        let last_char = player.get_datum(&last_char).int_value()?;
-        let first_char = player.get_datum(&first_char).int_value()?;
-        
+
+        let last_line = Self::stack_int(player, last_line)?;
+        let first_line = Self::stack_int(player, first_line)?;
+        let last_item = Self::stack_int(player, last_item)?;
+        let first_item = Self::stack_int(player, first_item)?;
+        let last_word = Self::stack_int(player, last_word)?;
+        let first_word = Self::stack_int(player, first_word)?;
+        let last_char = Self::stack_int(player, last_char)?;
+        let first_char = Self::stack_int(player, first_char)?;
+
         let mut chunks = Vec::new();
         
         // Add chunks in the order they should be applied
@@ -387,8 +422,10 @@ impl StringBytecodeHandler {
             // Plain `String` inputs (`"hello".word[2]`) have no member to
             // chain to, so the original flatten-to-String behaviour is
             // preserved for them.
-            let source_datum = player.get_datum(&string_ref).clone();
-            let initial_chain_source: Option<StringChunkSource> = match &source_datum {
+            // Inspect the source by REFERENCE. This used to `.clone()` the whole
+            // Datum — a full String copy on every chunk read — purely to check
+            // which variant it was.
+            let initial_chain_source: Option<StringChunkSource> = match player.get_datum(&string_ref) {
                 Datum::CastMember(member_ref) => Some(StringChunkSource::Member(member_ref.clone())),
                 Datum::StringChunk(..) => Some(StringChunkSource::Datum(string_ref.clone())),
                 _ => None,
@@ -396,7 +433,7 @@ impl StringBytecodeHandler {
 
             let result_ref = if let Some(initial_source) = initial_chain_source {
                 let mut current_source = initial_source;
-                let mut current_str = source_datum.string_value()?;
+                let mut current_str = player.get_datum(&string_ref).string_value()?;
                 let mut current_ref = string_ref.clone();
                 for expr in chunks.iter() {
                     current_str = StringChunkUtils::resolve_chunk_expr_string(&current_str, expr)?;
@@ -409,7 +446,7 @@ impl StringBytecodeHandler {
                 }
                 current_ref
             } else {
-                let mut result = source_datum.string_value()?;
+                let mut result = player.get_datum(&string_ref).string_value()?;
                 for chunk_expr in chunks {
                     result = StringChunkUtils::resolve_chunk_expr_string(&result, &chunk_expr)?;
                 }
