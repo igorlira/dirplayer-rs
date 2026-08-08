@@ -464,19 +464,49 @@ impl StringBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
-            let (id_ref, cast_id_ref) =
-                read_context_var_args(player, bytecode_obj as u32, ctx.scope_ref);
+            let var_type = bytecode_obj as u32;
+            let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
             let string_ref = player_get_context_var(
                 player,
                 &id_ref,
                 cast_id_ref.as_ref(),
-                bytecode_obj as u32,
+                var_type,
                 ctx,
             )?;
-            // let string = player.get_datum(string_ref);
             let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
 
-            StringChunkUtils::delete(player, &StringChunkSource::Datum(string_ref), &chunk_expr)?;
+            // Strings are value types in Director: `delete char 1 to n of tStr`
+            // ASSIGNS a new value to the variable, it does not edit a shared
+            // string object. `StringChunkUtils::delete` does `*s = new_string`
+            // into the datum behind `string_ref`, which is shared with everyone
+            // else holding that same DatumRef — including a CALLER that passed
+            // the string as an argument, since parameters are bound to the
+            // caller's ref. So a handler that deleted from its own string
+            // parameter destroyed the caller's variable.
+            //
+            // Habbo V31's `explode()` consumes its parameter while parsing
+            // (`delete char 1 to tPos + tDelimLength - 1 of tStr` each round), so
+            // one call left the caller's variable as just the final field. That
+            // broke `rotate`: it explodes the same `tName` once per direction it
+            // tries, and from the second iteration on it was exploding "0",
+            // hitting `count < 2`, and giving up with "Direction for object not
+            // found". Chairs were unaffected only because their cast ships a
+            // real direction-4 asset, so they exit on iteration 1.
+            //
+            // Build the new string and assign it, exactly as `put_chunk` in this
+            // file already does.
+            let current = player.get_datum(&string_ref).string_value()?;
+            let new_string = StringChunkUtils::string_by_deleting_chunk(&current, &chunk_expr)?;
+            let new_string_ref = player.alloc_datum(Datum::String(new_string));
+            player_set_context_var(
+                player,
+                &id_ref,
+                cast_id_ref.as_ref(),
+                var_type,
+                &new_string_ref,
+                PutType::Into,
+                ctx,
+            )?;
 
             Ok(HandlerExecutionResult::Advance)
         })
