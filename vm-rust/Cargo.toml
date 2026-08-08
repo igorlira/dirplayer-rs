@@ -150,12 +150,17 @@ version = "1.0.27"
 features = ["rust_backend"]
 default-features = false
 
+# `npm run build-vm` (wasm-pack --release) — the SHIPPING build, and the only
+# one any performance number may be quoted from. Takes ~6 min; for iteration
+# use `npm run build-vm-dev` (~2 min, see [profile.dev] below).
 [profile.release]
 # Optimize for SPEED. The Lingo interpreter's hot loop is built out of
 # `#[inline(always)]` closures (`reserve_player_mut`) over a jump-table `match`;
 # `opt-level = "s"` is exactly the setting that suppresses that inlining, so the
 # per-op cost was paying for closure calls that were meant to vanish.
 opt-level = 3
+# `lto = "fat"` and `codegen-units = 1` are most of the 6 minutes: whole-program
+# optimization at link time, and no parallelism across codegen units.
 lto = "fat"
 codegen-units = 1
 
@@ -164,12 +169,37 @@ codegen-units = 1
 # and roughly double the .wasm.
 wasm-opt = ["-O4"]
 
+# `npm run build-vm-dev` (wasm-pack --dev) — the FAST ITERATION build.
+#
+# These are the settings release used before it was tuned for speed: size-level
+# optimisation, no LTO, default (parallel) codegen units, incremental. That is
+# what made it a ~2 min build rather than ~6.
+#
+# DO NOT quote performance numbers from this build. It is meaningfully slower at
+# runtime than `build-vm`, so comparing a measurement taken here against one
+# taken there compares profiles, not code.
 [profile.dev]
-# Turn on a small amount of optimisation in Development mode.
-opt-level = 1
+opt-level = "s"
+# Debug info is the other half of the build time and doubles the .wasm; the
+# wasm-bindgen dwarf setting below is what actually gives usable symbols.
+debug = false
+# Match release SEMANTICS. With these on, dev can panic where release wraps —
+# so a bug reproduced here might not exist in the shipping build, or vice versa.
+debug-assertions = false
+overflow-checks = false
+incremental = true
 
 [profile.dev.package."*"]
+# Dependencies are rebuilt rarely, so optimise them harder than our own crate.
 opt-level = 2
+
+[package.metadata.wasm-pack.profile.dev]
+# wasm-pack disables wasm-opt for --dev by default. `-O` (not `-O4`) keeps the
+# module reasonable without the long optimisation passes; `-g` preserves the
+# symbols that make a stack trace readable. If this build is still too slow,
+# `wasm-opt = false` is the next lever — it is the largest remaining cost, and
+# also the largest runtime regression.
+wasm-opt = ["-O", "-g"]
 
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
 dwarf-debug-info = true
