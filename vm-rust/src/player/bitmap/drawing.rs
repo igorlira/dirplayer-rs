@@ -1991,8 +1991,34 @@ impl Bitmap {
                 if v < 0.0 { v = 0.0; }
                 if v > 1.0 { v = 1.0; }
 
-                let sx = (src_x0 + u * src_w) as i32;
-                let sy = (src_y0 + v * src_h) as i32;
+                // u/v reach exactly 1.0 on the quad's far edge, where
+                // `src_x0 + u * src_w` lands on src_rect.right — one pixel PAST
+                // the last source column, because the rect is half-open. The
+                // bounds check below then skipped that pixel, so every quad blit
+                // silently lost its far row and far column.
+                //
+                // On a large warped blit that is an invisible one-pixel seam,
+                // which is why it went unnoticed. It is destructive when the
+                // destination is only a few pixels across: Habbo V31 builds its
+                // window frames as a 9-slice whose 1x6 and 6x1 edge strips are
+                // produced by MIRRORING a base piece, and Director expresses a
+                // mirror as a quad — so for a 1x6 strip the dropped row is 1 of
+                // 6, and mirroring puts v == 1.0 on the dark border line that
+                // closes the frame. The strips arrived blank or border-less, the
+                // composed window had white bands, and ink 36 (Background
+                // Transparent) keyed that white out — which read as rounded
+                // transparent corners on a frame that should be square.
+                //
+                // Clamp to the last valid source pixel instead of dropping it.
+                let mut sx = (src_x0 + u * src_w) as i32;
+                let mut sy = (src_y0 + v * src_h) as i32;
+                if sx >= src_rect.right {
+                    sx = src_rect.right - 1;
+                }
+                if sy >= src_rect.bottom {
+                    sy = src_rect.bottom - 1;
+                }
+                // Kept as a backstop for source rects extending past the bitmap.
                 if sx < 0 || sx >= src.width as i32 || sy < 0 || sy >= src.height as i32 {
                     continue;
                 }
