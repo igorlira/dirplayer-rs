@@ -133,12 +133,15 @@ impl StackBytecodeHandler {
     pub fn push_prop_list(
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let arg_list_ref = reserve_player_mut(|player| {
+        // `[#a: 1, #b: 2]` compiles to `pusharglist N` + `pushproplist`, so the
+        // key/value pairs arrive as a call-style arg marker.
+        let arg_list: Vec<DatumRef> = reserve_player_mut(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.pop().unwrap()
-        });
+            scope.pop_call_args().map(|(a, _)| a).ok_or_else(|| {
+                ScriptError::new("push_prop_list: expected arg marker on stack".to_string())
+            })
+        })?;
         reserve_player_mut(|player| {
-            let arg_list = player.get_datum(&arg_list_ref).to_list()?;
             if arg_list.len() % 2 != 0 {
                 return Err(ScriptError::new("argList length must be even".to_string()));
             }
@@ -160,11 +163,15 @@ impl StackBytecodeHandler {
 
     pub fn push_list(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let list_id = {
+            // `[a, b, c]` compiles to `pusharglist N` + `pushlist`, so the
+            // elements arrive as a call-style arg marker, not a list datum.
+            let (items, _) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                scope.pop_call_args().ok_or_else(|| {
+                    ScriptError::new("push_list: expected arg marker on stack".to_string())
+                })?
             };
-            let list = player.get_datum(&list_id).to_list()?.clone();
+            let list: VecDeque<DatumRef> = items.into();
             let result_id = player.alloc_datum(Datum::List(DatumType::List, list, false));
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_id);
@@ -257,14 +264,19 @@ impl StackBytecodeHandler {
                     obj_type
                 )));
             }
-            let arg_list_ref = {
+            // `new(script "x", ..)` compiles to `pusharglist N` + `newobj`, so
+            // the script and its constructor args arrive as an arg marker.
+            let mut all_args = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                scope.pop_call_args().map(|(a, _)| a).ok_or_else(|| {
+                    ScriptError::new("new_obj: expected arg marker on stack".to_string())
+                })?
             };
-            // Move args out of the consumed ArgList instead of cloning (see obj_call).
-            let mut arg_vd = std::mem::take(player.get_datum_mut(&arg_list_ref).to_list_mut()?.1);
-            let script_arg_ref = arg_vd.pop_front().unwrap();
-            let extra_args: Vec<DatumRef> = arg_vd.into();
+            if all_args.is_empty() {
+                return Err(ScriptError::new("new_obj: arg list has no script".to_string()));
+            }
+            let script_arg_ref = all_args.remove(0);
+            let extra_args: Vec<DatumRef> = all_args;
             let script_arg = player.get_datum(&script_arg_ref);
             let script_ref = match script_arg {
                 Datum::String(script_name) => {
