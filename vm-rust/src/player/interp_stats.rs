@@ -83,6 +83,19 @@ counters!(
     EVAL_LOCAL_HIT,
     CTXVAR_LOCAL_GET,
     CTXVAR_LOCAL_SET,
+    // IR re-entries, split by whether the op waiting at `bytecode_index` was
+    // itself an escape. These size ONE decision: how much the escape fast path
+    // in `run_handler_resumable` is worth.
+    //
+    // Entering the IR's big `match` costs ~17 ns on wasm — measured as the
+    // re-entry floor minus a same-signature stub call, see
+    // docs/interpreter-escape-reentry.md §2a — and an escape-after-escape pays
+    // all of it to look at one op and return. REENTRY_ESCAPE_FIRST counts the
+    // re-entries that can skip the big frame entirely; REENTRY_TO_NATIVE counts
+    // the ones that have real work to do and must pay it (amortised over the
+    // run of native ops until the next escape).
+    REENTRY_ESCAPE_FIRST,
+    REENTRY_TO_NATIVE,
 );
 
 #[inline(always)]
@@ -117,6 +130,7 @@ pub fn reset() {
         &HANDLERS_COMPILED, &HANDLERS_REJECTED,
         &CALLS_WITH_IR, &CALLS_WITHOUT_IR, &CALL_ARGS_TOTAL,
         &EVAL_LOCAL_HIT, &CTXVAR_LOCAL_GET, &CTXVAR_LOCAL_SET,
+        &REENTRY_ESCAPE_FIRST, &REENTRY_TO_NATIVE,
     ] {
         slot.store(0, Ordering::Relaxed);
     }
@@ -139,6 +153,16 @@ pub fn record_interp_op(opcode: OpCode, from_ir: bool) {
     if from_ir {
         bump(&ESCAPED_OPS[idx], 1);
     }
+}
+
+/// One re-entry into the IR. `escape_first` means the op at `bytecode_index`
+/// was an `Escape`, so the run would enter the big loop only to return at once.
+#[inline(always)]
+pub fn record_ir_reentry(escape_first: bool) {
+    if !enabled() {
+        return;
+    }
+    bump(if escape_first { &REENTRY_ESCAPE_FIRST } else { &REENTRY_TO_NATIVE }, 1);
 }
 
 #[inline(always)]
@@ -242,6 +266,19 @@ pub fn report() -> String {
         pct(total_esc, total_ops),
         total_ops - total_esc,
         pct(total_ops - total_esc, total_ops),
+    ));
+
+    let re_esc = get(&REENTRY_ESCAPE_FIRST);
+    let re_nat = get(&REENTRY_TO_NATIVE);
+    out.push_str(&format!(
+        "IR re-entries      {}
+  escape first     {re_esc} ({:.1}%) - skips the big frame
+           into native ops  {re_nat} ({:.1}%)
+
+",
+        re_esc + re_nat,
+        pct(re_esc, re_esc + re_nat),
+        pct(re_nat, re_esc + re_nat),
     ));
 
     out.push_str(&format!(

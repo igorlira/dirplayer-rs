@@ -376,6 +376,35 @@ pub fn run_handler_resumable(
     let scope_ptr: *mut crate::player::scope::Scope =
         reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
 
+    // ESCAPE FAST PATH. The driver re-enters once per escaped opcode, and in an
+    // escape-dense handler the op waiting at `bytecode_index` is very often
+    // another escape — so the run would enter the big loop below, look at one
+    // op, and return.
+    //
+    // That is not free: entering `run_handler_resumable_ptr` costs ~17 ns on
+    // wasm (the re-entry floor of 20.7 ns minus the 3.6 ns a same-signature
+    // stub call costs — docs/interpreter-escape-reentry.md §2a), because its
+    // one enormous `match` has to reserve a frame sized for its heaviest arm
+    // however early it returns. Answering here skips that frame entirely.
+    //
+    // This is a pure short-circuit: the big loop's `Escape` arm does exactly
+    // `bytecode_index = pc; return Escape`, and `pc` was READ from
+    // `bytecode_index`, so the write it skips is a write of the same value.
+    // The `pc >= ops.len()` case is `Done` for the same reason.
+    let pc = unsafe { (*scope_ptr).bytecode_index };
+    let escape_first = match compiled.ops.get(pc) {
+        Some(IrOp::Escape) => true,
+        None => {
+            crate::player::interp_stats::record_ir_reentry(true);
+            return Ok(IrExit::Done);
+        }
+        _ => false,
+    };
+    crate::player::interp_stats::record_ir_reentry(escape_first);
+    if escape_first {
+        return Ok(IrExit::Escape);
+    }
+
     run_handler_resumable_ptr(compiled, scope_ptr)
 }
 
