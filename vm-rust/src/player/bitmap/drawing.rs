@@ -1995,8 +1995,21 @@ impl Bitmap {
                 if v < 0.0 { v = 0.0; }
                 if v > 1.0 { v = 1.0; }
 
-                let sx = (src_x0 + u * src_w) as i32;
-                let sy = (src_y0 + v * src_h) as i32;
+                // u/v reach exactly 1.0 on the quad's far edge, where
+                // `src_x0 + u * src_w` lands on src_rect.right — one pixel PAST
+                // the last source column (the rect is half-open). The bounds
+                // check below then skipped that pixel, so every quad blit lost
+                // its far row and column.
+                //
+                // Clamp to the last valid source pixel instead of dropping it.
+                let mut sx = (src_x0 + u * src_w) as i32;
+                let mut sy = (src_y0 + v * src_h) as i32;
+                if sx >= src_rect.right {
+                    sx = src_rect.right - 1;
+                }
+                if sy >= src_rect.bottom {
+                    sy = src_rect.bottom - 1;
+                }
                 if sx < 0 || sx >= src.width as i32 || sy < 0 || sy >= src.height as i32 {
                     continue;
                 }
