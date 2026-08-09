@@ -1307,6 +1307,131 @@ pub fn resolve_palette_table(
     table
 }
 
+/// A resolved palette plus a memo of RGB -> nearest-palette-index answers.
+///
+/// Writing one pixel into an indexed bitmap means finding the closest palette
+/// entry to an arbitrary RGB triple, which was an O(256) linear scan **per
+/// destination pixel** inside `Bitmap::set_pixel_fast` — the dominant cost of
+/// every software blit that can't take one of the raw index-copy fast paths
+/// (anything scaled, rotated, flipped, blended, masked or cross-palette).
+///
+/// The memo is keyed on the EXACT 24-bit colour, so a hit returns precisely
+/// what the linear scan would have returned — this is a pure speedup, not an
+/// approximation. Blits have very high colour locality (a tile blit sees at
+/// most the source palette's 256 colours), so after the first few rows almost
+/// every lookup is a hit.
+pub struct PaletteQuantizer {
+    table: Vec<(u8, u8, u8)>,
+    memo: std::cell::RefCell<fxhash::FxHashMap<u32, u8>>,
+}
+
+impl PaletteQuantizer {
+    pub fn new(table: Vec<(u8, u8, u8)>) -> Self {
+        Self { table, memo: std::cell::RefCell::new(fxhash::FxHashMap::default()) }
+    }
+
+    /// The quantizer used for a non-indexed (16/32-bit) destination, which
+    /// never needs a nearest-colour search.
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
+    #[inline]
+    pub fn table(&self) -> &[(u8, u8, u8)] {
+        &self.table
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    /// Nearest entry to `(r, g, b)` by the L1 channel distance, over the first
+    /// `limit` entries. Ties go to the lowest index, matching the `<` in the
+    /// scan this replaces.
+    #[inline]
+    pub fn nearest(&self, r: u8, g: u8, b: u8, limit: usize) -> u8 {
+        // Only the full-palette (8-bit) case is memoised. The 4-bit case scans
+        // 16 entries, which is cheaper than a hash lookup.
+        if limit < self.table.len() {
+            return Self::scan(&self.table, r, g, b, limit);
+        }
+        let key = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        if let Some(&idx) = self.memo.borrow().get(&key) {
+            return idx;
+        }
+        let idx = Self::scan(&self.table, r, g, b, limit);
+        let mut memo = self.memo.borrow_mut();
+        // A 32-bit photographic source quantized down to 8-bit can present
+        // millions of distinct colours, none of them repeating. Cap the memo so
+        // it stays a cache and not a leak; palette-indexed sources (the case
+        // this exists for) never come close to the limit.
+        if memo.len() >= 1 << 16 {
+            memo.clear();
+        }
+        memo.insert(key, idx);
+        idx
+    }
+
+    #[inline]
+    fn scan(table: &[(u8, u8, u8)], r: u8, g: u8, b: u8, limit: usize) -> u8 {
+        let mut result_index: u8 = 0;
+        let mut result_distance = i32::MAX;
+        for (idx, &(pr, pg, pb)) in table.iter().enumerate().take(limit) {
+            let distance = (r as i32 - pr as i32).abs()
+                + (g as i32 - pg as i32).abs()
+                + (b as i32 - pb as i32).abs();
+            if distance < result_distance {
+                result_index = idx as u8;
+                result_distance = distance;
+            }
+        }
+        result_index
+    }
+}
+
+/// How many distinct destination palettes keep a warm memo.
+///
+/// This must be more than one. A single slot looked sufficient but is not: a
+/// frame typically blits into several offscreen bitmaps with different
+/// palettes, and one slot thrashes between them, so every lookup misses and
+/// pays the linear scan PLUS a hash insert — strictly worse than no memo at
+/// all. A handful of slots covers the working set; the lookup is a linear walk
+/// comparing resolved tables, which is trivial next to a per-pixel scan.
+const QUANTIZER_CACHE_SLOTS: usize = 4;
+
+thread_local! {
+    /// Recently used destination quantizers, most-recent first, reused across
+    /// `copyPixels` calls so the memos stay warm frame to frame. Validated by
+    /// comparing the resolved palette table itself, which is self-invalidating
+    /// — no palette-version plumbing to get wrong.
+    static DST_QUANTIZERS: std::cell::RefCell<Vec<std::rc::Rc<PaletteQuantizer>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `resolve_palette_table`, but returning a memoising quantizer, reusing a
+/// cached one whenever the palette resolves to the same table.
+pub fn resolve_palette_quantizer(
+    palettes: &PaletteMap,
+    palette_ref: &PaletteRef,
+    original_bit_depth: u8,
+) -> std::rc::Rc<PaletteQuantizer> {
+    let table = resolve_palette_table(palettes, palette_ref, original_bit_depth);
+    DST_QUANTIZERS.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if let Some(pos) = cache.iter().position(|q| q.table() == table.as_slice()) {
+            // Move to front so the eviction below drops the coldest palette.
+            let hit = cache.remove(pos);
+            cache.insert(0, hit.clone());
+            return hit;
+        }
+        let fresh = std::rc::Rc::new(PaletteQuantizer::new(table));
+        cache.insert(0, fresh.clone());
+        cache.truncate(QUANTIZER_CACHE_SLOTS);
+        fresh
+    })
+}
+
 /// Decompress PackBits/RLE-compressed alpha data with even-padded row width.
 /// Director stores alpha rows padded to 2-byte boundaries; without accounting for
 /// this, odd-width bitmaps get a cumulative 1-byte-per-row diagonal shear.

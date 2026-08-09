@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    bitmap::{resolve_color_ref, resolve_palette_table, Bitmap},
+    bitmap::{resolve_color_ref, resolve_palette_quantizer, resolve_palette_table, Bitmap, PaletteQuantizer},
     mask::BitmapMask,
     palette_map::PaletteMap,
 };
@@ -503,11 +503,15 @@ impl Bitmap {
 
     /// Like `set_pixel`, but uses a pre-resolved palette table for indexed formats.
     /// For 4-bit/8-bit bitmaps, this avoids calling `resolve_color_ref` 16/256 times per pixel.
-    pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &[(u8, u8, u8)]) {
+    /// The 8-bit nearest-colour search is memoised by `PaletteQuantizer`.
+    pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &PaletteQuantizer) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
-        self.matte = None;
+        // NB: clearing `self.matte` is the CALLER's job — see the pixel loop in
+        // `copy_pixels_with_params`, the only caller. Doing it here meant an
+        // `Option<Arc<BitmapMask>>` assignment (a branch plus a possible
+        // refcount decrement) on every single pixel written.
         let (r, g, b) = color;
         let x = x as usize;
         let y = y as usize;
@@ -526,17 +530,7 @@ impl Bitmap {
                 self.data[byte_index] = value;
             }
             4 => {
-                let mut result_index: u8 = 0;
-                let mut result_distance = i32::MAX;
-                for (palette_idx, &(pr, pg, pb)) in palette_cache.iter().enumerate().take(16) {
-                    let distance = (r as i32 - pr as i32).abs()
-                        + (g as i32 - pg as i32).abs()
-                        + (b as i32 - pb as i32).abs();
-                    if distance < result_distance {
-                        result_index = palette_idx as u8;
-                        result_distance = distance;
-                    }
-                }
+                let result_index = palette_cache.nearest(r, g, b, 16);
                 let index = (y * self.width as usize + x) / 2;
                 if x % 2 == 0 {
                     self.data[index] = (self.data[index] & 0x0F) | (result_index << 4);
@@ -545,17 +539,7 @@ impl Bitmap {
                 }
             }
             8 => {
-                let mut result_index: u8 = 0;
-                let mut result_distance = i32::MAX;
-                for (idx, &(pr, pg, pb)) in palette_cache.iter().enumerate() {
-                    let distance = (r as i32 - pr as i32).abs()
-                        + (g as i32 - pg as i32).abs()
-                        + (b as i32 - pb as i32).abs();
-                    if distance < result_distance {
-                        result_index = idx as u8;
-                        result_distance = distance;
-                    }
-                }
+                let result_index = palette_cache.nearest(r, g, b, palette_cache.table().len());
                 let index = y * self.width as usize + x;
                 self.data[index] = result_index;
             }
@@ -2155,11 +2139,13 @@ impl Bitmap {
         } else {
             None
         };
-        // Destination table: used by set_pixel_fast to avoid O(256) nearest-color search per pixel.
-        let dst_palette_cache: Vec<(u8, u8, u8)> = if self.bit_depth <= 8 {
-            resolve_palette_table(palettes, &self.palette_ref, self.original_bit_depth)
+        // Destination table: used by set_pixel_fast to avoid resolving the
+        // palette per pixel, and to memoise the nearest-colour search that
+        // writing an indexed pixel needs.
+        let dst_palette_cache = if self.bit_depth <= 8 {
+            resolve_palette_quantizer(palettes, &self.palette_ref, self.original_bit_depth)
         } else {
-            Vec::new()
+            std::rc::Rc::new(PaletteQuantizer::empty())
         };
 
         let bg_index = match &params.bg_color {
@@ -2566,6 +2552,10 @@ impl Bitmap {
         }
 
         // ---------------- Pixel loop ----------------
+        // Invalidate the cached matte ONCE for the whole blit. `set_pixel_fast`
+        // used to do this per pixel. (The early-return fast paths above each
+        // clear it themselves before returning.)
+        self.matte = None;
         for dst_y in draw_min_y..draw_max_y {
             for dst_x in draw_min_x..draw_max_x {
                 if dst_x < 0
@@ -2722,7 +2712,7 @@ impl Bitmap {
                         (sr, sg, sb)
                     } else {
                         let dst_color = if !dst_palette_cache.is_empty() {
-                            self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                            self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
                         } else {
                             self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                         };
@@ -2743,7 +2733,7 @@ impl Bitmap {
                         if (sr, sg, sb) == bg_color_resolved {
                             continue;
                         }
-                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
                         let blended = if alpha >= 0.999 {
                             (sr, sg, sb)
                         } else {
@@ -2764,7 +2754,7 @@ impl Bitmap {
                         }
                         // Foreground bit → render with foreColor
                         let src_color = fg_color_resolved;
-                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                         let blended = if alpha >= 0.999 {
                             src_color
@@ -2812,7 +2802,7 @@ impl Bitmap {
                         (r, g, b) // Keep original color
                     };
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -2839,7 +2829,7 @@ impl Bitmap {
                     }
 
                     let src_color = (r, g, b);
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -2907,7 +2897,7 @@ impl Bitmap {
                         continue;
                     }
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     // Honor the per-pixel source alpha for use_alpha bitmaps,
                     // combined with the #blend factor. Without this a soft
@@ -2946,7 +2936,7 @@ impl Bitmap {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     let src_color = (r, g, b);
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -2990,7 +2980,7 @@ impl Bitmap {
                         src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
                     }
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -3077,7 +3067,7 @@ impl Bitmap {
                         }
 
                         let dst_color = if !dst_palette_cache.is_empty() {
-                            self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                            self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
                         } else {
                             self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                         };
@@ -3247,7 +3237,7 @@ impl Bitmap {
                     }
 
                     let dst_color =
-                        if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -3421,7 +3411,7 @@ impl Bitmap {
                     // Black pixel → foreground color
                     if (sr, sg, sb) == (0, 0, 0) {
                         let dst_color =
-                            if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                            if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
                         let blended = blend_pixel(
                             dst_color,
                             fg_color_resolved,
@@ -3457,7 +3447,7 @@ impl Bitmap {
                     let mb = ((sb as u16 * bg_color_resolved.2 as u16) / 255) as u8;
                     let multiplied = (mr, mg, mb);
                     let dst = if !dst_palette_cache.is_empty() {
-                        self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16)
+                        self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
                     } else {
                         self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                     };
@@ -3476,7 +3466,7 @@ impl Bitmap {
                 // 4. NON-TEXT normal rendering
                 // ----------------------------------------------------------
                 let src_alpha = sa as f32 / 255.0;
-                let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(&dst_palette_cache, dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
 
                 let blended = blend_pixel(
                     dst_color,
