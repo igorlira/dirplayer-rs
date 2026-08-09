@@ -427,19 +427,35 @@ impl StringBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj;
-            let (id_ref, cast_id_ref) =
-                read_context_var_args(player, bytecode_obj as u32, ctx.scope_ref);
+            let var_type = bytecode_obj as u32;
+            let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref);
             let string_ref = player_get_context_var(
                 player,
                 &id_ref,
                 cast_id_ref.as_ref(),
-                bytecode_obj as u32,
+                var_type,
                 ctx,
             )?;
-            // let string = player.get_datum(string_ref);
             let chunk_expr = Self::read_single_chunk_ref(player, ctx)?;
 
-            StringChunkUtils::delete(player, &StringChunkSource::Datum(string_ref), &chunk_expr)?;
+            // Strings are value types in Director: `delete char 1 to n of tStr` assigns a
+            // new value to the variable, it does not edit a shared string object.
+            // StringChunkUtils::delete() does `*s = new_string` into the datum behind
+            // `string_ref`, which is shared with anyone else holding the same DatumRef —
+            // including a caller that passed the string as an argument, since parameters
+            // are bound to the caller's ref. Allocate a fresh datum instead.
+            let current = player.get_datum(&string_ref).string_value()?;
+            let new_string = StringChunkUtils::string_by_deleting_chunk(&current, &chunk_expr)?;
+            let new_string_ref = player.alloc_datum(Datum::String(new_string));
+            player_set_context_var(
+                player,
+                &id_ref,
+                cast_id_ref.as_ref(),
+                var_type,
+                &new_string_ref,
+                PutType::Into,
+                ctx,
+            )?;
 
             Ok(HandlerExecutionResult::Advance)
         })
