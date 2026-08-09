@@ -104,6 +104,33 @@ fn escape_needs_local_sync(opcode: OpCode) -> bool {
             | OpCode::GetObjProp
             | OpCode::GetGlobal
             | OpCode::GetGlobal2
+            // Instance/static property access and parameter writes. Measured
+            // (browser e2e suite, all 50 movies, E2E_INTERP_STATS=1): the sync
+            // these four were forcing was ~4.6M of the 7.0M sync events in the
+            // whole run, at a mean 105 local slots copied EACH WAY per event.
+            // `getprop` alone was ~43% of all sync traffic.
+            //
+            // None of them can reach this frame's locals:
+            //   GetProp        get_set.rs:99  — reads the receiver instance's
+            //                  properties via the ancestor chain, pushes the
+            //                  result. Touches scope.receiver / script_ref /
+            //                  cached_handler_instance / stack, never locals.
+            //   SetProp        get_set.rs:131 — pops a value, writes it to the
+            //                  handler-level instance or the script's statics.
+            //   GetChainedProp get_set.rs:677 — pops the object, resolves a
+            //                  property on it, pushes the result.
+            //   SetParam       get_set.rs:617 — writes `scope.args`, not
+            //                  locals. Args cannot go stale either: the IR's
+            //                  `GetParam` reads `scope.args` LIVE rather than
+            //                  from the dense local file.
+            //
+            // Where these dispatch Lingo (a property getter, say), the callee
+            // runs in its OWN scope — the same reason ObjCall/LocalCall are
+            // opted out above.
+            | OpCode::GetProp
+            | OpCode::SetProp
+            | OpCode::GetChainedProp
+            | OpCode::SetParam
     )
 }
 
