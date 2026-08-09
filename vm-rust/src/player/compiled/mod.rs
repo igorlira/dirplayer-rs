@@ -419,13 +419,8 @@ pub fn sync_locals_in(
 ) {
     reserve_player_ref(|player| {
         let scope = player.scopes.get(scope_ref).unwrap();
-        for (slot, name_id) in compiled.local_name_ids.iter().enumerate() {
-            if let Some(dr) = scope.locals.get(name_id) {
-                if slot < locals.len() {
-                    locals[slot] = StackDatum::Ref(dr.clone());
-                }
-            }
-        }
+        let n = locals.len().min(scope.locals.len());
+        locals[..n].clone_from_slice(&scope.locals[..n]);
     });
     crate::player::interp_stats::record_sync_in(
         compiled.local_name_ids.len().min(locals.len()),
@@ -481,14 +476,15 @@ pub fn run_handler_resumable(
                 unsafe { (*scope_ptr).bytecode_index = pc };
                 if sync_locals {
                     let scope = unsafe { &mut *scope_ptr };
-                    for (slot, name_id) in compiled.local_name_ids.iter().enumerate() {
-                        if let Some(v) = locals.get(slot) {
-                            scope.locals.insert(*name_id, v.clone().into_ref());
-                        }
+                    scope.ensure_locals(locals.len());
+                    let n = locals.len().min(scope.locals.len());
+                    scope.locals[..n].clone_from_slice(&locals[..n]);
+                    // Anything the IR wrote counts as assigned; `do`/`eval`
+                    // resolution depends on this staying accurate.
+                    for a in scope.locals_assigned[..n].iter_mut() {
+                        *a = true;
                     }
-                    crate::player::interp_stats::record_sync_out(
-                        compiled.local_name_ids.len().min(locals.len()),
-                    );
+                    crate::player::interp_stats::record_sync_out(n);
                 }
                 return Ok(IrExit::Escape { sync_locals });
             }

@@ -647,8 +647,35 @@ fn get_eval_top_level_prop(
                 if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
                     if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
                         if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
-                            if let Some(local_ref) = player.scopes[scope_idx].locals.get(&(name_id as u16)) {
-                                return Ok(local_ref.clone());
+                            // `locals` is slot-indexed, so the name id has to
+                            // be mapped through the HANDLER's local table to
+                            // reach a slot. That mapping also enforces "this
+                            // handler declares it".
+                            //
+                            // The `local_is_assigned` check is what preserves
+                            // the old hash map's semantics: a key that was
+                            // never inserted meant "not a local here", and the
+                            // caller falls through to `me` and then globals. A
+                            // dense vector has every declared slot present
+                            // from the start, so without this a declared but
+                            // never-assigned local would silently shadow a
+                            // same-named global.
+                            let slot = player
+                                .movie
+                                .cast_manager
+                                .get_script_by_ref(&script_ref_for_locals)
+                                .and_then(|s| s.get_own_handler_by_local_name_id(
+                                    player.scopes[scope_idx].handler_name_id,
+                                ))
+                                .and_then(|h| {
+                                    h.local_name_ids.iter().position(|&nid| nid as usize == name_id)
+                                });
+                            if let Some(slot) = slot {
+                                let scope = &player.scopes[scope_idx];
+                                if scope.local_is_assigned(slot) {
+                                    crate::player::interp_stats::record_eval_local_hit();
+                                    return Ok(scope.local(slot).into_ref());
+                                }
                             }
                         }
                     }

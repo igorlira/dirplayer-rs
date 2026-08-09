@@ -652,16 +652,27 @@ pub fn mcp_get_call_stack(player: &DirPlayer, depth: Option<usize>, include_loca
                 handler_name: get_handler_name(lctx, scope.handler_name_id),
                 bytecode_index: scope.bytecode_index,
                 locals: if include_locals {
-                    Some(scope
-                        .locals
-                        .iter()
-                        .map(|(name_id, datum_ref)| {
-                            let name = lctx.and_then(|l| l.names.get(*name_id as usize))
-                                .cloned()
-                                .unwrap_or_else(|| format!("local_{}", name_id));
-                            (name, datum_to_mcp_value_compact(player, datum_ref))
-                        })
-                        .collect())
+                    Some({
+                        let local_name_ids = player
+                            .movie
+                            .cast_manager
+                            .get_script_by_ref(&scope.script_ref)
+                            .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                                .map(|h| h.local_name_ids.clone()))
+                            .unwrap_or_default();
+                        scope
+                            .locals
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, v)| {
+                                let name = local_name_ids
+                                    .get(slot)
+                                    .and_then(|nid| lctx.and_then(|l| l.names.get(*nid as usize)).cloned())
+                                    .unwrap_or_else(|| format!("local_{}", slot));
+                                (name, datum_to_mcp_value_compact(player, &v.clone().into_ref()))
+                            })
+                            .collect()
+                    })
                 } else {
                     None
                 },
@@ -789,16 +800,27 @@ pub fn mcp_get_locals(player: &DirPlayer, scope_index: Option<usize>) -> String 
     to_json(&McpLocalsResult {
         scope_index: index,
         handler_name: get_handler_name(lctx, scope.handler_name_id),
-        locals: scope
-            .locals
-            .iter()
-            .map(|(name_id, datum_ref)| {
-                let name = lctx.and_then(|l| l.names.get(*name_id as usize))
-                    .cloned()
-                    .unwrap_or_else(|| format!("local_{}", name_id));
-                (name, datum_to_mcp_value(player, datum_ref))
-            })
-            .collect(),
+        locals: {
+            let local_name_ids = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&scope.script_ref)
+                .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                    .map(|h| h.local_name_ids.clone()))
+                .unwrap_or_default();
+            scope
+                .locals
+                .iter()
+                .enumerate()
+                .map(|(slot, v)| {
+                    let name = local_name_ids
+                        .get(slot)
+                        .and_then(|nid| lctx.and_then(|l| l.names.get(*nid as usize)).cloned())
+                        .unwrap_or_else(|| format!("local_{}", slot));
+                    (name, datum_to_mcp_value(player, &v.clone().into_ref()))
+                })
+                .collect()
+        },
         args: scope
             .args
             .iter()

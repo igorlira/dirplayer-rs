@@ -12,7 +12,10 @@
 //!     want different fixes.
 //!   - What does `escape_needs_local_sync` actually cost? It defaults to TRUE
 //!     and copies every local into `scope.locals` and back around each escape,
-//!     so the cost is (events x locals), not events.
+//!     so the cost is (events x locals), not events. These were hash
+//!     insert/lookup pairs until `Scope.locals` became slot-indexed; they are
+//!     plain slot copies now — same count, far cheaper each, which is why the
+//!     report says "slots copied" rather than "hash ops".
 //!   - How many args does a handler call carry? That sizes the per-call
 //!     `Vec<DatumRef>` alloc + clone + drop in `setup_handler_frame`.
 //!
@@ -67,7 +70,34 @@ counters!(
     CALLS_WITHOUT_IR,
     // Argument traffic, to size the per-call Vec alloc + clone + drop.
     CALL_ARGS_TOTAL,
+    // `do` / `eval` reaching this frame's LOCALS. These exist to answer a
+    // coverage question, not a performance one: converting `Scope.locals` to a
+    // dense slot-indexed Vec changes what "this local is absent" means, and the
+    // only code that can observe the difference is the do/eval resolver. If
+    // these are zero across the whole e2e suite the path has no coverage and
+    // any behaviour change there would be silent.
+    //
+    // EVAL_LOCAL_HIT is the read in `eval.rs` that probes `locals` by name id
+    // after a global-name-table search; CTXVAR_LOCAL_GET / _SET are the
+    // `context_vars` 0x5 arms, which is how `do "x = 5"` writes a local.
+    EVAL_LOCAL_HIT,
+    CTXVAR_LOCAL_GET,
+    CTXVAR_LOCAL_SET,
 );
+
+#[inline(always)]
+pub fn record_eval_local_hit() {
+    if enabled() {
+        bump(&EVAL_LOCAL_HIT, 1);
+    }
+}
+
+#[inline(always)]
+pub fn record_ctxvar_local(is_write: bool) {
+    if enabled() {
+        bump(if is_write { &CTXVAR_LOCAL_SET } else { &CTXVAR_LOCAL_GET }, 1);
+    }
+}
 
 #[inline(always)]
 pub fn enabled() -> bool {
@@ -86,6 +116,7 @@ pub fn reset() {
         &SYNC_OUT_EVENTS, &SYNC_OUT_LOCALS, &SYNC_IN_EVENTS, &SYNC_IN_LOCALS,
         &HANDLERS_COMPILED, &HANDLERS_REJECTED,
         &CALLS_WITH_IR, &CALLS_WITHOUT_IR, &CALL_ARGS_TOTAL,
+        &EVAL_LOCAL_HIT, &CTXVAR_LOCAL_GET, &CTXVAR_LOCAL_SET,
     ] {
         slot.store(0, Ordering::Relaxed);
     }
@@ -199,7 +230,7 @@ pub fn report() -> String {
     out.push_str(&format!(
         "locals sync\n  out              {so_e} events, {so_l} slots (mean {:.2})\n  \
          in               {si_e} events, {si_l} slots (mean {:.2})\n  \
-         hash ops total   {}\n\n",
+         slots copied     {}\n\n",
         if so_e == 0 { 0.0 } else { so_l as f64 / so_e as f64 },
         if si_e == 0 { 0.0 } else { si_l as f64 / si_e as f64 },
         so_l + si_l,
@@ -211,6 +242,13 @@ pub fn report() -> String {
         pct(total_esc, total_ops),
         total_ops - total_esc,
         pct(total_ops - total_esc, total_ops),
+    ));
+
+    out.push_str(&format!(
+        "do/eval reaching locals\n  eval.rs read hit {}\n  context_vars get  {}\n  context_vars set  {}\n\n",
+        get(&EVAL_LOCAL_HIT),
+        get(&CTXVAR_LOCAL_GET),
+        get(&CTXVAR_LOCAL_SET),
     ));
 
     out.push_str("opcode                       count      %all   esc%\n");

@@ -268,7 +268,23 @@ pub struct Scope {
     pub handler_name_id: u16,
     pub args: Vec<DatumRef>,
     pub bytecode_index: usize,
-    pub locals: FxHashMap<u16, DatumRef>,
+    /// Handler locals, indexed by DENSE SLOT — the same index the bytecode
+    /// carries (`bytecode.obj / multiplier`) and the same one the register IR
+    /// uses. This was an `FxHashMap<u16, DatumRef>` keyed by the SPARSE
+    /// name-table id, which every call site reached by computing the slot and
+    /// then mapping it through `handler.local_name_ids` purely to build a hash
+    /// key; indexing by slot removes that step rather than adding one.
+    pub locals: Vec<StackDatum>,
+    /// Whether each slot has ever been assigned in this invocation.
+    ///
+    /// Load-bearing for `do`/`eval` only. The old hash map encoded "this frame
+    /// has no such local" as key ABSENCE, and `eval.rs`'s resolver relies on
+    /// that to fall through to `me` and then globals. A dense vector has every
+    /// declared slot present from the start, so without this a declared but
+    /// never-assigned local would start shadowing a same-named global —
+    /// silently. Written wherever a local is written (strictly cheaper than
+    /// the hash insert it replaces) and read only by that resolver.
+    pub locals_assigned: Vec<bool>,
     pub loop_return_indices: Vec<usize>,
     pub return_value: DatumRef,
     pub stack: OperandStack,
@@ -328,7 +344,8 @@ impl Scope {
             handler_name_id: 0,
             args: vec![],
             bytecode_index: 0,
-            locals: FxHashMap::default(),
+            locals: Vec::new(),
+            locals_assigned: Vec::new(),
             loop_return_indices: vec![],
             return_value: DatumRef::Void,
             stack: OperandStack::new(),
@@ -337,6 +354,43 @@ impl Scope {
             generation: 0,
             cached_handler_instance: None,
         }
+    }
+
+    /// Size the local file for a handler. Called once per handler entry; the
+    /// scope pool keeps its capacity across reuse, so after warmup this is a
+    /// memset rather than an allocation.
+    pub fn ensure_locals(&mut self, n_locals: usize) {
+        if self.locals.len() < n_locals {
+            self.locals.resize(n_locals, StackDatum::Void);
+            self.locals_assigned.resize(n_locals, false);
+        }
+    }
+
+    /// Read a local by slot. Out-of-range reads VOID rather than panicking:
+    /// the slot comes from bytecode, and a malformed handler must not be able
+    /// to take the player down.
+    #[inline]
+    pub fn local(&self, slot: usize) -> StackDatum {
+        self.locals.get(slot).cloned().unwrap_or(StackDatum::Void)
+    }
+
+    /// Write a local by slot, growing the file if the bytecode names a slot
+    /// beyond the handler's declared count.
+    #[inline]
+    pub fn set_local(&mut self, slot: usize, value: StackDatum) {
+        if slot >= self.locals.len() {
+            self.locals.resize(slot + 1, StackDatum::Void);
+            self.locals_assigned.resize(slot + 1, false);
+        }
+        self.locals[slot] = value;
+        self.locals_assigned[slot] = true;
+    }
+
+    /// Has this slot ever been assigned in this invocation? Only `do`/`eval`
+    /// name resolution needs this — see `locals_assigned`.
+    #[inline]
+    pub fn local_is_assigned(&self, slot: usize) -> bool {
+        self.locals_assigned.get(slot).copied().unwrap_or(false)
     }
 
     pub fn reset(&mut self) {
@@ -357,6 +411,7 @@ impl Scope {
         self.args.clear();
         self.bytecode_index = 0;
         self.locals.clear();
+        self.locals_assigned.clear();
         self.loop_return_indices.clear();
         self.return_value = DatumRef::Void;
         self.stack.clear();

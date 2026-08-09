@@ -88,24 +88,23 @@ pub fn player_get_context_var(
         }
         0x5 => {
             // local
+            // Resolve to the dense SLOT. The symbol form searches the name
+            // table by position (the position IS the slot); the int form
+            // already carries the slot.
             let local_name_ids = &handler.local_name_ids;
-            let name_id = if let Datum::Symbol(name) = id {
-                // Find the name_id matching the symbol name (Symbol is normalized to lowercase)
-                let found = local_name_ids.iter().find(|&&nid| {
+            let slot = if let Datum::Symbol(name) = id {
+                match local_name_ids.iter().position(|&nid| {
                     get_name(player, ctx, nid).map(|n| n == *name).unwrap_or(false)
-                });
-                match found {
-                    Some(&nid) => nid,
+                }) {
+                    Some(slot) => slot,
                     None => return Err(ScriptError::new(format!("Local variable '{}' not found", name))),
                 }
             } else {
-                let local_index = (id.int_value()? / variable_multiplier as i32) as usize;
-                local_name_ids[local_index]
+                (id.int_value()? / variable_multiplier as i32) as usize
             };
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let void = DatumRef::Void;
-            let local = scope.locals.get(&name_id).unwrap_or(&void);
-            Ok(local.clone())
+            crate::player::interp_stats::record_ctxvar_local(false);
+            Ok(scope.local(slot).into_ref())
         }
         0x6 => {
             // field
@@ -191,20 +190,19 @@ pub fn player_set_context_var(
         0x5 => {
             // local
             let local_name_ids = &handler.local_name_ids;
-            let name_id = if let Datum::Symbol(name) = id_datum {
-                let found = local_name_ids.iter().find(|&&nid| {
+            let slot = if let Datum::Symbol(name) = id_datum {
+                match local_name_ids.iter().position(|&nid| {
                     get_name(player, ctx, nid).map(|n| n == *name).unwrap_or(false)
-                });
-                match found {
-                    Some(&nid) => nid,
+                }) {
+                    Some(slot) => slot,
                     None => return Err(ScriptError::new(format!("Local variable '{}' not found", name))),
                 }
             } else {
-                let local_index = (id_datum.int_value()? / variable_multiplier as i32) as usize;
-                local_name_ids[local_index]
+                (id_datum.int_value()? / variable_multiplier as i32) as usize
             };
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.locals.insert(name_id, value_ref.clone());
+            scope.set_local(slot, crate::player::scope::StackDatum::Ref(value_ref.clone()));
+            crate::player::interp_stats::record_ctxvar_local(true);
             Ok(())
         }
         0x6 => {

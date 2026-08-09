@@ -2426,7 +2426,10 @@ impl DirPlayer {
                     accounted.insert(id);
                 }
             }
-            for (_, r) in &scope.locals {
+            for r in scope.locals.iter().filter_map(|v| match v {
+                crate::player::scope::StackDatum::Ref(r) => Some(r),
+                _ => None,
+            }) {
                 if let Some(id) = ref_id(r).filter(|id| new_datum_ids.contains(id)) {
                     *other_roots.entry(format!("{}[{}].locals", pfx, i)).or_insert(0) += 1;
                     accounted.insert(id);
@@ -4347,6 +4350,16 @@ fn setup_handler_frame(
         names_ptr,
     };
 
+    // Size the dense local file for this handler. The scope pool retains
+    // capacity across reuse, so after warmup this is a memset rather than an
+    // allocation.
+    {
+        let n_locals = unsafe { (*ctx.handler_def_ptr).local_name_ids.len() };
+        reserve_player_mut(|player| {
+            player.scopes.get_mut(ctx.scope_ref).unwrap().ensure_locals(n_locals);
+        });
+    }
+
     // Trace handler entry if traceScript is enabled.
     reserve_player_ref(|player| {
         if player.movie.trace_script {
@@ -4780,14 +4793,16 @@ pub async fn player_call_script_handler_raw_args(
                         match active {
                             None => "<no scope>".to_string(),
                             Some(s) => {
-                                // Locals are keyed by name id; print id=value pairs.
-                                // Even without the name table this shows which values
-                                // are stuck or cycling, which is what identifies the
-                                // non-advancing index.
-                                let mut locals: Vec<String> = s.locals.iter()
-                                    .map(|(id, r)| format!("#{}={}", id, format_datum(r, player)))
+                                // Locals are slot-indexed; print slot=value
+                                // pairs. Even without the name table this shows
+                                // which values are stuck or cycling, which is
+                                // what identifies the non-advancing index.
+                                let locals: Vec<String> = s.locals.iter()
+                                    .enumerate()
+                                    .map(|(slot, v)| {
+                                        format!("[{}]={}", slot, format_datum(&v.clone().into_ref(), player))
+                                    })
                                     .collect();
-                                locals.sort();
                                 let stack_items: Vec<_> = s.stack.iter().collect();
                                 let stack: Vec<String> = stack_items.iter().rev().take(4).copied()
                                     .map(|r| format_datum(r, player))
@@ -7037,7 +7052,11 @@ pub fn run_bytecode_benchmark() -> String {
         let scope_ref = reserve_player_mut(|player| {
             let s = player.push_scope();
             let d = player.alloc_datum(crate::director::lingo::datum::Datum::Int(1));
-            player.scopes.get_mut(s).unwrap().locals.insert(0u16, d);
+            player
+                .scopes
+                .get_mut(s)
+                .unwrap()
+                .set_local(0, crate::player::scope::StackDatum::Ref(d));
             s
         });
         let ctx = BytecodeHandlerContext {

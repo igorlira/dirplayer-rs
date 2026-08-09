@@ -1856,16 +1856,29 @@ impl JsApi {
                         script_member_ref: scope.script_ref.to_js(),
                         bytecode_index: scope.bytecode_index as u32,
                         handler_name: handler_name.to_owned(),
-                        locals: scope
-                            .locals
-                            .iter()
-                            .map(|(name_id, v)| {
-                                let name = names.get(*name_id as usize)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("local_{}", name_id));
-                                (name, v.clone())
-                            })
-                            .collect(),
+                        // Locals are slot-indexed, so recover the name via
+                        // the handler's local table: slot -> name id -> name.
+                        locals: {
+                            let local_name_ids = player
+                                .movie
+                                .cast_manager
+                                .get_script_by_ref(&scope.script_ref)
+                                .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                                    .map(|h| h.local_name_ids.clone()))
+                                .unwrap_or_default();
+                            scope
+                                .locals
+                                .iter()
+                                .enumerate()
+                                .map(|(slot, v)| {
+                                    let name = local_name_ids
+                                        .get(slot)
+                                        .and_then(|nid| names.get(*nid as usize).cloned())
+                                        .unwrap_or_else(|| format!("local_{}", slot));
+                                    (name, v.clone().into_ref())
+                                })
+                                .collect()
+                        },
                         stack: scope.stack.iter().cloned().collect(),
                         args: scope.args.clone(),
                     };

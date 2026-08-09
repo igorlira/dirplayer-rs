@@ -19,6 +19,7 @@ use crate::{
     },
 };
 use super::handler_manager::BytecodeHandlerContext;
+use crate::player::scope::StackDatum;
 use crate::player::handlers::datum_handlers::{list_handlers::ListDatumHandlers, sound_channel::SoundChannelDatumHandlers};
 
 pub struct GetSetBytecodeHandler {}
@@ -556,45 +557,44 @@ impl GetSetBytecodeHandler {
 
     pub fn get_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
-                / ctx.multiplier;
-            let handler = get_current_handler_def(player, &ctx);
-            let name_id = handler.local_name_ids[name_int as usize];
-
-            let scope = player.scopes.get(ctx.scope_ref).unwrap();
-            let value_ref = scope
-                .locals
-                .get(&name_id)
-                .unwrap_or(&DatumRef::Void)
-                .clone();
-
+            // `name_int` IS the dense slot; the old code mapped it through
+            // `local_name_ids` only to build a hash key.
+            let slot = (player.get_ctx_current_bytecode(ctx).obj as u32
+                / ctx.multiplier) as usize;
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.stack.push(value_ref);
+            let value = scope.local(slot);
+            scope.stack.push_value(value);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
     pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
-            let name_int = player.get_ctx_current_bytecode(ctx).obj as u32
-                / ctx.multiplier;
-            let handler = get_current_handler_def(player, &ctx);
-            let name_id = handler.local_name_ids[name_int as usize];
+            let slot = (player.get_ctx_current_bytecode(ctx).obj as u32
+                / ctx.multiplier) as usize;
 
-            let value_ref = {
+            let value = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                scope.stack.pop_value().unwrap_or(StackDatum::Void)
             };
 
-            // In Lingo, strings are value types and should be copied when assigned
-            // to prevent mutations from affecting the original variable
-            let value_ref = match player.get_datum(&value_ref) {
-                Datum::String(s) => player.alloc_datum(Datum::String(s.clone())),
-                _ => value_ref,
+            // In Lingo, strings are value types and should be copied when
+            // assigned, so a later mutation cannot reach the original. Only a
+            // `Ref` can be a string, so the inline int/symbol/void cases skip
+            // the arena lookup this used to do unconditionally.
+            let value = match value {
+                StackDatum::Ref(dr) => match player.get_datum(&dr) {
+                    Datum::String(s) => {
+                        let copy = Datum::String(s.clone());
+                        StackDatum::Ref(player.alloc_datum(copy))
+                    }
+                    _ => StackDatum::Ref(dr),
+                },
+                other => other,
             };
 
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            scope.locals.insert(name_id, value_ref);
+            scope.set_local(slot, value);
             Ok(HandlerExecutionResult::Advance)
         })
     }

@@ -222,11 +222,10 @@ impl StackBytecodeHandler {
                     scope.args.get(arg_index).cloned().unwrap_or(DatumRef::Void)
                 }
                 0x5 => {
-                    // local - raw index, no variable multiplier
-                    let handler = get_current_handler_def(player, ctx);
-                    let name_id = handler.local_name_ids[id as usize];
+                    // local - raw index, no variable multiplier. `id` is the
+                    // dense slot directly.
                     let scope = player.scopes.get(ctx.scope_ref).unwrap();
-                    scope.locals.get(&name_id).cloned().unwrap_or(DatumRef::Void)
+                    scope.local(id as usize).into_ref()
                 }
                 _ => {
                     // For other var types (field etc.), fall back to the standard path
