@@ -4177,14 +4177,15 @@ pub enum ScriptReceiver {
 /// suspend a caller (push a callee frame) and resume it without recursion or a
 /// boxed future. `_profile` keeps the handler's profiling frame open for the
 /// frame's lifetime (dropped on teardown).
-/// A frame's register-IR execution state. Lives on the frame (not the driver)
-/// so a suspended caller keeps its dense local file across a nested call.
+/// A frame's register-IR execution state.
+///
+/// Just the compiled handler now. The dense local file used to live here and be
+/// synced to and from `scope.locals` around every escape; both sides share
+/// `scope.locals` directly, so there is no second copy to carry or reconcile —
+/// and a suspended caller keeps its locals for free, because they were never
+/// anywhere but its own scope.
 struct IrState {
     compiled: std::rc::Rc<crate::player::compiled::CompiledHandler>,
-    locals: Vec<crate::player::scope::StackDatum>,
-    /// The last escape could write `scope.locals`, so read them back after the
-    /// interpreter has run that op.
-    pending_sync: bool,
 }
 
 struct HandlerFrame {
@@ -4394,10 +4395,7 @@ fn setup_handler_frame(
                 c
             }
         };
-        compiled.map(|c| {
-            let n = c.n_locals;
-            IrState { compiled: c, locals: vec![crate::player::scope::StackDatum::Void; n], pending_sync: false }
-        })
+        compiled.map(|c| IrState { compiled: c })
     } else {
         None
     };
@@ -4496,15 +4494,11 @@ pub async fn player_call_script_handler_raw_args(
         // `scope.bytecode_index` on that opcode, and the ordinary path below
         // executes exactly that one op and advances — then we re-enter here.
         if let Some(ir) = ir_state.as_mut() {
-            if ir.pending_sync {
-                crate::player::compiled::sync_locals_in(&ir.compiled, scope_ref, &mut ir.locals);
-                ir.pending_sync = false;
-            }
-            match crate::player::compiled::run_handler_resumable(&ir.compiled, scope_ref, &mut ir.locals) {
+            match crate::player::compiled::run_handler_resumable(&ir.compiled, scope_ref) {
                 Ok(crate::player::compiled::IrExit::Done) => break FrameTransfer::Done,
-                Ok(crate::player::compiled::IrExit::Escape { sync_locals }) => {
-                    ir.pending_sync = sync_locals;
-                }
+                // Nothing to reconcile — the escaped opcode reads and writes the
+                // very same `scope.locals` the IR does.
+                Ok(crate::player::compiled::IrExit::Escape) => {}
                 // Run the SAME cooperative-yield logic the interpreter's
                 // `HandlerExecutionResult::Jump` arm does, then re-enter.
                 //
@@ -7271,7 +7265,7 @@ pub fn run_bytecode_benchmark() -> String {
             compiled::IrOp::Ret,            // 11
         ];
         let loop_ops = (n as usize) * 9;
-        let compiled_loop = compiled::CompiledHandler { ops, n_locals: 1, local_name_ids: vec![0] };
+        let compiled_loop = compiled::CompiledHandler { ops, n_locals: 1 };
         let start = bench_now_ms();
         let _ = compiled::run(&compiled_loop, &[]);
         let ms = bench_now_ms() - start;

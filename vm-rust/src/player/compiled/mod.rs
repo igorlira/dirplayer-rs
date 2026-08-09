@@ -49,96 +49,14 @@ pub enum IrOp {
     /// reading `scope.bytecode_index` back after the interpreter advanced it.
     /// That invariant also keeps `bytecode_index_map` valid as an IR jump table.
     ///
-    /// `sync_locals`: whether this opcode can reach `scope.locals`, in which
-    /// case the dense local file must be written out before and read back after.
-    Escape { sync_locals: bool },
-}
-
-/// Can an escaped opcode read or write `scope.locals`?
-///
-/// Defaults to TRUE — a wrong answer must cost speed, never correctness. Only
-/// opcodes verified not to touch the local file opt out.
-///
-/// It has to default true because the reach is not obvious: `Put`/`Get`/`Set`
-/// go through `context_vars`, which does `scope.locals.insert`/`get` directly,
-/// and `ExtCall` covers `do`/`value`, where `eval` walks a scope's locals by
-/// name id.
-#[inline]
-fn escape_needs_local_sync(opcode: OpCode) -> bool {
-    !matches!(
-        opcode,
-        // Chunk expressions consume operands off the stack and push a string
-        // back; they never name a variable.
-        OpCode::GetChunk
-            | OpCode::JoinStr
-            | OpCode::JoinPadStr
-            | OpCode::ContainsStr
-            | OpCode::Contains0Str
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::Inv
-            | OpCode::And
-            | OpCode::Or
-            | OpCode::Not
-            | OpCode::PushCons
-            | OpCode::PushSymb
-            | OpCode::PushFloat32
-            | OpCode::Swap
-            | OpCode::Peek
-            // Pure stack shuffling — builds a list/arglist from operands.
-            | OpCode::PushArgList
-            | OpCode::PushArgListNoRet
-            | OpCode::PushList
-            | OpCode::PushPropList
-            // Calls run the callee in its OWN scope, so they cannot reach this
-            // handler's locals. `eval` resolves names against
-            // `scopes[scope_count - 1]` — the innermost frame — so a `do` inside
-            // a callee sees the callee's locals, not ours. `ExtCall` is NOT here:
-            // that is how `do`/`value` are invoked in THIS scope.
-            | OpCode::ObjCall
-            | OpCode::ObjCallV4
-            | OpCode::LocalCall
-            // Property and global reads name no local.
-            | OpCode::GetMovieProp
-            | OpCode::TheBuiltin
-            | OpCode::GetObjProp
-            | OpCode::GetGlobal
-            | OpCode::GetGlobal2
-            // Instance/static property access and parameter writes. Measured
-            // (browser e2e suite, all 50 movies, E2E_INTERP_STATS=1): the sync
-            // these four were forcing was ~4.6M of the 7.0M sync events in the
-            // whole run, at a mean 105 local slots copied EACH WAY per event.
-            // `getprop` alone was ~43% of all sync traffic.
-            //
-            // None of them can reach this frame's locals:
-            //   GetProp        get_set.rs:99  — reads the receiver instance's
-            //                  properties via the ancestor chain, pushes the
-            //                  result. Touches scope.receiver / script_ref /
-            //                  cached_handler_instance / stack, never locals.
-            //   SetProp        get_set.rs:131 — pops a value, writes it to the
-            //                  handler-level instance or the script's statics.
-            //   GetChainedProp get_set.rs:677 — pops the object, resolves a
-            //                  property on it, pushes the result.
-            //   SetParam       get_set.rs:617 — writes `scope.args`, not
-            //                  locals. Args cannot go stale either: the IR's
-            //                  `GetParam` reads `scope.args` LIVE rather than
-            //                  from the dense local file.
-            //
-            // Where these dispatch Lingo (a property getter, say), the callee
-            // runs in its OWN scope — the same reason ObjCall/LocalCall are
-            // opted out above.
-            | OpCode::GetProp
-            | OpCode::SetProp
-            | OpCode::GetChainedProp
-            | OpCode::SetParam
-    )
+    /// The IR and the interpreter share ONE local file (`scope.locals`), so an
+    /// escape hands over no state and needs no sync — it just returns.
+    Escape,
 }
 
 pub struct CompiledHandler {
     pub ops: Vec<IrOp>,
     pub n_locals: usize,
-    /// Slot -> name id, for syncing the dense local file into `scope.locals`.
-    pub local_name_ids: Vec<u16>,
 }
 
 /// How a run of the IR ended.
@@ -147,7 +65,7 @@ pub enum IrExit {
     Done,
     /// An `Escape`: `scope.bytecode_index` is set to the op the interpreter must
     /// run. The driver executes it, advances the index as usual, then re-enters.
-    Escape { sync_locals: bool },
+    Escape,
     /// A backward jump the DRIVER must see. `scope.bytecode_index` is the loop
     /// target; the driver runs its `HandlerExecutionResult::Jump` handling and
     /// re-enters.
@@ -200,7 +118,7 @@ pub fn compile(handler: &HandlerDef, multiplier: u32) -> Option<CompiledHandler>
             // arithmetic/branch/local cluster around it still gets the IR's
             // tight loop, which is the whole point — a handler is no longer
             // rejected outright because it contains one `getchunk` or `put`.
-            other => IrOp::Escape { sync_locals: escape_needs_local_sync(other) },
+            _ => IrOp::Escape,
         };
         ops.push(op);
     }
@@ -214,7 +132,6 @@ pub fn compile(handler: &HandlerDef, multiplier: u32) -> Option<CompiledHandler>
     Some(CompiledHandler {
         ops,
         n_locals: handler.local_name_ids.len(),
-        local_name_ids: handler.local_name_ids.clone(),
     })
 }
 
@@ -382,10 +299,9 @@ fn cow_on_assign(v: StackDatum) -> StackDatum {
 /// Run a fully-pure compiled handler against `scope_ref`. Returns Ok on the
 /// handler's `ret`; the caller's teardown reads `scope.return_value`.
 pub fn run_handler(compiled: &CompiledHandler, scope_ref: ScopeRef) -> Result<(), ScriptError> {
-    let mut locals: Vec<StackDatum> = vec![StackDatum::Void; compiled.n_locals];
-    match run_handler_resumable(compiled, scope_ref, &mut locals)? {
+    match run_handler_resumable(compiled, scope_ref)? {
         IrExit::Done => Ok(()),
-        IrExit::Escape { .. } | IrExit::BackJump => Err(ScriptError::new(
+        IrExit::Escape | IrExit::BackJump => Err(ScriptError::new(
             "run_handler: handler escaped; use run_handler_resumable".to_string(),
         )),
     }
@@ -410,23 +326,6 @@ fn back_jump(
     None
 }
 
-/// Read `scope.locals` back into the dense file after an escape that could have
-/// written them (see `escape_needs_local_sync`).
-pub fn sync_locals_in(
-    compiled: &CompiledHandler,
-    scope_ref: ScopeRef,
-    locals: &mut Vec<StackDatum>,
-) {
-    reserve_player_ref(|player| {
-        let scope = player.scopes.get(scope_ref).unwrap();
-        let n = locals.len().min(scope.locals.len());
-        locals[..n].clone_from_slice(&scope.locals[..n]);
-    });
-    crate::player::interp_stats::record_sync_in(
-        compiled.local_name_ids.len().min(locals.len()),
-    );
-}
-
 /// The IR loop, entered at `scope.bytecode_index` and returning how it stopped.
 ///
 /// Operands live on the REAL `scope.stack` rather than a runner-owned Vec. That
@@ -440,15 +339,27 @@ pub fn sync_locals_in(
 pub fn run_handler_resumable(
     compiled: &CompiledHandler,
     scope_ref: ScopeRef,
-    locals: &mut Vec<StackDatum>,
 ) -> Result<IrExit, ScriptError> {
-    if locals.len() < compiled.n_locals {
-        locals.resize(compiled.n_locals, StackDatum::Void);
-    }
     // `scopes` is a fixed, pre-filled pool that never reallocates (see
     // `push_scope`), so this slot address is stable for the run.
     let scope_ptr: *mut crate::player::scope::Scope =
         reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+    // Locals live in the scope, shared with the interpreter. Sized once here so
+    // the op loop can index without a bounds-grow on every write.
+    unsafe { (*scope_ptr).ensure_locals(compiled.n_locals) };
+    // Reads and writes go through the same raw pointer the operand stack uses.
+    // Nothing borrows across an escape: the Escape arm RETURNS, so the
+    // interpreter op that follows has exclusive access.
+    macro_rules! lc_get {
+        ($s:expr) => {
+            unsafe { (*scope_ptr).local($s as usize) }
+        };
+    }
+    macro_rules! lc_set {
+        ($s:expr, $v:expr) => {
+            unsafe { (*scope_ptr).set_local($s as usize, $v) }
+        };
+    }
     macro_rules! st_push {
         ($v:expr) => {
             unsafe { (*scope_ptr).stack.push_value($v) }
@@ -469,31 +380,19 @@ pub fn run_handler_resumable(
             return Ok(IrExit::Done);
         }
         match &ops[pc] {
-            IrOp::Escape { sync_locals } => {
-                let sync_locals = *sync_locals;
+            IrOp::Escape => {
                 // Hand the pc to the interpreter as a bytecode index (they are
-                // the same number by construction) and let the driver advance it.
+                // the same number by construction) and let the driver advance
+                // it. No locals handover: both sides read the same storage.
                 unsafe { (*scope_ptr).bytecode_index = pc };
-                if sync_locals {
-                    let scope = unsafe { &mut *scope_ptr };
-                    scope.ensure_locals(locals.len());
-                    let n = locals.len().min(scope.locals.len());
-                    scope.locals[..n].clone_from_slice(&locals[..n]);
-                    // Anything the IR wrote counts as assigned; `do`/`eval`
-                    // resolution depends on this staying accurate.
-                    for a in scope.locals_assigned[..n].iter_mut() {
-                        *a = true;
-                    }
-                    crate::player::interp_stats::record_sync_out(n);
-                }
-                return Ok(IrExit::Escape { sync_locals });
+                return Ok(IrExit::Escape);
             }
             _ => {}
         }
         match &ops[pc] {
             IrOp::PushInt(n) => { st_push!(StackDatum::Int(*n)); pc += 1; }
-            IrOp::GetLocal(s) => { st_push!(locals[*s as usize].clone()); pc += 1; }
-            IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); locals[*s as usize] = v; pc += 1; }
+            IrOp::GetLocal(s) => { st_push!(lc_get!(*s)); pc += 1; }
+            IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); lc_set!(*s, v); pc += 1; }
             IrOp::GetParam(s) => {
                 let s = *s as usize;
                 let dr = reserve_player_ref(|player| {
@@ -525,7 +424,7 @@ pub fn run_handler_resumable(
                 pc = t;
             }
             IrOp::Pop(n) => { for _ in 0..*n { let _ = st_pop!(); } pc += 1; }
-            IrOp::Escape { .. } => unreachable!("handled before this match"),
+            IrOp::Escape => unreachable!("handled before this match"),
             IrOp::Ret => {
                 // EXACTLY `FlowControlBytecodeHandler::ret`: VOID, and clear the
                 // stack. A handler's real return value comes from the `return`
@@ -589,7 +488,6 @@ mod tests {
             let compiled = CompiledHandler {
                 ops: vec![IrOp::GetParam(0), IrOp::PushInt(1), IrOp::Add],
                 n_locals: 0,
-                local_name_ids: vec![],
             };
             run_handler(&compiled, scope_ref).unwrap();
             assert_eq!(stack_top_int(scope_ref), 6);
@@ -614,7 +512,7 @@ mod tests {
                 IrOp::Jmp(4),                              // 16  loop
                 IrOp::GetLocal(0),                         // 17  leave sum on the stack
             ];
-            let compiled = CompiledHandler { ops, n_locals: 2, local_name_ids: vec![0, 1] };
+            let compiled = CompiledHandler { ops, n_locals: 2 };
             run_handler(&compiled, scope_ref).unwrap();
             assert_eq!(stack_top_int(scope_ref), 55);
             reserve_player_mut(|player| player.pop_scope());
@@ -652,18 +550,30 @@ mod tests {
             };
             let compiled = compile(&handler, 1).expect("escapes, never rejects");
             assert_eq!(compiled.ops.len(), handler.bytecode_array.len(), "IR must be 1:1");
-            // GetChunk consumes stack operands only, so it must NOT force a sync.
-            assert!(matches!(compiled.ops[2], IrOp::Escape { sync_locals: false }));
+            assert!(matches!(compiled.ops[2], IrOp::Escape));
 
             let scope_ref = reserve_player_mut(|player| player.push_scope());
-            let mut locals: Vec<StackDatum> = vec![StackDatum::Void; compiled.n_locals];
 
             // First run stops AT the escaped op (pc == its bytecode index).
-            match run_handler_resumable(&compiled, scope_ref, &mut locals).unwrap() {
-                IrExit::Escape { sync_locals } => assert!(!sync_locals),
+            match run_handler_resumable(&compiled, scope_ref).unwrap() {
+                IrExit::Escape => {}
                 other => panic!("expected an escape, got {}", match other {
                     IrExit::Done => "Done", IrExit::BackJump => "BackJump", _ => "?" }),
             }
+
+            // The local written before the escape is visible in the SCOPE, not
+            // in any IR-private copy — that is what makes the sync unnecessary.
+            assert!(
+                matches!(
+                    reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().local(0)),
+                    StackDatum::Int(5)
+                ),
+                "the IR must write locals straight into the scope"
+            );
+            assert!(
+                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().local_is_assigned(0)),
+                "an IR write must mark the slot assigned, or do/eval resolution breaks"
+            );
             assert_eq!(
                 reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().bytecode_index),
                 2,
@@ -676,9 +586,9 @@ mod tests {
             });
 
             // Resuming continues with locals intact and returns 5.
-            match run_handler_resumable(&compiled, scope_ref, &mut locals).unwrap() {
+            match run_handler_resumable(&compiled, scope_ref).unwrap() {
                 IrExit::Done => {}
-                IrExit::Escape { .. } => panic!("expected completion, got Escape"),
+                IrExit::Escape => panic!("expected completion, got Escape"),
                 IrExit::BackJump => panic!("expected completion, got BackJump"),
             }
             assert_eq!(stack_top_int(scope_ref), 5, "dense locals must survive the escape");
