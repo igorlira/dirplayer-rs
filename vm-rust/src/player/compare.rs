@@ -538,6 +538,21 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
     }
 }
 
+/// Case-insensitive lexicographic `<`, without allocating.
+///
+/// Byte-for-byte equivalent to `a.to_ascii_lowercase() < b.to_ascii_lowercase()`:
+/// `str`'s ordering is bytewise over UTF-8, and `to_ascii_lowercase` only ever
+/// remaps `A-Z` (single-byte, and never a UTF-8 continuation byte), so folding
+/// per byte during the walk gives the same answer without the two temporaries.
+#[inline]
+fn str_lt_ci(a: &str, b: &str) -> bool {
+    a.as_bytes()
+        .iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(b.as_bytes().iter().map(u8::to_ascii_lowercase))
+        .is_lt()
+}
+
 pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
     // A string chunk (`char/word/item/line N of x`) evaluates to a plain
     // string — compare by its resolved text. Without this, `char 1 of x < "m"`
@@ -558,9 +573,27 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
     if let Datum::SpriteRef(n) = right {
         return datum_less_than(left, &Datum::Int(*n as i32), allocator);
     }
+    // Symbol/string orderings are the hot case: `PropListUtils::get_key_index`
+    // runs one of these per binary-search probe (and per entry on its linear
+    // fallback), so a prop-list read did O(log n) comparisons. Handle the three
+    // text-vs-text pairs here WITHOUT allocating.
+    //
+    // These used to fall into the blanket symbol->String conversion below and
+    // then into the `to_ascii_lowercase() < to_ascii_lowercase()` arms further
+    // down, costing FOUR heap allocations per comparison (two to stringify the
+    // symbols, two to lowercase them) — the dedicated Symbol arms in the match
+    // were dead code because the conversion always fired first.
+    match (left, right) {
+        (Datum::Symbol(l), Datum::Symbol(r)) => {
+            return Ok(str_lt_ci(l.as_str(), r.as_str()))
+        }
+        (Datum::Symbol(l), Datum::String(r)) => return Ok(str_lt_ci(l.as_str(), r)),
+        (Datum::String(l), Datum::Symbol(r)) => return Ok(str_lt_ci(l, r.as_str())),
+        _ => {}
+    }
     // A symbol compares as its string name (Director treats `#foo` like "foo" in
     // ordered comparisons), so route symbols through the string logic below. This
-    // covers int-vs-symbol, symbol-vs-symbol, etc. without dedicated arms.
+    // covers int-vs-symbol and the other mixed pairs without dedicated arms.
     if let Datum::Symbol(s) = left {
         return datum_less_than(&Datum::String(s.clone().to_string()), right, allocator);
     }
@@ -625,14 +658,9 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // strings (e.g. CS FurnitureItem draw-order tags "a","b","c","d") would
         // always return 0 from find_index_to_add and silently prepend every
         // item, breaking sprite-pool allocation order.
-        (Datum::String(left), Datum::String(right)) =>
-            Ok(left.to_ascii_lowercase() < right.to_ascii_lowercase()),
-        (Datum::Symbol(left), Datum::Symbol(right)) =>
-            Ok(left.as_str().to_ascii_lowercase() < right.as_str().to_ascii_lowercase()),
-        (Datum::String(left), Datum::Symbol(right)) =>
-            Ok(left.to_ascii_lowercase() < right.as_str().to_ascii_lowercase()),
-        (Datum::Symbol(left), Datum::String(right)) =>
-            Ok(left.as_str().to_ascii_lowercase() < right.to_ascii_lowercase()),
+        // (The Symbol pairings are handled allocation-free at the top of this
+        // function, before the symbol->String conversion.)
+        (Datum::String(left), Datum::String(right)) => Ok(str_lt_ci(left, right)),
 
         // String comparisons
         (Datum::String(..), Datum::String(..)) => Ok(false),
