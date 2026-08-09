@@ -71,7 +71,12 @@ impl ToHexString for Vec<u8> {
 }
 
 /// Number of ticks (60 ticks/second) from epoch until endtime
-fn ticks_since_epoch(endtime: DateTime<Local>) -> i64 {
+/// Generic over the timezone so the "now" side can use `Utc`. `timestamp_nanos_opt`
+/// is an ABSOLUTE epoch value, so `Utc` and `Local` give a bit-identical result —
+/// but `Local::now()` re-resolves the timezone offset on every call, which under
+/// WASM is expensive. `the ticks` is polled in every game loop, and a profile put
+/// `chrono::offset::local::Local::now` at 6.5% of total frame time.
+fn ticks_since_epoch<Tz: chrono::TimeZone>(endtime: DateTime<Tz>) -> i64 {
     endtime.timestamp_nanos_opt().unwrap()
         / TimeDelta::milliseconds(1000 / 60)
             .num_nanoseconds()
@@ -79,7 +84,7 @@ fn ticks_since_epoch(endtime: DateTime<Local>) -> i64 {
 }
 
 pub fn get_elapsed_ticks(start_time: DateTime<chrono::Local>) -> i32 {
-    let current_ticks = ticks_since_epoch(chrono::Local::now());
+    let current_ticks = ticks_since_epoch(chrono::Utc::now());
     let start_ticks = ticks_since_epoch(start_time);
     (current_ticks - start_ticks) as i32
 }

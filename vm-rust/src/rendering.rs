@@ -3390,7 +3390,7 @@ impl PlayerCanvasRenderer {
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
         crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
-        // let time = chrono::Local::now().timestamp_millis() as i64;
+        // let time = chrono::Utc::now().timestamp_millis() as i64;
         // let time_seconds = time as f64 / 1000.0;
         // let oscillated_r = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64).sin();
         // let oscillated_g = 127.0 + 255.0 * (time_seconds * 2.0 * std::f32::consts::PI as f64 + (std::f32::consts::PI / 2.0) as f64).sin();
@@ -3433,7 +3433,7 @@ impl PlayerCanvasRenderer {
             self.active_transition = Some(TransitionPlayback {
                 old_bitmap: self.bitmap.clone(),
                 info,
-                start_ms: Local::now().timestamp_millis(),
+                start_ms: chrono::Utc::now().timestamp_millis(),
             });
         }
 
@@ -3504,7 +3504,7 @@ impl PlayerCanvasRenderer {
         // rendered NEW one per elapsed progress. Releases the player's playhead hold
         // on completion (precise sync); a time failsafe in the player backs it up.
         if let Some(trans) = self.active_transition.take() {
-            let elapsed = Local::now().timestamp_millis() - trans.start_ms;
+            let elapsed = chrono::Utc::now().timestamp_millis() - trans.start_ms;
             let progress = (elapsed as f32 / trans.info.duration_ms.max(1) as f32).min(1.0);
             apply_transition_effect(bitmap, &trans.old_bitmap, trans.info.transition_type, trans.info.chunk_size, progress);
             if progress < 1.0 {
@@ -3638,11 +3638,11 @@ fn should_skip_stage_draw() -> bool {
 }
 
 pub fn mark_frame_drawn() {
-    LAST_DRAW_MS.with(|ts| ts.set(Local::now().timestamp_millis()));
+    LAST_DRAW_MS.with(|ts| ts.set(chrono::Utc::now().timestamp_millis()));
 }
 
 fn was_frame_drawn_recently(interval_ms: i64) -> bool {
-    LAST_DRAW_MS.with(|ts| Local::now().timestamp_millis() - ts.get() < interval_ms)
+    LAST_DRAW_MS.with(|ts| chrono::Utc::now().timestamp_millis() - ts.get() < interval_ms)
 }
 
 #[allow(dead_code)]
@@ -4160,8 +4160,8 @@ async fn run_draw_loop() {
         let draw_fps = 24;
 
         let frame_interval = 1000 / draw_fps as i64;
-        if Local::now().timestamp_millis() - last_frame_ms >= frame_interval {
-            last_frame_ms = Local::now().timestamp_millis();
+        if chrono::Utc::now().timestamp_millis() - last_frame_ms >= frame_interval {
+            last_frame_ms = chrono::Utc::now().timestamp_millis();
             let skip_stage = should_skip_stage_draw();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {

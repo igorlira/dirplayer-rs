@@ -542,7 +542,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // two single clicks. CS's ACTION_TIMED_ANIMATION (and similar) reads
             // `the doubleClick` to gate `toggleState()`, so a wrong flag silently
             // breaks every animation-toggling action.
-            let click_now = Local::now().timestamp_millis().abs();
+            let click_now = chrono::Utc::now().timestamp_millis().abs();
             // Flush actorList stepFrame so cached rollover state (e.g. oMouseSquare)
             // is fresh before the mouseDown handler reads it. On mobile/touch there's
             // no prior mouse_move, so stepFrame hasn't run at the tap position yet.

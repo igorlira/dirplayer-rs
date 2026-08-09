@@ -266,9 +266,10 @@ impl Movie {
             BuiltInSymbol::AllowCustomCaching => Ok(datum_bool(self.allow_custom_caching)),
             BuiltInSymbol::Timer => {
                 reserve_player_ref(|player| {
-                    let elapsed = chrono::Local::now()
-                        .signed_duration_since(player.start_time)
-                        .num_milliseconds();
+                    // Utc: identical difference, without re-resolving the local
+                    // timezone offset on every call (see `the milliSeconds`).
+                    let elapsed = chrono::Utc::now().timestamp_millis()
+                        - player.start_time.timestamp_millis();
                     // Convert to ticks (60ths of a second)
                     let ticks = (elapsed * 60) / 1000;
                     Ok(Datum::Int(ticks as i32))
@@ -283,9 +284,8 @@ impl Movie {
                         .keyboard_manager
                         .last_key_time
                         .unwrap_or(player.start_time);
-                    let elapsed = chrono::Local::now()
-                        .signed_duration_since(reference)
-                        .num_milliseconds();
+                    let elapsed = chrono::Utc::now().timestamp_millis()
+                        - reference.timestamp_millis();
                     let ticks = (elapsed * 60) / 1000;
                     Ok(Datum::Int(ticks as i32))
                 })

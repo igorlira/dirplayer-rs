@@ -42,7 +42,7 @@ impl PlayerProfiler {
             id,
             ProfilingToken {
                 name,
-                start_time: chrono::Local::now().timestamp_millis() as u64,
+                start_time: chrono::Utc::now().timestamp_millis() as u64,
                 end_time: None,
             },
         );
@@ -52,7 +52,7 @@ impl PlayerProfiler {
 
     pub fn end(&mut self, id: u32) {
         let mut token = self.tokens.remove(&id).unwrap();
-        token.end_time = Some(chrono::Local::now().timestamp_millis() as u64);
+        token.end_time = Some(chrono::Utc::now().timestamp_millis() as u64);
         let elapsed = token.elapsed().unwrap();
 
         let elapsed_by_this_name = self
