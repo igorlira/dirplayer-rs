@@ -2225,8 +2225,25 @@ void main() {
             }
 
             if model_nodes.is_empty() {
-                // No model nodes — fallback: draw all meshes with identity transform
-                self.draw_all_meshes_fallback(gl, shader, scene, &member_key);
+                // Fallback for a member with no model-node scene graph at all: draw
+                // every mesh at identity so the geometry is at least visible.
+                //
+                // It must NOT fire when the scene HAS model nodes and the filtering
+                // above merely excluded them — that emptiness is the intended result,
+                // and dumping all meshes at identity paints flat untextured geometry
+                // over whatever earlier camera passes drew. Director's standard
+                // overlay-camera idiom hits this every frame: Agent Free Ride 2 does
+                //   ingameCam = member.newCamera("ingame_cam")
+                //   ingameCam.rootNode = member.newGroup("void_group")
+                //   sprite.addCamera(ingameCam)
+                // so the second pass legitimately renders no models (its rootNode
+                // subtree is empty, it only carries overlays) — and the fallback was
+                // wiping the whole 3D world to flat grey.
+                let scene_has_model_nodes = scene.nodes.iter()
+                    .any(|n| n.node_type == W3dNodeType::Model);
+                if !scene_has_model_nodes {
+                    self.draw_all_meshes_fallback(gl, shader, scene, &member_key);
+                }
             } else {
                 // Classify nodes into opaque, cutout, and transparent for proper order.
                 // - opaque (material opacity ≥ 1, no alpha texture): pass 1, depth write.
