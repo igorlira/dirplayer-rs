@@ -58,6 +58,9 @@ pub struct CastManager {
     /// scan. Built lazily; invalidated with movie_script_cache on cast load.
     pub movie_handler_refs: RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, crate::player::script::ScriptHandlerRef>>>,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
+    /// Memo of `find_member_ref_by_number` answers, including misses (`None`),
+    /// filled one query at a time. Invalidated with `member_name_cache`.
+    member_number_cache: RefCell<Option<FxHashMap<u32, Option<CastMemberRef>>>>,
     pub palette_cache: RefCell<Option<Rc<PaletteMap>>>,
     /// Version counter incremented when palette cache is invalidated.
     /// Used by renderers to know when to clear texture caches.
@@ -85,6 +88,7 @@ impl CastManager {
             all_handler_names: RefCell::new(None),
             movie_handler_refs: RefCell::new(None),
             member_name_cache: RefCell::new(None),
+            member_number_cache: RefCell::new(None),
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
             pending_texture_invalidations: RefCell::new(Vec::new()),
@@ -324,20 +328,44 @@ impl CastManager {
     }
 
     pub fn find_member_ref_by_number(&self, number: u32) -> Option<CastMemberRef> {
-        for cast in &self.casts {
+        // Memoised PER QUERY, not rebuilt wholesale.
+        //
+        // The bare scan below is O(all members of all casts) with a
+        // `get_cast_slot_number` per member, and this runs on per-frame render
+        // and script paths. But building a complete number->member map up front
+        // was WORSE: `invalidate_member_name_cache` fires whenever a movie
+        // creates, duplicates or renames a member (Habbo does all three at
+        // runtime), and a full rebuild after each of those costs far more than
+        // the scan it replaces — the scan at least stops at the first match.
+        // Caching each answer as it is asked for keeps the early exit and still
+        // makes the repeat lookups, which are the overwhelming majority, free.
+        if let Some(hit) = self
+            .member_number_cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&number))
+        {
+            return hit.clone();
+        }
+        let mut found = None;
+        'outer: for cast in &self.casts {
             for member in cast.members.values() {
                 if member.number == number
                     || CastMemberRefHandlers::get_cast_slot_number(cast.number, member.number)
                         == number
                 {
-                    return Some(CastMemberRef {
+                    found = Some(CastMemberRef {
                         cast_lib: cast.number as i32,
                         cast_member: member.number as i32,
                     });
+                    break 'outer;
                 }
             }
         }
-        None
+        let mut slot = self.member_number_cache.borrow_mut();
+        slot.get_or_insert_with(FxHashMap::default)
+            .insert(number, found.clone());
+        found
     }
 
     /// Like `find_member_by_ref`, but when `cast_lib=0` (shorthand for
@@ -781,6 +809,7 @@ impl CastManager {
 
     pub fn invalidate_member_name_cache(&self) {
         self.member_name_cache.replace(None);
+        self.member_number_cache.replace(None);
         // Also drop each cast's per-cast name index. This is the single
         // authoritative invalidation point hit on every member/name mutation,
         // so it keeps the per-cast indexes (used by `CastLib::find_member_by_name`)
