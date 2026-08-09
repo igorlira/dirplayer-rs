@@ -3425,6 +3425,10 @@ impl DirPlayer {
             return;
         }
         web_sys::console::error_1(&format!("[!!] play failed with error: {}", err.message).into());
+        // The message alone rarely says WHICH handler blew up. Scopes are still
+        // intact at this point, so dump them — in the browser E2E harness a
+        // script error aborts the run and the console is the only channel out.
+        web_sys::console::error_1(&self.format_scope_stack(5, 25).into());
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
@@ -3440,44 +3444,48 @@ impl DirPlayer {
         handler_def.bytecode_array.get(bytecode_index).unwrap()
     }
 
+    /// Render the live scope stack as `script::handler (bytecode_index=N)` lines.
+    /// Shows the BOTTOM `head` frames as well as the top `tail`: the tail alone
+    /// can't tell a genuinely infinite recursion from a legitimately deep one,
+    /// because you can't see how much is outer context and how much repeats.
+    pub fn format_scope_stack(&self, head: u32, tail: u32) -> String {
+        let mut out = String::from("Scope stack (outermost frames, then the deepest):\n");
+        let indices: Vec<u32> = if self.scope_count <= head + tail {
+            (0..self.scope_count).collect()
+        } else {
+            (0..head).chain((self.scope_count - tail)..self.scope_count).collect()
+        };
+        let mut last: Option<u32> = None;
+        for i in indices {
+            if let Some(prev) = last {
+                if i != prev + 1 {
+                    out.push_str(&format!("  … {} more frames …\n", i - prev - 1));
+                }
+            }
+            last = Some(i);
+            if let Some(scope) = self.scopes.get(i as ScopeRef) {
+                // Try to get the handler name from the script
+                let handler_info = if let Some(script) = self.movie.cast_manager.get_script_by_ref(&scope.script_ref) {
+                    // Find handler name by looking through the handlers map
+                    let handler_name = script.handlers.iter()
+                        .find(|(_, h)| h.name_id == scope.handler_name_id)
+                        .map(|(name, _)| name.as_str().to_owned())
+                        .unwrap_or_else(|| format!("handler_name_id#{}", scope.handler_name_id));
+                    format!("{}::{}", script.name, handler_name)
+                } else {
+                    format!("unknown_script::handler_name_id#{}", scope.handler_name_id)
+                };
+                out.push_str(&format!("  Scope {}: {} (bytecode_index={})\n", i, handler_info, scope.bytecode_index));
+            }
+        }
+        out
+    }
+
     pub fn push_scope(&mut self) -> ScopeRef {
         if (self.scope_count + 1) as usize >= MAX_STACK_SIZE {
             // Try to get some context about what's on the stack
-            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\nScope stack (outermost frames, then the deepest):\n");
-            // Show the BOTTOM of the stack as well as the top. The tail alone
-            // can't tell a genuinely infinite recursion from a legitimately deep
-            // one, because you can't see how much is outer context and how much
-            // is the repeating handler.
-            const HEAD: u32 = 5;
-            const TAIL: u32 = 25;
-            let indices: Vec<u32> = if self.scope_count <= HEAD + TAIL {
-                (0..self.scope_count).collect()
-            } else {
-                (0..HEAD).chain((self.scope_count - TAIL)..self.scope_count).collect()
-            };
-            let mut last: Option<u32> = None;
-            for i in indices {
-                if let Some(prev) = last {
-                    if i != prev + 1 {
-                        stack_trace.push_str(&format!("  … {} more frames …\n", i - prev - 1));
-                    }
-                }
-                last = Some(i);
-                if let Some(scope) = self.scopes.get(i as ScopeRef) {
-                    // Try to get the handler name from the script
-                    let handler_info = if let Some(script) = self.movie.cast_manager.get_script_by_ref(&scope.script_ref) {
-                        // Find handler name by looking through the handlers map
-                        let handler_name = script.handlers.iter()
-                            .find(|(_, h)| h.name_id == scope.handler_name_id)
-                            .map(|(name, _)| name.as_str().to_owned())
-                            .unwrap_or_else(|| format!("handler_name_id#{}", scope.handler_name_id));
-                        format!("{}::{}", script.name, handler_name)
-                    } else {
-                        format!("unknown_script::handler_name_id#{}", scope.handler_name_id)
-                    };
-                    stack_trace.push_str(&format!("  Scope {}: {} (bytecode_index={})\n", i, handler_info, scope.bytecode_index));
-                }
-            }
+            let mut stack_trace = String::from("Stack overflow detected - this is likely due to infinite recursion in the movie's Lingo scripts.\n");
+            stack_trace.push_str(&self.format_scope_stack(5, 25));
             stack_trace.push_str("\nThis usually indicates a bug in the Director movie's scripts (e.g., a handler calling itself infinitely).\n");
             stack_trace.push_str("Note: If this is happening during frame events, it may be a re-entrant call issue.\n");
             web_sys::console::error_1(&stack_trace.into());
