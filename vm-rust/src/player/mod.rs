@@ -7271,6 +7271,52 @@ pub fn run_bytecode_benchmark() -> String {
         let ms = bench_now_ms() - start;
         out.push_str(&line("IR repeat-counter loop", loop_ops, ms));
         out.push('\n');
+
+        // IR ESCAPE RE-ENTRY — the other half of the `MAX_ESCAPE_PERCENT`
+        // break-even, and the one number the rows above cannot show.
+        //
+        // Every other IR row here stays inside the loop, so they measure the
+        // best case. This measures the worst: a handler that is nothing but
+        // escapes, where each entry pays the IR's setup (`reserve_player_mut`
+        // for the scope pointer, `ensure_locals`, loop prologue), hits the
+        // escape immediately and returns. The driver re-enters ONCE PER
+        // ESCAPE, so this is exactly the overhead compiling ADDS to an op the
+        // IR cannot execute.
+        //
+        // Compiling a handler pays off when
+        //     native_ops * (interpreter ns/op - IR ns/op)  >  escapes * (this)
+        // so raising MAX_ESCAPE_PERCENT is only justified while that holds.
+        // Read this row against "getlocal+pop" (interpreter) and "IR
+        // repeat-counter loop" (IR native) above.
+        //
+        // `bytecode_index` is advanced through the cached scope pointer rather
+        // than a `reserve_player_mut` per iteration, because that is what the
+        // real driver does — routing it through a closure here would measure
+        // the benchmark instead of the thing being benchmarked.
+        {
+            let escapes: usize = 200_000;
+            let chunk = 1024usize;
+            let compiled_esc = compiled::CompiledHandler {
+                ops: vec![compiled::IrOp::Escape; chunk],
+                n_locals: 8,
+            };
+            let scope_ref = reserve_player_mut(|player| player.push_scope());
+            let scope_ptr: *mut crate::player::scope::Scope =
+                reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+            let start = bench_now_ms();
+            let mut done = 0usize;
+            while done < escapes {
+                for i in 0..chunk {
+                    unsafe { (*scope_ptr).bytecode_index = i };
+                    let _ = compiled::run_handler_resumable(&compiled_esc, scope_ref);
+                }
+                done += chunk;
+            }
+            let ms = bench_now_ms() - start;
+            reserve_player_mut(|player| player.pop_scope());
+            out.push_str(&line("IR escape re-entry", done, ms));
+            out.push('\n');
+        }
     }
 
     out
