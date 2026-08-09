@@ -859,6 +859,9 @@ impl Shockwave3dMemberHandlers {
 
                 // Try cached frame first (from sprite rendering), then offscreen render
                 let key = (cast_member_ref.cast_lib, cast_member_ref.cast_member);
+                // Opt this member into the per-frame FBO capture from now on. Until
+                // a script asks, the renderer skips that readback entirely.
+                player.w3d_image_requested.insert(key);
                 if let Some(&bitmap_ref) = player.w3d_frame_buffers.get(&key) {
                     return Ok(Datum::BitmapRef(bitmap_ref));
                 }

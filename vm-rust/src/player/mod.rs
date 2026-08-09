@@ -442,6 +442,20 @@ pub struct DirPlayer {
     pub flash_texture_targets: HashMap<i16, (cast_lib::CastMemberRef, String)>,
     /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
     pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
+    /// Members whose `.image` a script has actually asked for. The per-frame FBO
+    /// readback that fills `w3d_frame_buffers` is a synchronous GPU->CPU stall
+    /// (22.9% of frame time in a profile) plus two full-size buffer allocations,
+    /// and it ran speculatively for EVERY 3D member every frame. Most movies
+    /// never touch `world.image`, so only capture once someone has asked.
+    ///
+    /// The first request finds no cached frame and falls through to the getter's
+    /// offscreen `render_3d_to_rgba` path, so nothing is ever served stale.
+    pub w3d_image_requested: std::collections::HashSet<(i32, i32)>,
+    /// Set once any 3D member has rendered. Previously `!w3d_frame_buffers
+    /// .is_empty()` stood in for "3D content is active" when deciding whether to
+    /// request pointer lock; with the readback now lazy that map can legitimately
+    /// stay empty, which would have silently broken FPS mouselook.
+    pub w3d_any_rendered: bool,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
     pub in_step_frame: bool,
@@ -692,6 +706,8 @@ impl DirPlayer {
             input_polled: false,
             flash_texture_targets: HashMap::new(),
             w3d_frame_buffers: HashMap::new(),
+            w3d_image_requested: std::collections::HashSet::new(),
+            w3d_any_rendered: false,
             in_enter_frame: false,
             in_prepare_frame: false,
             in_step_frame: false,
@@ -1725,7 +1741,7 @@ impl DirPlayer {
             return false;
         }
         if let Some(deadline) = self.transition_hold_until_ms {
-            if chrono::Local::now().timestamp_millis() >= deadline {
+            if chrono::Utc::now().timestamp_millis() >= deadline {
                 self.score_transition_active = false;
                 self.transition_hold_until_ms = None;
                 return false;
@@ -1741,7 +1757,7 @@ impl DirPlayer {
         self.score_transition_active = true;
         let dur = (duration_ms as i64).clamp(1, 4000);
         self.transition_hold_until_ms =
-            Some(chrono::Local::now().timestamp_millis() + dur + 2000);
+            Some(chrono::Utc::now().timestamp_millis() + dur + 2000);
     }
 
     pub fn stop(&mut self) {
@@ -2673,10 +2689,13 @@ impl DirPlayer {
                 // (`repeat while (the milliSeconds - t0) < N`); mark it so the
                 // backward-jump handler yields cooperatively (see input_polled).
                 self.input_polled = true;
+                // `Utc`, not `Local`: the difference is identical (both are
+                // absolute epoch instants) but `Local::now()` re-resolves the
+                // timezone offset on every call under WASM. This is polled in
+                // busy-wait loops, so it ran constantly.
                 Ok(self.alloc_datum(Datum::Int(
-                    chrono::Local::now()
-                        .signed_duration_since(self.system_start_time)
-                        .num_milliseconds() as i32,
+                    (chrono::Utc::now().timestamp_millis()
+                        - self.system_start_time.timestamp_millis()) as i32,
                 )))
             },
             BuiltInSymbol::KeyboardFocusSprite => {
@@ -3154,7 +3173,7 @@ impl DirPlayer {
                         self.mouse_loc = (x, y);
                         // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
                         // Only request pointer lock if cursor is hidden AND 3D content is active.
-                        if self.cursor_is_hidden && !self.w3d_frame_buffers.is_empty() {
+                        if self.cursor_is_hidden && self.w3d_any_rendered {
                             self.wants_pointer_lock = true;
                         }
                         Ok(())
@@ -4420,7 +4439,7 @@ pub async fn player_call_script_handler_raw_args(
     // On each BACKWARD jump (a loop iteration) we check elapsed time and, past a
     // frame's worth, yield a real macrotask so queued input events fire, then
     // resume. Time-budgeted so ordinary fast compute loops are unaffected.
-    let mut last_yield_ms = chrono::Local::now().timestamp_millis();
+    let mut last_yield_ms = chrono::Utc::now().timestamp_millis();
     // Count backward jumps to distinguish a TIGHT busy-wait (thousands of
     // iterations/ms — `repeat while keyPressed`) from a heavy COMPUTE loop (a
     // few iterations, each doing real work — the game's `drawmap`/water
@@ -4483,7 +4502,7 @@ pub async fn player_call_script_handler_raw_args(
                         backjumps = backjumps.wrapping_add(1);
                         if backjumps >= 4096 {
                             backjumps = 0;
-                            let now = chrono::Local::now().timestamp_millis();
+                            let now = chrono::Utc::now().timestamp_millis();
                             if now - last_yield_ms >= 16 {
                                 last_yield_ms = now;
                                 let _ = timeout(
@@ -4781,7 +4800,7 @@ pub async fn player_call_script_handler_raw_args(
                     backjumps = backjumps.wrapping_add(1);
                     if backjumps >= 4096 {
                         backjumps = 0;
-                        let now = chrono::Local::now().timestamp_millis();
+                        let now = chrono::Utc::now().timestamp_millis();
                         if now - last_yield_ms >= 16 {
                             last_yield_ms = now;
                             let _ = timeout(

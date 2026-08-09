@@ -708,7 +708,7 @@ impl WebGL2Renderer {
             player.score_transition_active = false;
             return;
         }
-        let elapsed = chrono::Local::now().timestamp_millis() - start_ms;
+        let elapsed = chrono::Utc::now().timestamp_millis() - start_ms;
         let dur = info.duration_ms.max(1) as i64;
         let progress = (elapsed as f32 / dur as f32).clamp(0.0, 1.0);
 
@@ -795,7 +795,7 @@ impl WebGL2Renderer {
                 let (w, h) = self.size;
                 let old_pixels = self.read_prev_frame_rgba();
                 if old_pixels.len() == (w as usize * h as usize * 4) {
-                    let start_ms = chrono::Local::now().timestamp_millis();
+                    let start_ms = chrono::Utc::now().timestamp_millis();
                     self.active_transition = Some(TransitionPlayback {
                         old_pixels,
                         width: w,
@@ -4293,8 +4293,20 @@ impl WebGL2Renderer {
                     }
                 };
 
-                // Capture FBO pixels for world.image access (after releasing the scene3d borrow)
-                self.capture_w3d_frame(player, member_key, width, height);
+                // "3D has rendered" — drives the pointer-lock heuristic, which used
+                // to infer this from `w3d_frame_buffers` being non-empty.
+                player.w3d_any_rendered = true;
+
+                // Capture FBO pixels for world.image access — ONLY if a script has
+                // actually asked for this member's image. The readback is a
+                // synchronous GPU->CPU stall (22.9% of frame time in a profile of a
+                // 3D-heavy movie) plus two full-size allocations, and it ran every
+                // frame for every 3D member on the chance someone might read
+                // `world.image`. The getter's offscreen render covers the first
+                // request, so nothing is served stale.
+                if player.w3d_image_requested.contains(&member_key) {
+                    self.capture_w3d_frame(player, member_key, width, height);
+                }
 
                 // Unbind FBO so 2D compositor draws to the canvas, not the FBO
                 self.context.gl().bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
