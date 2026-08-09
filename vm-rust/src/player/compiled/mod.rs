@@ -408,6 +408,73 @@ pub fn run_handler_resumable(
     run_handler_resumable_ptr(compiled, scope_ptr)
 }
 
+/// Benchmark control: the smallest possible function with the same SIGNATURE
+/// and the same first act as the real one — read `pc`, park it back on the
+/// scope, report an escape. Everything the real function has and this does not
+/// is the giant `match`. Comparing entry cost between the two prices the
+/// function's own frame rather than any work in the prologue.
+#[inline(never)]
+pub fn run_handler_stub(
+    compiled: &CompiledHandler,
+    scope_ptr: *mut crate::player::scope::Scope,
+) -> Result<IrExit, ScriptError> {
+    let pc = unsafe { (*scope_ptr).bytecode_index };
+    if pc >= compiled.ops.len() {
+        return Ok(IrExit::Done);
+    }
+    unsafe { (*scope_ptr).bytecode_index = pc };
+    Ok(IrExit::Escape)
+}
+
+/// Benchmark control: `run_handler_stub` plus a frame the size of the real
+/// function's (624 bytes, read out of the release wasm), and nothing else.
+///
+/// This is the experiment that decides whether the ~17 ns entry cost is the
+/// SHADOW-STACK FRAME or something else about the big function. If this row
+/// benches near the stub, the frame is not the cost and splitting the `match`
+/// into `#[inline(never)]` arms would be wasted work; if it benches near the
+/// real function, the frame is the cost and shrinking it is the fix.
+#[inline(never)]
+pub fn run_handler_stub_framed(
+    compiled: &CompiledHandler,
+    scope_ptr: *mut crate::player::scope::Scope,
+) -> Result<IrExit, ScriptError> {
+    // 624 bytes RESERVED on the shadow stack — deliberately NOT initialised.
+    // `[0u8; 624]` would memset the frame on every call, which is work the real
+    // function never does: LLVM's prologue only decrements the stack pointer and
+    // lets each slot be written when used. `MaybeUninit` + a black-boxed pointer
+    // reserves the space and defeats removal without touching a byte of it.
+    let mut frame: core::mem::MaybeUninit<[u8; 624]> = core::mem::MaybeUninit::uninit();
+    core::hint::black_box(frame.as_mut_ptr());
+    let pc = unsafe { (*scope_ptr).bytecode_index };
+    if pc >= compiled.ops.len() {
+        return Ok(IrExit::Done);
+    }
+    unsafe { (*scope_ptr).bytecode_index = pc };
+    Ok(IrExit::Escape)
+}
+
+/// Benchmark control: the frame ZEROED rather than merely reserved.
+///
+/// Not a model of the real function — it is the upper bound, and it exists to
+/// show what the first version of `run_handler_stub_framed` accidentally
+/// measured. `[0u8; N]` memsets on every call; the real prologue does not. Keep
+/// both rows so the difference stays visible to whoever reads this next.
+#[inline(never)]
+pub fn run_handler_stub_zeroed(
+    compiled: &CompiledHandler,
+    scope_ptr: *mut crate::player::scope::Scope,
+) -> Result<IrExit, ScriptError> {
+    let mut frame = [0u8; 624];
+    core::hint::black_box(&mut frame);
+    let pc = unsafe { (*scope_ptr).bytecode_index };
+    if pc >= compiled.ops.len() {
+        return Ok(IrExit::Done);
+    }
+    unsafe { (*scope_ptr).bytecode_index = pc };
+    Ok(IrExit::Escape)
+}
+
 /// The loop body, entered with the scope pointer already in hand.
 ///
 /// Split out of `run_handler_resumable` purely so the benchmark can price the

@@ -7293,6 +7293,14 @@ pub fn run_bytecode_benchmark() -> String {
         // than a `reserve_player_mut` per iteration, because that is what the
         // real driver does — routing it through a closure here would measure
         // the benchmark instead of the thing being benchmarked.
+        //
+        // NOTE: this handler is nothing but escapes, so every re-entry takes
+        // the escape FAST PATH in `run_handler_resumable` and never enters the
+        // big loop. That is the best case, not the typical one. The bisect rows
+        // below call `run_handler_resumable_ptr` directly, so they still price
+        // entering the big loop — the gap between the two IS what the fast path
+        // saves, and `IR re-entries` in the E2E_INTERP_STATS report says how
+        // often the suite actually gets it.
         {
             let escapes: usize = 200_000;
             let chunk = 1024usize;
@@ -7303,6 +7311,16 @@ pub fn run_bytecode_benchmark() -> String {
             let scope_ref = reserve_player_mut(|player| player.push_scope());
             let scope_ptr: *mut crate::player::scope::Scope =
                 reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+            // A real argument, so the `getparam` rows below read a live
+            // `DatumRef` (refcount bump on clone included) rather than the
+            // empty-args fast path.
+            reserve_player_mut(|player| {
+                let dr = player.alloc_datum(Datum::Int(7));
+                player.scopes[scope_ref].args.push(dr);
+            });
+            // Sink for rows whose result would otherwise be dead code. Printed
+            // with the report so the optimiser has to keep the loop.
+            let mut sink: usize = 0;
             let start = bench_now_ms();
             let mut done = 0usize;
             while done < escapes {
@@ -7313,9 +7331,135 @@ pub fn run_bytecode_benchmark() -> String {
                 done += chunk;
             }
             let ms = bench_now_ms() - start;
-            reserve_player_mut(|player| player.pop_scope());
             out.push_str(&line("IR escape re-entry", done, ms));
             out.push('\n');
+
+            // PROLOGUE BISECT. The row above is 6.6x worse on wasm than native
+            // (32.4 vs 4.9 ns) and the reason was never established, only
+            // guessed at. These rows split the prologue so the guess can be
+            // replaced with a measurement:
+            //
+            //   full     = derive the scope pointer + ensure_locals  (as above)
+            //   derive   = derive the pointer, skip ensure_locals
+            //   ensure   = pointer handed in, ensure_locals only
+            //   neither  = pointer handed in, no ensure_locals
+            //   stub     = a minimal function with the same signature
+            //   ptr only = the `reserve_player_mut` derive ALONE, no IR call
+            //
+            // "neither" is the floor for any prologue change; "stub" is the
+            // floor for a wasm call at all, so `neither - stub` is what the
+            // function's own body costs to ENTER, before it does any work.
+            //
+            // Each row is warmed and then timed over ~40x more iterations than
+            // the row above, and the whole set runs TWICE. At the original
+            // 200k iterations a row took ~5ms and the numbers moved ±9 ns
+            // between identical runs — V8 tiers wasm up from baseline to the
+            // optimising compiler mid-row, so short rows measure the tier-up,
+            // not the code. Two passes make that visible instead of silent:
+            // pass 2 is the one to read.
+            {
+                let warmup = 1 << 20;
+                let escapes_b: usize = 8_000_000;
+                macro_rules! esc_row {
+                    ($pass:expr, $label:expr, $body:expr) => {{
+                        let mut w = 0usize;
+                        while w < warmup {
+                            for i in 0..chunk {
+                                unsafe { (*scope_ptr).bytecode_index = i };
+                                #[allow(clippy::redundant_closure_call)]
+                                $body(i);
+                            }
+                            w += chunk;
+                        }
+                        let start = bench_now_ms();
+                        let mut done = 0usize;
+                        while done < escapes_b {
+                            for i in 0..chunk {
+                                unsafe { (*scope_ptr).bytecode_index = i };
+                                #[allow(clippy::redundant_closure_call)]
+                                $body(i);
+                            }
+                            done += chunk;
+                        }
+                        let ms = bench_now_ms() - start;
+                        out.push_str(&line(&format!("  p{} {}", $pass, $label), done, ms));
+                        out.push('\n');
+                    }};
+                }
+                for pass in 1..=2 {
+
+                // Full path, through the public entry point — the same thing
+                // the "IR escape re-entry" row measures, repeated here so it
+                // gets the same warmup and length as everything below it.
+                esc_row!(pass, "re-entry: full (via wrapper)", |_i| {
+                    let _ = compiled::run_handler_resumable(&compiled_esc, scope_ref);
+                });
+                // The same work, but WITHOUT the wrapper in the way. If this
+                // comes out well under the row above, the difference is the
+                // extra call, not `ensure_locals`.
+                esc_row!(pass, "re-entry: derive+ensure, no wrapper", |_i| {
+                    let p: *mut crate::player::scope::Scope =
+                        reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+                    unsafe { (*p).ensure_locals(compiled_esc.n_locals) };
+                    let _ = compiled::run_handler_resumable_ptr(&compiled_esc, p);
+                });
+                esc_row!(pass, "re-entry: derive ptr only", |_i| {
+                    let p: *mut crate::player::scope::Scope =
+                        reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+                    let _ = compiled::run_handler_resumable_ptr(&compiled_esc, p);
+                });
+                esc_row!(pass, "re-entry: ensure only", |_i| {
+                    unsafe { (*scope_ptr).ensure_locals(compiled_esc.n_locals) };
+                    let _ = compiled::run_handler_resumable_ptr(&compiled_esc, scope_ptr);
+                });
+                esc_row!(pass, "re-entry: neither", |_i| {
+                    let _ = compiled::run_handler_resumable_ptr(&compiled_esc, scope_ptr);
+                });
+                // Entry cost of a MINIMAL function with the same signature.
+                // The gap between this and "neither" is what the real
+                // function's own body costs to enter, before it does anything.
+                esc_row!(pass, "re-entry: stub fn (call floor)", |_i| {
+                    let _ = compiled::run_handler_stub(&compiled_esc, scope_ptr);
+                });
+                // Which part of the ~17 ns entry cost is the frame, and which
+                // is the locals? These two stubs carry one each.
+                esc_row!(pass, "re-entry: stub + 624B frame", |_i| {
+                    let _ = compiled::run_handler_stub_framed(&compiled_esc, scope_ptr);
+                });
+                esc_row!(pass, "re-entry: stub + 624B ZEROED (upper bound)", |_i| {
+                    let _ = compiled::run_handler_stub_zeroed(&compiled_esc, scope_ptr);
+                });
+                // The derive alone. `bytecode_index` is written THROUGH the
+                // derived pointer so the closure's result is observable and the
+                // optimiser cannot delete it.
+                esc_row!(pass, "re-entry: ptr derive alone (no IR)", |i| {
+                    let p: *mut crate::player::scope::Scope =
+                        reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+                    unsafe { (*p).bytecode_index = i };
+                });
+
+                // `GetParam`'s two ways to reach an argument. The escape rows
+                // above cannot show this — that handler is nothing but escapes
+                // and never executes a param read — but `GetParam` runs
+                // NATIVELY in the IR, so its cost is paid per op, not per
+                // escape. `reserve_player_ref` is not `#[inline(always)]`,
+                // unlike `reserve_player_mut`.
+                esc_row!(pass, "getparam: via reserve_player_ref", |_i| {
+                    let dr = reserve_player_ref(|player| {
+                        player.scopes.get(scope_ref).unwrap().args.get(0).cloned()
+                            .unwrap_or(crate::player::DatumRef::Void)
+                    });
+                    sink = sink.wrapping_add(dr.unwrap());
+                });
+                esc_row!(pass, "getparam: via scope ptr", |_i| {
+                    let dr = unsafe { (*scope_ptr).arg(0) };
+                    sink = sink.wrapping_add(dr.unwrap());
+                });
+                }
+            }
+
+            out.push_str(&format!("  [getparam sink={sink}]\n"));
+            reserve_player_mut(|player| player.pop_scope());
         }
     }
 
