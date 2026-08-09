@@ -318,6 +318,10 @@ fn cow_on_assign(v: StackDatum) -> StackDatum {
 /// Run a fully-pure compiled handler against `scope_ref`. Returns Ok on the
 /// handler's `ret`; the caller's teardown reads `scope.return_value`.
 pub fn run_handler(compiled: &CompiledHandler, scope_ref: ScopeRef) -> Result<(), ScriptError> {
+    // Size the local file. `run_handler_resumable` no longer does this — it is
+    // entered once per ESCAPE, and sizing is a once-per-FRAME job. This entry
+    // point has no frame setup behind it, so it does its own.
+    reserve_player_mut(|player| player.scopes[scope_ref].ensure_locals(compiled.n_locals));
     match run_handler_resumable(compiled, scope_ref)? {
         IrExit::Done => Ok(()),
         IrExit::Escape | IrExit::BackJump => Err(ScriptError::new(
@@ -361,11 +365,30 @@ pub fn run_handler_resumable(
 ) -> Result<IrExit, ScriptError> {
     // `scopes` is a fixed, pre-filled pool that never reallocates (see
     // `push_scope`), so this slot address is stable for the run.
+    //
+    // Sizing the local file is NOT done here. This function is re-entered once
+    // per escaped opcode — ~120 M times across the e2e suite — while the file
+    // only needs sizing once per handler FRAME, which `setup_handler_frame`
+    // already does with the very same count (`CompiledHandler.n_locals` is
+    // `handler.local_name_ids.len()`, the value it passes). `Scope::local` and
+    // `set_local` stay bounds-safe regardless: a caller that skipped it reads
+    // VOID and grows on write rather than panicking.
     let scope_ptr: *mut crate::player::scope::Scope =
         reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
-    // Locals live in the scope, shared with the interpreter. Sized once here so
-    // the op loop can index without a bounds-grow on every write.
-    unsafe { (*scope_ptr).ensure_locals(compiled.n_locals) };
+
+    run_handler_resumable_ptr(compiled, scope_ptr)
+}
+
+/// The loop body, entered with the scope pointer already in hand.
+///
+/// Split out of `run_handler_resumable` purely so the benchmark can price the
+/// two halves of the prologue — deriving the pointer, and `ensure_locals` —
+/// against each other and against neither. Callers outside the bench should use
+/// `run_handler_resumable`.
+pub fn run_handler_resumable_ptr(
+    compiled: &CompiledHandler,
+    scope_ptr: *mut crate::player::scope::Scope,
+) -> Result<IrExit, ScriptError> {
     // Reads and writes go through the same raw pointer the operand stack uses.
     // Nothing borrows across an escape: the Escape arm RETURNS, so the
     // interpreter op that follows has exclusive access.
@@ -413,10 +436,12 @@ pub fn run_handler_resumable(
             IrOp::GetLocal(s) => { st_push!(lc_get!(*s)); pc += 1; }
             IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); lc_set!(*s, v); pc += 1; }
             IrOp::GetParam(s) => {
+                // Through the pointer this function already derived, rather
+                // than a second lookup of the same scope. `reserve_player_ref`
+                // is not `#[inline(always)]` (unlike `reserve_player_mut`), so
+                // on wasm this was a real call per param read.
                 let s = *s as usize;
-                let dr = reserve_player_ref(|player| {
-                    player.scopes.get(scope_ref).unwrap().args.get(s).cloned().unwrap_or(DatumRef::Void)
-                });
+                let dr = unsafe { (*scope_ptr).arg(s) };
                 st_push!(StackDatum::Ref(dr));
                 pc += 1;
             }

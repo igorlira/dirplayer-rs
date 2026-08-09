@@ -386,6 +386,15 @@ impl Scope {
         self.locals_assigned[slot] = true;
     }
 
+    /// Read an argument by index, VOID past the end. Mirrors `local`, and
+    /// exists so the IR can reach args through the scope pointer it already
+    /// holds: writing `(*scope_ptr).args.get(i)` at the call site would autoref
+    /// through the Vec's `Deref` to a slice, which is a raw-pointer footgun.
+    #[inline]
+    pub fn arg(&self, index: usize) -> DatumRef {
+        self.args.get(index).cloned().unwrap_or(DatumRef::Void)
+    }
+
     /// Has this slot ever been assigned in this invocation? Only `do`/`eval`
     /// name resolution needs this — see `locals_assigned`.
     #[inline]
