@@ -304,6 +304,27 @@ pub fn trigger_timeout(name: &str) {
     player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
 }
 
+// ── Interpreter instrumentation ─────────────────────────────────────────
+//
+// Off by default; the browser e2e harness turns it on for the whole suite so
+// the opcode histogram is sampled across every movie rather than one title.
+// See `player::interp_stats`.
+
+#[wasm_bindgen]
+pub fn set_interp_stats_enabled(enabled: bool) {
+    crate::player::interp_stats::set_enabled(enabled);
+}
+
+#[wasm_bindgen]
+pub fn reset_interp_stats() {
+    crate::player::interp_stats::reset();
+}
+
+#[wasm_bindgen]
+pub fn get_interp_stats_report() -> String {
+    crate::player::interp_stats::report()
+}
+
 // ── External Xtra plugin host surface ───────────────────────────────────
 //
 // JS calls these after fetching and instantiating a plugin .wasm. The

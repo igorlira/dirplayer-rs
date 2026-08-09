@@ -400,6 +400,9 @@ pub fn sync_locals_in(
             }
         }
     });
+    crate::player::interp_stats::record_sync_in(
+        compiled.local_name_ids.len().min(locals.len()),
+    );
 }
 
 /// The IR loop, entered at `scope.bytecode_index` and returning how it stopped.
@@ -456,6 +459,9 @@ pub fn run_handler_resumable(
                             scope.locals.insert(*name_id, v.clone().into_ref());
                         }
                     }
+                    crate::player::interp_stats::record_sync_out(
+                        compiled.local_name_ids.len().min(locals.len()),
+                    );
                 }
                 return Ok(IrExit::Escape { sync_locals });
             }

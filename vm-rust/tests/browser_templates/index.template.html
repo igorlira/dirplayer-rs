@@ -83,6 +83,9 @@
     window.__testDebug = $DEBUG_MODE;
     // Optional substring filter (E2E_FILTER env var) — run only matching test_* fns.
     window.__testFilter = "$TEST_FILTER";
+    // Interpreter opcode/escape counters — see E2E_INTERP_STATS in
+    // scripts/run-browser-tests.mjs.
+    window.__interpStatsEnabled = $INTERP_STATS;
 
     // Ruffle + DirPlayer Flash bridge — mirrors public/index.html setup.
     // dirplayer-rs ships a fork of Ruffle namespaced under
@@ -218,6 +221,16 @@
       window.dirplayer_resolveAndLoadMovieXtras = api.resolveAndLoadMovieXtras;
       statusLine('Module loaded. Running tests...');
 
+      // Interpreter instrumentation, opt-in via E2E_INTERP_STATS=1. Counters
+      // are process-global in the wasm module and every test runs against this
+      // one instance, so they accumulate across all movies without any
+      // per-test aggregation — which is the entire reason to sample here
+      // rather than in a single title.
+      if (window.__interpStatsEnabled && typeof wasm.set_interp_stats_enabled === 'function') {
+        wasm.reset_interp_stats();
+        wasm.set_interp_stats_enabled(true);
+      }
+
       const testFilter = (window.__testFilter || '').trim().toLowerCase();
       const filterParts = testFilter ? testFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
       const testFns = Object.keys(wasm)
@@ -254,6 +267,17 @@
       results.tests.push({ name: '__init', status: 'fail', error: e.message });
       results.failed++;
       statusLine('ERROR: ' + e.message + '\n' + e.stack);
+    }
+
+    // Publish BEFORE `done`, so the spec is guaranteed to see it — the spec
+    // stops waiting the moment `done` flips.
+    try {
+      if (window.__interpStatsEnabled && typeof wasm !== 'undefined'
+          && typeof wasm.get_interp_stats_report === 'function') {
+        window.__interpStats = wasm.get_interp_stats_report();
+      }
+    } catch (e) {
+      window.__interpStats = 'interp stats unavailable: ' + (e && e.message ? e.message : e);
     }
 
     results.done = true;

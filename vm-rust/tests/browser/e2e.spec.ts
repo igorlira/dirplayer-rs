@@ -177,11 +177,24 @@ test("browser e2e tests", async ({ page }) => {
   );
   await handle.dispose();
 
-  const [testResults, panicMessage, scriptErrors] = await Promise.all([
+  const [testResults, panicMessage, scriptErrors, interpStats] = await Promise.all([
     page.evaluate(() => ((window as any).__testResults ?? null) as TestResults | null),
     page.evaluate(() => ((window as any).__testPanic ?? null) as string | null),
     page.evaluate(() => ((window as any).__scriptErrors ?? []) as string[]),
+    page.evaluate(() => ((window as any).__interpStats ?? null) as string | null),
   ]);
+
+  // Interpreter opcode/escape counters, accumulated across every test in the
+  // suite (all of them share one wasm instance). Written unconditionally so a
+  // failing run still yields the histogram.
+  if (interpStats) {
+    const statsDir = path.resolve(__dirname, "../../..", "test-results");
+    fs.mkdirSync(statsDir, { recursive: true });
+    const statsPath = path.join(statsDir, "interp-stats.txt");
+    fs.writeFileSync(statsPath, interpStats);
+    console.log(`\nInterpreter stats written to ${statsPath}`);
+    console.log(interpStats);
+  }
 
   // Collect all errors before acting on them so keep-open can fire first.
   const errors: string[] = [];

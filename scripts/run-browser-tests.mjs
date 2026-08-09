@@ -168,7 +168,12 @@ const html = template
   .replaceAll("$DEBUG_MODE", keepOpen ? "true" : "false")
   // Optional substring filter: `E2E_FILTER=lore npm run e2e-test-browser`
   // runs only test_* functions whose name contains the string.
-  .replaceAll("$TEST_FILTER", (loadedEnv.E2E_FILTER || "").replace(/"/g, ""));
+  .replaceAll("$TEST_FILTER", (loadedEnv.E2E_FILTER || "").replace(/"/g, ""))
+  // `E2E_INTERP_STATS=1` turns on the interpreter opcode/escape counters for
+  // the run and writes test-results/interp-stats.txt. OFF by default: the
+  // counters add two atomic RMWs per interpreted opcode, which is harmless for
+  // counting but perturbs timing, and some snapshots are timing-sensitive.
+  .replaceAll("$INTERP_STATS", loadedEnv.E2E_INTERP_STATS === "1" ? "true" : "false");
 fs.writeFileSync(path.join(RUNNER_DIR, "index.html"), html);
 
 // 7. Link the asset directory into the runner. Use a junction on Windows so

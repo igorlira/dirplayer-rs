@@ -27,6 +27,7 @@ pub mod events;
 pub mod font;
 pub mod geometry;
 pub mod handlers;
+pub mod interp_stats;
 pub mod js_lingo;
 pub mod js_lingo_loader;
 pub mod keyboard;
@@ -4372,6 +4373,10 @@ fn setup_handler_frame(
                 let c = crate::player::compiled::compile(handler_def, ctx.multiplier)
                     .filter(crate::player::compiled::is_worth_compiling)
                     .map(std::rc::Rc::new);
+                // Counted here, not inside `is_worth_compiling`, so the result
+                // is per DISTINCT handler: the outcome is cached on the
+                // HandlerDef, so this arm runs at most once per handler.
+                crate::player::interp_stats::record_compile_outcome(c.is_some());
                 *handler_def.compiled_ir.borrow_mut() = Some(c.clone());
                 c
             }
@@ -4383,6 +4388,9 @@ fn setup_handler_frame(
     } else {
         None
     };
+    // Call-weighted, unlike the compile outcome above: one hot handler the IR
+    // declined matters more than a hundred cold ones.
+    crate::player::interp_stats::record_handler_call(ir.is_some(), arg_list.len());
 
     Ok(FrameSetup::Frame(HandlerFrame {
         ir,
@@ -4610,6 +4618,10 @@ pub async fn player_call_script_handler_raw_args(
             break FrameTransfer::Done;
         }
         let opcode = handler_def.bytecode_array[bytecode_index].opcode;
+        // Every opcode the INTERPRETER runs passes through here — ops the IR
+        // executes natively never do. `ir_state.is_some()` separates an escape
+        // out of a compiled handler from a handler the IR declined outright.
+        crate::player::interp_stats::record_interp_op(opcode, ir_state.is_some());
         let exec_result = match try_execute_opcode_sync(opcode, &ctx) {
             Some(r) => r,
             None => {
