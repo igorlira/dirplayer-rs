@@ -2950,18 +2950,21 @@ impl Shockwave3dMemberHandlers {
 
                     let is_proplist = args.len() > 2 && matches!(player.get_datum(&args[2]), Datum::PropList(..));
                     if is_proplist {
-                        let map = player.get_datum(&args[2]).to_map()?.clone();
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxNumberOfModels".to_owned())), &player.allocator)?;
+                        let (map, map_sorted) = {
+                            let (m, srt) = player.get_datum(&args[2]).to_map_tuple()?;
+                            (m.clone(), srt)
+                        };
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxNumberOfModels".to_owned())), &player.allocator, map_sorted)?;
                         if let Ok(n) = player.get_datum(&v).int_value() { max_models = n; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"levelOfDetail".to_owned())), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"levelOfDetail".to_owned())), &player.allocator, map_sorted)?;
                         if player.get_datum(&v).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed") { detailed = true; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxDistance".to_owned())), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"maxDistance".to_owned())), &player.allocator, map_sorted)?;
                         match player.get_datum(&v) {
                             Datum::Int(i) => max_dist = *i as f32,
                             Datum::Float(f) => max_dist = *f as f32,
                             _ => {}
                         }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"modelList".to_owned())), &player.allocator)?;
+                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"modelList".to_owned())), &player.allocator, map_sorted)?;
                         let items = match player.get_datum(&v) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
                         for item in &items {
                             if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name); }

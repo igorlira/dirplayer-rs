@@ -106,14 +106,16 @@ impl TypeUtils {
         let datum = player.get_datum(datum_ref);
         let prop_key = player.get_datum(prop_key_ref);
 
-        let formatted_key = format_datum(prop_key_ref, player);
+        // `formatted_key` is only ever read on an error/warn path, so it is
+        // formatted there rather than eagerly here — this ran a full
+        // `format_datum` (and its heap allocation) on EVERY subscript read.
         let result = match datum {
-            Datum::PropList(prop_list, ..) => PropListUtils::get_prop(
+            Datum::PropList(prop_list, is_sorted) => PropListUtils::get_prop(
                 prop_list,
                 prop_key_ref,
                 &player.allocator,
                 false,
-                formatted_key.clone(),
+                *is_sorted,
             )?,
             Datum::Rect(vals, flags) => {
                 let index = prop_key.int_value()?; // 1..4
@@ -170,7 +172,8 @@ impl TypeUtils {
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Cannot index sprite {} with {}",
-                            sprite_number, formatted_key
+                            sprite_number,
+                            format_datum(prop_key_ref, player)
                         )))
                     }
                 };
@@ -297,6 +300,7 @@ impl TypeUtils {
             // silent no-op on VOID rather than an error.
             Datum::Void => player.alloc_datum(Datum::Void),
             _ => {
+                let formatted_key = format_datum(prop_key_ref, player);
                 web_sys::console::log_1(
                     &format!(
                         "  ❌ Cannot get sub-prop '{}' from type {}",
@@ -322,16 +326,10 @@ impl TypeUtils {
         player: &mut DirPlayer,
     ) -> Result<(), ScriptError> {
         let datum_type = player.get_datum(datum_ref).type_enum();
-        let formatted_key = format_datum(prop_key_ref, player);
         match datum_type {
-            DatumType::PropList => PropListUtils::set_prop(
-                datum_ref,
-                prop_key_ref,
-                value_ref,
-                player,
-                false,
-                &formatted_key,
-            ),
+            DatumType::PropList => {
+                PropListUtils::set_prop(datum_ref, prop_key_ref, value_ref, player, false)
+            }
             DatumType::List => {
                 let position = player.get_datum(prop_key_ref).int_value()?;
                 let index = position - 1;
@@ -363,7 +361,7 @@ impl TypeUtils {
             _ => {
                 warn!(
                     "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
-                    formatted_key,
+                    format_datum(prop_key_ref, player),
                     datum_type.type_str()
                 );
                 Ok(())

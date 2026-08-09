@@ -278,14 +278,15 @@ impl BuiltInHandlerManager {
         });
         if prop_lookup {
             return reserve_player_mut(|player| {
-                let prop_list = match player.get_datum(&args[0]) {
-                    Datum::PropList(pl, ..) => pl.clone(),
+                let (prop_list, is_sorted) = match player.get_datum(&args[0]) {
+                    Datum::PropList(pl, sorted) => (pl.clone(), *sorted),
                     _ => unreachable!(),
                 };
                 crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
                     &prop_list,
                     &args[1],
                     &player.allocator,
+                    is_sorted,
                 )
             });
         }
@@ -407,7 +408,7 @@ impl BuiltInHandlerManager {
             let is_prop_list = matches!(player.get_datum(list_ref), Datum::PropList(..));
             if is_prop_list && key_is_name {
                 crate::player::handlers::datum_handlers::prop_list::PropListUtils::set_at(
-                    player, list_ref, &args[1], &args[2], "",
+                    player, list_ref, &args[1], &args[2],
                 )?;
                 return Ok(());
             }

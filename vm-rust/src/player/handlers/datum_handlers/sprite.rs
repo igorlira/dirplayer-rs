@@ -664,9 +664,9 @@ impl SpriteDatumHandlers {
                             if args.len() > 1 {
                                 let list_datum = player.get_datum(&result).clone();
                                 match list_datum {
-                                    Datum::PropList(pairs, _) => {
+                                    Datum::PropList(pairs, pairs_sorted) => {
                                         return crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_by_key(
-                                            &pairs, &args[1], &player.allocator,
+                                            &pairs, &args[1], &player.allocator, pairs_sorted,
                                         );
                                     }
                                     Datum::List(_, item_refs, _) => {

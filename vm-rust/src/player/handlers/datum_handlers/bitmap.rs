@@ -515,18 +515,18 @@ impl BitmapDatumHandlers {
             // ("Cannot convert datum to map") trying to to_map() the color.
             let empty_map: std::collections::VecDeque<(DatumRef, DatumRef)> =
                 std::collections::VecDeque::new();
-            let draw_map: &std::collections::VecDeque<(DatumRef, DatumRef)> =
+            let (draw_map, draw_map_sorted): (&std::collections::VecDeque<(DatumRef, DatumRef)>, bool) =
                 if arg_pos >= args.len() {
-                    &empty_map
+                    (&empty_map, false)
                 } else {
                     let last_arg = player.get_datum(&args[arg_pos]);
                     if matches!(last_arg, Datum::ColorRef(_)) {
                         if explicit_color.is_none() {
                             explicit_color = last_arg.to_color_ref().ok();
                         }
-                        &empty_map
+                        (&empty_map, false)
                     } else {
-                        last_arg.to_map()?
+                        last_arg.to_map_tuple()?
                     }
                 };
             let bitmap = player.bitmap_manager.get_bitmap(*bitmap_ref).unwrap();
@@ -538,6 +538,7 @@ impl BitmapDatumHandlers {
                     &draw_map,
                     &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)),
                     &player.allocator,
+                        draw_map_sorted,
                 )?;
                 player.get_datum(&cr).to_color_ref()?
             };
@@ -558,6 +559,7 @@ impl BitmapDatumHandlers {
                 &draw_map,
                 &Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShapeType)),
                 &player.allocator,
+                        draw_map_sorted,
             )?;
             let shape_type_d = player.get_datum(&shape_type_d);
             let shape_type = if shape_type_d.is_void() {
@@ -570,6 +572,7 @@ impl BitmapDatumHandlers {
                 &draw_map,
                 &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Blend)),
                 &player.allocator,
+                        draw_map_sorted,
             )?;
             let blend = player.get_datum(&blend);
             let blend = if blend.is_void() {
@@ -589,6 +592,7 @@ impl BitmapDatumHandlers {
                         &draw_map,
                         &Datum::Symbol(Symbol::builtin(key)),
                         &player.allocator,
+                        draw_map_sorted,
                     )
                     .ok()?;
                     if player.get_datum(&value).is_void() {
@@ -606,6 +610,7 @@ impl BitmapDatumHandlers {
                 &draw_map,
                 &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Radius)),
                 &player.allocator,
+                        draw_map_sorted,
             )?;
             let radius_d = player.get_datum(&radius_d);
             let radius = if radius_d.is_void() { 8 } else { radius_d.int_value()?.max(0) };
@@ -781,11 +786,12 @@ impl BitmapDatumHandlers {
             let (color_ref, shape) = match params {
                 Datum::ColorRef(color_ref) => (color_ref.clone(), Symbol::builtin(BuiltInSymbol::Rect)),
                 Datum::Int(i) => (ColorRef::PaletteIndex(*i as u8), Symbol::builtin(BuiltInSymbol::Rect)),
-                Datum::PropList(prop_list, ..) => {
+                Datum::PropList(prop_list, prop_list_sorted) => {
                     let shape_ref = PropListUtils::get_by_concrete_key(
                         &prop_list,
                         &Datum::Symbol(Symbol::from_str(&"shapeType".to_string())),
                         &player.allocator,
+                        *prop_list_sorted,
                     )?;
                     let shape = match player.get_datum(&shape_ref) {
                         Datum::Symbol(s) => *s,
@@ -805,6 +811,7 @@ impl BitmapDatumHandlers {
                             &prop_list,
                             &Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)),
                             &player.allocator,
+                            *prop_list_sorted,
                         )?;
                         player.get_datum(&cr).to_color_ref()?.clone()
                     };

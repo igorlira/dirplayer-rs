@@ -555,14 +555,7 @@ pub async fn player_set_obj_prop(
         }),
         Datum::PropList(..) => reserve_player_mut(|player| {
             let key_ref = player.alloc_datum(Datum::Symbol(prop_name.to_owned()));
-            PropListUtils::set_prop(
-                obj_ref,
-                &key_ref,
-                value_ref,
-                player,
-                false,
-                prop_name.as_str(),
-            )
+            PropListUtils::set_prop(obj_ref, &key_ref, value_ref, player, false)
         }),
         Datum::Rect(..) => reserve_player_mut(|player| {
             RectDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
@@ -704,8 +697,8 @@ pub fn get_obj_prop(
             script_get_prop(player, &script_instance_id, prop_name)
         }
         Datum::ScriptRef(script_ref) => script_get_static_prop(player, &script_ref, prop_name),
-        Datum::PropList(prop_list, ..) => {
-            PropListUtils::get_prop_or_built_in(player, &prop_list, prop_name)
+        Datum::PropList(prop_list, is_sorted) => {
+            PropListUtils::get_prop_or_built_in(player, &prop_list, prop_name, is_sorted)
         }
         Datum::List(list_type, list, sorted) => {
             // Director: every datum has `.string` returning its textual form.

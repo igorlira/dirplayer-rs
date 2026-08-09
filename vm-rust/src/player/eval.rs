@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{cast_lib::INVALID_CAST_MEMBER_REF, datum_formatting::format_datum, sprite::ColorRef, DatumRef, ScriptError};
+use super::{cast_lib::INVALID_CAST_MEMBER_REF, sprite::ColorRef, DatumRef, ScriptError};
 
 #[derive(Parser)]
 #[grammar = "lingo.pest"]
@@ -1806,8 +1806,8 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                         }
                     }
                     // PropList: int index = Nth value, symbol/string = key lookup
-                    Datum::PropList(pairs, _) => {
-                        PropListUtils::get_at(pairs, &index_ref, &player.allocator)
+                    Datum::PropList(pairs, pairs_sorted) => {
+                        PropListUtils::get_at(pairs, &index_ref, &player.allocator, *pairs_sorted)
                     }
                     // Point indexed by number: 1=x, 2=y
                     Datum::Point(vals, flags) => {
@@ -2107,8 +2107,7 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                                 Ok(right_datum)
                             }
                             Datum::PropList(..) => {
-                                let formatted_key = format_datum(&index_ref, &player);
-                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum, &formatted_key)?;
+                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum)?;
                                 Ok(right_datum)
                             }
                             Datum::Point(..) => {

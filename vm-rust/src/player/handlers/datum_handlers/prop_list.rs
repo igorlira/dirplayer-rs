@@ -10,7 +10,7 @@ use crate::{
     player::{
         allocator::{DatumAllocator, DatumAllocatorTrait},
         compare::{datum_equals, datum_less_than},
-        datum_formatting::{format_concrete_datum, format_datum},
+        datum_formatting::format_concrete_datum,
         handlers::types::TypeUtils,
         player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer,
         ScriptError,
@@ -44,14 +44,27 @@ impl PropListUtils {
         Ok(low)
     }
 
+    /// `is_sorted` is `Datum::PropList`'s own sorted flag — the one maintained
+    /// by `sort`/`addProp`/`setaProp` via `find_index_to_add`.
+    ///
+    /// It matters because the binary search below is only valid on a sorted
+    /// list, and on an UNSORTED one it is pure waste: log2(n) `datum_less_than`
+    /// probes plus a `datum_equals_for_lookup` hit check that cannot succeed,
+    /// and then the full linear scan runs anyway. Prop lists are unsorted
+    /// unless a script sorts them, so that was the normal path for every list
+    /// of 8 or more entries. The flag was available at the call sites and
+    /// simply being dropped on the way in.
+    ///
+    /// Passing `false` is never wrong, only slower on a genuinely sorted list —
+    /// the linear scan is the authoritative answer either way (and returns the
+    /// FIRST match, where the binary search could land on a later duplicate).
     fn get_key_index(
         prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
+        is_sorted: bool,
     ) -> Result<i32, ScriptError> {
-        // For sorted prop lists with enough entries, use binary search
-        // (sorted lists are maintained by addProp/setaProp with find_index_to_add)
-        if prop_list.len() >= 8 {
+        if is_sorted && prop_list.len() >= 8 {
             // Try binary search: find insertion point, then check if the key matches
             let mut low = 0i32;
             let mut high = prop_list.len() as i32;
@@ -73,6 +86,13 @@ impl PropListUtils {
             }
             // Binary search may miss due to mixed key types — fall through to linear scan
         }
+        // A Symbol key — `obj.foo`, `getaProp(#foo)` — is the overwhelmingly
+        // common lookup, and it reduces to comparing interned ids. Take it
+        // through an inlined scan rather than the generic one below, which
+        // makes an out-of-line `Result`-returning call per entry.
+        if let Datum::Symbol(want) = key {
+            return Ok(Self::symbol_key_index(prop_list, *want, allocator));
+        }
         for (i, (k, _)) in prop_list.iter().enumerate() {
             let k_datum = allocator.get_datum(k);
             if Self::datum_equals_for_lookup(k_datum, key, allocator)? {
@@ -80,6 +100,51 @@ impl PropListUtils {
             }
         }
         Ok(-1)
+    }
+
+    /// `get_key_index`'s linear scan, specialised for a Symbol key.
+    ///
+    /// Exactly mirrors `datum_equals_for_lookup(entry_key, Datum::Symbol(want))`:
+    /// symbol keys compare by interned id, string keys by text, and an integer
+    /// key matches a numeric symbol (`#2` finds key `2`). Every other key type
+    /// falls through `datum_equals`' symbol arm to `false`.
+    fn symbol_key_index(
+        prop_list: &VecDeque<PropListPair>,
+        want: Symbol,
+        allocator: &DatumAllocator,
+    ) -> i32 {
+        let want_str = want.as_str();
+        // Hoisted: the integer arm re-parsed the symbol name for every entry.
+        let want_as_int = want_str.parse::<i32>().ok();
+        for (i, (k, _)) in prop_list.iter().enumerate() {
+            let hit = match allocator.get_datum(k) {
+                Datum::Symbol(got) => *got == want,
+                Datum::String(got) => got == want_str,
+                Datum::Int(got) => want_as_int == Some(*got),
+                _ => false,
+            };
+            if hit {
+                return i as i32;
+            }
+        }
+        -1
+    }
+
+    /// Format a prop-list key for an error message WITHOUT a `&DirPlayer`.
+    ///
+    /// The `formatted_key` these lookups used to take was produced eagerly by
+    /// `format_datum` at every call site — a heap allocation and a full format
+    /// on every `getaProp`/`setaProp`, for a string that is only ever read on
+    /// the not-found error path. Keys are symbols, strings or ints in
+    /// practically all real Lingo, none of which need player context; anything
+    /// else gets its type name, which is all the message was worth anyway.
+    pub fn format_key_for_error(key: &Datum) -> String {
+        match key {
+            Datum::Symbol(s) => format!("#{}", s.as_str()),
+            Datum::String(s) => format!("\"{s}\""),
+            Datum::Int(i) => i.to_string(),
+            other => format!("<{}>", other.type_enum().type_str()),
+        }
     }
 
     pub fn datum_equals_for_lookup(
@@ -127,14 +192,24 @@ impl PropListUtils {
         player: &mut DirPlayer,
         prop_list: &VecDeque<PropListPair>,
         key: Symbol,
+        is_sorted: bool,
     ) -> Result<DatumRef, ScriptError> {
-        let key_index =
-            Self::get_key_index(prop_list, &Datum::String(key.to_string()), &player.allocator)?;
-        if key_index >= 0 {
-            return Ok(prop_list[key_index as usize].1.clone());
-        }
-        let key_index =
-            Self::get_key_index(prop_list, &Datum::Symbol(key.to_owned()), &player.allocator)?;
+        // ONE pass with the Symbol form. This used to run the whole lookup
+        // twice — first with `Datum::String(key.to_string())` (a heap
+        // allocation per property read), then again with `Datum::Symbol`. The
+        // String pass was pure waste on a symbol-keyed list, which is nearly
+        // all of them: `datum_less_than` orders symbols by their name, so a
+        // String probe key never matches a Symbol entry in the binary search
+        // and every read fell through to the full O(n) linear scan before the
+        // Symbol pass even started. `datum_equals_for_lookup` already treats
+        // String and Symbol keys as interchangeable (both arms below), so the
+        // single Symbol pass finds string-keyed entries too.
+        let key_index = Self::get_key_index(
+            prop_list,
+            &Datum::Symbol(key.to_owned()),
+            &player.allocator,
+            is_sorted,
+        )?;
         if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
         }
@@ -174,11 +249,11 @@ impl PropListUtils {
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
         is_required: bool,
-        formatted_key: String,
+        is_sorted: bool,
     ) -> Result<DatumRef, ScriptError> {
         let key = allocator.get_datum(&key_ref);
         // First try key-based lookup (works for all types including Int)
-        let key_index = Self::get_key_index(prop_list, key, &allocator)?;
+        let key_index = Self::get_key_index(prop_list, key, &allocator, is_sorted)?;
         if key_index >= 0 {
             return Ok(prop_list[key_index as usize].1.clone());
         }
@@ -195,7 +270,7 @@ impl PropListUtils {
         if is_required {
             return Err(ScriptError::new(format!(
                 "Prop not found: {}",
-                formatted_key
+                Self::format_key_for_error(key)
             )));
         }
         Ok(DatumRef::Void)
@@ -207,15 +282,14 @@ impl PropListUtils {
         value_ref: &DatumRef,
         player: &mut DirPlayer,
         is_required: bool,
-        formatted_key: &str,
     ) -> Result<(), ScriptError> {
         let key = player.get_datum(key_ref);
         let (prop_list, is_sorted) = player.get_datum(prop_list_ref).to_map_tuple()?;
-        let key_index = Self::get_key_index(&prop_list, key, &player.allocator)?;
+        let key_index = Self::get_key_index(&prop_list, key, &player.allocator, is_sorted)?;
         if is_required && key_index < 0 {
             return Err(ScriptError::new(format!(
                 "Prop not found: {}",
-                formatted_key
+                Self::format_key_for_error(key)
             )));
         }
         let index_to_add =
@@ -235,6 +309,7 @@ impl PropListUtils {
         prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
+        is_sorted: bool,
     ) -> Result<DatumRef, ScriptError> {
         let key = allocator.get_datum(key_ref);
         match key {
@@ -247,7 +322,7 @@ impl PropListUtils {
                     Err(ScriptError::new(format!("Index out of range: {}", index)))
                 }
             }
-            _ => Self::get_by_key(prop_list, key_ref, &allocator),
+            _ => Self::get_by_key(prop_list, key_ref, &allocator, is_sorted),
         }
     }
 
@@ -255,17 +330,24 @@ impl PropListUtils {
         prop_list: &VecDeque<PropListPair>,
         key_ref: &DatumRef,
         allocator: &DatumAllocator,
+        is_sorted: bool,
     ) -> Result<DatumRef, ScriptError> {
         let key = allocator.get_datum(key_ref);
-        Self::get_by_concrete_key(prop_list, key, allocator)
+        Self::get_by_concrete_key(prop_list, key, allocator, is_sorted)
     }
 
+    /// `is_sorted` must be the owning `Datum::PropList`'s flag. An earlier cut
+    /// of this hard-coded `false` here on the assumption that every caller was
+    /// a small option list; `getPropRef` and `getAt` also come through here on
+    /// large sorted lists, and dropping their binary search measurably
+    /// regressed `get_key_index`. Pass the real flag.
     pub fn get_by_concrete_key(
         prop_list: &VecDeque<PropListPair>,
         key: &Datum,
         allocator: &DatumAllocator,
+        is_sorted: bool,
     ) -> Result<DatumRef, ScriptError> {
-        let key_index = Self::get_key_index(prop_list, key, &allocator)?;
+        let key_index = Self::get_key_index(prop_list, key, &allocator, is_sorted)?;
         if key_index < 0 {
             return Ok(DatumRef::Void);
         }
@@ -277,7 +359,6 @@ impl PropListUtils {
         prop_list_ref: &DatumRef,
         key_ref: &DatumRef,
         value_ref: &DatumRef,
-        formatted_key: &str,
     ) -> Result<(), ScriptError> {
         let key = &player.get_datum(key_ref);
         match key {
@@ -293,14 +374,7 @@ impl PropListUtils {
                     return Err(ScriptError::new(format!("Index out of range: {}", index)));
                 }
             }
-            _ => Self::set_prop(
-                prop_list_ref,
-                key_ref,
-                value_ref,
-                player,
-                false,
-                formatted_key,
-            )?,
+            _ => Self::set_prop(prop_list_ref, key_ref, value_ref, player, false)?,
         }
         Ok(())
     }
@@ -326,9 +400,10 @@ impl PropListDatumHandlers {
                         let index_ref = &args[1];
                         let value_ref = &args[2];
 
-                        let prop_list = player.get_datum(datum).to_map()?;
+                        let (prop_list, is_sorted) =
+                            player.get_datum(datum).to_map_tuple()?;
                         let list_ref =
-                            PropListUtils::get_by_key(prop_list, prop_key_ref, &player.allocator)?;
+                            PropListUtils::get_by_key(prop_list, prop_key_ref, &player.allocator, is_sorted)?;
 
                         let index = player.get_datum(index_ref).int_value()? as usize;
                         let adjusted_index = if index == 0 { 0 } else { index - 1 };
@@ -375,14 +450,7 @@ impl PropListDatumHandlers {
                                 // via its position (2 missions → a HUD "4 / 10").
                                 // set_at does the Int/positional split and still
                                 // routes non-integer keys to set_prop.
-                                let formatted_key = format_datum(index_ref, &player);
-                                PropListUtils::set_at(
-                                    player,
-                                    &list_ref,
-                                    index_ref,
-                                    value_ref,
-                                    &formatted_key,
-                                )?;
+                                PropListUtils::set_at(player, &list_ref, index_ref, value_ref)?;
                                 Ok(DatumRef::Void)
                             }
                             Datum::Point(..) => {
@@ -503,13 +571,13 @@ impl PropListDatumHandlers {
 
     fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let prop_list = player.get_datum(datum).to_map()?;
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
             let count = if args.is_empty() {
                 prop_list.len()
             } else if args.len() == 1 {
                 let prop_name = &args[0];
                 let prop_value =
-                    PropListUtils::get_by_key(prop_list, prop_name, &player.allocator)?;
+                    PropListUtils::get_by_key(prop_list, prop_name, &player.allocator, is_sorted)?;
                 let prop_value = player.get_datum(&prop_value);
                 match prop_value {
                     Datum::List(_, list, _) => list.len(),
@@ -677,7 +745,7 @@ impl PropListDatumHandlers {
             );
 
             match prop_list {
-                Datum::PropList(entries, ..) => {
+                Datum::PropList(entries, is_sorted) => {
                     debug!(
                         "PropList has {} entries", 
                         entries.len()
@@ -692,7 +760,8 @@ impl PropListDatumHandlers {
                         );
                     }
                     
-                    let key_index = PropListUtils::get_key_index(entries, key, &player.allocator)?;
+                    let key_index =
+                        PropListUtils::get_key_index(entries, key, &player.allocator, *is_sorted)?;
                     if key_index >= 0 {
                         let result = entries[key_index as usize].1.clone();
                         debug!(
@@ -720,8 +789,9 @@ impl PropListDatumHandlers {
             if matches!(key, Datum::Void) {
                 return Ok(DatumRef::Void);
             }
-            let prop_list = player.get_datum(datum).to_map()?;
-            let key_index = PropListUtils::get_key_index(prop_list, key, &player.allocator)?;
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+            let key_index =
+                PropListUtils::get_key_index(prop_list, key, &player.allocator, is_sorted)?;
             if key_index >= 0 {
                 Ok(prop_list[key_index as usize].1.clone())
             } else {
@@ -748,7 +818,6 @@ impl PropListDatumHandlers {
 
     pub fn set_opt_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let formatted_key = format_datum(&args[0], &player);
             let prop_list = player.get_datum(datum);
             match prop_list {
                 Datum::PropList(..) => {}
@@ -761,14 +830,7 @@ impl PropListDatumHandlers {
             let prop_name_ref = &args[0];
             let value_ref = &args[1];
 
-            PropListUtils::set_prop(
-                datum,
-                &prop_name_ref,
-                &value_ref,
-                player,
-                false,
-                &formatted_key,
-            )?;
+            PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, false)?;
             Ok(DatumRef::Void)
         })
     }
@@ -805,7 +867,6 @@ impl PropListDatumHandlers {
 
     fn set_required_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let formatted_key = format_datum(&args[0], &player);
             let prop_list = player.get_datum(datum);
             match prop_list {
                 Datum::PropList(..) => {}
@@ -818,21 +879,13 @@ impl PropListDatumHandlers {
             let prop_name_ref = &args[0];
             let value_ref = &args[1];
 
-            PropListUtils::set_prop(
-                datum,
-                &prop_name_ref,
-                &value_ref,
-                player,
-                true,
-                &formatted_key,
-            )?;
+            PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, true)?;
             Ok(DatumRef::Void)
         })
     }
 
     pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
-            let formatted_key = format_datum(&args[0], &player);
             let prop_list = player.get_datum(datum);
             match prop_list {
                 Datum::PropList(..) => {}
@@ -845,7 +898,7 @@ impl PropListDatumHandlers {
             let prop_name_ref = &args[0];
             let value_ref = &args[1];
 
-            PropListUtils::set_at(player, datum, &prop_name_ref, &value_ref, &formatted_key)?;
+            PropListUtils::set_at(player, datum, &prop_name_ref, &value_ref)?;
             Ok(DatumRef::Void)
         })
     }
@@ -853,8 +906,8 @@ impl PropListDatumHandlers {
     pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let prop_list = player.get_datum(datum);
-            let prop_list = match prop_list {
-                Datum::PropList(prop_list, ..) => prop_list,
+            let (prop_list, is_sorted) = match prop_list {
+                Datum::PropList(prop_list, is_sorted) => (prop_list, *is_sorted),
                 _ => {
                     return Err(ScriptError::new(
                         "Cannot get prop list at non-prop list".to_string(),
@@ -862,7 +915,7 @@ impl PropListDatumHandlers {
                 }
             };
             let prop_name_ref = &args[0];
-            PropListUtils::get_at(&prop_list, &prop_name_ref, &player.allocator)
+            PropListUtils::get_at(&prop_list, &prop_name_ref, &player.allocator, is_sorted)
         })
     }
 
@@ -976,8 +1029,9 @@ impl PropListDatumHandlers {
             
             if prop_name.is_string() || prop_name.is_symbol() {
                 // Key-based lookup for strings and symbols
-                let prop_list = player.get_datum(datum).to_map()?;
-                let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+                let index =
+                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, is_sorted)?;
                 if index >= 0 {
                     let prop_list = player.get_datum_mut(datum).to_map_mut()?;
                     prop_list.remove(index as usize);
@@ -987,8 +1041,9 @@ impl PropListDatumHandlers {
                 }
             } else if prop_name.is_int() {
                 // For ints: try key lookup first, then fall back to positional
-                let prop_list = player.get_datum(datum).to_map()?;
-                let key_index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+                let key_index =
+                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, is_sorted)?;
                 
                 if key_index >= 0 {
                     // Found as key - delete by key
@@ -1009,8 +1064,9 @@ impl PropListDatumHandlers {
                 }
             } else {
                 // Other types (list/point, etc.) — key-based lookup
-                let prop_list = player.get_datum(datum).to_map()?;
-                let index = PropListUtils::get_key_index(&prop_list, prop_name, &player.allocator)?;
+                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+                let index =
+                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, is_sorted)?;
 
                 if index >= 0 {
                     let prop_list = player.get_datum_mut(datum).to_map_mut()?;
@@ -1037,7 +1093,8 @@ impl PropListDatumHandlers {
         let result = match base {
             Datum::PropList(prop_list, _is_sorted) => {
                 // Get the property from the prop list
-                let prop_value = PropListUtils::get_by_key(&prop_list, &key, &player.allocator)?;
+                let prop_value =
+                    PropListUtils::get_by_key(&prop_list, &key, &player.allocator, *_is_sorted)?;
 
                 // If there's a second argument and the property is a list, index into it
                 if args.len() >= 2 {
@@ -1086,8 +1143,13 @@ impl PropListDatumHandlers {
                         // `#til` — `member(#til, N)` is not a member, so the
                         // sprite blanked for a frame every walk cycle: the
                         // blinking wizard.
-                        Datum::PropList(inner_pairs, _) => {
-                            PropListUtils::get_at(&inner_pairs, index_ref, &player.allocator)?
+                        Datum::PropList(inner_pairs, inner_sorted) => {
+                            PropListUtils::get_at(
+                                &inner_pairs,
+                                index_ref,
+                                &player.allocator,
+                                *inner_sorted,
+                            )?
                         }
                         // Point: index 1 = locH (x), index 2 = locV (y)
                         Datum::Point(vals, flags) => {

@@ -318,9 +318,9 @@ pub async fn player_call_datum_handler(
                                 // PropListUtils::get_at applies Director's rule: an
                                 // integer indexes positionally, anything else is a key
                                 // lookup.
-                                Datum::PropList(pairs, ..) => {
+                                Datum::PropList(pairs, pairs_sorted) => {
                                     crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
-                                        &pairs, &args[1], &player.allocator,
+                                        &pairs, &args[1], &player.allocator, pairs_sorted,
                                     )
                                 }
                                 _ => Ok(prop_ref)
