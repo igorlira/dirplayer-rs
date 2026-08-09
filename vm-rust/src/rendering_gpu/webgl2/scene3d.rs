@@ -3,6 +3,11 @@
 //! Renders W3dScene data to an offscreen FBO, producing a texture
 //! that can be composited as a regular sprite in the 2D pipeline.
 
+// NOTE: swapping this for `FxHashMap` is worth ~6.7% of frame time, but it
+// changes HashMap ITERATION ORDER, which is observable anywhere the renderer
+// takes "the first" camera/light/node out of a map. That is a plausible cause of
+// a 3D view coming out from the wrong angle, so it is reverted until the
+// order-dependent lookups are found and made explicit.
 use std::collections::HashMap;
 use wasm_bindgen::JsValue;
 use web_sys::{
@@ -49,6 +54,12 @@ struct MemberGpuData {
     /// (the SubDivSurfaces slider) mutates only runtime_state, not the scene, so
     /// this forces a GPU rebuild when the subdivided geometry must change.
     sds_version: u64,
+    /// Per-RESOURCE mesh signature at upload (vertex + face counts summed over the
+    /// resource's meshes). `mesh_content_version` is a single global counter, so
+    /// it says geometry changed SOMEWHERE but not where — Agent Free Ride bumps
+    /// it by ~4 per rebuild against ~364 mesh resources, and the whole set was
+    /// re-uploaded to service that. This gives per-resource granularity.
+    mesh_signatures: HashMap<Symbol, u64>,
     /// Per-texture data length at upload time (for incremental re-upload detection)
     texture_versions: HashMap<Symbol, u64>,
     /// Scene's texture_content_version at last check
@@ -1204,10 +1215,35 @@ void main() {
             ));
             self.logged_members.remove(&key);
         }
-        self.member_data.remove(&key);
+        // KEEP the outgoing entry: its GPU textures are reusable. A rebuild is
+        // triggered by `scene_version`, which counts nodes/meshes/textures/
+        // shaders — so cloning a single model or calling removeFromWorld
+        // invalidated the whole entry and re-decoded EVERY JPEG in the scene.
+        // A profile of a texture-heavy movie put `decode_and_upload_texture_impl`
+        // at 53% of total time, with the scalar zune_jpeg decode alone at 38%.
+        //
+        // Dropping this map also leaked every GL texture it held: `WebGlTexture`
+        // is a JS handle, so dropping the Rust value does NOT call
+        // `gl.deleteTexture`. Whatever is not carried over below is deleted.
+        let mut old_gpu = self.member_data.remove(&key);
 
         let mut mesh_groups: HashMap<Symbol, Vec<Mesh3dBuffers>> = HashMap::new();
+        let mut mesh_signatures: HashMap<Symbol, u64> = HashMap::new();
         let mut all_meshes = Vec::new();
+        // Meshes may only be carried over when NOTHING about the geometry has
+        // changed: `#sds` rewrites it, and `mesh_content_version` is the scene's
+        // own "geometry was mutated" signal.
+        //
+        // Gating on `sds_version` alone was wrong and caused visible regressions
+        // (Intel 3dText lost its tunnelling, a Havok camera view came out from
+        // the wrong angle). The per-resource signature is vertex + face COUNTS,
+        // so a mesh regenerated with identical topology but moved vertices
+        // compares equal — exactly what geometry animation does. Counts alone
+        // can only prove a resource is different, never that it is the same, so
+        // they must not override the scene's explicit change flag.
+        let content_unchanged = old_gpu.as_ref().map_or(false, |o| {
+            o.sds_version == sds_version && o.mesh_content_version == scene.mesh_content_version
+        });
 
         // Collect resource names used by LIGHT nodes (to skip their geometry)
         let light_resources: std::collections::HashSet<Symbol> = scene.nodes.iter()
@@ -1224,6 +1260,24 @@ void main() {
         for (name, decoded_meshes) in &scene.clod_meshes {
             if light_resources.contains(name) {
                 continue; // Skip light cone/sphere meshes
+            }
+            // Signature: vertex + face counts across this resource's meshes.
+            // Same idea as the texture byte-length check — cheap, and it moves
+            // whenever the geometry is rebuilt.
+            let sig: u64 = decoded_meshes
+                .iter()
+                .map(|m| (m.positions.len() as u64) << 20 ^ (m.faces.len() as u64))
+                .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b));
+            if content_unchanged {
+                if let Some(old) = old_gpu.as_mut() {
+                    if old.mesh_signatures.get(name) == Some(&sig) {
+                        if let Some(group) = old.mesh_groups.remove(name) {
+                            mesh_signatures.insert(*name, sig);
+                            mesh_groups.insert(name.clone(), group);
+                            continue;
+                        }
+                    }
+                }
             }
             let mut group = Vec::new();
             for mesh in decoded_meshes.iter() {
@@ -1345,6 +1399,7 @@ void main() {
                 }
                 group.push(buffers);
             }
+            mesh_signatures.insert(*name, sig);
             mesh_groups.insert(name.clone(), group);
         }
 
@@ -1398,6 +1453,35 @@ void main() {
             // are stored right-side-up). The skyline mesh UVs use the same convention
             // as everything else, and the texture declarations carry no orientation
             // flag, so flip these on upload to render the horizon the right way up.
+            // Same signature `update_textures_incremental` uses: the image's
+            // byte length. Unchanged => hand the existing GPU texture straight
+            // over and skip decode + upload entirely.
+            // Byte length can only prove an image is DIFFERENT, never that it is
+            // the same — a recolour that re-encodes to the same size compares
+            // equal (Heatwave Daytona's selected car rendered black off a stale
+            // texture). So require the scene's own texture_content_version to be
+            // unchanged as well.
+            let data_len = image_data.len() as u64;
+            let tex_content_same = old_gpu
+                .as_ref()
+                .map_or(false, |o| o.texture_content_version == scene.texture_content_version);
+            if let Some(old) = old_gpu.as_mut().filter(|_| tex_content_same) {
+                if old.texture_versions.get(tex_name) == Some(&data_len) {
+                    if let Some(tex) = old.textures.remove(tex_name) {
+                        if let Some(sz) = old.texture_sizes.get(tex_name) {
+                            texture_sizes.insert(*tex_name, *sz);
+                        }
+                        if old.alpha_textures.contains(tex_name) {
+                            alpha_textures.insert(*tex_name);
+                        }
+                        if old.soft_alpha_textures.contains(tex_name) {
+                            soft_alpha_textures.insert(*tex_name);
+                        }
+                        textures.insert(*tex_name, tex);
+                        continue;
+                    }
+                }
+            }
             let flip_v = lower.contains("skyline");
             if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
                 texture_sizes.insert(*tex_name, (w, h));
@@ -1408,6 +1492,28 @@ void main() {
                     soft_alpha_textures.insert(*tex_name);
                 }
                 textures.insert(*tex_name, tex);
+            }
+        }
+
+        // Release whatever was NOT carried over. `WebGlTexture` is a JS handle,
+        // so dropping the map frees no GPU memory — before this, every rebuild
+        // leaked its entire texture set.
+        if let Some(old) = old_gpu.take() {
+            let gl = context.gl();
+            for (_, tex) in old.textures.iter() {
+                gl.delete_texture(Some(tex));
+            }
+            for (_, tex) in old.cube_maps.iter() {
+                gl.delete_texture(Some(tex));
+            }
+            // Meshes not carried over. Each holds a VAO plus up to seven VBOs,
+            // and nothing freed them before — Agent Free Ride rebuilds 200+
+            // times a session against ~364 mesh resources, so it leaked the
+            // scene's entire vertex data over and over.
+            for (_, group) in old.mesh_groups.iter() {
+                for m in group.iter() {
+                    m.delete(gl);
+                }
             }
         }
 
@@ -1426,7 +1532,7 @@ void main() {
             texture_versions.insert(*tex_name, image_data.len() as u64);
         }
         self.member_data.insert(key, MemberGpuData {
-            mesh_groups, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
+            mesh_groups, mesh_signatures, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
             scene_version: current_version,
             mesh_content_version: scene.mesh_content_version,
             sds_version,

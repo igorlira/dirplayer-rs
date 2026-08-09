@@ -51,6 +51,35 @@ pub struct Mesh3dBuffers {
 }
 
 impl Mesh3dBuffers {
+    /// Release every GL object this mesh owns.
+    ///
+    /// `WebGlBuffer`/`WebGlVertexArrayObject` are JS handles — dropping the Rust
+    /// value does NOT free the GPU allocation. Nothing called this before, so a
+    /// scene rebuild leaked a VAO plus up to seven VBOs per mesh, for every mesh
+    /// in the scene. Agent Free Ride rebuilds constantly (it appends track
+    /// sections as you drive, which changes `nodes.len()`), so it leaked the
+    /// whole scene's vertex data over and over.
+    pub fn delete(&self, gl: &web_sys::WebGl2RenderingContext) {
+        gl.delete_vertex_array(Some(&self.vao));
+        gl.delete_buffer(Some(&self.vbo_positions));
+        gl.delete_buffer(Some(&self.vbo_normals));
+        for b in [
+            &self.vbo_texcoords,
+            &self.vbo_texcoords2,
+            &self.vbo_bone_indices,
+            &self.vbo_bone_weights,
+            &self.vbo_vertex_colors,
+        ] {
+            if let Some(b) = b.as_ref() {
+                gl.delete_buffer(Some(b));
+            }
+        }
+        gl.delete_buffer(Some(&self.ibo));
+        if let Some(b) = self.line_ibo.borrow().as_ref() {
+            gl.delete_buffer(Some(b));
+        }
+    }
+
     /// Upload mesh data to GPU buffers.
     ///
     /// Vertex attributes:
