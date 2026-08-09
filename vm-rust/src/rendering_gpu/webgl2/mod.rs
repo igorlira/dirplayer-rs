@@ -5437,9 +5437,22 @@ impl WebGL2Renderer {
         // Stack for flood fill (use iterative approach to avoid stack overflow)
         let mut stack: Vec<(usize, usize)> = Vec::new();
 
-        // Helper to check if a pixel matches the background color (by RGB)
+        // Resolve the palette ONCE. `bitmap.get_pixel_color` ran a full
+        // `resolve_color_ref` — palette-map lookup, `find_by_member`, the lot —
+        // for every probe; the table makes a probe an array index.
+        //
+        // The probing itself stays LAZY. Precomputing an is-background flag for
+        // the whole bitmap up front is slower in practice: the flood fill only
+        // ever reaches the border plus the connected background, so an eager
+        // W*H pass does strictly more work than the fill it feeds, and it
+        // measurably regressed this function.
+        let palette_table = crate::player::bitmap::bitmap::resolve_palette_table(
+            palettes,
+            &bitmap.palette_ref,
+            bitmap.original_bit_depth,
+        );
         let matches_bg = |x: usize, y: usize| -> bool {
-            let (r, g, b) = bitmap.get_pixel_color(palettes, x as u16, y as u16);
+            let (r, g, b) = bitmap.get_pixel_color_fast(&palette_table, x as u16, y as u16);
             r == bg_color_rgb.0 && g == bg_color_rgb.1 && b == bg_color_rgb.2
         };
 
