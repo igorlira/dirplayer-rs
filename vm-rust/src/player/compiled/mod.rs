@@ -135,18 +135,37 @@ pub fn compile(handler: &HandlerDef, multiplier: u32) -> Option<CompiledHandler>
     })
 }
 
-/// Is compiling this handler likely to pay for itself?
+/// Largest share of escaped ops (percent) a handler may have and still be
+/// worth compiling.
 ///
-/// A handler that is mostly escapes would run the IR loop only to bounce
-/// straight back into the interpreter for each op — strictly slower than just
-/// interpreting. Require a real op stream and a majority of natively-executed
-/// ops.
+/// An escape is no longer free, just cheap: the driver re-enters
+/// `run_handler_resumable` ONCE PER ESCAPE, and each re-entry pays a
+/// `reserve_player_mut`, an `ensure_locals` check and loop setup. A handler
+/// that is nothing but escapes therefore runs the IR loop only to bounce
+/// straight back out, which is strictly slower than interpreting it.
+///
+/// It used to be 50% (`escapes * 2 < ops.len()`), chosen when an escape ALSO
+/// dragged the whole local file into and out of a hash map. With that gone the
+/// break-even sits much higher: the IR saves the driver's whole per-op path
+/// (debugger check, generation read, opcode decode, the two dispatch matches,
+/// result match) on every natively-executed op, and costs only re-entry on
+/// each escape.
+///
+/// This is deliberately a tunable constant rather than a folded-in `* 2`,
+/// because the right value is an empirical question — raise it, then check
+/// `interpreted ops` in the E2E_INTERP_STATS report. That total counts only
+/// ops reaching the interpreter, so it falls as the IR takes over, and it is
+/// the direct measure of whether a change to this number helped.
+const MAX_ESCAPE_PERCENT: usize = 65;
+
+/// Is compiling this handler likely to pay for itself? Requires a real op
+/// stream, and escapes below `MAX_ESCAPE_PERCENT` of it.
 pub fn is_worth_compiling(c: &CompiledHandler) -> bool {
     if c.ops.len() < 8 {
         return false;
     }
-    let escapes = c.ops.iter().filter(|o| matches!(o, IrOp::Escape { .. })).count();
-    escapes * 2 < c.ops.len()
+    let escapes = c.ops.iter().filter(|o| matches!(o, IrOp::Escape)).count();
+    escapes * 100 < c.ops.len() * MAX_ESCAPE_PERCENT
 }
 
 #[inline(always)]
