@@ -1462,6 +1462,38 @@ impl HavokPhysicsMemberHandlers {
 
         havok.state.rigid_bodies.push(rb);
         let new_rb_index = havok.state.rigid_bodies.len() - 1;
+
+        // Collision shape from the MODEL'S OWN GEOMETRY. Per the Xtra contract,
+        // `makeMovableRigidBody(model, mass)` / `(model, mass, isConvex)` builds a
+        // CONVEX HULL of the model's mesh; only the 4-arg form with an explicit
+        // #box / #sphere asks for a primitive. Without this the body fell back to
+        // the axis-aligned bounding box of that same mesh, which is both fatter
+        // than the real shape at every corner and centred on the node origin
+        // rather than on the geometry — so a chassis catches its phantom corners
+        // on ramp lips and wall edges that the real hull clears.
+        //
+        // The vertices are stored body-local (the mesh is already expressed about
+        // the node origin, which is the body position) and welded, since the
+        // narrow phase samples them per triangle per step. HKE-authored movable
+        // bodies populate the same field from their HKE mesh.
+        let wants_primitive = shape_type.eq_ignore_ascii_case("box")
+            || shape_type.eq_ignore_ascii_case("sphere");
+        if !wants_primitive && !mesh_vertices.is_empty() {
+            let mut welded: Vec<[f64; 3]> = Vec::new();
+            let mut seen: std::collections::HashSet<(i64, i64, i64)> = std::collections::HashSet::new();
+            for v in &mesh_vertices {
+                let key = ((v[0] * 4.0) as i64, (v[1] * 4.0) as i64, (v[2] * 4.0) as i64);
+                if seen.insert(key) {
+                    welded.push(*v);
+                }
+            }
+            debug!(
+                "[HAVOK-RB '{}'] collision hull: {} mesh verts -> {} welded",
+                model_name, mesh_vertices.len(), welded.len()
+            );
+            havok.state.rigid_bodies[new_rb_index].collision_hull_local = welded;
+        }
+
         havok.state.rigid_bodies[new_rb_index].snapshot_initial();
         // Re-link collision mesh for this body
         for cmesh in &mut havok.state.collision_meshes {
