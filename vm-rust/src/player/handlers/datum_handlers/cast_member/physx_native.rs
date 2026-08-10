@@ -362,12 +362,30 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
 //  AABB helpers
 // ==========================================================================
 
+/// World centre of a body's collision SHAPE. For a primitive/convex shape this
+/// is the body origin plus its authored `shape_offset` (rotated into world);
+/// #concaveShape returns the origin unchanged because its cooked triangles
+/// already carry the offset. Every narrowphase, broadphase and raycast site must
+/// use this rather than `body.position`, or an off-centre proxy collides in the
+/// wrong place — see `PhysXRigidBody::shape_offset`.
+pub fn shape_center(body: &crate::player::cast_member::PhysXRigidBody) -> [f64; 3] {
+    if matches!(body.shape, PhysXShapeKind::ConcaveShape) {
+        return body.position;
+    }
+    let off = body.shape_offset;
+    if off[0] == 0.0 && off[1] == 0.0 && off[2] == 0.0 {
+        return body.position;
+    }
+    v_add(body.position, q_rotate(axisangle_to_quat(body.orientation), off))
+}
+
 fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3], [f64; 3]) {
     let q = axisangle_to_quat(body.orientation);
+    let center = shape_center(body);
     match body.shape {
         PhysXShapeKind::Sphere => {
             let r = [body.radius; 3];
-            (v_sub(body.position, r), v_add(body.position, r))
+            (v_sub(center, r), v_add(center, r))
         }
         // Concave with cooked triangles: the cooked verts are already in the
         // world basis and are NOT centred on the body position (a track tile
@@ -391,7 +409,7 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
                 ex[1].abs() + ey[1].abs() + ez[1].abs(),
                 ex[2].abs() + ey[2].abs() + ez[2].abs(),
             ];
-            (v_sub(body.position, r), v_add(body.position, r))
+            (v_sub(center, r), v_add(center, r))
         }
         PhysXShapeKind::Capsule => {
             let hh = q_rotate(q, [body.half_height, 0.0, 0.0]);
@@ -400,7 +418,7 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
                 hh[1].abs() + body.radius,
                 hh[2].abs() + body.radius,
             ];
-            (v_sub(body.position, r), v_add(body.position, r))
+            (v_sub(center, r), v_add(center, r))
         }
     }
 }
@@ -448,23 +466,27 @@ fn build_contacts(
     let b = &state.bodies[j];
     let qa = axisangle_to_quat(a.orientation);
     let qb = axisangle_to_quat(b.orientation);
+    // SHAPE centres, not body origins: an authored proxy need not be centred on
+    // its own origin (see `shape_offset`).
+    let pa = shape_center(a);
+    let pb = shape_center(b);
 
     // Dispatch by shape pair. Single-contact pairs return Option<GuContact>;
     // manifold pairs (box-box, capsule-capsule) write directly to `buffer`.
     let single = match (a.shape, b.shape) {
         (PhysXShapeKind::Sphere, PhysXShapeKind::Sphere) =>
-            contact_sphere_sphere(a.position, a.radius, b.position, b.radius, 0.0),
+            contact_sphere_sphere(pa, a.radius, pb, b.radius, 0.0),
         (PhysXShapeKind::Sphere, PhysXShapeKind::Box) =>
-            contact_sphere_box(a.position, a.radius, b.half_extents, qb, b.position, 0.0),
+            contact_sphere_box(pa, a.radius, b.half_extents, qb, pb, 0.0),
         (PhysXShapeKind::Box, PhysXShapeKind::Sphere) => {
             // Reverse: PhysX dispatches sphere-as-shape0; flip the resulting normal.
-            contact_sphere_box(b.position, b.radius, a.half_extents, qa, a.position, 0.0)
+            contact_sphere_box(pb, b.radius, a.half_extents, qa, pa, 0.0)
                 .map(|c| gu::GuContact { normal: v_neg(c.normal), ..c })
         }
         (PhysXShapeKind::Sphere, PhysXShapeKind::Capsule) =>
-            contact_sphere_capsule(a.position, a.radius, b.position, qb, b.half_height, b.radius, 0.0),
+            contact_sphere_capsule(pa, a.radius, pb, qb, b.half_height, b.radius, 0.0),
         (PhysXShapeKind::Capsule, PhysXShapeKind::Sphere) => {
-            contact_sphere_capsule(b.position, b.radius, a.position, qa, a.half_height, a.radius, 0.0)
+            contact_sphere_capsule(pb, b.radius, pa, qa, a.half_height, a.radius, 0.0)
                 .map(|c| gu::GuContact { normal: v_neg(c.normal), ..c })
         }
         _ => None,
@@ -495,7 +517,7 @@ fn build_contacts(
     match (a.shape, b.shape) {
         (PhysXShapeKind::Box, PhysXShapeKind::Box) => {
             let mut pair_data: u8 = 0; // warm-start cache (not yet persistent across frames)
-            contact_box_box(buffer, a.half_extents, qa, a.position, b.half_extents, qb, b.position, &mut pair_data, 0.0);
+            contact_box_box(buffer, a.half_extents, qa, pa, b.half_extents, qb, pb, &mut pair_data, 0.0);
         }
         // Convex pairs route through the hull-vs-hull SAT + Sutherland-Hodgman
         // manifold. Boxes are wrapped as PolygonalBox on the fly so we can
@@ -529,16 +551,16 @@ fn build_contacts(
                 }
                 _ => { owned_b = gx::polygonal_box(b.half_extents); &owned_b }
             };
-            gx::contact_hull_hull(buffer, poly_a, poly_b, qa, a.position, qb, b.position, 0.0);
+            gx::contact_hull_hull(buffer, poly_a, poly_b, qa, pa, qb, pb, 0.0);
         }
         (PhysXShapeKind::Capsule, PhysXShapeKind::Capsule) => {
-            contact_capsule_capsule(buffer, a.position, qa, a.half_height, a.radius, b.position, qb, b.half_height, b.radius, 0.0);
+            contact_capsule_capsule(buffer, pa, qa, a.half_height, a.radius, pb, qb, b.half_height, b.radius, 0.0);
         }
         (PhysXShapeKind::Capsule, PhysXShapeKind::Box) => {
             super::physx_gu_capsule_box::contact_capsule_box(
                 buffer,
-                a.position, qa, a.half_height, a.radius,
-                b.position, qb, b.half_extents,
+                pa, qa, a.half_height, a.radius,
+                pb, qb, b.half_extents,
                 0.0,
             );
         }
@@ -548,8 +570,8 @@ fn build_contacts(
             // post-flip the normal so it lands in our (i=BodyA=Box, j=BodyB=Capsule) frame.
             super::physx_gu_capsule_box::contact_capsule_box(
                 buffer,
-                b.position, qb, b.half_height, b.radius,
-                a.position, qa, a.half_extents,
+                pb, qb, b.half_height, b.radius,
+                pa, qa, a.half_extents,
                 0.0,
             );
             swap_normal = true;
@@ -635,15 +657,17 @@ fn build_mesh_contacts(
     let f64_to_f32 = |v: [f64; 3]| -> [f32; 3] { [v[0] as f32, v[1] as f32, v[2] as f32] };
     let f32_to_f64 = |v: [f32; 3]| -> [f64; 3] { [v[0] as f64, v[1] as f64, v[2] as f64] };
 
+    // The query shape's own centre, not the body origin (see `shape_offset`).
+    let shape_pos = shape_center(shape_body);
     let local_contacts: Vec<mp::GuTriContact> = match shape_body.shape {
         PhysXShapeKind::Sphere => {
-            let c = f64_to_f32(to_local(shape_body.position));
+            let c = f64_to_f32(to_local(shape_pos));
             mp::sphere_vs_mesh(mesh, c, shape_body.radius as f32, 0.0)
         }
         PhysXShapeKind::Capsule => {
             let q = axisangle_to_quat(shape_body.orientation);
-            let p0_w = v_add(shape_body.position, q_rotate(q, [-shape_body.half_height, 0.0, 0.0]));
-            let p1_w = v_add(shape_body.position, q_rotate(q, [ shape_body.half_height, 0.0, 0.0]));
+            let p0_w = v_add(shape_pos, q_rotate(q, [-shape_body.half_height, 0.0, 0.0]));
+            let p1_w = v_add(shape_pos, q_rotate(q, [ shape_body.half_height, 0.0, 0.0]));
             mp::capsule_vs_mesh(mesh, f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
                                 shape_body.radius as f32, 0.0)
         }
@@ -655,7 +679,7 @@ fn build_mesh_contacts(
         // narrowphase, so Agent Free Ride's boarder free-fell from the first
         // simulate() and never generated a single contact.
         PhysXShapeKind::Box | PhysXShapeKind::ConvexShape => {
-            let c = f64_to_f32(to_local(shape_body.position));
+            let c = f64_to_f32(to_local(shape_pos));
             // Combined rotation: mesh^{-1} * shape ⇒ shape's local axes in mesh-local.
             let q_combined = q_mul(mesh_qinv, axisangle_to_quat(shape_body.orientation));
             let ax = f64_to_f32(q_rotate(q_combined, [1.0, 0.0, 0.0]));
@@ -726,21 +750,23 @@ fn build_terrain_contacts(
     let f64_to_f32 = |v: [f64; 3]| -> [f32; 3] { [v[0] as f32, v[1] as f32, v[2] as f32] };
     let f32_to_f64 = |v: [f32; 3]| -> [f64; 3] { [v[0] as f64, v[1] as f64, v[2] as f64] };
 
+    // Shape centre, not body origin (see `shape_offset`).
+    let body_pos = shape_center(body);
     let local_contacts = match body.shape {
         PhysXShapeKind::Sphere => {
-            let c = f64_to_f32(to_local(body.position));
+            let c = f64_to_f32(to_local(body_pos));
             hf::sphere_vs_heightfield(&terrain.height_field, c, body.radius as f32, 0.0)
         }
         PhysXShapeKind::Capsule => {
             let q = axisangle_to_quat(body.orientation);
-            let p0_w = v_add(body.position, q_rotate(q, [-body.half_height, 0.0, 0.0]));
-            let p1_w = v_add(body.position, q_rotate(q, [ body.half_height, 0.0, 0.0]));
+            let p0_w = v_add(body_pos, q_rotate(q, [-body.half_height, 0.0, 0.0]));
+            let p1_w = v_add(body_pos, q_rotate(q, [ body.half_height, 0.0, 0.0]));
             hf::capsule_vs_heightfield(&terrain.height_field,
                 f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
                 body.radius as f32, 0.0)
         }
         PhysXShapeKind::Box => {
-            let c = f64_to_f32(to_local(body.position));
+            let c = f64_to_f32(to_local(body_pos));
             let q_combined = q_mul(terrain_qinv, axisangle_to_quat(body.orientation));
             let ax = f64_to_f32(q_rotate(q_combined, [1.0, 0.0, 0.0]));
             let ay = f64_to_f32(q_rotate(q_combined, [0.0, 1.0, 0.0]));

@@ -2591,6 +2591,20 @@ pub struct PhysXRigidBody {
     /// the first step. Mirrors `HavokRigidBody::sync_scale`.
     pub sync_scale: [f64; 3],
 
+    /// Body-LOCAL offset from the body origin to the centre of a PRIMITIVE or
+    /// convex collision shape, captured at `createRigidBody` as the cooked
+    /// geometry's AABB centre. Director/PhysX pose a shape relative to the
+    /// actor, and an authored proxy is often not centred on its own origin — a
+    /// character capsule has its origin at the FEET (AreaZero's
+    /// `FPSPlayer1Stand`: half-height 1.0, AABB centre +1.0, so the geometry
+    /// spans 0..2 above the origin). Centring the box on the origin instead
+    /// buried the character half its height in the floor, which put its ground
+    /// ray 1.1 above the surface and left it permanently "airborne".
+    ///
+    /// NOT applied to #concaveShape: those cook their real vertex positions, so
+    /// the offset is already baked into the triangle mesh.
+    pub shape_offset: [f64; 3],
+
     /// Accumulated Lingo `applyForce` (PxForceMode::eFORCE): integrated as
     /// `v += F/m·dt` across the NEXT simulate() and then cleared, matching
     /// PxRigidBody::addForce semantics (force lives until the step consumes it).
@@ -2619,6 +2633,7 @@ impl Default for PhysXRigidBody {
             convex_hull: None,
             triangle_mesh: None,
             sync_scale: [1.0; 3],
+            shape_offset: [0.0; 3],
             pending_force: [0.0; 3],
             pending_torque: [0.0; 3],
         }

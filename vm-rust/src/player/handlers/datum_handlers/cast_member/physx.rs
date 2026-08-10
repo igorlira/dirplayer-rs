@@ -912,6 +912,17 @@ impl PhysXPhysicsMemberHandlers {
                 (0.5 * (mx[2] - mn[2])).abs().max(1e-4),
             ];
             rb.half_extents = he;
+            // Where the cooked geometry actually sits relative to the body
+            // origin. #concaveShape keeps its real vertex positions, so its mesh
+            // already carries this; every other shape is a primitive posed about
+            // a centre and needs it explicitly. See `shape_offset`.
+            if !matches!(shape, PhysXShapeKind::ConcaveShape) {
+                rb.shape_offset = [
+                    0.5 * (mn[0] + mx[0]),
+                    0.5 * (mn[1] + mx[1]),
+                    0.5 * (mn[2] + mx[2]),
+                ];
+            }
             if prim_radius <= 1.0 {
                 rb.radius = he[0].max(he[1]).max(he[2]);
             }
