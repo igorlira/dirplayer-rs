@@ -1501,14 +1501,45 @@ impl PhysXPhysicsMemberHandlers {
             let ang = rb.orientation[3] * std::f64::consts::PI / 180.0 * 0.5;
             let s = ang.sin(); let c = ang.cos();
             let q = [rb.orientation[0] * s, rb.orientation[1] * s, rb.orientation[2] * s, c];
+            // Shape centre, not body origin: an authored proxy need not be
+            // centred on its own origin (see `PhysXRigidBody::shape_offset`).
+            let c = super::physx_native::shape_center(rb);
             let hit = match rb.shape {
                 PhysXShapeKind::Sphere =>
-                    rc::raycast_sphere(rb.position, rb.radius, origin, dir, distance),
+                    rc::raycast_sphere(c, rb.radius, origin, dir, distance),
                 PhysXShapeKind::Capsule =>
-                    rc::raycast_capsule(rb.position, q, rb.half_height, rb.radius, origin, dir, distance),
-                // Box / convex / concave fall through to box AABB until a
-                // ray-vs-convex-hull port lands.
-                _ => rc::raycast_box(rb.half_extents, q, rb.position, origin, dir, distance),
+                    rc::raycast_capsule(c, q, rb.half_height, rb.radius, origin, dir, distance),
+                // Level geometry: hit the actual TRIANGLES. Testing a cooked mesh
+                // as its bounding box made every ray hit a slab the size of the
+                // whole floor — AreaZero's character probes the ground with
+                // `rayCastClosest(feet + 0.1, -Z)` and needs a hit within 0.2, so
+                // an AABB whose top sits 1.4 above the real surface (and 10.6 off
+                // in Y) left it reporting "airborne" forever and never landing.
+                PhysXShapeKind::ConcaveShape if rb.triangle_mesh.is_some() => {
+                    let mesh = rb.triangle_mesh.as_ref().unwrap();
+                    // Mesh vertices are body-local with translation carried by
+                    // the body position (see the cook in create_rigid_body).
+                    let o = [
+                        (origin[0] - rb.position[0]) as f32,
+                        (origin[1] - rb.position[1]) as f32,
+                        (origin[2] - rb.position[2]) as f32,
+                    ];
+                    let d = [dir[0] as f32, dir[1] as f32, dir[2] as f32];
+                    super::physx_gu_mesh::raycast_mesh(mesh, o, d, distance as f32)
+                        .map(|(tri, t, point, normal)| rc::GuRaycastHit {
+                            distance: t as f64,
+                            position: [
+                                point[0] as f64 + rb.position[0],
+                                point[1] as f64 + rb.position[1],
+                                point[2] as f64 + rb.position[2],
+                            ],
+                            normal: [normal[0] as f64, normal[1] as f64, normal[2] as f64],
+                            face_index: tri,
+                        })
+                }
+                // Box / convex fall through to box AABB until a ray-vs-convex-hull
+                // port lands.
+                _ => rc::raycast_box(rb.half_extents, q, c, origin, dir, distance),
             };
             if let Some(h) = hit { out.push((rb.id, h)); }
         }
