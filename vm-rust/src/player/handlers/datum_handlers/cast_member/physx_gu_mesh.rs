@@ -22,6 +22,12 @@ pub struct GuTriangleMesh {
     /// Local-space AABB.
     pub aabb_min: [f32; 3],
     pub aabb_max: [f32; 3],
+    /// Per-triangle internal-edge mask, bit k set when edge k (vertex k → k+1)
+    /// is shared with a COPLANAR neighbour. PhysX cooks the same adjacency
+    /// (`PxTriangleMeshFlag`/edge flags) and uses it to suppress edge contacts:
+    /// a shared coplanar edge is not a real crease, so it must never supply a
+    /// contact normal. See `box_vs_triangle`.
+    pub internal_edges: Vec<u8>,
 }
 
 impl GuTriangleMesh {
@@ -38,7 +44,12 @@ impl GuTriangleMesh {
 
     pub fn build(vertices: Vec<[f32; 3]>, triangles: Vec<u32>) -> Self {
         let tree = RTreeBuilder::build(&triangles, &vertices);
-        let mut mesh = Self { vertices, triangles, tree, aabb_min: [0.0; 3], aabb_max: [0.0; 3] };
+        let internal_edges = Self::cook_internal_edges(&vertices, &triangles);
+        let mut mesh = Self {
+            vertices, triangles, tree,
+            aabb_min: [0.0; 3], aabb_max: [0.0; 3],
+            internal_edges,
+        };
         if mesh.vertices.is_empty() {
             return mesh;
         }
@@ -51,6 +62,78 @@ impl GuTriangleMesh {
         }
         mesh.aabb_min = mn; mesh.aabb_max = mx;
         mesh
+    }
+
+    /// Find, per triangle, which of its three edges are shared with a coplanar
+    /// neighbour. Vertices are welded by quantised POSITION rather than index:
+    /// the cooked mesh concatenates submeshes with rebased indices, so the two
+    /// halves of one authored quad can reference different vertex records for
+    /// the same corner.
+    fn cook_internal_edges(vertices: &[[f32; 3]], triangles: &[u32]) -> Vec<u8> {
+        use std::collections::HashMap;
+        let tri_count = triangles.len() / 3;
+        let mut flags = vec![0u8; tri_count];
+        if tri_count < 2 {
+            return flags;
+        }
+        // 0.01 world units. Authored features are orders of magnitude coarser
+        // than this, and f32 at track scale (~1e4) still resolves ~5e-4.
+        const WELD: f32 = 0.01;
+        let mut weld: HashMap<(i64, i64, i64), u32> = HashMap::new();
+        let mut welded: Vec<u32> = Vec::with_capacity(vertices.len());
+        for v in vertices {
+            let key = (
+                (v[0] / WELD).round() as i64,
+                (v[1] / WELD).round() as i64,
+                (v[2] / WELD).round() as i64,
+            );
+            let next = weld.len() as u32;
+            welded.push(*weld.entry(key).or_insert(next));
+        }
+
+        // Triangle normals (unnormalised length carries the degeneracy test).
+        let mut normals: Vec<Option<[f32; 3]>> = Vec::with_capacity(tri_count);
+        for t in 0..tri_count {
+            let (a, b, c) = (
+                vertices[triangles[t * 3] as usize],
+                vertices[triangles[t * 3 + 1] as usize],
+                vertices[triangles[t * 3 + 2] as usize],
+            );
+            let n = cross(sub(b, a), sub(c, a));
+            normals.push(if dot(n, n) > 1e-12 { Some(normalize(n)) } else { None });
+        }
+
+        // Edge → the (triangle, edge index) pairs that use it.
+        let mut edges: HashMap<(u32, u32), Vec<(usize, usize)>> = HashMap::new();
+        for t in 0..tri_count {
+            for e in 0..3 {
+                let i0 = welded[triangles[t * 3 + e] as usize];
+                let i1 = welded[triangles[t * 3 + (e + 1) % 3] as usize];
+                if i0 == i1 { continue; }
+                let key = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+                edges.entry(key).or_default().push((t, e));
+            }
+        }
+
+        // cos(2.5°) — two triangles this close to parallel share a flat surface,
+        // not a crease. |dot| so a coplanar pair with opposite winding (a
+        // zero-thickness double-sided wall) counts too.
+        const COPLANAR: f32 = 0.999;
+        for users in edges.values() {
+            if users.len() < 2 { continue; }
+            for i in 0..users.len() {
+                for j in (i + 1)..users.len() {
+                    let (ti, ei) = users[i];
+                    let (tj, ej) = users[j];
+                    let (Some(ni), Some(nj)) = (normals[ti], normals[tj]) else { continue };
+                    if dot(ni, nj).abs() >= COPLANAR {
+                        flags[ti] |= 1 << ei;
+                        flags[tj] |= 1 << ej;
+                    }
+                }
+            }
+        }
+        flags
     }
 }
 
@@ -341,11 +424,17 @@ pub fn capsule_vs_triangle(
 /// Source: GuPCMTriangleContactGen.cpp::SATSweep pattern (reduced — single
 /// contact per (axis, triangle)). The dispatcher accumulates contacts across
 /// all triangles for a multi-point manifold per body pair.
+/// `internal_edges` is the cooked mask from `GuTriangleMesh::internal_edges`
+/// (bit k = edge k is shared with a coplanar neighbour). Edge-cross axes for
+/// those edges are NOT candidates: the edge is interior to a flat surface, so
+/// the minimising axis it produces is a lateral direction that does not exist
+/// on the real surface. Pass 0 for geometry with no adjacency information.
 pub fn box_vs_triangle(
     box_center: [f32; 3], box_half_extents: [f32; 3],
     box_axis_x: [f32; 3], box_axis_y: [f32; 3], box_axis_z: [f32; 3],
     contact_dist: f32,
     v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], tri_index: u32,
+    internal_edges: u8,
 ) -> Option<GuTriContact> {
     let mut best_overlap = f32::MAX;
     let mut best_axis = [0.0f32; 3];
@@ -385,7 +474,15 @@ pub fn box_vs_triangle(
     let tri_edges = [sub(v1, v0), sub(v2, v1), sub(v0, v2)];
     let box_edges = [box_axis_x, box_axis_y, box_axis_z];
     for be in box_edges.iter() {
-        for te in tri_edges.iter() {
+        for (ei, te) in tri_edges.iter().enumerate() {
+            // Interior edge of a flat surface: no crease here, so it must not
+            // win the minimum-overlap axis. A box resting on a large tile has a
+            // tiny face-normal overlap, so without this ANY edge axis from the
+            // tile's internal split undercuts it and the contact normal comes
+            // out horizontal — Agent Free Ride 2 spawns its jet ski at x ≈ 0,
+            // exactly on `l_t_d3_4`'s split, and the spurious sideways impulse
+            // launched it off the start line.
+            if internal_edges & (1 << ei) != 0 { continue; }
             let axis = cross(*be, *te);
             let ax2 = dot(axis, axis);
             if ax2 < 1e-8 { continue; }
@@ -483,11 +580,12 @@ pub fn box_vs_triangle_manifold(
     box_axis_x: [f32; 3], box_axis_y: [f32; 3], box_axis_z: [f32; 3],
     contact_dist: f32,
     v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], tri_index: u32,
+    internal_edges: u8,
     out: &mut Vec<GuTriContact>,
 ) {
     let Some(single) = box_vs_triangle(
         box_center, box_half_extents, box_axis_x, box_axis_y, box_axis_z,
-        contact_dist, v0, v1, v2, tri_index,
+        contact_dist, v0, v1, v2, tri_index, internal_edges,
     ) else { return; };
 
     let raw_n = cross(sub(v1, v0), sub(v2, v0));
@@ -655,18 +753,19 @@ pub fn box_vs_mesh(
     let pad = contact_dist;
     let mn = [box_center[0] - ex - pad, box_center[1] - ey - pad, box_center[2] - ez - pad];
     let mx = [box_center[0] + ex + pad, box_center[1] + ey + pad, box_center[2] + ez + pad];
-    struct Cb<'a> { c: [f32;3], he: [f32;3], ax: [f32;3], ay: [f32;3], az: [f32;3], cd: f32, out: &'a mut Vec<GuTriContact> }
+    struct Cb<'a> { c: [f32;3], he: [f32;3], ax: [f32;3], ay: [f32;3], az: [f32;3], cd: f32, edges: &'a [u8], out: &'a mut Vec<GuTriContact> }
     impl<'a> MeshHitCallback for Cb<'a> {
         fn process(&mut self, ti: u32, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) -> bool {
             // Manifold, not a single point — see box_vs_triangle_manifold.
+            let mask = self.edges.get(ti as usize).copied().unwrap_or(0);
             box_vs_triangle_manifold(
                 self.c, self.he, self.ax, self.ay, self.az, self.cd,
-                v0, v1, v2, ti, self.out,
+                v0, v1, v2, ti, mask, self.out,
             );
             true
         }
     }
-    midphase_intersect_aabb(mesh, mn, mx, &mut Cb { c: box_center, he: box_half_extents, ax: box_axis_x, ay: box_axis_y, az: box_axis_z, cd: contact_dist, out: &mut out });
+    midphase_intersect_aabb(mesh, mn, mx, &mut Cb { c: box_center, he: box_half_extents, ax: box_axis_x, ay: box_axis_y, az: box_axis_z, cd: contact_dist, edges: &mesh.internal_edges, out: &mut out });
     out
 }
 

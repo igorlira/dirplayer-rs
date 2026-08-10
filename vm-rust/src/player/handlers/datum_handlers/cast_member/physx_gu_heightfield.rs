@@ -194,7 +194,9 @@ pub fn box_vs_heightfield(
     struct Cb<'a> { c: [f32;3], he: [f32;3], ax: [f32;3], ay: [f32;3], az: [f32;3], cd: f32, out: &'a mut Vec<GuTriContact> }
     impl<'a> MeshHitCallback for Cb<'a> {
         fn process(&mut self, ti: u32, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3]) -> bool {
-            if let Some(c) = box_vs_triangle(self.c, self.he, self.ax, self.ay, self.az, self.cd, v0, v1, v2, ti) {
+            // 0 = no cooked edge adjacency for heightfields; every axis stays a
+            // candidate, as before. Only cooked triangle meshes carry the mask.
+            if let Some(c) = box_vs_triangle(self.c, self.he, self.ax, self.ay, self.az, self.cd, v0, v1, v2, ti, 0) {
                 self.out.push(c);
             }
             true
