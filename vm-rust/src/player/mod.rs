@@ -3426,9 +3426,8 @@ impl DirPlayer {
         }
         web_sys::console::error_1(&format!("[!!] play failed with error: {}", err.message).into());
         // The message alone rarely says WHICH handler blew up. Scopes are still
-        // intact at this point, so dump them — in the browser E2E harness a
-        // script error aborts the run and the console is the only channel out.
-        web_sys::console::error_1(&self.format_scope_stack(5, 25).into());
+        // intact at this point, so dump them.
+        crate::console_error!("{}", self.format_scope_stack(5, 25));
         warn!("[!!] play failed with error: {}", err.message);
         self.stop();
 
