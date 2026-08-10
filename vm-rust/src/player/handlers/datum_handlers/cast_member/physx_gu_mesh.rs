@@ -421,6 +421,28 @@ pub fn box_vs_triangle(
     {
         return None;
     }
+    // Single-sidedness, decided on the CONTACT NORMAL rather than the box's
+    // extent. A mesh triangle only pushes along its own front face, so a normal
+    // opposing it means the box is behind the surface and there is nothing to
+    // push against. The extent allowance above keeps a RESTING body's contacts
+    // alive (its normal still points out of the face, so it passes here), but on
+    // its own it also made every one-sided wall solid from behind: as soon as any
+    // part of the box crossed the plane it got a contact pointing back the way it
+    // came, so it could never pass through.
+    //
+    // Agent Free Ride 2's canal has `x_collision_101`, a 2-triangle plane whose
+    // faces both point +y, sealing the dead-end behind the start line. The racing
+    // line (token t4) runs +y straight through where it sits, and the jet ski
+    // wedged 0.4 units short of it — an invisible wall across the track.
+    // Only a normal that CLEARLY opposes the face is rejected (more than 120°
+    // away from it). Perpendicular normals must be kept: when a box sinks deep
+    // into a floor the face-normal overlap grows with the penetration, so the
+    // minimum-overlap axis flips to a lateral one — rejecting those took away a
+    // sunk body's last support and it kept creeping down (AreaZero sank slowly
+    // through the floor). Opposing is unambiguous: the wall case above is -1.
+    if dot(tri_normal, tri_normal) > 0.0 && dot(n, tri_normal) < -0.5 {
+        return None;
+    }
     let sx = if dot(box_axis_x, n) >= 0.0 { -box_half_extents[0] } else { box_half_extents[0] };
     let sy = if dot(box_axis_y, n) >= 0.0 { -box_half_extents[1] } else { box_half_extents[1] };
     let sz = if dot(box_axis_z, n) >= 0.0 { -box_half_extents[2] } else { box_half_extents[2] };
