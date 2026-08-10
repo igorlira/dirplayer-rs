@@ -844,7 +844,17 @@ fn pt_in_tri_xy(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> bool {
     let d11 = (v2[0]-v0[0])*(v2[0]-v0[0]) + (v2[1]-v0[1])*(v2[1]-v0[1]);
     let d12 = (v2[0]-v0[0])*(px-v0[0]) + (v2[1]-v0[1])*(py-v0[1]);
     let denom = d00*d11 - d01*d01;
-    if denom.abs() < 1e-12 { return false; }
+    // Reject a triangle whose XY projection is degenerate (a line). `denom` is
+    // |e0|²|e1|²·sin²θ — the FOURTH power of the mesh's units — so an absolute
+    // epsilon means nothing at scene scale: a wall triangle projecting to a line
+    // 800 units long still clears 1e-12 by ~20 orders of magnitude, and the
+    // ill-conditioned solve that follows then accepts points nowhere near it.
+    // That is exactly how the SuperSonic ground clamp got 330.7 at (2050,-2800):
+    // a VERTICAL `Stairs` triangle whose three vertices all sit at y=-3227 was
+    // accepted 427 units away in y, and its extrapolated z won. Compare against
+    // sin²θ instead, which is scale-free (and still rejects duplicate vertices,
+    // where d00 or d11 is 0).
+    if !(denom > 1e-12 * d00 * d11) { return false; }
     let u = (d11*d02 - d01*d12) / denom;
     let v = (d00*d12 - d01*d02) / denom;
     u >= -1e-6 && v >= -1e-6 && (u + v) <= 1.0 + 1e-6
@@ -855,7 +865,8 @@ fn pt_in_tri_3d(p: V3, v0: V3, v1: V3, v2: V3) -> bool {
     let d00 = v3_dot(e0, e0); let d01 = v3_dot(e0, e1); let d02 = v3_dot(e0, e2);
     let d11 = v3_dot(e1, e1); let d12 = v3_dot(e1, e2);
     let denom = d00*d11 - d01*d01;
-    if denom.abs() < 1e-12 { return false; }
+    // Scale-free degeneracy test — see the note in `pt_in_tri_xy`.
+    if !(denom > 1e-12 * d00 * d11) { return false; }
     let u = (d11*d02 - d01*d12) / denom;
     let v = (d00*d12 - d01*d02) / denom;
     u >= -0.01 && v >= -0.01 && (u + v) <= 1.01
@@ -909,7 +920,8 @@ fn interp_z(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> f64 {
     let d11 = (v2[0]-v0[0])*(v2[0]-v0[0]) + (v2[1]-v0[1])*(v2[1]-v0[1]);
     let d12 = (v2[0]-v0[0])*(px-v0[0]) + (v2[1]-v0[1])*(py-v0[1]);
     let denom = d00*d11 - d01*d01;
-    if denom.abs() < 1e-12 { return v0[2]; }
+    // Scale-free degeneracy test — see the note in `pt_in_tri_xy`.
+    if !(denom > 1e-12 * d00 * d11) { return v0[2]; }
     let u = (d11*d02 - d01*d12) / denom;
     let v = (d00*d12 - d01*d02) / denom;
     (1.0 - u - v) * v0[2] + u * v1[2] + v * v2[2]
@@ -1915,7 +1927,19 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
         let pos = state.rigid_bodies[bi].position;
 
         if !state.collision_meshes.is_empty() {
-            if let Some(ground_z) = find_ground_z(&state.collision_meshes, pos[0], pos[1], pos[2] + 100.0) {
+            // A GROUND constraint must never pick a surface ABOVE the body. The
+            // search used to reach `pos.z + 100`, so it could grab scenery up to
+            // 100 units overhead — and since a rescue TELEPORTS the body up to
+            // that surface, the next step could then reach higher still. In
+            // SuperSonic the car walked itself up in +47 increments, three steps
+            // running, and ended standing on the MainA floor (z=330.7) it had
+            // been driving UNDER: the "jumping like it is going up a stair"
+            // judder, and the reason the area beneath the main floor could not
+            // be stayed in. Cap the search at the body's own top; anything the
+            // clamp legitimately rescues (a body sunk through the surface it was
+            // resting on) is below that by definition.
+            let search_ceiling = pos[2] + half_z;
+            if let Some(ground_z) = find_ground_z(&state.collision_meshes, pos[0], pos[1], search_ceiling) {
                 let body_bottom = pos[2] - half_z;
                 // Safety net: only clamp if body penetrates MORE than 5 units below ground.
                 // Normal suspension is handled by the game's Lingo spring forces.
@@ -1926,6 +1950,16 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
                     if vz > 0.0 {
                         state.rigid_bodies[bi].linear_velocity[2] *= 0.5;
                     }
+                    // Do NOT touch a DOWNWARD velocity here, however wrong it looks:
+                    // a clamped body carries a large phantom -vz (the car reads ≈ -104
+                    // while descending 0.4/frame, because it keeps integrating gravity
+                    // while being held). Zeroing it was tried and REVERTED — it glues
+                    // the body to the surface: the car could no longer leave a plateau
+                    // downward at all (parked at z=144 for 200 frames instead of
+                    // rolling off), and it flattened the jump-then-spring-recovery the
+                    // game is supposed to show coming down a ramp. The phantom
+                    // velocity is a symptom of the clamp doing the suspension's job;
+                    // fix that, not this.
                 }
             }
         } else if state.ground_z > -1e10 {
