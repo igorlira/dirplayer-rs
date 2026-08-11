@@ -150,71 +150,29 @@ version = "1.0.27"
 features = ["rust_backend"]
 default-features = false
 
-# `npm run build-vm` (wasm-pack --release) — the SHIPPING build, and the only
-# one any performance number may be quoted from. Takes ~6 min; for iteration
-# use `npm run build-vm-dev` (~2 min, see [profile.dev] below).
 [profile.release]
-# Optimize for SPEED. The Lingo interpreter's hot loop is built out of
-# `#[inline(always)]` closures (`reserve_player_mut`) over a jump-table `match`;
-# `opt-level = "s"` is exactly the setting that suppresses that inlining, so the
-# per-op cost was paying for closure calls that were meant to vanish.
 opt-level = 3
-# `lto = "fat"` and `codegen-units = 1` are most of the 6 minutes: whole-program
-# optimization at link time, and no parallelism across codegen units.
 lto = "fat"
 codegen-units = 1
 
 [package.metadata.wasm-pack.profile.release]
-# -O4 rather than -O, and drop -g: debug symbols inhibit some wasm-opt passes
-# and roughly double the .wasm.
 wasm-opt = ["-O4"]
 
-# `npm run build-vm-dev` (wasm-pack --dev) — the FAST ITERATION build.
-#
-# These are the settings release used before it was tuned for speed: size-level
-# optimisation, no LTO, default (parallel) codegen units, incremental. That is
-# what made it a ~2 min build rather than ~6.
-#
-# DO NOT quote performance numbers from this build. It is meaningfully slower at
-# runtime than `build-vm`, so comparing a measurement taken here against one
-# taken there compares profiles, not code.
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+dwarf-debug-info = false
+
 [profile.dev]
 opt-level = "s"
-# Line tables, NOT full debug info. This is what emits the wasm `name` section,
-# which is where Chrome's PERFORMANCE panel reads function names from — DWARF is
-# a separate thing, used by the C/C++ DevTools Support extension for source-level
-# stepping in the Sources panel. `debug = false` produced a wasm with neither, so
-# profiles showed `wasm-function[1234]`. `wasm-opt -g` and `dwarf-debug-info`
-# below only PRESERVE what rustc emitted; they cannot conjure it.
 debug = "line-tables-only"
-# Match release SEMANTICS. With these on, dev can panic where release wraps —
-# so a bug reproduced here might not exist in the shipping build, or vice versa.
 debug-assertions = false
 overflow-checks = false
 incremental = true
 
 [profile.dev.package."*"]
-# Dependencies are rebuilt rarely, so optimise them harder than our own crate.
 opt-level = 2
 
 [package.metadata.wasm-pack.profile.dev]
-# `-O` (not `-O4`) keeps the module reasonable without the long optimisation
-# passes. `-g` is what PRESERVES the `name` section through wasm-opt — drop it
-# and every frame in Chrome's Performance panel becomes `wasm-function[1234]`.
 wasm-opt = ["-O", "-g"]
 
 [package.metadata.wasm-pack.profile.dev.wasm-bindgen]
-# DWARF OFF, names ON. These are separate things and it is worth being precise:
-#   - the wasm `name` section  -> function names in Chrome's PERFORMANCE panel
-#   - the `.debug_*` DWARF     -> source-level stepping in the Sources panel,
-#                                 via the C/C++ DevTools Support extension
-# `debug = "line-tables-only"` above makes rustc emit both. DWARF alone is
-# 42.8 MB of the 54 MB pre-link module — it blew the build up 7x and wasm-opt
-# could not even process the result. The name section is only 0.6 MB, so
-# stripping DWARF here keeps readable profiles at essentially no cost:
-#   names + DWARF : 54.6 MB, wasm-opt FAILS
-#   names only    :  8.2 MB, 42 s, 6931 named functions
-dwarf-debug-info = false
-
-[package.metadata.wasm-pack.profile.release.wasm-bindgen]
 dwarf-debug-info = false
