@@ -3,3 +3,31 @@ path = "dcr_lego/ClubGames/JunkbotUndercover/NoSave/DSWMEDIA/JunkbotUndercover.d
 
 [test]
 suite = "lego"
+
+# `sw1` is the URL prefix the movie's database manager pastes in front of
+# `getState` / `setState` / `getTopTen`, and the LEGO page passed it empty:
+#
+#     prefix = externalParamValue("sw1")             -- database manager, on new
+#     netID  = getNetText(site & prefix & "getState" & suffix)
+#
+# With an empty prefix that resolves to `getState.asp` NEXT TO THE DCR, and the
+# archived "NoSave" package ships one there: a canned response holding a FULLY
+# COMPLETED save (all 60 levels beaten, 761 moves, rank 1 of 1). The loading
+# screen blocks on that request (`glob.database_manager.READY()`) before it
+# calls `movieloaded()`, so by the time `prepareLevelMenu` runs the record is
+# in, and every screen afterwards renders the finished game: no opening memo,
+# medals down the level list, the SUPERSPY portrait and the rank meter in place
+# of the "complete all the levels" note.
+#
+# This test wants a fresh player, so point `sw1` at a prefix that resolves to
+# nothing. Every request 404s, `loggedin` stays VOID, `getRecord()` returns
+# VOID, and the movie starts at level 1 — which is what an anonymous visitor
+# got on the live site, and what the reference screenshots were captured
+# against. Junkbot 1 needs no equivalent: it hardcodes `prefix =
+# "/build/junkbot/"`, so its own canned save is never reachable either.
+#
+# Do NOT drop this and rely on the old accident: before the per-test external
+# param reset, `sw1` LEAKED forward from `sulake_habbo_v7` (which sets it to
+# "connection.info.host=...") into this test, which broke the URL by chance.
+[external_params]
+sw1 = "no_backend_"
