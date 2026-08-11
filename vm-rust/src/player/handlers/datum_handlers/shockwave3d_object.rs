@@ -580,15 +580,32 @@ impl Shockwave3dObjectDatumHandlers {
                                 if !uvs.is_empty() { break; }
                             }
                         }
-                        // Internal UVs are CENTRED and V-flipped — the CLOD vertex
-                        // shader does `vec2(u + 0.5, 0.5 - v)`. Director's Lingo API is
-                        // documented as 0.0..1.0, and the movie's arithmetic relies on
-                        // that (it clamps to [0,1], which would eat every negative
-                        // coordinate). Convert on the way out; the setter converts back.
+                        // Internal UVs are CENTRED — the CLOD vertex shader does
+                        // `vec2(u + 0.5, 0.5 - v)` to get the GL sample coordinate,
+                        // whose V runs 0 = FIRST uploaded row = image TOP. Director's
+                        // Lingo API is 0.0..1.0 with V = 0 at the image BOTTOM (the
+                        // OpenGL convention), i.e. gl_v = 1 - director_v. Solving
+                        // `0.5 - internal = 1 - director` gives `director = internal + 0.5`
+                        // — the same sign as U.
+                        //
+                        // Reporting `0.5 - internal` instead MIRRORED V. Full-range
+                        // 0..1 UVs are symmetric under that mirror, so nothing looked
+                        // wrong until a script did affine arithmetic on the values it
+                        // read back. `[M] Text Misc.GetAndSetTagTextureSize` does
+                        // exactly that — it rounds a text texture up to a power of two
+                        // and compensates with `v * (size/POT) + (1 - size/POT)`, which
+                        // anchors the content at V = 1 (the image top). In the mirrored
+                        // space that anchored it at the opposite edge, so every baked
+                        // AreaZero HUD string sampled the padding instead of its own
+                        // glyphs ("Score"/"Level" lost their top third). The same mirror
+                        // hid `InterfaceBulletsClip`: its hardcoded V range 0..0.0625
+                        // addresses the bullet strip along the BOTTOM of
+                        // Interface_Texture, and mirrored it sampled the transparent
+                        // top edge instead — the ammo bar rendered as nothing at all.
                         for uv in uvs {
                             let mut pair = VecDeque::new();
                             pair.push_back(player.alloc_datum(Datum::Float(uv[0] as f64 + 0.5)));
-                            pair.push_back(player.alloc_datum(Datum::Float(0.5 - uv[1] as f64)));
+                            pair.push_back(player.alloc_datum(Datum::Float(uv[1] as f64 + 0.5)));
                             items.push_back(player.alloc_datum(Datum::List(
                                 crate::director::lingo::datum::DatumType::List, pair, false,
                             )));
@@ -2580,19 +2597,19 @@ impl Shockwave3dObjectDatumHandlers {
                         let model_name = parts.get(0).unwrap_or(&"").to_string();
                         let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                         // Each entry is a 2-element list [u, v]; accept a point too.
-                        // Director-space (0..1) -> internal centred / V-flipped space.
-                        // Inverse of the getter's conversion; see the CLOD remap in the
-                        // vertex shader.
+                        // Director-space (0..1, V = 0 at the image BOTTOM) -> internal
+                        // centred space. Exact inverse of the getter above — see the
+                        // note there for why V is NOT mirrored.
                         let uvs: Vec<[f32; 2]> = if let Datum::List(_, items, _) = value {
                             items.iter().map(|item_ref| match player.get_datum(item_ref) {
                                 Datum::List(_, uv, _) => {
                                     let get = |i: usize| uv.get(i)
                                         .map(|r| player.get_datum(r).to_float().unwrap_or(0.0))
                                         .unwrap_or(0.0) as f32;
-                                    [get(0) - 0.5, 0.5 - get(1)]
+                                    [get(0) - 0.5, get(1) - 0.5]
                                 }
-                                Datum::Point(vals, _) => [vals[0] as f32 - 0.5, 0.5 - vals[1] as f32],
-                                _ => [-0.5, 0.5],
+                                Datum::Point(vals, _) => [vals[0] as f32 - 0.5, vals[1] as f32 - 0.5],
+                                _ => [-0.5, -0.5],
                             }).collect()
                         } else { vec![] };
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
