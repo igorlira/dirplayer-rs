@@ -265,8 +265,20 @@ impl NetManager {
                 // In native (test) mode, read the file directly from disk
                 // and fulfill the task immediately (no spawn_local) so that
                 // await_task callers don't block on a future that never runs.
-                let file_path = resolved_url_str.strip_prefix("file://").unwrap_or(&resolved_url_str);
-                let result: super::net_task::NetResult = match std::fs::read(file_path) {
+                // `Url::to_file_path`, NOT a `strip_prefix("file://")`.
+                //
+                // A well-formed file URL is `file:///E:/dir/x.cct` on Windows and
+                // `file:///home/u/x.cct` elsewhere - three slashes either way.
+                // Chopping just `file://` leaves `/E:/dir/x.cct`, and that leading
+                // slash before the drive letter makes `fs::read` fail on Windows
+                // while working by accident on macOS/Linux. `to_file_path` decodes
+                // percent-escapes and yields a real platform path on all three.
+                let result: super::net_task::NetResult = match net_task
+                    .resolved_url
+                    .to_file_path()
+                    .map_err(|_| ())
+                    .and_then(|p| std::fs::read(p).map_err(|_| ()))
+                {
                     Ok(bytes) => Ok(bytes),
                     Err(_) => Err(-1),
                 };
