@@ -1420,12 +1420,20 @@ impl DirPlayer {
         // Publish it for the JS side. flashPlayerManager's Ruffle frame capture
         // paces itself to this: capturing faster than the stage redraws is pure
         // waste, and each capture is a full GPU→CPU `getImageData` readback.
-        if let Some(window) = web_sys::window() {
-            let _ = js_sys::Reflect::set(
-                &window,
-                &wasm_bindgen::JsValue::from_str("__dirplayerFrameTempo"),
-                &wasm_bindgen::JsValue::from_f64(self.current_frame_tempo as f64),
-            );
+        //
+        // wasm32 only. `web_sys::window()` reaches a wasm-bindgen imported static,
+        // and on a native target that PANICS ("cannot access imported statics on
+        // non-wasm targets") rather than returning None — so an unguarded call
+        // here takes down every native e2e test on the first `begin_all_sprites`.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                let _ = js_sys::Reflect::set(
+                    &window,
+                    &wasm_bindgen::JsValue::from_str("__dirplayerFrameTempo"),
+                    &wasm_bindgen::JsValue::from_f64(self.current_frame_tempo as f64),
+                );
+            }
         }
     }
 
@@ -3442,7 +3450,12 @@ impl DirPlayer {
         if err.code == ScriptErrorCode::Abort {
             return;
         }
-        web_sys::console::error_1(&format!("[!!] play failed with error: {}", err.message).into());
+        // `console_error!`, not `web_sys::console::error_1`: the raw call takes a
+        // `JsValue`, and building one on a native target panics inside
+        // wasm-bindgen ("cannot access imported statics on non-wasm targets").
+        // Since this runs on EVERY script error, it took down every native e2e
+        // run the moment a movie hit one. The macro is wasm/native-aware.
+        crate::console_error!("[!!] play failed with error: {}", err.message);
         // The message alone rarely says WHICH handler blew up. Scopes are still
         // intact at this point, so dump them.
         crate::console_error!("{}", self.format_scope_stack(5, 25));
@@ -6659,38 +6672,58 @@ pub async fn player_trigger_error_pause(
     handler_ref: ScriptHandlerRef,
     bytecode_index: usize,
 ) {
-    let (future, completer) = ManualFuture::new();
-    let script_name = reserve_player_ref(|player| {
-        player
-            .movie
-            .cast_manager
-            .get_script_by_ref(&script_ref)
-            .map(|s| s.name.clone())
-            .unwrap_or_default()
-    });
-    let breakpoint = Breakpoint {
-        script_name,
-        handler_name: handler_ref.1.to_string(),
-        bytecode_index,
-    };
-    let breakpoint_ctx = BreakpointContext {
-        breakpoint,
-        script_ref,
-        handler_ref,
-        bytecode_index,
-        completer,
-        error: Some(err.clone()),
-    };
-    reserve_player_mut(|player| {
-        player.current_breakpoint = Some(breakpoint_ctx);
-        player.pause_script();
-        JsApi::dispatch_scope_list(player);
-        JsApi::dispatch_script_error(player, &err);
-    });
-    future.await;
-    reserve_player_mut(|player| {
-        player.resume_script();
-    });
+    // A debugger pause parks on a `ManualFuture` that ONLY the debugger UI can
+    // complete (`player_resume_breakpoint`). There is no such UI off the web
+    // build, so on a native target this waits forever: `break_on_error` defaults
+    // to true, so the FIRST script error silently froze the whole interpreter
+    // with zero CPU and no output. That is how the native e2e test presented —
+    // as a hang rather than as the error it actually hit
+    // ("No built-in handler: startClient()"). Report and carry on instead; the
+    // caller already routes the error through `on_script_error`.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        log::error!(
+            "Script error in {}:{} at bytecode {}: {}",
+            handler_ref.1, script_ref.cast_member, bytecode_index, err.message
+        );
+        return;
+    }
+    
+    #[cfg(target_arch = "wasm32")]
+    {
+        let (future, completer) = ManualFuture::new();
+        let script_name = reserve_player_ref(|player| {
+            player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&script_ref)
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        });
+        let breakpoint = Breakpoint {
+            script_name,
+            handler_name: handler_ref.1.to_string(),
+            bytecode_index,
+        };
+        let breakpoint_ctx = BreakpointContext {
+            breakpoint,
+            script_ref,
+            handler_ref,
+            bytecode_index,
+            completer,
+            error: Some(err.clone()),
+        };
+        reserve_player_mut(|player| {
+            player.current_breakpoint = Some(breakpoint_ctx);
+            player.pause_script();
+            JsApi::dispatch_scope_list(player);
+            JsApi::dispatch_script_error(player, &err);
+        });
+        future.await;
+        reserve_player_mut(|player| {
+            player.resume_script();
+        });
+    }
 }
 
 pub async fn player_is_playing() -> bool {

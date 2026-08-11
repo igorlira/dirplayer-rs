@@ -390,10 +390,10 @@ async fn player_invoke_frame_and_movie_scripts_inner(
             Ok(_) => {}
             Err(err) => {
                 if err.code != ScriptErrorCode::Abort {
-                    web_sys::console::warn_1(&format!(
+                    crate::console_warn!(
                         "  {} handler on {:?} ERROR: {}",
                         handler_name, script_member_ref, err.message
-                    ).into());
+                    );
                 }
             }
         }
@@ -1923,8 +1923,9 @@ pub async fn dispatch_event_to_all_behaviors(
                     });
                     return;
                 }
-                web_sys::console::error_1(
-                    &format!("Error in {} for sprite {} behavior '{}': {}", handler_name, sprite_number, ascii_safe(&script_name.to_string()), err.message).into()
+                crate::console_error!(
+                    "Error in {} for sprite {} behavior '{}': {}",
+                    handler_name, sprite_number, ascii_safe(&script_name.to_string()), err.message
                 );
                 reserve_player_mut(|player| {
                     player.on_script_error(&err);
