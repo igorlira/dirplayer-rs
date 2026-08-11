@@ -15,7 +15,9 @@ pub struct BrowserTestPlayer {}
 
 impl BrowserTestPlayer {
     pub async fn new() -> Self {
-        Self::reset_player().await;
+        // `preserve_external_params: false` — this is the per-TEST boundary, and
+        // one movie's external params are never right for the next movie.
+        Self::reset_player_with(false).await;
         BrowserTestPlayer {}
     }
 
@@ -37,12 +39,21 @@ impl BrowserTestPlayer {
     }
 
     async fn reset_player() {
-        // Preserve external_params across the reset. Tests set these via
-        // `cfg.apply_external_params()` BEFORE calling `load_movie`, so a
-        // per-movie reset that discarded them would leave the new player
-        // without the credentials/args the test configured.
-        let preserved_external_params = unsafe {
-            PLAYER_OPT.as_ref().map(|p| p.external_params.clone()).unwrap_or_default()
+        Self::reset_player_with(true).await
+    }
+
+    /// `preserve_external_params` — carry the current player's external params
+    /// onto the fresh one. TRUE for the per-movie reset inside `load_movie`:
+    /// tests call `cfg.apply_external_params()` BEFORE `load_movie`, so
+    /// discarding them there would leave the new player without the
+    /// credentials/args the test configured. FALSE at the per-test boundary
+    /// (`BrowserTestPlayer::new`), so a movie's params cannot reach the next
+    /// test — see the note there.
+    async fn reset_player_with(preserve_external_params: bool) {
+        let preserved_external_params = if preserve_external_params {
+            unsafe { PLAYER_OPT.as_ref().map(|p| p.external_params.clone()).unwrap_or_default() }
+        } else {
+            Default::default()
         };
 
         // Stop the current movie and clear all timeouts before resetting.
