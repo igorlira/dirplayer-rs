@@ -225,6 +225,17 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // tracks the in-progress single-finger interaction so we can deliver mouse_up
   // even if the finger lifts outside the canvas rect
   const singleTouchActiveRef = useRef(false);
+  // The canvas THIS player locked for mouse-look, or null.
+  //
+  // Ownership, not "is anything locked": a page can host two DirPlayers — the
+  // browser extension and a copy of the standalone polyfill the site embeds
+  // itself (hackahobo.info does exactly this). Testing `pointerLockElement`
+  // alone makes the idle player mistake the other one's lock for its own, find
+  // that its own movie does not want mouse-look, and release it on the next
+  // mousemove. Measured there: lock granted, then killed 25-44ms later from
+  // `dirplayer-polyfill.js`, on every click, so mouse-look never engaged and
+  // the relocking tripped Chrome's request rate limiter.
+  const lockedElRef = useRef<Element | null>(null);
   // text-edit drag state: which sprite the press started on, so subsequent
   // pointermoves extend the selection inside that field.
   const textDragRef = useRef<{ spriteId: number } | null>(null);
@@ -343,9 +354,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   // Handle pointer-locked mouse movement (events fire on document, not the div)
   useEffect(() => {
     const handleLockedMouseMove = (e: MouseEvent) => {
-      if (document.pointerLockElement) {
+      // `ownsPointerLock()`, not `document.pointerLockElement`: releasing here
+      // on someone else's lock is what breaks mouse-look when a second
+      // DirPlayer shares the page. See `lockedElRef`.
+      if (ownsPointerLock()) {
         if (!wants_pointer_lock()) {
           document.exitPointerLock();
+          lockedElRef.current = null;
           return;
         }
         mouse_move_delta(e.movementX, e.movementY);
@@ -353,7 +368,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     };
     // Handle keyboard during pointer lock (focus may be on canvas, not the div)
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (document.pointerLockElement) {
+      if (ownsPointerLock()) {
         // Don't prevent ESC — browser needs it to exit pointer lock
         if (e.key !== "Escape") e.preventDefault();
         if (!e.repeat) {
@@ -362,7 +377,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (document.pointerLockElement) {
+      if (ownsPointerLock()) {
         key_up(e.key, e.keyCode);
       }
     };
@@ -472,6 +487,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     return { centroid: { x: cx, y: cy }, dist };
   }
 
+  // Do WE hold the pointer lock? Never release or act on one we did not take.
+  function ownsPointerLock(): boolean {
+    return !!lockedElRef.current && document.pointerLockElement === lockedElRef.current;
+  }
+
   function dispatchVMMouse(name: "move" | "down" | "up", canvasX: number, canvasY: number, e: React.PointerEvent) {
     if (pickingMode) {
       if (name === "move") {
@@ -493,7 +513,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     const isRight = (name === "down" || name === "up") && e.button === 2;
     switch (name) {
       case "move":
-        if (!document.pointerLockElement) {
+        if (!ownsPointerLock()) {
           mouse_move(canvasX, canvasY);
         }
         if (textDragRef.current) {
@@ -539,9 +559,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             outerRef.current?.focus();
           }
         }
-        if (wants_pointer_lock() && !document.pointerLockElement) {
+        if (wants_pointer_lock() && !ownsPointerLock()) {
           const canvas = stageEl.current?.querySelector("canvas");
           if (canvas) {
+            lockedElRef.current = canvas;
             canvas.requestPointerLock();
           }
         }

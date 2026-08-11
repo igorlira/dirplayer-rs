@@ -81,6 +81,10 @@ const ATTR_MOUNT_GESTURES = 'data-dirplayer-gestures';
 // to acknowledge — DOM events and defaultPrevented cross the world boundary,
 // module state does not.
 const EVENT_RENDER_AS_EXTENSION = 'dirplayer-render-as-extension';
+// The other half of the handover: asks the extension world to UNMOUNT the
+// player it put in a mount. Ripping the mount's children out instead leaves the
+// React tree mounted — see `unmountPlayer`.
+const EVENT_UNRENDER_AS_EXTENSION = 'dirplayer-unrender-as-extension';
 
 // Set in the polyfill world when a conflict with the extension is detected.
 let conflictPolyfillConfig: PolyfillConfig | null = null;
@@ -391,6 +395,34 @@ function notifyPlayerMounted(): void {
   }
 }
 
+// Every player root this world has mounted, keyed by its mount.
+//
+// Removing a mount's DOM children does NOT unmount React: the component tree
+// stays alive, its effects keep running, and the Stage's document-level
+// listeners (mousemove, keydown, keyup) keep firing for a player the user can
+// no longer see. One of those listeners releases the Pointer Lock whenever its
+// own movie does not want mouse-look — so an orphaned player silently breaks
+// mouse-look for the player that replaced it. Keep the roots so they can be
+// unmounted properly.
+const mountedRoots = new Map<HTMLDivElement, ReactDOM.Root>();
+
+/** Unmount this world's player from `mount`, if it has one. */
+function unmountPlayer(mount: HTMLDivElement): boolean {
+  const root = mountedRoots.get(mount);
+  if (!root) return false;
+  mountedRoots.delete(mount);
+  // Deferred: React refuses to unmount synchronously from inside a render or
+  // lifecycle, and callers here run from event handlers that may be mid-render.
+  queueMicrotask(() => {
+    try {
+      root.unmount();
+    } catch {
+      /* already gone */
+    }
+  });
+  return true;
+}
+
 function _renderPlayer(
   config: PolyfillConfig,
   mount: HTMLDivElement,
@@ -401,7 +433,11 @@ function _renderPlayer(
   enableGestures?: boolean
 ) {
   notifyPlayerMounted();
+  // A second createRoot on the same container would orphan the first tree,
+  // listeners and all.
+  unmountPlayer(mount);
   const root = ReactDOM.createRoot(mount);
+  mountedRoots.set(mount, root);
   root.render(
     <React.StrictMode>
       <StoreProvider store={store}>
@@ -505,7 +541,13 @@ function injectConflictOverlay(
     uiHost.remove();
     mount.style.position = savedPosition;
     if (choice === 'polyfill') {
-      // Clear the extension's DOM from the mount, then render polyfill player.
+      // Ask the extension world to unmount its player first. Deleting the DOM
+      // alone (what this used to do) leaves its React tree mounted and its
+      // document listeners live, which then fight the polyfill player over
+      // page-global state like Pointer Lock.
+      mount.dispatchEvent(new Event(EVENT_UNRENDER_AS_EXTENSION, { bubbles: true, cancelable: true }));
+      // Belt and braces: clear anything the extension left behind (an older
+      // extension build does not answer the unrender event at all), then render.
       while (mount.firstChild) mount.removeChild(mount.firstChild);
       _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
     }
@@ -746,6 +788,15 @@ function installExtensionRenderListener(config: PolyfillConfig) {
     const enableGestures = mount.hasAttribute(ATTR_MOUNT_GESTURES) || undefined;
     console.log('[DirPlayer] Extension rendering mount handed over by conflict UI');
     _renderPlayer(config, mount, width, height, src, externalParams, enableGestures);
+  }, true);
+
+  document.addEventListener(EVENT_UNRENDER_AS_EXTENSION, (event) => {
+    const mount = event.target;
+    if (!(mount instanceof HTMLDivElement)) return;
+    if (unmountPlayer(mount)) {
+      event.preventDefault();
+      console.log('[DirPlayer] Extension unmounted its player — the polyfill is taking this mount');
+    }
   }, true);
 }
 
