@@ -716,6 +716,16 @@ impl PhysXPhysicsMemberHandlers {
         if args.len() < 4 {
             return Err(ScriptError::new("createRigidBody expects 4-5 arguments".to_string()));
         }
+        // A body is cooked at the linked model's CURRENT pose. `model.transform.position
+        // = v` mutates the node's persistent Transform3d datum in place, and that datum
+        // is only flushed into `runtime_state.node_transforms` once per frame by
+        // `sync_persistent_transforms`. A script that places a model and creates its body
+        // in the same handler therefore cooked the body from the pre-write transform.
+        // AreaZero's `[PS] FPS.new` does exactly that — it moves FPSPlayer1Stand to the
+        // level's "PlayerSpawn" group and creates the proxy body four lines later — so
+        // the player always spawned at the world origin (mid-hangar) instead of at the
+        // spawn point. Flush first; the call is a no-op when nothing is dirty.
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
         let name = player.get_datum(&args[0]).symbol_value()?;
         let model_name = player.get_datum(&args[1]).string_value()?;
         let shape_sym = match player.get_datum(&args[2]) {
@@ -977,6 +987,8 @@ impl PhysXPhysicsMemberHandlers {
         if args.len() < 3 {
             return Err(ScriptError::new("createRigidBodyFromProxy expects 3+ arguments".to_string()));
         }
+        // Same-handler placement must be visible here — see create_rigid_body.
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
         let name = player.get_datum(&args[0]).symbol_value()?;
         let model_name = player.get_datum(&args[1]).string_value()?;
         let type_sym = match player.get_datum(&args[2]) {
