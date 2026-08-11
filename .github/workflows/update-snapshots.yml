@@ -86,7 +86,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: inputs.suite != 'native'
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install npm dependencies

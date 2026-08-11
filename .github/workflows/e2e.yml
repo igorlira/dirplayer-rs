@@ -129,6 +129,17 @@ jobs:
         working-directory: ./vm-rust
         run: cargo fetch
 
+      # `run-native-tests.mjs` always runs `generate-snapshot-report.mjs`
+      # afterwards, and that imports `pngjs`. Without an install step this job
+      # ended every run on ERR_MODULE_NOT_FOUND, whatever the tests did.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
       - name: Run native e2e tests
         id: native_tests
         continue-on-error: true
@@ -288,7 +299,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install npm dependencies
