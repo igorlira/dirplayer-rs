@@ -1400,10 +1400,21 @@ impl DirPlayer {
         });
     }
 
-    pub fn begin_all_sprites(&mut self) {
-        self.movie.score.begin_sprites(ScoreRef::Stage, self.movie.current_frame);
-        
-        // Cache the tempo for this frame
+    /// Recompute the cached frame tempo and republish it to JS.
+    ///
+    /// MUST run every frame, not only on a frame CHANGE. `begin_all_sprites` is
+    /// skipped while the playhead stays on the same frame (`stayed_on_same_frame`
+    /// in `run_single_frame`, and the same test in `go`), and holding a frame with
+    /// `go the frame` is the standard Director idiom — every game in the corpus
+    /// does it. Refreshing the cache only from there meant `puppetTempo()` could
+    /// update `movie.puppet_tempo`, and `get_effective_tempo()` would happily
+    /// report the new value, while the frame loop went on pacing from a
+    /// `current_frame_tempo` frozen at whatever the tempo was when the frame was
+    /// first entered — so puppetTempo simply had NO EFFECT on a looping frame.
+    /// Measured with `docs/fps-probe`: a movie whose authored frame_rate is 1
+    /// stayed at 1.00 fps (1002 ms/frame) through puppetTempo 30/60/120/999,
+    /// where Shockwave gives 30/60/120/1000.
+    pub fn refresh_frame_tempo(&mut self) {
         self.current_frame_tempo = self.movie.get_effective_tempo();
 
         // Publish it for the JS side. flashPlayerManager's Ruffle frame capture
@@ -1416,7 +1427,14 @@ impl DirPlayer {
                 &wasm_bindgen::JsValue::from_f64(self.current_frame_tempo as f64),
             );
         }
-        
+    }
+
+    pub fn begin_all_sprites(&mut self) {
+        self.movie.score.begin_sprites(ScoreRef::Stage, self.movie.current_frame);
+
+        // Cache the tempo for this frame
+        self.refresh_frame_tempo();
+
         // If the player isn't playing yet (i.e., during initial load),
         // reset the entered flags so that beginSprite will be called again
         // when the movie actually starts playing with the fixed spriteNum
@@ -6333,22 +6351,15 @@ fn tick_sound_manager(delta: f64) {
     }
 }
 
-/// TEMP perf diagnostic: accounts frame-loop work vs inter-frame wait, to
-/// confirm whether movie load is bound by per-frame tempo pacing rather than
-/// CPU. Logged to the browser console every N frames. Remove before commit.
-#[derive(Default)]
-struct FrameLoopDiag {
-    frames: u64,
-    work_ms: f64,
-    wait_ms: f64,
-    start_ms: f64,
+/// Wait until `deadline_ms`, with the 1 ms floor the browser event loop needs.
+async fn wait_until_deadline(deadline_ms: f64) {
+    let remaining_ms = (deadline_ms - bench_now_ms()).max(1.0);
+    let _ = timeout(
+        Duration::from_millis(remaining_ms.ceil() as u64),
+        future::pending::<()>(),
+    )
+    .await;
 }
-thread_local! {
-    static FRAME_LOOP_DIAG: std::cell::RefCell<FrameLoopDiag> =
-        std::cell::RefCell::new(FrameLoopDiag::default());
-}
-
-
 
 pub async fn run_frame_loop() {
     unsafe {
@@ -6360,6 +6371,9 @@ pub async fn run_frame_loop() {
 
     let generation = unsafe { PLAYER_GENERATION };
     let mut is_playing = true;
+    // Absolute pacing deadline, carried across frames. See the wait at the end
+    // of the loop for why this is not recomputed from scratch each frame.
+    let mut next_deadline_ms = bench_now_ms();
     while is_playing {
         // Exit if the player was reset (e.g. between tests)
         if unsafe { PLAYER_GENERATION } != generation {
@@ -6423,9 +6437,7 @@ pub async fn run_frame_loop() {
         }
 
         // Run one frame cycle (scripts + advance)
-        let __diag_work_start = bench_now_ms();
         let (playing, _) = run_single_frame().await;
-        let __diag_work_ms = bench_now_ms() - __diag_work_start;
         is_playing = playing;
 
         if !is_playing {
@@ -6503,8 +6515,13 @@ pub async fn run_frame_loop() {
             debug!("[Flash] Ruffle instance ready, resuming frame loop.");
         }
 
-        // Get the target frame delay based on cached tempo for current frame
-        let (target_delay_ms, current_tempo_for_diag) = reserve_player_ref(|player| {
+        // Re-read the tempo every frame. `begin_all_sprites` only runs on a frame
+        // CHANGE, so without this a movie holding one frame (`go the frame`) could
+        // never see a `puppetTempo()` it set itself. See `refresh_frame_tempo`.
+        reserve_player_mut(|player| player.refresh_frame_tempo());
+
+        // Get the target frame delay based on the tempo for the current frame
+        let target_delay_ms = reserve_player_ref(|player| {
             let tempo = player.current_frame_tempo;
             let base = if tempo == 0 {
                 1000.0 / 30.0  // Default to 30fps if tempo is 0
@@ -6553,57 +6570,59 @@ pub async fn run_frame_loop() {
             } else {
                 base
             };
-            (delay, tempo)
+            delay
         });
 
-        // Phase-aware pacing. While the movie is still loading assets (pending
-        // net tasks or casts mid-load), run frames back-to-back using a 1ms
-        // macrotask yield (which still lets async I/O / network / rendering
-        // progress) instead of idling to the display tempo. Habbo's preloader
-        // spins many low-fps frames waiting on loads, and pacing those to tempo
-        // (66.7ms/frame at tempo 15) was ~60% of total load time. Once loading
-        // is done we honor the tempo so playback animates at the authored rate.
-        let still_loading = reserve_player_ref(|player| {
-            player.net_manager.has_pending_tasks()
-                || player.movie.cast_manager.any_cast_loading()
-        });
-        let effective_delay_ms = if still_loading { 1.0 } else { target_delay_ms };
+        // DEADLINE pacing, not a fixed sleep, and the movie's tempo paces every
+        // frame whether or not assets are loading.
+        //
+        // Director's measured model (`docs/fps-probe`, captured from both the
+        // authoring environment and the browser plugin) is exactly
+        //
+        //     frame_period = max(1000 / tempo, work)
+        //
+        // — the tempo is a CEILING. Director runs the frame and then burns only
+        // what is LEFT of the period; past the deadline it runs flat out with no
+        // added penalty (busy 40 ms at tempo 30 measured frame 40.0 ms = 25.0 fps
+        // exactly). Sleeping the WHOLE period after the work instead made our real
+        // period `work + period`, so fps could never reach the tempo and the gap
+        // widened with frame cost — at tempo 30 with 20 ms of work Shockwave gives
+        // 30 fps and we gave ~18.8.
+        //
+        // (Removed at the same time: a "phase-aware pacing" override from 7f38a47a
+        // that forced a 1 ms yield while casts were loading. It was a real
+        // load-time win, but it silently overrode the authored tempo — including a
+        // script's own puppetTempo — and took precedence over the fetch/Flash
+        // floors above, so a load could starve the very fetches those protect.)
+        //
+        // Floor at 1 ms rather than 0: this is a browser, and the loop must always
+        // hand control back or network, input and rendering starve. Note a
+        // setTimeout-backed sleep is additionally clamped to ~4 ms once timer
+        // nesting exceeds 5 levels, capping us near 250 fps regardless — that is
+        // irrelevant below tempo 250, and is why we cannot match Shockwave's
+        // measured 1000 fps at tempo 999 without a different yield primitive.
+        //
+        // The deadline is ABSOLUTE and carried across frames rather than derived
+        // from a fresh `now` each time. Computing `period - spent` per frame loses
+        // whatever `.ceil()` rounds up plus however late the timer actually fires,
+        // and that error repeats every frame instead of being absorbed: measured
+        // +1.4 ms/frame (frame 18.10 ms against a 16.70 ms period at tempo 60,
+        // 9.70 against 8.30 at tempo 120), i.e. 26.6 fps at tempo 30 where
+        // Shockwave gives 29.8. Advancing a running deadline lets a frame that
+        // came back early pay for one that ran late.
 
-        let __diag_wait_start = bench_now_ms();
-        timeout(
-            Duration::from_millis(effective_delay_ms.ceil() as u64),
-            future::pending::<()>(),
-        )
-        .await
-        .unwrap_err();
-        let __diag_wait_ms = bench_now_ms() - __diag_wait_start;
+        let now_ms = bench_now_ms();
+        next_deadline_ms += target_delay_ms;
+        // Already past it - a frame overran, or the tempo just dropped. Do NOT
+        // bank that debt and then sprint to repay it with a burst of zero-length
+        // frames; Director simply runs flat out and starts the next period from
+        // now (its measured model is `frame = max(period, work)`, with no penalty
+        // for having missed). Resync.
+        if next_deadline_ms < now_ms {
+            next_deadline_ms = now_ms;
+        }
+        wait_until_deadline(next_deadline_ms).await;
 
-        // TEMP perf diagnostic — log work vs wait per ~250 frames.
-        FRAME_LOOP_DIAG.with(|d| {
-            let mut d = d.borrow_mut();
-            if d.frames == 0 {
-                d.start_ms = __diag_work_start;
-            }
-            d.frames += 1;
-            d.work_ms += __diag_work_ms;
-            d.wait_ms += __diag_wait_ms;
-            if d.frames % 250 == 0 {
-                let wall = (bench_now_ms() - d.start_ms) / 1000.0;
-                let fps = if wall > 0.0 { d.frames as f64 / wall } else { 0.0 };
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let (net, parse, apply, casts) =
-                        CAST_LOAD_DIAG.with(|c| *c.borrow());
-                    let lingo = (d.work_ms - net - parse - apply).max(0.0);
-                    log::debug!(
-                        "[frame-diag] frames={} tempo={} delay={:.1}ms | wall={:.1}s work={:.1}s wait={:.1}s => {:.0} fps || casts={} parse={:.1}s apply={:.1}s net={:.1}s lingo(rest)={:.1}s",
-                        d.frames, current_tempo_for_diag, target_delay_ms,
-                        wall, d.work_ms / 1000.0, d.wait_ms / 1000.0, fps,
-                        casts, parse / 1000.0, apply / 1000.0, net / 1000.0, lingo / 1000.0
-                    );
-                }
-            }
-        });
         player_wait_available().await;
     }
 }
@@ -6921,24 +6940,6 @@ pub(crate) fn bench_now_ms() -> f64 {
     use std::time::Instant;
     static BASE: OnceLock<Instant> = OnceLock::new();
     BASE.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
-}
-
-// TEMP perf diagnostic: cumulative time (ms) and counts for the cast-load
-// pipeline stages, so we can split the per-frame "work" into net-await vs
-// file-parse (decompress + chunk parse) vs apply (member creation) vs the
-// remaining Lingo-bytecode CPU. Remove before commit.
-thread_local! {
-    pub(crate) static CAST_LOAD_DIAG: std::cell::RefCell<(f64, f64, f64, u32)> =
-        std::cell::RefCell::new((0.0, 0.0, 0.0, 0));
-}
-pub(crate) fn cast_diag_add_net(ms: f64) {
-    CAST_LOAD_DIAG.with(|d| d.borrow_mut().0 += ms);
-}
-pub(crate) fn cast_diag_add_parse(ms: f64) {
-    CAST_LOAD_DIAG.with(|d| { let mut d = d.borrow_mut(); d.1 += ms; d.3 += 1; });
-}
-pub(crate) fn cast_diag_add_apply(ms: f64) {
-    CAST_LOAD_DIAG.with(|d| d.borrow_mut().2 += ms);
 }
 
 /// A minimal valid Script. `player_execute_bytecode`/`try_execute_bytecode_sync`

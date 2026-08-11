@@ -108,17 +108,13 @@ impl CastLib {
         if file_name.is_empty() {
             return;
         } else if let Some(cached_file) = dir_cache.get(&*file_name) {
-            let __t = crate::player::bench_now_ms();
             self.load_from_dir_file(cached_file, &file_name, bitmap_manager);
-            crate::player::cast_diag_add_apply(crate::player::bench_now_ms() - __t);
         } else {
             log::debug!("Loading cast {} into castLib {} ('{}')", self.file_name, self.number, self.name);
             self.state = CastLibState::Loading;
             let task_id = net_manager.preload_net_thing(self.file_name.clone());
             if !net_manager.is_task_done(Some(task_id)) {
-                let __t = crate::player::bench_now_ms();
                 net_manager.await_task(task_id).await;
-                crate::player::cast_diag_add_net(crate::player::bench_now_ms() - __t);
             }
             let task = net_manager.get_task(task_id).unwrap();
             let result = net_manager.get_task_result(Some(task_id)).unwrap();
@@ -135,19 +131,15 @@ impl CastLib {
     ) {
         let load_file_name = resolved_url.as_str();
         if let Ok(cast_bytes) = result {
-            let __tp = crate::player::bench_now_ms();
             let cast_file = read_director_file_bytes(
                 cast_bytes,
                 &resolved_url.to_string(),
                 &get_base_url(resolved_url).to_string(),
             );
-            crate::player::cast_diag_add_parse(crate::player::bench_now_ms() - __tp);
             if let Ok(cast_file) = cast_file {
                 dir_cache.insert(load_file_name.into(), cast_file);
                 let cast_file = dir_cache.get(load_file_name).unwrap();
-                let __ta = crate::player::bench_now_ms();
                 self.load_from_dir_file(&cast_file, load_file_name, bitmap_manager);
-                crate::player::cast_diag_add_apply(crate::player::bench_now_ms() - __ta);
                 // We return here because the function `load_from_dir_file()`
                 // has changed our `state` to `Loaded` and we want to keep this.
                 return;
