@@ -56,7 +56,15 @@ impl TestHarness for TestPlayer {
     fn asset_path(&self, relative: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let workspace_root = std::path::Path::new(manifest_dir).parent().unwrap();
-        workspace_root.join("public").join(relative).to_string_lossy().to_string()
+        // Push each segment separately: `join()` on a "a/b/c" string keeps the
+        // forward slashes verbatim, so on Windows this produced MIXED separators
+        // (`E:\...\public\dcr_sulake/habbo_v7/habbo.dcr`). This is the path the
+        // test hands to `load_movie`, which derives the movie's base URL from it.
+        let mut abs = workspace_root.join("public");
+        for segment in relative.split('/').filter(|s| !s.is_empty()) {
+            abs.push(segment);
+        }
+        abs.to_string_lossy().to_string()
     }
     async fn load_movie(&mut self, path: &str) {
         crate::player::testing_shared::log_test_action(&format!("Load: {}", path));
@@ -65,7 +73,16 @@ impl TestHarness for TestPlayer {
         } else {
             let manifest_dir = env!("CARGO_MANIFEST_DIR");
             let workspace_root = Path::new(manifest_dir).parent().unwrap();
-            workspace_root.join(path).to_string_lossy().to_string()
+            // Push each segment separately. `join()` on a "a/b/c" string keeps the
+            // forward slashes verbatim, so on Windows the result came out with
+            // MIXED separators (`E:\...\public\dcr_sulake/habbo_v7/habbo.dcr`).
+            // `fs::read` tolerates that, but anything that parses or compares the
+            // path (or derives a URL from it) should not have to.
+            let mut abs = workspace_root.to_path_buf();
+            for segment in path.split('/').filter(|s| !s.is_empty()) {
+                abs.push(segment);
+            }
+            abs.to_string_lossy().to_string()
         };
 
         let data_bytes =
@@ -74,10 +91,29 @@ impl TestHarness for TestPlayer {
         let file_name = Path::new(&abs_path)
             .file_name().unwrap().to_string_lossy().to_string();
 
-        let base_url = format!(
-            "file://{}",
-            Path::new(&abs_path).parent().unwrap().to_string_lossy()
-        );
+        // A correct file URL for the movie's DIRECTORY, built with
+        // `Url::from_directory_path` rather than string concatenation.
+        //
+        // `format!("file://{}", dir)` was wrong on every platform:
+        //   * no trailing slash, so resolving a relative cast name against it
+        //     REPLACES the last path segment instead of appending —
+        //     `fuse_client.cct` landed beside the movie's folder, not inside it.
+        //     That alone breaks macOS and Linux.
+        //   * on Windows it additionally produced `file://E:\dir`, which parses
+        //     with HOST = "e:" and an EMPTY path rather than a drive-letter path
+        //     (a valid Windows file URL is `file:///E:/dir/`), so the resolved
+        //     cast path was garbage and `std::fs::read` failed.
+        // With the external casts failing to load, their movie scripts never
+        // registered, so habbo's `startClient()` (which lives in fuse_client.cct)
+        // raised "No built-in handler: startClient()" on the first frame.
+        //
+        // `Url::from_directory_path` is the portable answer: drive letters and
+        // `\` on Windows, plain `/` paths on macOS/Linux, trailing slash on all
+        // three.
+        let dir = Path::new(&abs_path).parent().unwrap();
+        let base_url = url::Url::from_directory_path(dir)
+            .unwrap_or_else(|_| panic!("Could not build a file URL for {}", dir.display()))
+            .to_string();
 
         let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url)
             .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", file_name, e));
@@ -132,7 +168,34 @@ impl Drop for TestPlayer {
 }
 
 /// Run an async test body using the async-std runtime (single-threaded).
+/// Minimal `log` sink for native tests.
+///
+/// Without a logger installed, `log::error!` / `warn!` go nowhere — and since
+/// `console_error!` / `console_warn!` map to those off the web build, every
+/// script error a movie hits was silently discarded. The native e2e run would
+/// then report only a downstream symptom ("Movie stopped while waiting for
+/// member 'Logo'") with no hint of the actual Lingo failure that caused it.
+struct NativeTestLogger;
+
+impl log::Log for NativeTestLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+static NATIVE_TEST_LOGGER: NativeTestLogger = NativeTestLogger;
+
 pub fn run_test<F: std::future::Future<Output = ()>>(f: F) {
+    // `set_logger` errors if one is already installed (a second test in the same
+    // process); that is fine, ignore it.
+    let _ = log::set_logger(&NATIVE_TEST_LOGGER)
+        .map(|()| log::set_max_level(log::LevelFilter::Warn));
     async_std::task::block_on(f);
 }
 
