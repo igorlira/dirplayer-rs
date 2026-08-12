@@ -215,10 +215,12 @@ pub fn raycast_scene_multi(
         if let Some(excluded) = excluded_nodes {
             if excluded.contains(&node.name) { continue; }
         }
-        // #modelList whitelist (modelsUnderRay/Loc optionsList): when provided and
-        // non-empty, only models whose name is in the list are tested; all others are
-        // ignored even if under the ray. Empty / None => no restriction (test all),
-        // matching the dictionary's "if omitted, all models" wording.
+        // #modelList whitelist (modelsUnderRay/Loc optionsList): when provided, only
+        // models whose name is in the list are tested; all others are ignored even if
+        // under the ray, per the Director 11.5 Scripting Dictionary. `None` means the
+        // caller omitted the list entirely => no restriction. A provided-but-EMPTY list
+        // includes nothing and therefore matches nothing — the caller decides that, so
+        // do NOT re-interpret an empty set as "test all" here.
         if let Some(included) = included_nodes {
             // Hash lookup, not a linear scan. This is a `HashSet<Symbol>` — the
             // `excluded` test above already uses `contains` — but the whitelist
@@ -234,7 +236,7 @@ pub fn raycast_scene_multi(
             // `contains` stays case-insensitive for free: `intern` lowercases,
             // so symbol identity is already case-folded and equality is a spur
             // compare.
-            if !included.is_empty() && !included.contains(&node.name) {
+            if !included.contains(&node.name) {
                 continue;
             }
         }

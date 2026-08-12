@@ -2943,10 +2943,18 @@ impl Shockwave3dMemberHandlers {
                     let mut max_models: i32 = 100;
                     let mut detailed = false;
                     let mut max_dist: f32 = 100000.0;
-                    // #modelList: a list of model REFERENCES to restrict the cast to. An
-                    // empty/absent list means "no restriction" (test all), matching the
-                    // dictionary's "if omitted, all models" wording.
+                    // #modelList: a list of model REFERENCES to restrict the cast to.
+                    // Per the Director 11.5 Scripting Dictionary entry for modelsUnderRay:
+                    // "Model references not included in this list are ignored, even if they
+                    // are under the specified ray. Specify each model you want to include."
+                    // It is a strict whitelist, so an ABSENT list means "test all" while a
+                    // SUPPLIED BUT EMPTY list includes nothing and must return no hits.
+                    // (The "If omitted ... all models" wording belongs to maxNumberOfModels,
+                    // not to modelList.) `model_list_present` keeps the two cases apart —
+                    // conflating them made AreaZero's pre-spawn `#modelList: []` robot ray
+                    // hit scenery, so the movie took its #Robots branch with a non-robot.
                     let mut model_whitelist: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+                    let mut model_list_present = false;
 
                     let is_proplist = args.len() > 2 && matches!(player.get_datum(&args[2]), Datum::PropList(..));
                     if is_proplist {
@@ -2965,7 +2973,10 @@ impl Shockwave3dMemberHandlers {
                             _ => {}
                         }
                         let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(Symbol::from_str(&"modelList".to_owned())), &player.allocator, map_sorted)?;
-                        let items = match player.get_datum(&v) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                        let items = match player.get_datum(&v) {
+                            Datum::List(_, items, _) => { model_list_present = true; items.clone() }
+                            _ => VecDeque::new(),
+                        };
                         for item in &items {
                             if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name); }
                         }
@@ -2974,7 +2985,10 @@ impl Shockwave3dMemberHandlers {
                         if args.len() > 3 { detailed = player.get_datum(&args[3]).string_value().unwrap_or_default().eq_ignore_ascii_case("detailed"); }
                         // Optional positional #modelList at args[4].
                         if args.len() > 4 {
-                            let items = match player.get_datum(&args[4]) { Datum::List(_, items, _) => items.clone(), _ => VecDeque::new() };
+                            let items = match player.get_datum(&args[4]) {
+                                Datum::List(_, items, _) => { model_list_present = true; items.clone() }
+                                _ => VecDeque::new(),
+                            };
                             for item in &items {
                                 if let Datum::Shockwave3dObjectRef(r) = player.get_datum(item) { model_whitelist.insert(r.name); }
                             }
@@ -3062,7 +3076,9 @@ impl Shockwave3dMemberHandlers {
                             max_dist
                         };
                         let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
-                        let included_ref = if model_whitelist.is_empty() { None } else { Some(&model_whitelist) };
+                        // Presence, not emptiness: a supplied-but-empty #modelList is a
+                        // whitelist that includes nothing, which must yield no hits.
+                        let included_ref = if model_list_present { Some(&model_whitelist) } else { None };
                         let hits = raycast_scene_multi(
                             &ray, &scene, world_max_dist, max_models as usize,
                             node_transforms.as_ref(),
