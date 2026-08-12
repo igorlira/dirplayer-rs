@@ -2665,6 +2665,21 @@ pub struct PhysXConstraint {
     /// D6-only: per-axis motion[XYZ TwistSwing1Swing2] (0=Locked / 1=Limited / 2=Free).
     pub d6_linear_motion: [u8; 3],
     pub d6_angular_motion: [u8; 3],
+    /// D6-only local joint frame. Per the 11.5 dictionary these read back as a VOID
+    /// vector until explicitly set, hence Option rather than a zero default:
+    /// "available only after you set the values explicitly for these properties".
+    /// Order: axisA, normalA, axisB, normalB, anchorA, anchorB.
+    pub d6_local_axis_a: Option<[f64; 3]>,
+    pub d6_local_normal_a: Option<[f64; 3]>,
+    pub d6_local_axis_b: Option<[f64; 3]>,
+    pub d6_local_normal_b: Option<[f64; 3]>,
+    pub d6_local_anchor_a: Option<[f64; 3]>,
+    pub d6_local_anchor_b: Option<[f64; 3]>,
+    /// D6-only limits, each `[limitValue, stiffness, damping, restitution]`.
+    pub d6_twist_limit: Option<[f64; 4]>,
+    pub d6_swing1_limit: Option<[f64; 4]>,
+    pub d6_swing2_limit: Option<[f64; 4]>,
+    pub d6_linear_limit: Option<[f64; 4]>,
 }
 
 impl Default for PhysXConstraint {
@@ -2677,6 +2692,11 @@ impl Default for PhysXConstraint {
             stiffness: 0.0, damping: 0.0, rest_length: 0.0,
             orientation: [1.0, 0.0, 0.0, 0.0],
             d6_linear_motion: [0; 3], d6_angular_motion: [0; 3],
+            d6_local_axis_a: None, d6_local_normal_a: None,
+            d6_local_axis_b: None, d6_local_normal_b: None,
+            d6_local_anchor_a: None, d6_local_anchor_b: None,
+            d6_twist_limit: None, d6_swing1_limit: None,
+            d6_swing2_limit: None, d6_linear_limit: None,
         }
     }
 }

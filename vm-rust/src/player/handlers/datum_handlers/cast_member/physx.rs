@@ -1192,6 +1192,58 @@ impl PhysXPhysicsMemberHandlers {
         }
     }
 
+    /// `createD6Joint` is the one constraint constructor that does NOT take a
+    /// ConstraintDesc. Per the Director 11.5 Scripting Dictionary:
+    ///
+    ///   <d6joint> world.createD6Joint(jointName, RigidBody rb1, RigidBody rb2,
+    ///                                 vector globalAnchor)
+    ///
+    /// and rb1 may be VOID — "Creates a joint between the anchor point and rb2."
+    /// The sibling constructors are descriptor-based by comparison:
+    ///   createAngularJoint(ConstraintDesc, float length)
+    ///   createLinearJoint(ConstraintDesc, list orientation)
+    ///   createSpring(ConstraintDesc, symbol forceExertionMode, float restLength)
+    ///
+    /// Routing D6 through the descriptor decoder made every call fail with
+    /// "Invalid ConstraintDesc" — Agent Free Ride 2 builds its vehicle proxy with
+    /// `createD6Joint(name, VOID, chassisRB, vector(0,0,0))`.
+    fn decode_desc_positional(
+        player: &crate::player::DirPlayer,
+        args: &Vec<DatumRef>,
+    ) -> Option<ConstraintDescDecoded> {
+        if args.len() < 3 {
+            return None;
+        }
+        let name = match player.get_datum(&args[0]) {
+            Datum::String(s) => Symbol::from_str(&s),
+            Datum::Symbol(s) => *s,
+            _ => return None,
+        };
+        let body_of = |r: &DatumRef| match player.get_datum(r) {
+            Datum::PhysXObjectRef(o) => Some(o.id),
+            _ => None, // VOID => anchored to a point in the world
+        };
+        let body_a = body_of(&args[1]);
+        let body_b = body_of(&args[2]);
+        // A single GLOBAL anchor, unlike the descriptor form's per-body pointA/pointB.
+        let anchor = args
+            .get(3)
+            .map(|r| match player.get_datum(r) {
+                Datum::Vector(v) => *v,
+                _ => [0.0; 3],
+            })
+            .unwrap_or([0.0; 3]);
+        Some(ConstraintDescDecoded {
+            name,
+            body_a,
+            body_b,
+            pt_a: anchor,
+            pt_b: anchor,
+            stiffness: 0.0,
+            damping: 0.0,
+        })
+    }
+
     fn create_constraint(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
@@ -1201,9 +1253,22 @@ impl PhysXPhysicsMemberHandlers {
         if args.is_empty() {
             return Err(ScriptError::new("createConstraint expects at least 1 argument".to_string()));
         }
-        let desc = Self::decode_desc(player, &args[0])
-            .ok_or_else(|| ScriptError::new("Invalid ConstraintDesc".to_string()))?;
-        let extra_length = if args.len() > 1 { player.get_datum(&args[1]).to_float().unwrap_or(0.0) } else { 0.0 };
+        let is_d6 = matches!(kind, PhysXConstraintKind::D6Joint);
+        let desc = if is_d6 {
+            Self::decode_desc_positional(player, args)
+                .ok_or_else(|| ScriptError::new(
+                    "createD6Joint expects (jointName, rb1, rb2, vector globalAnchor)".to_string()
+                ))?
+        } else {
+            Self::decode_desc(player, &args[0])
+                .ok_or_else(|| ScriptError::new("Invalid ConstraintDesc".to_string()))?
+        };
+        // For D6 args[1] is rb1, not a length.
+        let extra_length = if !is_d6 && args.len() > 1 {
+            player.get_datum(&args[1]).to_float().unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
@@ -1212,7 +1277,10 @@ impl PhysXPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
 
-        if physx.state.constraints.iter().any(|c| c.name != desc.name) {
+        // Reject a DUPLICATE name ("constraints with duplicate names are not allowed").
+        // The test was inverted — `!=` rejected as soon as any constraint with a
+        // DIFFERENT name existed, so every constraint after the first one failed.
+        if physx.state.constraints.iter().any(|c| c.name == desc.name) {
             return Ok(player.alloc_datum(Datum::Int(-4)));
         }
 

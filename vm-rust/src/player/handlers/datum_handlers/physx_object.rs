@@ -813,15 +813,41 @@ impl PhysXObjectDatumHandlers {
         name: Symbol,
         prop: &str,
     ) -> Result<DatumRef, ScriptError> {
-        let member = player.movie.cast_manager.find_member_by_ref(member_ref)
-            .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
-        let physx = match &member.member_type {
-            CastMemberType::PhysXPhysics(p) => p,
-            _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
+        // Take an owned copy so the D6 limit getters below can allocate list datums
+        // (which needs `&mut player`) without holding a borrow of the member.
+        let c = {
+            let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+                .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
+            let physx = match &member.member_type {
+                CastMemberType::PhysXPhysics(p) => p,
+                _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
+            };
+            physx.state.constraints.iter()
+                .find(|c| c.name == name)
+                .cloned()
+                .ok_or_else(|| ScriptError::new(format!("Constraint '{}' not found", name)))?
         };
-        let c = physx.state.constraints.iter()
-            .find(|c| c.name == name)
-            .ok_or_else(|| ScriptError::new(format!("Constraint '{}' not found", name)))?;
+        let c = &c;
+
+        let motion_symbol = |code: u8| Datum::Symbol(Symbol::from_str(match code {
+            0 => "locked",
+            1 => "limited",
+            _ => "free",
+        }));
+        fn limit_datum(
+            player: &mut crate::player::DirPlayer,
+            vals: Option<[f64; 4]>,
+        ) -> Datum {
+            match vals {
+                Some(v) => {
+                    let items = v.iter()
+                        .map(|f| player.alloc_datum(Datum::Float(*f)))
+                        .collect::<std::collections::VecDeque<_>>();
+                    Datum::List(DatumType::List, items, false)
+                }
+                None => Datum::Void,
+            }
+        }
 
         let result = match_ci!(prop, {
             "name" => Datum::String(c.name.to_string()),
@@ -836,6 +862,26 @@ impl PhysXObjectDatumHandlers {
                 PhysXConstraintKind::AngularJoint => "angularjoint",
                 PhysXConstraintKind::D6Joint => "d6joint",
             })),
+
+            // --- D6Joint (see set_constraint_prop for the documented contract) ---
+            "axisMotion" => motion_symbol(c.d6_linear_motion[0]),
+            "normalMotion" => motion_symbol(c.d6_linear_motion[1]),
+            "biNormalMotion" | "binormalMotion" => motion_symbol(c.d6_linear_motion[2]),
+            "twistMotion" => motion_symbol(c.d6_angular_motion[0]),
+            "swing1Motion" => motion_symbol(c.d6_angular_motion[1]),
+            "swing2Motion" => motion_symbol(c.d6_angular_motion[2]),
+            "twistLimit" => limit_datum(player, c.d6_twist_limit),
+            "swing1Limit" => limit_datum(player, c.d6_swing1_limit),
+            "swing2Limit" => limit_datum(player, c.d6_swing2_limit),
+            "linearLimit" => limit_datum(player, c.d6_linear_limit),
+            // "If the value is not set, a void vector is returned."
+            "localAxisA" => c.d6_local_axis_a.map_or(Datum::Void, Datum::Vector),
+            "localNormalA" => c.d6_local_normal_a.map_or(Datum::Void, Datum::Vector),
+            "localAxisB" => c.d6_local_axis_b.map_or(Datum::Void, Datum::Vector),
+            "localNormalB" => c.d6_local_normal_b.map_or(Datum::Void, Datum::Vector),
+            "localAnchorA" => c.d6_local_anchor_a.map_or(Datum::Void, Datum::Vector),
+            "localAnchorB" => c.d6_local_anchor_b.map_or(Datum::Void, Datum::Vector),
+
             _ => return Err(ScriptError::new(format!("Unknown constraint property: {}", prop))),
         });
         Ok(player.alloc_datum(result))
@@ -849,6 +895,20 @@ impl PhysXObjectDatumHandlers {
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        // Resolve a `[limitValue, stiffness, damping, restitution]` argument BEFORE
+        // taking the mutable member borrow — reading the list elements needs `&player`.
+        let limit_arg: Option<[f64; 4]> = if let Datum::List(_, items, _) = &value {
+            let mut out = [0.0f64; 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = items.get(i)
+                    .map(|r| player.get_datum(r).to_float().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+            }
+            Some(out)
+        } else {
+            None
+        };
+
         let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &mut member.member_type {
@@ -859,12 +919,62 @@ impl PhysXObjectDatumHandlers {
             .find(|c| c.name == name)
             .ok_or_else(|| ScriptError::new(format!("Constraint '{}' not found", name)))?;
 
+        // D6Joint properties (Director 11.5 Scripting Dictionary, Physics Engine):
+        //   *Motion  — symbol #locked / #limited / #free
+        //   *Limit   — list [limitValue, stiffness, damping, restitution]
+        //   local*   — vector; reads back VOID until explicitly set
+        // The dictionary notes limits must be set BEFORE the matching motion symbol.
+        let motion_code = |v: &Datum| -> Option<u8> {
+            let s = match v {
+                Datum::Symbol(s) => s.to_string(),
+                Datum::String(s) => s.clone(),
+                _ => return None,
+            };
+            match s.to_ascii_lowercase().as_str() {
+                "locked" => Some(0),
+                "limited" => Some(1),
+                "free" => Some(2),
+                _ => None,
+            }
+        };
+
         match_ci!(prop, {
             "pointA" => { if let Datum::Vector(v) = &value { c.anchor_a = *v; } else { return Err(ScriptError::new("Expected vector".to_string())); } },
             "pointB" => { if let Datum::Vector(v) = &value { c.anchor_b = *v; } else { return Err(ScriptError::new("Expected vector".to_string())); } },
             "stiffness" => { c.stiffness = value.to_float()?; },
             "damping" => { c.damping = value.to_float()?; },
             "restLength" | "length" => { c.rest_length = value.to_float()?; },
+
+            // --- D6 linear degrees of freedom (along axis / normal / binormal) ---
+            "axisMotion" => { c.d6_linear_motion[0] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+            "normalMotion" => { c.d6_linear_motion[1] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+            "biNormalMotion" | "binormalMotion" => { c.d6_linear_motion[2] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+
+            // --- D6 angular degrees of freedom (twist / swing1 / swing2) ---
+            "twistMotion" => { c.d6_angular_motion[0] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+            "swing1Motion" => { c.d6_angular_motion[1] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+            "swing2Motion" => { c.d6_angular_motion[2] = motion_code(&value)
+                .ok_or_else(|| ScriptError::new("Expected #locked, #limited or #free".to_string()))?; },
+
+            // --- D6 limits ---
+            "twistLimit" => { c.d6_twist_limit = limit_arg; },
+            "swing1Limit" => { c.d6_swing1_limit = limit_arg; },
+            "swing2Limit" => { c.d6_swing2_limit = limit_arg; },
+            "linearLimit" => { c.d6_linear_limit = limit_arg; },
+
+            // --- D6 local joint frame ---
+            "localAxisA" => { if let Datum::Vector(v) = &value { c.d6_local_axis_a = Some(*v); } },
+            "localNormalA" => { if let Datum::Vector(v) = &value { c.d6_local_normal_a = Some(*v); } },
+            "localAxisB" => { if let Datum::Vector(v) = &value { c.d6_local_axis_b = Some(*v); } },
+            "localNormalB" => { if let Datum::Vector(v) = &value { c.d6_local_normal_b = Some(*v); } },
+            "localAnchorA" => { if let Datum::Vector(v) = &value { c.d6_local_anchor_a = Some(*v); } },
+            "localAnchorB" => { if let Datum::Vector(v) = &value { c.d6_local_anchor_b = Some(*v); } },
+
             _ => return Err(ScriptError::new(format!("Cannot set constraint property: {}", prop))),
         });
         Ok(())
