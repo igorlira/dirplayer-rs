@@ -136,13 +136,10 @@ pub fn build_bone_matrices_ex(
                 } else {
                     (kf.pos_x, kf.pos_y, kf.pos_z)
                 };
-                let sx = if kf.scale_x.abs() < 0.01 { 1.0 } else { kf.scale_x };
-                let sy = if kf.scale_y.abs() < 0.01 { 1.0 } else { kf.scale_y };
-                let sz = if kf.scale_z.abs() < 0.01 { 1.0 } else { kf.scale_z };
                 local_matrices.push(compose_matrix(
                     px, py, pz,
                     kf.rot_x, kf.rot_y, kf.rot_z, kf.rot_w,
-                    sx, sy, sz,
+                    kf.scale_x, kf.scale_y, kf.scale_z,
                 ));
                 has_motion_track[bone_idx] = true;
                 continue;

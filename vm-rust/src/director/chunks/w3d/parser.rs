@@ -1012,9 +1012,12 @@ impl W3dFileParser {
 
                 // Scale
                 if k == 0 {
-                    acc_scale_x = bs.read_f32();
-                    acc_scale_y = bs.read_f32();
-                    acc_scale_z = bs.read_f32();
+                    // Key 0's scale triple is a DELTA from the accumulator's 1.0 start,
+                    // not an absolute value — unscaled bones store 0.0 here, so
+                    // assigning instead of accumulating decoded every rest scale as 0.
+                    acc_scale_x += bs.read_f32();
+                    acc_scale_y += bs.read_f32();
+                    acc_scale_z += bs.read_f32();
                 } else {
                     let sc_sign = bs.read_compressed_u8(7);
                     let mag_x = bs.read_compressed_u32(8) as f32 * scale_iq;
