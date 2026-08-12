@@ -756,7 +756,9 @@ impl TextMemberHandlers {
                         } else {
                             text_data.height.max(measured_height)
                         }
-                    } else if text_has_breaks || is_multi_par_authored {
+                    } else if (text_has_breaks || is_multi_par_authored)
+                        && !text_data.text_set_at_runtime
+                    {
                         text_data.height
                     } else {
                         measured_height
@@ -926,7 +928,9 @@ impl TextMemberHandlers {
                         } else {
                             text_data.height.max(measured)
                         }
-                    } else if text_has_breaks || is_multi_par_authored {
+                    } else if (text_has_breaks || is_multi_par_authored)
+                        && !text_data.text_set_at_runtime
+                    {
                         text_data.height
                     } else {
                         measured
@@ -2350,6 +2354,10 @@ impl TextMemberHandlers {
 
                     // Update the plain text + caret state in one go.
                     text_member.set_text_preserving_caret(new_text.clone());
+                    // The authored box no longer describes this content — an
+                    // #adjust member must re-measure from here on (see
+                    // `text_set_at_runtime`).
+                    text_member.text_set_at_runtime = true;
 
                     // Clear html_styled_spans on .text assignment. Inheriting the
                     // first existing span's style carried colour/bold from prior

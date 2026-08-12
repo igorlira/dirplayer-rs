@@ -183,6 +183,14 @@ pub struct TextMember {
     /// stretches the text vertically. Distinguishes the runtime-set case from a
     /// stale single-line authored height (wrap-only #adjust must still measure).
     pub rect_set_at_runtime: bool,
+    /// True once Lingo has replaced the member's text at runtime (`member.text = …`,
+    /// `.html`, `.rtf`). An `#adjust` member's authored width/height describe the
+    /// AUTHORED layout only; once the text is rewritten Director re-adjusts the
+    /// rect to the new content. SuperSonic RC's `textgenerator` is authored 513x65
+    /// (2 paragraphs) and reused as a one-line label factory — trusting the stored
+    /// 65 made `3d_textsprite` pick a 128-tall texture and push both HUD labels
+    /// ("Time remaining", "Points") off the top of the screen.
+    pub text_set_at_runtime: bool,
     pub char_spacing: i32,
     pub tab_stops: Vec<TabStop>,
     pub html_styled_spans: Vec<StyledSpan>,
@@ -474,6 +482,7 @@ impl TextMember {
             width: 100,
             height: 20,
             rect_set_at_runtime: false,
+            text_set_at_runtime: false,
             char_spacing: 0,
             tab_stops: Vec::new(),
             html_styled_spans: Vec::new(),
@@ -5092,6 +5101,7 @@ impl CastMember {
             width: box_w,
             height: box_h,
             rect_set_at_runtime: false,
+            text_set_at_runtime: false,
             char_spacing: styled_text.styled_spans.first()
                 .map(|s| s.style.char_spacing as i32)
                 .unwrap_or(0),

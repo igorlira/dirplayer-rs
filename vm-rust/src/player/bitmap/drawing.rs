@@ -2257,29 +2257,49 @@ impl Bitmap {
                 if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { return None; }
                 Some(((sy as usize) * src.width as usize + sx as usize) * 4)
             };
-            // Only take the alpha-mask fast path if the copied source region has any
-            // transparency; an opaque source belongs on the colour (nearest-index) path.
+            // Only take the alpha-mask fast path if the copied source region is
+            // mask-like: it either carries transparency (a glyph coverage image) or
+            // is pure grayscale (R==G==B — what `extractAlpha()` returns, alpha 255
+            // with the mask in RGB). A COLOUR opaque source — the Habbo camera
+            // capturing `(the stage).image` into an 8-bit #grayscale photo — belongs
+            // on the colour (nearest-index) path instead.
             let mut src_has_alpha = false;
+            let mut src_is_gray = true;
             'scan: for dy in min_dst_y..max_dst_y {
                 if dy < 0 || dy >= self.height as i32 { continue; }
                 for dx in min_dst_x..max_dst_x {
                     if dx < 0 || dx >= self.width as i32 { continue; }
                     if let Some(si) = src_index(dx, dy) {
-                        if si + 3 < src.data.len() && src.data[si + 3] < 255 {
-                            src_has_alpha = true;
-                            break 'scan;
+                        if si + 3 < src.data.len() {
+                            if src.data[si + 3] < 255 {
+                                src_has_alpha = true;
+                                break 'scan;
+                            }
+                            if src.data[si] != src.data[si + 1] || src.data[si + 1] != src.data[si + 2] {
+                                src_is_gray = false;
+                            }
                         }
                     }
                 }
             }
-            if src_has_alpha {
+            if src_has_alpha || src_is_gray {
                 for dy in min_dst_y..max_dst_y {
                     if dy < 0 || dy >= self.height as i32 { continue; }
                     for dx in min_dst_x..max_dst_x {
                         if dx < 0 || dx >= self.width as i32 { continue; }
                         if let Some(si) = src_index(dx, dy) {
                             if si + 3 < src.data.len() {
-                                self.data[(dy as usize) * dw + dx as usize] = src.data[si + 3];
+                                // Transparency-bearing source: its ALPHA is the mask
+                                // (LEGO SuperSonic's timer digits copy the text image
+                                // itself). Opaque grayscale source: the mask is already
+                                // in RGB (`extractAlpha()` output — the "Time remaining"
+                                // / "Points" labels), and the reversed Mac #grayscale
+                                // CLUT would invert it to an opaque white block.
+                                self.data[(dy as usize) * dw + dx as usize] = if src_has_alpha {
+                                    src.data[si + 3]
+                                } else {
+                                    src.data[si]
+                                };
                             }
                         }
                     }
