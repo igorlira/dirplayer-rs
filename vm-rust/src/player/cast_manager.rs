@@ -416,11 +416,21 @@ impl CastManager {
     }
 
     pub fn find_member_ref_by_name(&self, name: &str) -> Option<CastMemberRef> {
+        // Unnamed members are addressable only by number — an empty name matches
+        // nothing, and unnamed members must stay out of the name cache. See the note
+        // on `CastLib::find_member_by_name`; this is the path `member("")` takes when
+        // no cast library is given.
+        if name.is_empty() {
+            return None;
+        }
         if self.member_name_cache.borrow().is_none() {
             let mut cache = FxHashMap::default();
             for cast in &self.casts {
                 let mut best_matches: FxHashMap<String, CastMemberRef> = FxHashMap::default();
                 for member in cast.members.values() {
+                    if member.name.is_empty() {
+                        continue;
+                    }
                     let key = member.name.to_ascii_lowercase();
                     let member_ref = CastMemberRef {
                         cast_lib: cast.number as i32,

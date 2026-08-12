@@ -169,12 +169,29 @@ impl CastLib {
     }
 
     pub fn find_member_by_name(&self, name: &str) -> Option<&CastMember> {
+        // An UNNAMED member cannot be addressed by name. Director identifies members
+        // by name or by number, and a member with no name is reachable only by number,
+        // so an empty query must never match — and unnamed members must never enter
+        // the name index, or they become the match for `member("")`.
+        //
+        // AreaZero's Sound Manager does `member(tSoundName)` where tSoundName comes
+        // straight from data that carries 39 `#sound: ""` entries; its own guard only
+        // rejects VOID, not EMPTY. Indexing unnamed members made `member("")` resolve
+        // to the lowest-numbered unnamed member — a SCRIPT — which then failed with
+        // "Script members don't support property duration" and flooded the audio path
+        // with non-sound members ("Failed to create source AudioBuffer").
+        if name.is_empty() {
+            return None;
+        }
         // Director returns the lowest-numbered member when duplicates exist in the
         // same cast. Build (once) a lowercased-name → lowest-number index so repeated
         // lookups are O(1) instead of an O(members) scan per call.
         if self.name_index.borrow().is_none() {
             let mut index: FxHashMap<String, u32> = FxHashMap::default();
             for member in self.members.values() {
+                if member.name.is_empty() {
+                    continue;
+                }
                 let key = member.name.to_ascii_lowercase();
                 index
                     .entry(key)
