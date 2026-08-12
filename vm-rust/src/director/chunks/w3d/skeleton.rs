@@ -116,7 +116,7 @@ pub fn build_bone_matrices_ex(
             let (px, py, pz) = if root_lock && bone.parent_index < 0 {
                 (0.0, 0.0, 0.0)
             } else {
-                resolve_local_translation(skeleton, bone_idx, ov[12], ov[13], ov[14])
+                (ov[12], ov[13], ov[14])
             };
             let mut local = *ov;
             local[12] = px;
@@ -129,11 +129,12 @@ pub fn build_bone_matrices_ex(
         if let Some(mot) = motion {
             if let Some(track) = mot.find_track_by_bone(bone.name) {
                 let kf = track.evaluate(time);
-                // Resolve translation: use parent bone length if displacement is zero
+                // RAW translation. The parent-tip offset is applied by the world walk
+                // below, not folded in here — see the note on bone length there.
                 let (px, py, pz) = if root_lock && bone.parent_index < 0 {
                     (0.0, 0.0, 0.0)
                 } else {
-                    resolve_local_translation(skeleton, bone_idx, kf.pos_x, kf.pos_y, kf.pos_z)
+                    (kf.pos_x, kf.pos_y, kf.pos_z)
                 };
                 let sx = if kf.scale_x.abs() < 0.01 { 1.0 } else { kf.scale_x };
                 let sy = if kf.scale_y.abs() < 0.01 { 1.0 } else { kf.scale_y };
@@ -148,22 +149,44 @@ pub fn build_bone_matrices_ex(
             }
         }
 
-        // Fall back to rest pose with resolved translation
-        let (rx, ry, rz) = resolve_local_translation(skeleton, bone_idx, bone.dir_x, bone.dir_y, bone.dir_z);
+        // Fall back to the rest pose — raw `dir`, tip offset applied by the world walk.
         local_matrices.push(compose_matrix(
-            rx, ry, rz,
+            bone.dir_x, bone.dir_y, bone.dir_z,
             bone.rot_x, bone.rot_y, bone.rot_z, bone.rot_w,
             1.0, 1.0, 1.0,
         ));
     }
 
-    // Walk parent chain to build world matrices
+    // Walk the parent chain to build world matrices.
+    //
+    // IFX parents a child at its parent's TIP, not the parent's origin:
+    // `IFXCharacter::ForEachNodeTransformed2` stores the node's own transform, then
+    // translates by (length, 0, 0) in the node's local frame before recursing into
+    // children. So `dir` (and any keyframe position) is an offset measured FROM the
+    // parent's tip:
+    //
+    //     world(child) = world(parent) * T(parentLength.x) * T(dir) * R(rot) * S(scale)
+    //
+    // Confirmed numerically on the Agent Free Ride biped: 20 of its 31 bones carry
+    // dir=(0,0,0) with a large nonzero length, and for the bones that DO have a dir,
+    // the sum lands where anatomy requires — L Thigh's dir.x (-24.103) added to its
+    // parent Spine's length (13.739) gives -10.364, i.e. exactly one Pelvis length
+    // (10.367) below the spine base.
     for i in 0..count {
         let parent = skeleton.bones[i].parent_index;
         if parent < 0 {
             world_matrices[i] = local_matrices[i];
         } else {
-            world_matrices[i] = multiply_matrix(&world_matrices[parent as usize], &local_matrices[i]);
+            let p = parent as usize;
+            let plen = skeleton.bones[p].length;
+            let tip = [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                plen, 0.0, 0.0, 1.0,
+            ];
+            let parent_tip = multiply_matrix(&world_matrices[p], &tip);
+            world_matrices[i] = multiply_matrix(&parent_tip, &local_matrices[i]);
         }
     }
 

@@ -4852,20 +4852,13 @@ void main() {
             _ => return false,
         };
 
-        // The biped mesh is bound to the MOTION's frame 0, not the skeleton HTree rest —
-        // so build inv_bind from the motion's first frame for it. (Other rigs bind to rest.)
-        let bind_to_motion_frame0 = resource_name.to_ascii_lowercase().contains("biped");
-
-        // Compute inverse bind matrices fresh (bypass cache to ensure correct transpose)
+        // The bind pose is the skeleton's REST pose, for every rig. IFX captures it once
+        // at model-bind time (`CIFXSkeletonModifier::SetModelData` -> `StoreReferencePositions`)
+        // by walking the loaded rest TRS, and stores it in a per-bone reference record
+        // (`IFXCoreNodeShare+32`) that motion sampling never writes. A motion's frame 0 is
+        // therefore never the bind pose — see docs/w3d-skeleton-motion-spec.md.
         let inv_bind_fresh = {
-            let bind_motion = if bind_to_motion_frame0 {
-                let cmn = runtime_state.and_then(|rs| rs.bones_player(model_name))
-                    .filter(|b| b.current_motion.is_some())
-                    .and_then(|b| b.current_motion)
-                    .or_else(|| runtime_state.and_then(|rs| rs.current_motion));
-                cmn.and_then(|name| scene.motions.iter().find(|m| m.name == name))
-            } else { None };
-            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, bind_motion, 0.0);
+            let rest = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, None, 0.0);
             rest.iter().map(|m| {
                 // Proper column-major affine inverse: R^-1 = R^T, t^-1 = -R^T * t
                 let (r00,r01,r02) = (m[0], m[4], m[8]);
@@ -5035,20 +5028,6 @@ void main() {
                 let rel = mat4_multiply_col_major(&root_relinv, &world_matrices[i]);
                 let final_mat = mat4_multiply_col_major(&rel, &inv_bind[i]);
                 skinning_matrices[i * 16..i * 16 + 16].copy_from_slice(&final_mat);
-            }
-        }
-
-        // Debug: log root bone matrices once
-        {
-            static BONE_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !BONE_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let w = &world_matrices[0];
-                let ib = &inv_bind[0];
-                log(&format!(
-                    "[3D-BONE0] rootLock={} world_pos=({:.1},{:.1},{:.1}) inv_bind_pos=({:.1},{:.1},{:.1}) skin_pos=({:.2},{:.2},{:.2})",
-                    root_lock, w[12], w[13], w[14], ib[12], ib[13], ib[14],
-                    skinning_matrices[12], skinning_matrices[13], skinning_matrices[14]
-                ));
             }
         }
 
