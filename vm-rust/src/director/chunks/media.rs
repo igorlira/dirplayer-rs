@@ -50,6 +50,51 @@ impl MediaChunk {
             });
         }
 
+        // Detect an ID3v2-tagged MP3 before parsing the sound header, for the same
+        // reason as the JPEG check above: there is no Director sound header here, and
+        // parsing one reads the tag's own text as numeric fields.
+        //
+        // AreaZero's sound members are MP3s carrying an ID3v2 tag, so they begin with
+        // "ID3" rather than an MP3 frame sync — the frame-sync test in get_codec_name
+        // missed them, and the header parse produced identical garbage on every member
+        // (headerSize 0x49443303 = "ID3\x03", sampleRate 0x07765443 = "\x07vTC",
+        // dataSizeField 0x00426C75 = "\0Blu" — the TCON genre frame, "Blues"). The
+        // bogus dataSizeField then tripped the compression-ratio heuristic, so they
+        // were reported as ima_adpcm at 125195331 Hz.
+        //
+        // Strip the tag so the data starts at a real frame sync and the normal MP3
+        // path takes over; the decoder reads the true sample rate from the stream.
+        if data_test.len() >= 10 && &data_test[0..3] == b"ID3" {
+            let flags = data_test[5];
+            // ID3v2 sizes are synchsafe: 7 bits per byte, high bit always clear.
+            let tag_size = ((data_test[6] as usize & 0x7F) << 21)
+                | ((data_test[7] as usize & 0x7F) << 14)
+                | ((data_test[8] as usize & 0x7F) << 7)
+                | (data_test[9] as usize & 0x7F);
+            // 10-byte header, plus a 10-byte footer when the footer flag is set.
+            let tag_len = 10 + tag_size + if flags & 0x10 != 0 { 10 } else { 0 };
+            if tag_len < data_test.len() {
+                let audio_data = data_test[tag_len..].to_vec();
+                debug!(
+                    "MediaChunk: ID3v2 tag of {} bytes stripped, {} bytes of MP3 remain",
+                    tag_len,
+                    audio_data.len()
+                );
+                return Ok(MediaChunk {
+                    sample_rate: 0, // the MP3 stream carries its own rate
+                    data_size_field: audio_data.len() as u32,
+                    guid: None,
+                    audio_data,
+                    is_compressed: true,
+                });
+            }
+            debug!(
+                "MediaChunk: ID3v2 tag length {} >= data length {}; parsing as-is",
+                tag_len,
+                data_test.len()
+            );
+        }
+
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
 
