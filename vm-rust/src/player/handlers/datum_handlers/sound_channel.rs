@@ -1958,8 +1958,15 @@ impl SoundChannel {
                 source_sample_rate as f32,
             ) {
                 Ok(buf) => buf,
-                Err(_) => {
-                    error!("❌ Failed to create source AudioBuffer");
+                Err(e) => {
+                    // createBuffer rejects for three distinct reasons — channel count
+                    // 0 or >32, length 0, or a sample rate outside the implementation
+                    // range — so name the values rather than just the failure.
+                    error!(
+                        "❌ Failed to create source AudioBuffer: channels={} frames={} sampleRate={} (samples={}, targetRate={}) err={:?}",
+                        num_channels, num_frames, source_sample_rate,
+                        audio_data.samples.len(), target_sample_rate, e
+                    );
                     let mut this = self_rc.borrow_mut();
                     this.status = SoundStatus::Idle;
                     return;

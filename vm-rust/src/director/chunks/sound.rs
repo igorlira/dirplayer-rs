@@ -328,8 +328,26 @@ impl SoundChunk {
         let encode = reader.read_u8().map_err(|e| format!("encode: {}", e))?;
         let _base_frequency = reader.read_u8().map_err(|e| format!("baseFrequency: {}", e))?;
 
-        // Convert Fixed-point 16.16 sample rate to integer
-        let sample_rate = sample_rate_fixed >> 16;
+        // The Mac snd resource stores sampleRate as 16.16 Fixed, so 22050 Hz is
+        // 0x56220000 and the integer part is the high word. Director 11.5 members
+        // instead store a PLAIN integer in the low word — AreaZero and Agent Free Ride
+        // both carry 0x00005622 (= 22050), where `>> 16` yields 0. A rate of 0 makes
+        // Web Audio's createBuffer throw, so every one of those sounds was dropped.
+        //
+        // Take the high word when it is a usable rate, else fall back to the low word.
+        // Both are checked against Web Audio's accepted range rather than assumed, so a
+        // genuinely malformed field still reports 0 instead of a fabricated rate.
+        const MIN_RATE: u32 = 3000;
+        const MAX_RATE: u32 = 768_000;
+        let fixed_point_rate = sample_rate_fixed >> 16;
+        let plain_int_rate = sample_rate_fixed & 0xFFFF;
+        let sample_rate = if (MIN_RATE..=MAX_RATE).contains(&fixed_point_rate) {
+            fixed_point_rate
+        } else if (MIN_RATE..=MAX_RATE).contains(&plain_int_rate) {
+            plain_int_rate
+        } else {
+            fixed_point_rate
+        };
 
         let (channels, bits_per_sample, sample_count, audio_data_start);
 
@@ -385,14 +403,37 @@ impl SoundChunk {
                 );
             }
             _ => {
-                // Unknown encode byte - default to 16-bit
-                channels = 1;
-                bits_per_sample = 16;
-                sample_count = length_or_channels;
+                // Non-Mac encode byte (Director writes 0x01). TWO different layouts
+                // arrive here and they must be told apart by the length field, not by
+                // the encode byte — assuming either one breaks the other movie:
+                //
+                //  * stdSH-like, 8-bit UNSIGNED mono: `length_or_channels` is the
+                //    sample count, which for 8-bit equals the audio byte count.
+                //    Agent Free Ride ships these (snd_music: field 1245312, audio
+                //    1245312 bytes).
+                //  * extSH-like, 16-bit BIG-ENDIAN: `length_or_channels` is the
+                //    CHANNEL count (1 or 2), nothing like the byte count. AreaZero
+                //    ships these (PlayerFootstep1_SFX: field 1, audio 11064 bytes).
+                //
+                // Verified by scoring the mean sample-to-sample delta of every
+                // candidate reading (real audio is smooth, a wrong one reads as noise):
+                //   AFR  snd_music:           8u=0.014  8s=0.21  16BE=0.21  16LE=0.24
+                //   AZ   PlayerFootstep1_SFX: 8u=0.164  8s=0.008 16BE=0.008 16LE=0.46
                 audio_data_start = (header_pos - start_pos) + 22;
+                let audio_bytes = all_bytes.len().saturating_sub(audio_data_start) as u32;
+                if length_or_channels == audio_bytes {
+                    channels = 1;
+                    bits_per_sample = 8;
+                    sample_count = length_or_channels;
+                } else {
+                    channels = if length_or_channels == 2 { 2 } else { 1 };
+                    bits_per_sample = 16;
+                    sample_count = audio_bytes / (2 * channels as u32).max(1);
+                }
                 debug!(
-                    "Unknown encode 0x{:02X}: {} Hz, defaulting to 16-bit mono, audio at offset {}",
-                    encode, sample_rate, audio_data_start
+                    "Encode 0x{:02X} (Director variant): {} Hz, {}-bit, {} ch, {} samples, audio at offset {} (lengthField={}, audioBytes={})",
+                    encode, sample_rate, bits_per_sample, channels, sample_count,
+                    audio_data_start, length_or_channels, audio_bytes
                 );
             }
         }
@@ -519,7 +560,6 @@ impl SoundChunk {
     /// Create a SoundChunk from sndH (header) and sndS (samples) chunks.
     /// Uses MoaSoundFormat fields from the sndH header for metadata.
     pub fn from_snd_header_and_samples(header: &SndHeaderChunk, samples: &[u8]) -> SoundChunk {
-        let sample_rate = header.frame_rate as u32;
         let bits_per_sample = if header.bits_per_sample > 0 {
             header.bits_per_sample as u16
         } else {
@@ -529,6 +569,43 @@ impl SoundChunk {
             header.num_channels as u16
         } else {
             1
+        };
+        // frameRate is the sample rate, but some sndH headers carry 0 there (seen on
+        // AreaZero and Agent Free Ride members). It used to pass through unguarded —
+        // unlike bitsPerSample/numChannels above — and a rate of 0 makes Web Audio's
+        // createBuffer throw NotSupportedError ("outside the range [3000, 768000]"),
+        // so the sound was dropped entirely.
+        //
+        // Recover it from the header's own byteRate rather than inventing a rate:
+        //   byteRate = sampleRate * channels * bytesPerSample
+        // and only fall back to a default if that is unusable too.
+        let sample_rate = if header.frame_rate > 0 {
+            header.frame_rate as u32
+        } else {
+            let bytes_per_sample = if header.bytes_per_sample > 0 {
+                header.bytes_per_sample as u32
+            } else {
+                (bits_per_sample as u32 + 7) / 8
+            };
+            let divisor = channels as u32 * bytes_per_sample.max(1);
+            let derived = if header.byte_rate > 0 && divisor > 0 {
+                header.byte_rate as u32 / divisor
+            } else {
+                0
+            };
+            if (3000..=768_000).contains(&derived) {
+                debug!(
+                    "[SND] sndH frameRate is 0; derived {} Hz from byteRate {} ({} ch x {} bytes)",
+                    derived, header.byte_rate, channels, bytes_per_sample
+                );
+                derived
+            } else {
+                debug!(
+                    "[SND] sndH frameRate is 0 and byteRate {} gives no usable rate ({}); defaulting to 22050 Hz",
+                    header.byte_rate, derived
+                );
+                22050
+            }
         };
 
         // Determine codec from compression_type GUID
