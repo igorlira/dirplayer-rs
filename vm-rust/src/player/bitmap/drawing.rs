@@ -2111,6 +2111,17 @@ impl Bitmap {
         src_rect: IntRect,
         params: &CopyPixelsParams,
     ) {
+        // Destination pixels are about to change, so retire anything keyed on the
+        // old contents. The WebGL2 texture cache keys on `bitmap.version`
+        // (rendering_gpu/webgl2/mod.rs), so a member image mutated IN PLACE by
+        // Lingo — `sprite.member.image.copyPixels(digit, …)`, the timer HUD in
+        // Heatwave Racing and Age of Speed — kept rendering the texture uploaded
+        // when the sprite first appeared: the clock froze at its first value and
+        // only the odd character that happened to land on another invalidation
+        // ever changed. Marked up front so every early return below is covered.
+        self.matte = None;
+        self.mark_dirty();
+
         let ink = params.ink;
         let alpha = params.blend as f32 / 100.0;
         let mask_image = params.mask_image;
