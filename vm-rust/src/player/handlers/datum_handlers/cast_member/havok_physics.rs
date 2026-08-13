@@ -1958,21 +1958,37 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
                 // Normal suspension is handled by the game's Lingo spring forces.
                 // The car needs to be free to oscillate above the ground mesh.
                 if body_bottom < ground_z - 5.0 {
-                    state.rigid_bodies[bi].position[2] = ground_z + half_z - 5.0;
-                    let vz = state.rigid_bodies[bi].linear_velocity[2];
-                    if vz > 0.0 {
-                        state.rigid_bodies[bi].linear_velocity[2] *= 0.5;
-                    }
-                    // Do NOT touch a DOWNWARD velocity here, however wrong it looks:
-                    // a clamped body carries a large phantom -vz (the car reads ≈ -104
-                    // while descending 0.4/frame, because it keeps integrating gravity
-                    // while being held). Zeroing it was tried and REVERTED — it glues
-                    // the body to the surface: the car could no longer leave a plateau
-                    // downward at all (parked at z=144 for 200 frames instead of
-                    // rolling off), and it flattened the jump-then-spring-recovery the
-                    // game is supposed to show coming down a ramp. The phantom
-                    // velocity is a symptom of the clamp doing the suspension's job;
-                    // fix that, not this.
+                    // Rescue the body ONTO the surface, not back onto the
+                    // trigger threshold. `- 5.0` here parked it exactly at the
+                    // `< ground_z - 5.0` condition above, so it stayed
+                    // permanently penetrating: the clamp re-fired every step,
+                    // the body never came to rest, and because the clamp
+                    // deliberately leaves a downward velocity alone (see below)
+                    // that velocity ran away unbounded — SuperSonic's car sat at
+                    // z=3 on a road at z=0 with vz past -500, and Age of Speed's
+                    // car sinks into the road coming out of a loop and loses
+                    // speed. The 5-unit trigger stays as hysteresis so normal
+                    // suspension travel is still the Lingo springs' job.
+                    state.rigid_bodies[bi].position[2] = ground_z + half_z;
+                    // Bleed BOTH directions by half, symmetrically.
+                    //
+                    // ZEROING the downward velocity was tried and reverted: it
+                    // glues the body to the surface — the car could no longer
+                    // leave a plateau downward at all (parked at z=144 for 200
+                    // frames instead of rolling off) and it flattened the
+                    // jump-then-spring-recovery coming down a ramp. But leaving
+                    // it strictly alone is the other extreme: while the clamp
+                    // holds position, gravity keeps integrating into vz with
+                    // nothing ever removing it, so it grows without bound —
+                    // measured at -717 on a car sitting at ride height, which
+                    // also drags its ground speed down to a crawl.
+                    //
+                    // Halving is the middle ground and mirrors what the upward
+                    // case already does: gravity re-adds ~g*dt each step, so vz
+                    // settles at a small equilibrium instead of diverging, while
+                    // a body genuinely leaving downward still re-accelerates and
+                    // departs.
+                    state.rigid_bodies[bi].linear_velocity[2] *= 0.5;
                 }
             }
         } else if state.ground_z > -1e10 {
