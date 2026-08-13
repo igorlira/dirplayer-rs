@@ -893,14 +893,13 @@ out vec4 frag_color;
 void main() {
     // colorRange / blendRange interpolate start->end over the particle's life.
     vec3 color = mix(u_color_start, u_color_end, v_age_ratio);
-    // blendRange is the per-particle ALPHA (the script comments call it the
-    // "transparency", scaled by how far the tap is turned). The ParticleTexture is
-    // a solid white square with useAlpha=false, so the texture adds nothing — the
-    // whole look is colorRange (tint) + blendRange (alpha). The faucet drives blend
-    // to 2..3 (cold) / 6..7 (hot) at full flow; clamped that's opaque, but Shockwave
-    // renders the stream translucent (you see the drain through it), so we cap full
-    // flow at ~half. Low flow scales below that toward a faint trickle.
-    float opacity = clamp(mix(u_blend_start, u_blend_end, v_age_ratio), 0.0, 1.0) * 0.5;
+    // blendRange is the particle OPACITY as a PERCENTAGE: "must be greater than
+    // or equal to 0.0 and less than or equal to 100.0. The default value for
+    // this property is 100.0" (Director 11.5 Scripting Dictionary, "blendRange").
+    // Treating it as a 0..1 alpha clamped every real percentage to fully opaque —
+    // Agent Free Ride's landing dust (blendRange.start = 20) and snow spray (30)
+    // came out as solid white blobs instead of faint puffs.
+    float opacity = clamp(mix(u_blend_start, u_blend_end, v_age_ratio) / 100.0, 0.0, 1.0);
 
     float alpha;
     if (u_has_tex > 0) {

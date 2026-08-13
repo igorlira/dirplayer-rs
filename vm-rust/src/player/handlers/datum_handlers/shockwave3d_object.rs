@@ -879,11 +879,10 @@ impl Shockwave3dObjectDatumHandlers {
                                         if is_start { ps.size_start = v; } else { ps.size_end = v; }
                                     },
                                     "blendRange" => {
-                                        // IFX particle blend is the per-particle ALPHA (0..1, default
-                                        // 0.1) — NOT a 0..100 percentage. Store the raw value; values
-                                        // >1 (the faucet's 2-3 / 6-7 at full flow) clamp to fully
-                                        // opaque at render time. See CIFXShaderParticle (vertex RGBA).
-                                        let v = value.float_value().unwrap_or(0.1) as f32;
+                                        // Particle opacity as a PERCENTAGE, 0.0..100.0, default 100.0
+                                        // (Director 11.5 Scripting Dictionary, "blendRange"). Stored
+                                        // raw; the particle shader divides by 100.
+                                        let v = value.float_value().unwrap_or(100.0) as f32;
                                         if is_start { ps.blend_start = v; } else { ps.blend_end = v; }
                                     },
                                     _ => {}

@@ -1702,6 +1702,10 @@ pub struct ParticleSystemState {
     pub velocities: Vec<[f32; 3]>,
     pub ages: Vec<f32>,
     pub alive: Vec<bool>,
+    /// Per-particle "has been emitted at least once". `alive` goes false again
+    /// when a particle dies, so it can't tell a first birth from a re-birth —
+    /// which is exactly the distinction `emitter.loop = 0` needs.
+    pub emitted: Vec<bool>,
     pub max_particles: usize,
     pub lifetime: f32,
     pub gravity: [f32; 3],
@@ -1717,14 +1721,21 @@ pub struct ParticleSystemState {
     pub particle_size: f32,
     pub max_speed: f32,         // upper bound of the emitter speed range
     pub stream: bool,           // #stream = continuous recycle, #burst = emit once
+    /// `emitter.loop` — TRUE (default) reborns each particle at the end of its
+    /// lifetime at the emitter region; FALSE lets it die there (Director 11.5
+    /// Scripting Dictionary, "loop (emitter)"). A one-shot burst is
+    /// `mode = #burst` + `loop = 0`; Agent Free Ride's landing dust / mine
+    /// explosions are built that way, and without this they respawned forever
+    /// as white blobs parked at the effect's last position.
+    pub loop_enabled: bool,
     // Per-particle appearance interpolated from birth (start) to death (end), per
     // the Director #particle colorRange/sizeRange/blendRange properties.
     pub color_start: [f32; 3],  // RGB 0..1 at birth
     pub color_end: [f32; 3],    // RGB 0..1 at death
     pub size_start: f32,
     pub size_end: f32,
-    pub blend_start: f32,       // opacity 0..1 at birth
-    pub blend_end: f32,         // opacity 0..1 at death
+    pub blend_start: f32,       // blendRange.start — opacity PERCENT (0..100) at birth
+    pub blend_end: f32,         // blendRange.end — opacity PERCENT (0..100) at death
     pub texture_name: String,   // particle billboard texture (lowercased gpu key)
     pub seed: u32,              // evolving RNG so respawns aren't a fixed per-index pattern
 }
@@ -1860,6 +1871,7 @@ impl Default for ParticleSystemState {
             velocities: Vec::new(),
             ages: Vec::new(),
             alive: Vec::new(),
+            emitted: Vec::new(),
             max_particles: 100,
             lifetime: 10.0,
             gravity: [0.0, -9.8, 0.0],
@@ -1875,12 +1887,13 @@ impl Default for ParticleSystemState {
             particle_size: 1.0,
             max_speed: 1.0,
             stream: true,
+            loop_enabled: true,
             color_start: [1.0, 1.0, 1.0],
             color_end: [1.0, 1.0, 1.0],
             size_start: 1.0,
             size_end: 1.0,
-            blend_start: 1.0,
-            blend_end: 1.0,
+            blend_start: 100.0,
+            blend_end: 100.0,
             texture_name: String::new(),
             seed: 0x9E3779B9,
         }
@@ -1894,14 +1907,18 @@ impl ParticleSystemState {
         self.velocities = vec![[0.0; 3]; count];
         self.ages = vec![0.0; count];
         self.alive = vec![false; count];
+        self.emitted = vec![false; count];
 
-        // Randomize initial ages across the lifetime so particles are at varied
-        // distances down the stream from the start — a uniform stagger plus the
-        // constant emit speed left them at regular intervals (visible banding).
+        // #stream emits a group of particles each frame, so stagger the birth
+        // times: randomize initial ages across the lifetime, putting particles at
+        // varied distances down the stream from the start (a uniform stagger plus
+        // the constant emit speed left them at regular intervals — visible
+        // banding). #burst emits ALL particles at the same time (Director 11.5
+        // Scripting Dictionary, "mode (emitter)"), so start them due at once.
         for i in 0..count {
             self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
             let r = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
-            self.ages[i] = r * self.lifetime;
+            self.ages[i] = if self.stream { r * self.lifetime } else { self.lifetime };
             self.alive[i] = false;
         }
     }
@@ -1913,6 +1930,21 @@ impl ParticleSystemState {
             self.ages[i] += dt;
 
             if self.ages[i] >= self.lifetime {
+                // `emitter.loop = 0` means the particle DIES at the end of its
+                // lifetime instead of being reborn at the emitter region. Without
+                // this every one-shot burst (Agent Free Ride's landing dust, mine
+                // explosions) respawned forever, leaving white blobs parked where
+                // the effect last fired.
+                // Only RE-births are suppressed: a one-shot burst still gets its
+                // single emission, it just doesn't come back. `alive` can't carry
+                // this — it goes false again the moment the particle dies — hence
+                // the separate `emitted` flag.
+                if !self.loop_enabled && self.emitted[i] {
+                    self.alive[i] = false;
+                    self.ages[i] = self.lifetime;
+                    continue;
+                }
+                self.emitted[i] = true;
                 // Recycle
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;

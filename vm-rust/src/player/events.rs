@@ -880,8 +880,15 @@ pub async fn tick_w3d_particles() {
                                 // emitter.angle is the cone half-angle in degrees.
                                 ps.angle_range = (em.angle as f32).to_radians();
                                 ps.stream = em.mode.eq_ignore_ascii_case("stream");
+                                ps.loop_enabled = em.is_loop;
+                                // `emitter.numParticles = 0` is how scripts silence an
+                                // effect (Agent Free Ride's Particles.ImmediateStop);
+                                // skipping n == 0 left the system emitting its previous
+                                // count forever, at whatever region it last had — four
+                                // idle riders' powder jets sat at the world origin as
+                                // white blobs on the horizon.
                                 let n = (em.num_particles.max(0) as usize).min(10000);
-                                if n > 0 && ps.max_particles != n {
+                                if ps.max_particles != n {
                                     ps.initialize(n);
                                 }
                             }
