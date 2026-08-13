@@ -465,7 +465,15 @@ impl HavokObjectDatumHandlers {
                         // Linear: v += impulse * inverseMass
                         rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
 
-                        // Rotate model-local point by body orientation
+                        // Rotate model-local point by body orientation.
+                        //
+                        // NB the Xtra's `applyImpulseSingle` uses `r = point -
+                        // position` rather than subtracting
+                        // the centre of mass. Tried matching that: it made Age of
+                        // Speed's loop WORSE (speed decayed to 188-197 km/h where
+                        // the COM-relative lever holds 226-241), so it is not simply
+                        // a lever-origin mismatch. Don't repeat without also
+                        // reworking how `center_of_mass` feeds the integrator.
                         let rel = v3_sub(point, rb.center_of_mass);
                         let r = quat_rotate_v(rb.orientation, rel);
 

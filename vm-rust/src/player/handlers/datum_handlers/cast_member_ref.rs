@@ -192,6 +192,13 @@ impl CastMemberRefHandlers {
             // `step_force` accumulator rather than the force_scale-attenuated one.
             // The gravity callback runs synchronously (a plain applyForce loop), so
             // the flag can't leak across an await.
+            //
+            // NB the Xtra actually fires these per SUB-STEP (Havok Xtra Lingo
+            // Reference: "called at each sub step"), so post-step invocation leaves
+            // the applied force one frame stale. Moving it BEFORE the step was
+            // tried: it did NOT fix Age of Speed's loop and it REGRESSED
+            // SuperSonic (supersonic.rs:231). Don't repeat it without also
+            // reworking how `step_force` is accumulated.
             use super::cast_member::havok_physics::IN_STEP_CALLBACK;
             for (cb_handler, cb_instance, dt_value) in &step_cbs {
                 let dt_ref = reserve_player_mut(|player| {

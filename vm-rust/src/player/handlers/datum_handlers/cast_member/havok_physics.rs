@@ -1443,6 +1443,12 @@ fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) 
         q[3] + (qdot[3] * 0.5 + drift * q[3]) * dt,
     ]);
 
+    // NB the integrator rotates about `rb.position` (the visual-origin reference),
+    // NOT about the centre of mass, while `build_sync_transform` rotates about the
+    // COM for rendering. Making the integrator COM-preserving was TRIED for Age of
+    // Speed's loop pitch error and changed nothing measurable (axle split and speed
+    // unchanged), so that mismatch is not the cause. Don't repeat it blind.
+
     // Phase 3: Linear velocity: vel += (F/m) * dt
     if rb.inverse_mass > 0.0 {
         for i in 0..3 { rb.linear_velocity[i] += rb.force[i] * rb.inverse_mass * dt; }
@@ -2209,6 +2215,14 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             // Skip upward-facing ground contacts for unowned scenery meshes when
             // a driven body handles ground via hover forces. Box-stacking
             // objects must keep these or they fall through the floor.
+            //
+            // NB the 0.7 cut also discards drivable SLOPES (SuperSonic's BigRamp
+            // measures normal.z 0.913 at the foot, 0.808 mid-ramp), which looks
+            // wrong but is load-bearing: raising the cut to 0.98 so slope
+            // surfaces survive makes the resolver apply contact friction to the
+            // climbing car and brings it to a dead stop mid-ramp (measured:
+            // step 47 -> 9 -> 2 -> 0 at z=244). Don't "fix" this without fixing
+            // the friction path first.
             if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
