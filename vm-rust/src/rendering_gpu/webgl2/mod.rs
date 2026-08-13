@@ -4424,10 +4424,20 @@ impl WebGL2Renderer {
         // Only switch to mipmapped minification once the sprite is meaningfully
         // smaller than its source; at or above native size MAG_FILTER (NEAREST)
         // applies and every other movie stays pixel-exact.
-        let minifies = tex_source_size.map_or(false, |(sw, sh)| {
-            let (dw, dh) = (sprite_rect.width() as f32, sprite_rect.height() as f32);
-            dw > 0.0 && dh > 0.0 && (sw as f32 / dw > 1.2 || sh as f32 / dh > 1.2)
-        });
+        //
+        // NOT for a colour-keyed ink, whatever the ratio: those shaders decide a
+        // pixel from its exact colour, and a filtered sample invents colours the
+        // source never had along every key boundary. Habbo v7's room lights are
+        // a black glow on a keyed white field at ink 33 — the Dirty Duck's
+        // `pub_light_02` (292x292 into 408x186, 1.57x) and the lobby's
+        // `lobby_coloredlight_1` (186x186 into 296x141, 1.32x) both cleared the
+        // threshold, so the averaged white-to-dark edge missed the key and went
+        // through the additive blend as a bright ring around the light.
+        let minifies = !effective_ink.keys_on_bg_color()
+            && tex_source_size.map_or(false, |(sw, sh)| {
+                let (dw, dh) = (sprite_rect.width() as f32, sprite_rect.height() as f32);
+                dw > 0.0 && dh > 0.0 && (sw as f32 / dw > 1.2 || sh as f32 / dh > 1.2)
+            });
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
             WebGl2RenderingContext::TEXTURE_MIN_FILTER,
@@ -4513,15 +4523,9 @@ impl WebGL2Renderer {
         // - SubPin: for color-key transparency (ALL bgColor pixels transparent)
         // Note: Matte (ink 8) uses flood-fill matte in texture alpha, not color-key
         // (using the already-resolved bg_color_rgb from earlier)
-        if effective_ink == InkMode::BackgroundTransparent
-            || effective_ink == InkMode::Ghost
-            || effective_ink == InkMode::NotGhost
-            || effective_ink == InkMode::Darken
-            || effective_ink == InkMode::AddPin
-            || effective_ink == InkMode::SubPin
-            || effective_ink == InkMode::Lighten
-            || effective_ink == InkMode::Reverse
-        {
+        // (`keys_on_bg_color` is the same set, shared with the sampling choice
+        // above so the two cannot drift apart.)
+        if effective_ink.keys_on_bg_color() {
             if let Some(ref loc) = u_bg_color {
                 gl.uniform4f(
                     Some(loc),

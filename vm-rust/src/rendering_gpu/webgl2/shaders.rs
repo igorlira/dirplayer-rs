@@ -41,6 +41,34 @@ pub enum InkMode {
 }
 
 impl InkMode {
+    /// Does this ink's shader compare the sampled texel against `u_bg_color`?
+    ///
+    /// These inks decide a pixel's fate from its exact colour — usually
+    /// `discard` on a near-exact match with the sprite's bgColor. That test is
+    /// only meaningful on a texel the source actually contains, so a draw using
+    /// one of them must POINT-sample: a filtered sample invents in-between
+    /// colours along every colour-key boundary, and those survive the key.
+    ///
+    /// The Dirty Duck pub's `pub_light_02` is the case that found this — a
+    /// 292x292 black glow on a white (keyed) field, drawn into a 408x186 sprite.
+    /// The 1.57x vertical shrink opted it into mipmapped minification, which
+    /// averaged the white surround with the dark disc, and the resulting greys
+    /// missed the key and went through AddPin's additive blend as a bright ring
+    /// around the light.
+    pub fn keys_on_bg_color(self) -> bool {
+        matches!(
+            self,
+            InkMode::BackgroundTransparent
+                | InkMode::Ghost
+                | InkMode::NotGhost
+                | InkMode::Darken
+                | InkMode::AddPin
+                | InkMode::SubPin
+                | InkMode::Lighten
+                | InkMode::Reverse
+        )
+    }
+
     /// Convert Director ink number to InkMode
     pub fn from_ink_number(ink: i32) -> Self {
         match ink {
