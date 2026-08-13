@@ -80,6 +80,7 @@ use cast_manager::CastPreloadReason;
 use cast_member::CastMemberType;
 use datum_ref::DatumRef;
 use fxhash::FxHashMap;
+use indexmap::IndexMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -92,6 +93,7 @@ use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
 use xtra::curl::{CurlXtraManager, CURL_XTRA_MANAGER_OPT};
+use xtra::leechprotection::EnvOverrides;
 use xtra::fileio::{FileIoXtraManager, FILEIO_XTRA_MANAGER_OPT};
 use xtra::multiuser::{MultiuserXtraManager, MULTIUSER_XTRA_MANAGER_OPT};
 use xtra::xmlparser::{XmlParserXtraManager, XMLPARSER_XTRA_MANAGER_OPT};
@@ -364,7 +366,11 @@ pub struct DirPlayer {
     pub allocator: DatumAllocator,
     pub dir_cache: HashMap<Box<str>, DirectorFile>,
     pub scope_count: u32,
-    pub external_params: HashMap<String, String>,
+    /// Insertion-ordered: Director's `externalParamName(n)` /
+    /// `externalParamValue(n)` are indexed accessors, so the order the host
+    /// (or `LeechProtectionRemovalHelp`'s `setExternalParam`) supplied the
+    /// params in is observable from Lingo.
+    pub external_params: IndexMap<String, String>,
     // XML document storage - maps XML document IDs to parsed XML structures
     pub xml_documents: HashMap<u32, XmlDocument>,
     // XML node storage - maps node IDs to XML nodes
@@ -591,7 +597,35 @@ pub struct DirPlayer {
     /// the proxy unchanged. Mutually exclusive with the rewrite path —
     /// when both are set, this label wins for `the moviePath`.
     pub movie_path_label: Option<String>,
+    /// Fake environment installed by the LeechProtectionRemovalHelp Xtra.
+    /// Lives on the Player rather than the Movie so it outlives a movie load,
+    /// which is precisely what that Xtra promises.
+    pub env_overrides: EnvOverrides,
     pub console: console::ConsoleBuffer,
+}
+
+/// Reduce a movie-location label to the directory string Director's `the
+/// moviePath` / `the path` return — those are the *directory* part, never the
+/// full file URL. A label may arrive either way: the `_moviePath` external
+/// param and `set_movie_path_label` typically carry a full movie URL, while
+/// LeechProtectionRemovalHelp's `setTheMoviePath` is documented with a
+/// trailing-slash directory. Both reduce correctly here.
+fn dir_part_of_path(path: &str) -> String {
+    if let Ok(url) = Url::parse(path) {
+        get_base_url(&url).to_string()
+    } else if let Some(pos) = path.rfind('/') {
+        path[..=pos].to_string()
+    } else if let Some(pos) = path.rfind('\\') {
+        path[..=pos].to_string()
+    } else {
+        // Single-segment path: nothing to strip — append a separator so
+        // concatenation with movieName produces a well-formed path.
+        let mut s = path.to_string();
+        if !s.ends_with('/') && !s.ends_with('\\') {
+            s.push('/');
+        }
+        s
+    }
 }
 
 /// Target frame for a movie transition (gotoNetMovie or go movie).
@@ -679,7 +713,7 @@ impl DirPlayer {
             allocator: DatumAllocator::default(),
             dir_cache: HashMap::new(),
             scope_count: 0,
-            external_params: HashMap::new(),
+            external_params: IndexMap::new(),
             xml_documents: HashMap::new(),
             xml_nodes: HashMap::new(),
             next_xml_id: 1000,
@@ -757,6 +791,7 @@ impl DirPlayer {
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
             movie_path_label: None,
+            env_overrides: EnvOverrides::default(),
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
         };
@@ -2638,6 +2673,56 @@ impl DirPlayer {
             .map(|(_, v)| v.clone())
     }
 
+    /// `the runMode` / `the environment.runMode` / `_player.runMode`.
+    /// LeechProtectionRemovalHelp's `setTheRunMode` outranks the `_runMode`
+    /// external param, which in turn outranks the "Plugin" default.
+    fn effective_run_mode(&self) -> String {
+        self.env_overrides
+            .run_mode
+            .clone()
+            .or_else(|| self.external_param_ci("_runMode"))
+            .unwrap_or_else(|| "Plugin".to_string())
+    }
+
+    /// `the platform` / `the environment.platform`.
+    fn effective_platform(&self) -> String {
+        self.env_overrides
+            .platform
+            .clone()
+            .unwrap_or_else(|| "Windows,32".to_string())
+    }
+
+    /// `the productVersion` / `the environment.productVersion` /
+    /// `_player.productVersion`.
+    fn effective_product_version(&self) -> String {
+        self.env_overrides
+            .product_version
+            .clone()
+            .unwrap_or_else(|| "11.0".to_string())
+    }
+
+    /// The fake `the moviePath` label, highest precedence first:
+    ///   1. LeechProtectionRemovalHelp's `setTheMoviePath`
+    ///   2. `external_params["_moviePath"]`
+    ///   3. `movie_path_label` (the `set_movie_path_label` JS API)
+    /// `None` means "report the real loaded path". Callers still reduce the
+    /// label to its directory / filename part — the Xtra is documented with a
+    /// directory (`"http://addictinggames.com/newGames/foo/"`), but the other
+    /// two sources may carry a full movie URL.
+    fn movie_path_label_effective(&self) -> Option<String> {
+        self.env_overrides
+            .movie_path
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.external_param_ci("_moviePath").filter(|s| !s.is_empty()))
+            .or_else(|| {
+                self.movie_path_label
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+            })
+    }
+
     /// The film loop the innermost active `tell` block targets, if any.
     fn tell_film_loop(&self) -> Option<CastMemberRef> {
         self.tell_target_stack
@@ -2871,26 +2956,28 @@ impl DirPlayer {
             },
             BuiltInSymbol::ClickOn => Ok(self.alloc_datum(Datum::Int(self.click_on_sprite as i32))),
             BuiltInSymbol::Environment | BuiltInSymbol::EnvironmentPropList => {
-                // Build the environment property list
+                // Build the environment property list. Seven of these entries
+                // are overridable by the LeechProtectionRemovalHelp Xtra, whose
+                // whole purpose is to make an archived movie's environment
+                // check see the values it saw on its original host.
                 let props = VecDeque::from(vec![
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShockMachine))),
-                        self.alloc_datum(Datum::Int(0))
+                        self.alloc_datum(Datum::Int(self.env_overrides.shock_machine.unwrap_or(0)))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ShockMachineVersion))),
-                        self.alloc_datum(Datum::String("".to_string()))
+                        self.alloc_datum(Datum::String(
+                            self.env_overrides.shock_machine_version.clone().unwrap_or_default()
+                        ))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Platform))),
-                        self.alloc_datum(Datum::String("Windows,32".to_string()))
+                        self.alloc_datum(Datum::String(self.effective_platform()))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::RunMode))),
-                        self.alloc_datum(Datum::String(
-                            self.external_param_ci("_runMode")
-                                .unwrap_or_else(|| "Plugin".to_string())
-                        ))
+                        self.alloc_datum(Datum::String(self.effective_run_mode()))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ColorDepth))),
@@ -2910,15 +2997,21 @@ impl DirPlayer {
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ProductBuildVersion))),
-                        self.alloc_datum(Datum::String("188".to_string()))
+                        self.alloc_datum(Datum::String(
+                            self.env_overrides.product_build_version.clone()
+                                .unwrap_or_else(|| "188".to_string())
+                        ))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ProductVersion))),
-                        self.alloc_datum(Datum::String("11.0".to_string()))
+                        self.alloc_datum(Datum::String(self.effective_product_version()))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::OSVersion))),
-                        self.alloc_datum(Datum::String("Windows XP,5,1,148,2,Service Pack 3".to_string()))
+                        self.alloc_datum(Datum::String(
+                            self.env_overrides.os_version.clone()
+                                .unwrap_or_else(|| "Windows XP,5,1,148,2,Service Pack 3".to_string())
+                        ))
                     ),
                     (
                         self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::DirectXVersion))),
@@ -2991,9 +3084,54 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
             },
             BuiltInSymbol::RunMode => {
-                let mode = self.external_param_ci("_runMode")
-                    .unwrap_or_else(|| "Plugin".to_string());
+                let mode = self.effective_run_mode();
                 Ok(self.alloc_datum(Datum::String(mode)))
+            },
+            // Faked wholesale by LeechProtectionRemovalHelp; otherwise these
+            // are dirplayer's fixed "Windows Shockwave" identity, resolved in
+            // `Movie::get_prop`.
+            BuiltInSymbol::Platform => {
+                let platform = self.effective_platform();
+                Ok(self.alloc_datum(Datum::String(platform)))
+            },
+            BuiltInSymbol::ProductVersion => {
+                let version = self.effective_product_version();
+                Ok(self.alloc_datum(Datum::String(version)))
+            },
+            BuiltInSymbol::MachineType => {
+                match self.env_overrides.machine_type {
+                    Some(v) => Ok(self.alloc_datum(Datum::Int(v))),
+                    None => {
+                        let datum = self.movie.get_prop(prop)?;
+                        Ok(self.alloc_datum(datum))
+                    }
+                }
+            },
+            // `the path` / `_movie.path` is the same directory string as
+            // `the moviePath`, and `setTheMoviePath` fakes both.
+            BuiltInSymbol::Path => {
+                match self.env_overrides.movie_path.clone().filter(|s| !s.is_empty()) {
+                    Some(path) => Ok(self.alloc_datum(Datum::String(dir_part_of_path(&path)))),
+                    None => {
+                        let datum = self.movie.get_prop(prop)?;
+                        Ok(self.alloc_datum(datum))
+                    }
+                }
+            },
+            // `forceTheExitLock` pins the value — see `Movie::set_prop`, which
+            // drops the movie's own writes while a forced value is installed.
+            BuiltInSymbol::ExitLock => {
+                match self.env_overrides.forced_exit_lock {
+                    Some(v) => Ok(self.alloc_datum(datum_bool(v))),
+                    None => {
+                        let datum = self.movie.get_prop(prop)?;
+                        Ok(self.alloc_datum(datum))
+                    }
+                }
+            },
+            BuiltInSymbol::SafePlayer => {
+                let value = self.env_overrides.forced_safe_player.unwrap_or(false);
+                Ok(self.alloc_datum(datum_bool(value)))
             },
             // `the moviePath` precedence (read at every Lingo access so
             // it stays correct even if external_params change post-load):
@@ -3009,31 +3147,9 @@ impl DirPlayer {
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
             BuiltInSymbol::MoviePath => {
-                let label = self.external_param_ci("_moviePath")
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        self.movie_path_label
-                            .as_ref()
-                            .filter(|s| !s.is_empty())
-                            .cloned()
-                    });
+                let label = self.movie_path_label_effective();
                 if let Some(path) = label {
-                    let base_path = if let Ok(url) = Url::parse(&path) {
-                        get_base_url(&url).to_string()
-                    } else if let Some(pos) = path.rfind('/') {
-                        path[..=pos].to_string()
-                    } else if let Some(pos) = path.rfind('\\') {
-                        path[..=pos].to_string()
-                    } else {
-                        // Single-segment path: nothing to strip — append
-                        // a separator so concatenation with movieName
-                        // produces a well-formed path.
-                        let mut s = path.clone();
-                        if !s.ends_with('/') && !s.ends_with('\\') {
-                            s.push('/');
-                        }
-                        s
-                    };
+                    let base_path = dir_part_of_path(&path);
                     Ok(self.alloc_datum(Datum::String(base_path)))
                 } else {
                     let datum = self.movie.get_prop(prop)?;
@@ -3046,15 +3162,23 @@ impl DirPlayer {
             // the full URL for security/whitelist checks. Without this
             // companion intercept, `movieName` would still come from the
             // actually-loaded file, breaking the concatenation.
-            BuiltInSymbol::MovieName => {
-                let label = self.external_param_ci("_moviePath")
+            // `the movie` and `_movie.name` are aliases of `the movieName`
+            // (see `Movie::get_prop`), and both the label logic below and
+            // `setTheMovieName` are documented to cover all three.
+            BuiltInSymbol::MovieName | BuiltInSymbol::Movie | BuiltInSymbol::Name => {
+                // `setTheMovieName` is a name in its own right — the Xtra takes
+                // the path and the name as two separate calls, and its own
+                // usage example passes a bare filename ("foo.dcr") to this one.
+                // So it wins outright rather than being derived from a path.
+                if let Some(name) = self
+                    .env_overrides
+                    .movie_name
+                    .clone()
                     .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        self.movie_path_label
-                            .as_ref()
-                            .filter(|s| !s.is_empty())
-                            .cloned()
-                    });
+                {
+                    return Ok(self.alloc_datum(Datum::String(name)));
+                }
+                let label = self.movie_path_label_effective();
                 if let Some(path) = label {
                     let file_name = if let Ok(url) = Url::parse(&path) {
                         url.path_segments()
@@ -3132,11 +3256,17 @@ impl DirPlayer {
     fn get_player_prop(&mut self, prop: Symbol) -> Result<DatumRef, ScriptError> {
         match prop.into_builtin() {
             Some(BuiltInSymbol::TraceScript) => Ok(self.alloc_datum(datum_bool(false))), // TODO
-            Some(BuiltInSymbol::ProductVersion) => Ok(self.alloc_datum(Datum::String("11.0".to_string()))), // TODO
+            Some(BuiltInSymbol::ProductVersion) => {
+                let version = self.effective_product_version();
+                Ok(self.alloc_datum(Datum::String(version)))
+            }
             Some(BuiltInSymbol::RunMode) => {
-                let mode = self.external_param_ci("_runMode")
-                    .unwrap_or_else(|| "Plugin".to_string());
+                let mode = self.effective_run_mode();
                 Ok(self.alloc_datum(Datum::String(mode)))
+            }
+            Some(BuiltInSymbol::SafePlayer) => {
+                let value = self.env_overrides.forced_safe_player.unwrap_or(false);
+                Ok(self.alloc_datum(datum_bool(value)))
             }
             // Key state properties (also accessible via _key.optionDown etc.)
             Some(BuiltInSymbol::OptionDown) => Ok(self.alloc_datum(datum_bool(self.keyboard_manager.is_alt_down()))),
@@ -3275,7 +3405,9 @@ impl DirPlayer {
             BuiltInSymbol::SoundLevel => Ok(Datum::Int(7)), // max volume
             BuiltInSymbol::BeepOn | BuiltInSymbol::FixStageSize => Ok(Datum::Int(0)),
             BuiltInSymbol::CenterStage => Ok(datum_bool(self.center_stage)),
-            BuiltInSymbol::ExitLock => Ok(datum_bool(self.movie.exit_lock)),
+            BuiltInSymbol::ExitLock => Ok(datum_bool(
+                self.env_overrides.forced_exit_lock.unwrap_or(self.movie.exit_lock),
+            )),
             BuiltInSymbol::Key => Ok(Datum::String(self.keyboard_manager.key())),
             BuiltInSymbol::KeyPressed => Ok(Datum::String(self.keyboard_manager.key_pressed())),
             BuiltInSymbol::KeyCode => Ok(Datum::Int(self.keyboard_manager.key_code() as i32)),
@@ -3288,8 +3420,14 @@ impl DirPlayer {
             BuiltInSymbol::PauseState => Ok(datum_bool(self.is_script_paused)),
             BuiltInSymbol::SelStart => Ok(Datum::Int(self.text_selection_start as i32)),
             BuiltInSymbol::SelEnd => Ok(Datum::Int(self.text_selection_end as i32)),
+            // `the safePlayer` is 0 (unsafe / full trust) unless
+            // LeechProtectionRemovalHelp's `forceTheSafePlayer` pins it —
+            // movies test it to decide whether local file access is allowed.
+            BuiltInSymbol::SafePlayer => Ok(datum_bool(
+                self.env_overrides.forced_safe_player.unwrap_or(false),
+            )),
             BuiltInSymbol::SwitchColorDepth | BuiltInSymbol::ImageDirect | BuiltInSymbol::ColorQD | BuiltInSymbol::QuickTimePresent
-            | BuiltInSymbol::VideoForWindowsPresent | BuiltInSymbol::NetPresent | BuiltInSymbol::SafePlayer
+            | BuiltInSymbol::VideoForWindowsPresent | BuiltInSymbol::NetPresent
             | BuiltInSymbol::SoundKeepDevice | BuiltInSymbol::SoundMixMedia | BuiltInSymbol::PreLoadRAM
             | BuiltInSymbol::ButtonStyle | BuiltInSymbol::CheckBoxAccess | BuiltInSymbol::CheckBoxType => Ok(Datum::Int(0)),
             _ => Err(ScriptError::new(format!("Unknown anim prop {}", prop_name))),
@@ -3325,8 +3463,15 @@ impl DirPlayer {
         }
     }
 
-    fn set_movie_prop(&mut self, prop: Symbol, value: Datum) -> Result<(), ScriptError> {
+    pub(crate) fn set_movie_prop(&mut self, prop: Symbol, value: Datum) -> Result<(), ScriptError> {
         match prop.into_builtin() {
+            // LeechProtectionRemovalHelp `forceTheExitLock` — "force", not
+            // "set": the write is swallowed so a leech check that re-asserts
+            // `the exitLock` before testing it can't undo the fake. Director
+            // never errors on this assignment, so neither do we.
+            Some(BuiltInSymbol::ExitLock) if self.env_overrides.forced_exit_lock.is_some() => {
+                Ok(())
+            }
             // Director 11.5 Scripting Dictionary lists `timeoutList` as a
             // READ-ONLY Movie property: "a linear list containing all currently
             // active timeout objects… Use the forget() method to delete a timeout

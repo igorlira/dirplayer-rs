@@ -7,6 +7,7 @@ use super::budapi::BudApiXtra;
 use super::curl::{CurlXtra, CurlXtraManager};
 use super::external;
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
+use super::leechprotection::LeechProtectionXtra;
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
 use super::openurl::OpenUrlXtra;
 use super::sysmenu::SysMenuXtra;
@@ -25,7 +26,8 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "curl"
         || name_lower == "openurl"
         || name_lower == "sysmenu"
-        || name_lower == "budapi";
+        || name_lower == "budapi"
+        || name_lower == "leechprotectionremovalhelp";
 }
 
 pub fn get_registered_xtra_names() -> Vec<String> {
@@ -37,6 +39,7 @@ pub fn get_registered_xtra_names() -> Vec<String> {
         "OpenURL".to_string(),
         "SysMenu".to_string(),
         "BudAPI".to_string(),
+        "LeechProtectionRemovalHelp".to_string(),
     ];
     // Append any externally loaded xtras. Names are stored lowercased in
     // the external registry; we surface them as-is — Director treats
@@ -60,6 +63,9 @@ pub fn try_call_xtra_static_handler(
     }
     if BudApiXtra::has_handler(name) {
         return Some(BudApiXtra::call_handler(name, args));
+    }
+    if LeechProtectionXtra::has_handler(name) {
+        return Some(LeechProtectionXtra::call_handler(name, args));
     }
     if CurlXtra::has_static_handler(name) {
         return Some(CurlXtra::call_static_handler(name, args));
@@ -114,6 +120,12 @@ pub fn call_xtra_instance_handler(
         }
         "curl" => {
             return CurlXtraManager::call_instance_handler(handler_name, instance_id, args)
+        }
+        // Static-only, but stateless: its handlers write to player-level
+        // overrides, so an instance-syntax call (`lprh.setTheMoviePath(…)`)
+        // means exactly the same thing as the bare global the README shows.
+        "leechprotectionremovalhelp" if LeechProtectionXtra::has_handler(handler_name) => {
+            return LeechProtectionXtra::call_handler(handler_name, args)
         }
         _ => Err(ScriptError::new(format!(
             "No handler {} found for xtra {} instance #{}",
@@ -203,10 +215,11 @@ pub fn create_xtra_instance(
         "xmlparser" => Ok(borrow_xmlparser_manager_mut(|x| x.create_instance(args))),
         "fileio" => Ok(borrow_fileio_manager_mut(|x| x.create_instance(args))),
         "curl" => Ok(super::curl::borrow_curl_manager_mut(|x| x.create_instance(args))),
-        // OpenURL, SysMenu, BudAPI are static-only — `new` still hands back
+        // OpenURL, SysMenu, BudAPI and LeechProtectionRemovalHelp are
+        // static-only — `new` still hands back
         // an opaque instance id for parity with the real Xtras, but the id
         // is never consulted by any handler.
-        "openurl" | "sysmenu" | "budapi" => Ok(0),
+        "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
     }
 }

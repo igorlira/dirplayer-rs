@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+
 use async_std::channel::Receiver;
 use chrono::Local;
 use log::{warn, debug};
@@ -40,7 +42,7 @@ use super::{
 #[allow(dead_code)]
 pub enum PlayerVMCommand {
     LoadMovieFromFile(String, bool),
-    SetExternalParams(HashMap<String, String>),
+    SetExternalParams(IndexMap<String, String>),
     SetBasePath(String),
     SetMoviePathOverride(String),
     SetMoviePathLabel(String),

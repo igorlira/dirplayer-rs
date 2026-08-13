@@ -18,6 +18,12 @@ alloc-debug-overlay = []
 [dependencies]
 wasm-bindgen = "=0.2.108"
 
+# Insertion-ordered map. `externalParamName(n)` / `externalParamValue(n)` are
+# INDEXED accessors in Director — the params keep the order the host handed
+# them over in (query string / <param> tags / LeechProtectionRemovalHelp's
+# setExternalParam), so a plain HashMap would randomise them.
+indexmap = { version = "2", features = ["serde"] }
+
 # SDK for external Xtras. vm-rust uses it to decode the wire format that
 # plugin .wasm modules exchange with the host. Plugins depend on the same
 # crate; the path link makes them version-locked together in this repo.

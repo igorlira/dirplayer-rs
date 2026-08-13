@@ -927,6 +927,11 @@ impl MovieHandlers {
         if args.is_empty() {
             return Ok(DatumRef::Void);
         }
+        // LeechProtectionRemovalHelp `disableGoToNetPage` — swallow the call so
+        // a movie's leech check can't bounce the player to the original site.
+        if reserve_player_ref(|player| player.env_overrides.disable_goto_net_page) {
+            return Ok(DatumRef::Void);
+        }
         let (url, target) = reserve_player_ref(|player| {
             let url = player.get_datum(&args[0]).string_value()?;
             let target = if args.len() > 1 {
@@ -963,6 +968,13 @@ impl MovieHandlers {
     }
 
     pub fn go_to_net_movie(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // LeechProtectionRemovalHelp `disableGoToNetMovie` — see
+        // `go_to_net_page`. Note this pins the CURRENT movie in place, so a
+        // movie that legitimately navigates by `gotoNetMovie` will stop
+        // advancing once the movie's setup script calls this.
+        if reserve_player_ref(|player| player.env_overrides.disable_goto_net_movie) {
+            return Ok(DatumRef::Void);
+        }
         reserve_player_mut(|player| {
             let raw_url = player.get_datum(&args[0]).string_value()?;
 

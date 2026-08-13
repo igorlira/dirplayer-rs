@@ -39,7 +39,10 @@ extern "C" {
 
 #[wasm_bindgen]
 pub fn set_external_params(params: js_sys::Object) {
-    let mut external_params = std::collections::HashMap::new();
+    // IndexMap: `Object::keys` yields the object's own string keys in
+    // insertion order, and Director's indexed `externalParamName(n)` /
+    // `externalParamValue(n)` expose that order to the movie.
+    let mut external_params = indexmap::IndexMap::new();
     let keys = js_sys::Object::keys(&params);
     for key in keys.iter() {
         let key_str = key.as_string().unwrap();

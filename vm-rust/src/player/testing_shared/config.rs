@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use indexmap::IndexMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 use serde::Deserialize;
@@ -48,8 +49,11 @@ pub struct TestConfig {
     pub movie: MovieConfig,
     #[serde(default)]
     pub test: TestSection,
+    /// IndexMap so `[external_params]` reaches the player in the order the
+    /// TOML declares them — Director exposes that order through the indexed
+    /// `externalParamName(n)` / `externalParamValue(n)`.
     #[serde(default)]
-    pub external_params: HashMap<String, String>,
+    pub external_params: IndexMap<String, String>,
     #[serde(default)]
     pub params: HashMap<String, String>,
 }
