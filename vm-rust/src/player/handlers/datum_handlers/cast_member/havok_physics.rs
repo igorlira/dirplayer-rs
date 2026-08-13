@@ -568,8 +568,14 @@ pub fn detect_body_contacts(
         // never moves, so it stays a valid static collider — and its body_index
         // lets the resolver use that surface's restitution/friction (the
         // Properties demo's bouncy/slippery floors).
+        // A stale owner (body deleted without the mesh being reindexed — see
+        // `reindex_after_body_removal`) is not static scenery; skip it rather
+        // than index out of bounds and panic the player.
         if let Some(owner) = mesh.body_index {
-            if !bodies[owner].pinned { continue; }
+            match bodies.get(owner) {
+                Some(body) if body.pinned => {}
+                _ => continue,
+            }
         }
         if pos[0]+max_r < mesh.aabb_min[0] || pos[0]-max_r > mesh.aabb_max[0] { continue; }
         if pos[1]+max_r < mesh.aabb_min[1] || pos[1]-max_r > mesh.aabb_max[1] { continue; }
@@ -695,7 +701,13 @@ fn detect_hull_contacts(
         // Static scenery only: an unowned mesh, or one owned by a pinned body.
         // (A movable body's own baked mesh is skipped — it's the hull's source.)
         if let Some(owner) = mesh.body_index {
-            if !bodies[owner].pinned { continue; }
+            // A stale owner (body deleted without the mesh being reindexed —
+            // see `reindex_after_body_removal`) is not static scenery; skip it
+            // rather than index out of bounds and panic the player.
+            match bodies.get(owner) {
+                Some(body) if body.pinned => {}
+                _ => continue,
+            }
         }
         if hmx[0] + tolerance < mesh.aabb_min[0] || hmn[0] - tolerance > mesh.aabb_max[0] { continue; }
         if hmx[1] + tolerance < mesh.aabb_min[1] || hmn[1] - tolerance > mesh.aabb_max[1] { continue; }
@@ -1910,7 +1922,13 @@ fn apply_cables(state: &mut HavokPhysicsState) {
     if state.cable_constraints.is_empty() { return; }
     let cables = state.cable_constraints.clone();
     for cable in &cables {
-        let rb = &mut state.rigid_bodies[cable.body_index];
+        // Stale index: the owning body was deleted without the constraint being
+        // reindexed (`reindex_after_body_removal` is the real fix). Skip rather
+        // than panic — an out-of-bounds here takes down the whole player.
+        let rb = match state.rigid_bodies.get_mut(cable.body_index) {
+            Some(rb) => rb,
+            None => continue,
+        };
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
 
         let attach_world = v3_add(rb.position, quat_rotate_v(rb.orientation, cable.attach_local));

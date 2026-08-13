@@ -48,6 +48,157 @@ fn build_plane_quad(
     Some(cmesh)
 }
 
+/// Repair the POSITIONAL references into `rigid_bodies` after some bodies were
+/// removed from that vector.
+///
+/// `CollisionMesh::body_index` and `HavokCable::body_index` are plain indices,
+/// so `Vec::remove` / `retain` silently shifts every later body out from under
+/// them: a mesh owned by the last body ends up pointing at `rigid_bodies.len()`,
+/// and the narrow phase panics on `bodies[owner]`. Anything belonging to a
+/// deleted body is dropped outright — a movable body's collision mesh only
+/// exists to represent that body (an unowned mesh is static scenery), and a
+/// cable anchored to nothing has no constraint left to solve.
+///
+/// `removed` are the ORIGINAL indices, i.e. as they were before any of the
+/// removals happened; ascending order is not required.
+fn reindex_after_body_removal(
+    state: &mut crate::player::cast_member::HavokPhysicsState,
+    removed: &[usize],
+) {
+    if removed.is_empty() {
+        return;
+    }
+    // Old index -> new index, or None if that body itself went away.
+    let remap = |old: usize| -> Option<usize> {
+        if removed.contains(&old) {
+            return None;
+        }
+        Some(old - removed.iter().filter(|&&r| r < old).count())
+    };
+
+    state.collision_meshes.retain_mut(|mesh| match mesh.body_index {
+        Some(owner) => match remap(owner) {
+            Some(new_owner) => {
+                mesh.body_index = Some(new_owner);
+                true
+            }
+            None => false,
+        },
+        // Unowned: static scenery, unaffected by body removal.
+        None => true,
+    });
+    state
+        .cable_constraints
+        .retain_mut(|cable| match remap(cable.body_index) {
+            Some(new_owner) => {
+                cable.body_index = new_owner;
+                true
+            }
+            None => false,
+        });
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod reindex_tests {
+    //! Run with:
+    //!   cargo test --lib --manifest-path vm-rust/Cargo.toml reindex
+
+    use super::reindex_after_body_removal;
+    use crate::player::cast_member::{HavokCable, HavokPhysicsState, HavokRigidBody};
+    use crate::player::symbols::symbol::Symbol;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+
+    fn state_with_bodies(n: usize) -> HavokPhysicsState {
+        let mut state = HavokPhysicsState::default();
+        for i in 0..n {
+            state.rigid_bodies.push(HavokRigidBody::new_movable(
+                Symbol::from_str(&format!("body{i}")),
+                1.0,
+                true,
+            ));
+            state.collision_meshes.push(super::super::havok_physics::CollisionMesh {
+                name: Symbol::from_str(&format!("body{i}")),
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+                aabb_min: [0.0; 3],
+                aabb_max: [0.0; 3],
+                body_index: Some(i),
+            });
+        }
+        // One unowned mesh: static scenery, must always survive untouched.
+        state.collision_meshes.push(super::super::havok_physics::CollisionMesh {
+            name: Symbol::from_str("scenery"),
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            aabb_min: [0.0; 3],
+            aabb_max: [0.0; 3],
+            body_index: None,
+        });
+        state
+    }
+
+    fn owners(state: &HavokPhysicsState) -> Vec<Option<usize>> {
+        state.collision_meshes.iter().map(|m| m.body_index).collect()
+    }
+
+    #[test]
+    fn reindex_shifts_meshes_after_a_removed_body() {
+        init_symbol_table();
+        let mut state = state_with_bodies(3);
+        // Simulate `deleteRigidBody(1)`: body index 0 removed.
+        state.rigid_bodies.remove(0);
+        reindex_after_body_removal(&mut state, &[0]);
+
+        // Body 0's mesh is gone; 1 and 2 slide down to 0 and 1; scenery intact.
+        assert_eq!(owners(&state), vec![Some(0), Some(1), None]);
+        // Every surviving owner is a valid index — this is what the narrow
+        // phase panicked on (`len is 115 but the index is 115`).
+        for owner in owners(&state).into_iter().flatten() {
+            assert!(owner < state.rigid_bodies.len());
+        }
+    }
+
+    #[test]
+    fn reindex_handles_the_last_body_and_multiple_removals() {
+        init_symbol_table();
+        let mut state = state_with_bodies(4);
+        // `deleteRigidBody("body1")` semantics: several indices at once,
+        // including the LAST body — the case that produced index == len.
+        state.rigid_bodies.remove(3);
+        state.rigid_bodies.remove(1);
+        reindex_after_body_removal(&mut state, &[1, 3]);
+
+        assert_eq!(state.rigid_bodies.len(), 2);
+        assert_eq!(owners(&state), vec![Some(0), Some(1), None]);
+    }
+
+    #[test]
+    fn reindex_drops_cables_anchored_to_a_deleted_body() {
+        init_symbol_table();
+        let mut state = state_with_bodies(3);
+        state.cable_constraints.push(HavokCable {
+            body_index: 0,
+            anchor: [0.0; 3],
+            attach_local: [0.0; 3],
+            length: 1.0,
+        });
+        state.cable_constraints.push(HavokCable {
+            body_index: 2,
+            anchor: [0.0; 3],
+            attach_local: [0.0; 3],
+            length: 1.0,
+        });
+
+        state.rigid_bodies.remove(0);
+        reindex_after_body_removal(&mut state, &[0]);
+
+        // The cable on the deleted body goes; the other follows its body down.
+        let cable_owners: Vec<usize> =
+            state.cable_constraints.iter().map(|c| c.body_index).collect();
+        assert_eq!(cable_owners, vec![1]);
+    }
+}
+
 pub struct HavokPhysicsMemberHandlers {}
 
 impl HavokPhysicsMemberHandlers {
@@ -1825,22 +1976,37 @@ impl HavokPhysicsMemberHandlers {
             _ => return Err(ScriptError::new("Not a Havok member".to_string())),
         };
 
-        // Remove from havok state
-        match &arg {
+        // Remove from havok state. `collision_meshes` and `cable_constraints`
+        // hold POSITIONAL indices into `rigid_bodies`, so removing an element
+        // shifts every later body out from under them — `reindex_after_body_removal`
+        // repairs that. Springs / dashpots / hinges reference bodies by NAME and
+        // need no fixup.
+        let removed: Vec<usize> = match &arg {
             Datum::String(name) => {
-                havok
+                let target = Symbol::from_str(name.as_str());
+                let removed: Vec<usize> = havok
                     .state
                     .rigid_bodies
-                    .retain(|rb| rb.name != Symbol::from_str(name.as_str()));
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, rb)| rb.name == target)
+                    .map(|(i, _)| i)
+                    .collect();
+                havok.state.rigid_bodies.retain(|rb| rb.name != target);
+                removed
             }
             Datum::Int(index) => {
                 let idx = (*index as usize).saturating_sub(1);
                 if idx < havok.state.rigid_bodies.len() {
                     havok.state.rigid_bodies.remove(idx);
+                    vec![idx]
+                } else {
+                    Vec::new()
                 }
             }
-            _ => {}
-        }
+            _ => Vec::new(),
+        };
+        reindex_after_body_removal(&mut havok.state, &removed);
         Ok(DatumRef::Void)
     }
 
