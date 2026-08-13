@@ -2223,7 +2223,16 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             // climbing car and brings it to a dead stop mid-ramp (measured:
             // step 47 -> 9 -> 2 -> 0 at z=244). Don't "fix" this without fixing
             // the friction path first.
-            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive { continue; }
+            //
+            // The cut is about FRICTION, not about the normal: what breaks the ramp
+            // climb is the resolver rubbing the car to a stop, and a body the movie
+            // has made frictionless has nothing to rub. Age of Speed's `InitHover`
+            // sets friction 0 on every vehicle body, and Director scrapes that
+            // chassis along the road continuously — 1619 of its 1681 contacts carry
+            // normal.z ~ 0.995. Discarding those left the hull with no floor, so the
+            // car sank through the loop instead of resting on the track.
+            let frictionless = rb.friction.abs() < 1e-6;
+            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
             }
