@@ -1832,7 +1832,20 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                         rb.position[0] += c.normal[0] * push;
                         rb.position[1] += c.normal[1] * push;
                         rb.position[2] += c.normal[2] * push;
-                        if vn.abs() < 10.0 {
+                        // Remove the INTO-surface velocity whatever its magnitude.
+                        // The old `vn.abs() < 10.0` gate only cancelled slow
+                        // contacts, so a body arriving fast kept its entire normal
+                        // velocity: position was pushed out of penetration but the
+                        // velocity that caused it was left intact, and it simply
+                        // ploughed on. Age of Speed's car contacts the road at
+                        // impact speeds of 20-1400 (measured), so it was never
+                        // arrested — first contact lands at ride height 27.5, right
+                        // where Director stops, and the car still sank to 8.3 with
+                        // contacts firing the whole way.
+                        //
+                        // Only INWARD motion (vn < 0) is removed; a separating
+                        // contact is left alone so bodies can still leave a surface.
+                        if vn < 0.0 {
                             rb.linear_velocity[0] -= vn * c.normal[0];
                             rb.linear_velocity[1] -= vn * c.normal[1];
                             rb.linear_velocity[2] -= vn * c.normal[2];
