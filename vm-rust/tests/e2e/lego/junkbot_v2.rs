@@ -78,7 +78,7 @@ browser_e2e_test!(test_junkbot_v2_load, |player| async move {
     
     player.click_sprite(sprite().number(74)).await?; // halloffame_ok_button
 
-    player.step_frames(10).await;
+    player.step_frames(50).await;
 
     snapshots.verify("level_overview", player.snapshot_stage())?;
 

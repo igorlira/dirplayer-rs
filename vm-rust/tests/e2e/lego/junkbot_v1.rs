@@ -98,7 +98,7 @@ browser_e2e_test!(test_junkbot_v1_load, |player| async move {
 
     player.step_until(sprite().member("building_icon_1").visible(1.0)).await?;
 
-    player.step_frames(25).await;
+    player.step_frames(50).await;
 
     snapshots.verify("level_overview", player.snapshot_stage())?;
 
