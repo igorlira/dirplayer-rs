@@ -191,8 +191,14 @@ pub struct HandlerDef {
     /// lives and dies with the handler it was compiled from. A map keyed by
     /// `handler_def_ptr` would risk an unloaded cast's address being reused by a
     /// different handler, which is a correctness hazard, not just a stale cache.
-    /// `None` = not attempted yet; `Some(None)` = attempted and ineligible.
-    pub compiled_ir: std::cell::RefCell<Option<Option<std::rc::Rc<crate::player::compiled::CompiledHandler>>>>,
+    /// `None` = not attempted yet; `Some((_, None))` = attempted and ineligible.
+    ///
+    /// The `u64` is the `BreakpointManager` generation the entry was compiled
+    /// under. Breakpoints are baked in as `IrOp::Escape` (the only way the
+    /// debugger can see an op the IR would otherwise run natively), so an entry
+    /// built under a different breakpoint list is stale and gets recompiled.
+    /// With no breakpoints the generation never moves and this never fires.
+    pub compiled_ir: std::cell::RefCell<Option<(u64, Option<std::rc::Rc<crate::player::compiled::CompiledHandler>>)>>,
 }
 
 impl HandlerRecord {

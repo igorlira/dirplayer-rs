@@ -135,6 +135,39 @@ pub fn compile(handler: &HandlerDef, multiplier: u32) -> Option<CompiledHandler>
     })
 }
 
+/// Force every op carrying a breakpoint to `IrOp::Escape`, so the interpreter
+/// runs it and the driver's breakpoint check gets to see it.
+///
+/// The IR runs its ops natively and parks `scope.bytecode_index` only when it
+/// escapes, returns or back-jumps, so an op it executes is invisible to the
+/// debugger — a breakpoint on `Add` / `SetLocal` / `Jmp` never fired at all,
+/// while one on `put` or a call did, because those already compile to `Escape`.
+///
+/// Escaping is the whole mechanism: `compile` emits exactly one `IrOp` per
+/// bytecode, so the IR pc IS the bytecode index, and an `Escape` hands the
+/// interpreter precisely the index the breakpoint was set on. That costs
+/// nothing while running — the rest of the handler keeps the IR — and nothing
+/// at all for the handlers (i.e. nearly all of them) with no breakpoints.
+///
+/// Called after `compile` and BEFORE `is_worth_compiling`, so a handler that
+/// the added escapes push past the escape ceiling is judged on what it will
+/// actually run.
+pub fn apply_breakpoints(
+    c: &mut CompiledHandler,
+    breakpoints: &[crate::player::debug::Breakpoint],
+    script_name: &str,
+    handler_name: &str,
+) {
+    for bp in breakpoints {
+        if bp.script_name != script_name || bp.handler_name != handler_name {
+            continue;
+        }
+        if let Some(op) = c.ops.get_mut(bp.bytecode_index) {
+            *op = IrOp::Escape;
+        }
+    }
+}
+
 /// Largest share of escaped ops (percent) a handler may have and still be
 /// worth compiling.
 ///
@@ -655,6 +688,51 @@ mod tests {
             let compiled = CompiledHandler { ops, n_locals: 2 };
             run_handler(&compiled, scope_ref).unwrap();
             assert_eq!(stack_top_int(scope_ref), 55);
+            reserve_player_mut(|player| player.pop_scope());
+        });
+    }
+
+    /// A breakpoint on an IR-NATIVE opcode must stop the IR at that bytecode
+    /// index. Without the patch the IR runs `SetLocal` itself and only parks
+    /// `bytecode_index` when it escapes or returns, so the driver's breakpoint
+    /// check never sees the op and the breakpoint silently does nothing.
+    #[test]
+    fn breakpoint_on_ir_native_op_escapes_to_the_interpreter() {
+        use crate::player::debug::Breakpoint;
+        init_symbol_table();
+        run_test(async {
+            let _player = TestPlayer::new();
+
+            // local0 = 5 ; local0 = 6 — every op is IR-native, so an unpatched
+            // run goes straight through to Done without a single escape.
+            let mut compiled = CompiledHandler {
+                ops: vec![
+                    IrOp::PushInt(5), IrOp::SetLocal(0),
+                    IrOp::PushInt(6), IrOp::SetLocal(0),
+                ],
+                n_locals: 1,
+            };
+            let bps = vec![
+                Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 3 },
+                // Must be ignored: right index, wrong handler.
+                Breakpoint { script_name: "s".into(), handler_name: "other".into(), bytecode_index: 1 },
+                // Must be ignored rather than panic: past the end of the stream.
+                Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 99 },
+            ];
+            apply_breakpoints(&mut compiled, &bps, "s", "h");
+            assert!(matches!(compiled.ops[3], IrOp::Escape), "breakpoint op must escape");
+            assert!(matches!(compiled.ops[1], IrOp::SetLocal(0)), "other handlers' breakpoints must not patch");
+
+            let scope_ref = reserve_player_mut(|player| player.push_scope());
+            match run_handler_resumable(&compiled, scope_ref).unwrap() {
+                IrExit::Escape => {}
+                _ => panic!("a breakpointed op must hand control back to the interpreter"),
+            }
+            assert_eq!(
+                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().bytecode_index),
+                3,
+                "the driver looks up the breakpoint by this index, so it must be the op's own"
+            );
             reserve_player_mut(|player| player.pop_scope());
         });
     }

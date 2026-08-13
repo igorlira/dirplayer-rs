@@ -45,12 +45,23 @@ pub struct BreakpointContext {
 
 pub struct BreakpointManager {
     pub breakpoints: Vec<Breakpoint>,
+    /// Bumped on every change to `breakpoints`.
+    ///
+    /// The register IR executes its opcodes natively and only parks
+    /// `scope.bytecode_index` when it escapes, so the driver's breakpoint check
+    /// can never see an op the IR ran — a breakpoint on `Add`/`SetLocal`/`Jmp`
+    /// simply never fires. The fix is to compile those ops to `IrOp::Escape`
+    /// (see `compiled::apply_breakpoints`), which costs nothing at run time but
+    /// bakes the breakpoint list into the cached `HandlerDef.compiled_ir`. This
+    /// counter is what tells a later handler entry that the cache is stale.
+    pub generation: u64,
 }
 
 impl BreakpointManager {
     pub fn new() -> BreakpointManager {
         BreakpointManager {
             breakpoints: vec![],
+            generation: 0,
         }
     }
 
@@ -73,6 +84,7 @@ impl BreakpointManager {
             handler_name,
             bytecode_index,
         });
+        self.generation = self.generation.wrapping_add(1);
         JsApi::dispatch_breakpoint_list_changed();
     }
 
@@ -87,6 +99,7 @@ impl BreakpointManager {
                 || bp.handler_name != handler_name
                 || bp.bytecode_index != bytecode_index
         });
+        self.generation = self.generation.wrapping_add(1);
         JsApi::dispatch_breakpoint_list_changed();
     }
 

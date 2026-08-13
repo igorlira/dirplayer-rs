@@ -4413,23 +4413,44 @@ fn setup_handler_frame(
     let scope_generation = reserve_player_ref(|player| player.scopes.get(scope_ref).unwrap().generation);
 
     // Compile to register IR on first call and cache it on the HandlerDef.
-    let ir = if reserve_player_ref(|player| player.ir_enabled) {
+    // `bp_generation` rides along in the same read: the cached IR has the
+    // breakpoint list baked into it as escapes, so it is only valid for the
+    // generation it was built under. Untouched by a session with no
+    // breakpoints, where the generation stays 0 and the cache never misses.
+    let (ir_enabled, bp_generation) = reserve_player_ref(|player| {
+        (player.ir_enabled, player.breakpoint_manager.generation)
+    });
+    let ir = if ir_enabled {
         let handler_def = unsafe { &*ctx.handler_def_ptr };
         let cached = {
             let slot = handler_def.compiled_ir.borrow();
             slot.clone()
         };
         let compiled = match cached {
-            Some(c) => c,
-            None => {
+            Some((cached_gen, c)) if cached_gen == bp_generation => c,
+            _ => {
                 let c = crate::player::compiled::compile(handler_def, ctx.multiplier)
+                    .map(|mut c| {
+                        // Before `is_worth_compiling`, so the escape ceiling is
+                        // judged on the op stream that will actually run.
+                        reserve_player_ref(|player| {
+                            crate::player::compiled::apply_breakpoints(
+                                &mut c,
+                                &player.breakpoint_manager.breakpoints,
+                                unsafe { &(*ctx.script_ptr).name },
+                                handler_name.as_str(),
+                            )
+                        });
+                        c
+                    })
                     .filter(crate::player::compiled::is_worth_compiling)
                     .map(std::rc::Rc::new);
                 // Counted here, not inside `is_worth_compiling`, so the result
                 // is per DISTINCT handler: the outcome is cached on the
-                // HandlerDef, so this arm runs at most once per handler.
+                // HandlerDef, so this arm runs at most once per handler (or
+                // once per breakpoint-list change, which is interactive).
                 crate::player::interp_stats::record_compile_outcome(c.is_some());
-                *handler_def.compiled_ir.borrow_mut() = Some(c.clone());
+                *handler_def.compiled_ir.borrow_mut() = Some((bp_generation, c.clone()));
                 c
             }
         };
@@ -4531,7 +4552,16 @@ pub async fn player_call_script_handler_raw_args(
         // or reaches a backward jump the driver must see. On an escape it leaves
         // `scope.bytecode_index` on that opcode, and the ordinary path below
         // executes exactly that one op and advances — then we re-enter here.
-        if let Some(ir) = ir_state.as_mut() {
+        //
+        // Breakpoints do NOT need this to be skipped: they are baked into the
+        // compiled stream as escapes, so the op they sit on comes back out to
+        // the interpreter and the check below sees it. Stepping is different —
+        // it has to stop on EVERY op, and it is switched on while the handler
+        // is already running, so its frame's IR cannot be re-patched. Stand the
+        // IR down for the duration instead; single-stepping is interactive, so
+        // the interpreted speed costs nothing a user can perceive.
+        let stepping = !matches!(unsafe { crate::player::player_ref() }.step_mode, StepMode::None);
+        if let Some(ir) = ir_state.as_mut().filter(|_| !stepping) {
             match crate::player::compiled::run_handler_resumable(&ir.compiled, scope_ref) {
                 Ok(crate::player::compiled::IrExit::Done) => break FrameTransfer::Done,
                 // Nothing to reconcile — the escaped opcode reads and writes the
@@ -4587,11 +4617,13 @@ pub async fn player_call_script_handler_raw_args(
         }
 
         // Direct slot read — no closure, no bounds check, no unwrap.
+        // `stepping` was read just above, before the IR ran; the IR run is
+        // synchronous, so nothing can have changed `step_mode` in between.
+        // Reusing it keeps this at the same one read per iteration it always was.
         let (current_gen, bytecode_index, debugger_active) = {
             let scope = unsafe { &*scope_ptr };
             let player = unsafe { crate::player::player_ref() };
-            let debugging = !player.breakpoint_manager.breakpoints.is_empty()
-                || !matches!(player.step_mode, StepMode::None);
+            let debugging = stepping || !player.breakpoint_manager.breakpoints.is_empty();
             (scope.generation, scope.bytecode_index, debugging)
         };
         // Scope was reused (generation changed = popped and re-pushed) → done.
