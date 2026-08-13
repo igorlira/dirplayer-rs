@@ -1352,6 +1352,13 @@ pub struct Shockwave3dRuntimeState {
     /// Shader overrides for nodes: model_name → (mesh_index → shader_name)
     /// mesh_index is 0-based; index 0 is also the whole-model fallback
     pub node_shaders: std::collections::HashMap<Symbol, std::collections::HashMap<usize, Symbol>>,
+    /// Nodes whose `node_shaders` entries were written by an INDEXED assignment
+    /// (`model.shaderList[i] = shd`), which in Director touches only mesh `i`.
+    /// Without this the single-entry index-0 whole-model fallback could not tell
+    /// `shaderList[1] = shd` apart from `shaderList = shd`, so Agent Free Ride 2
+    /// voiding the enemy rider's weapon mesh (`shaderList[1] = void_mat`) made the
+    /// WHOLE rider invisible — jet skis driving with nobody on them.
+    pub node_shaders_indexed: std::collections::HashSet<Symbol>,
     /// Shader names (as authored) the script explicitly set `.transparent = 1` on.
     /// Such shaders alpha-BLEND softly (Director's default #blend), so a model
     /// carrying one is routed to the transparent pass even at blend=100 — instead

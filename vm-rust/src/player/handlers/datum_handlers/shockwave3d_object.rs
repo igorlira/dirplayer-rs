@@ -1047,6 +1047,10 @@ impl Shockwave3dObjectDatumHandlers {
                                 for (i, name) in shader_names {
                                     map.insert(i, name);
                                 }
+                                // `shaderList = shd` REPLACES the list, so any earlier
+                                // indexed writes (and their per-mesh-only semantics) are
+                                // gone: index 0 is the whole-model fallback again.
+                                w3d.runtime_state.node_shaders_indexed.remove(&s3d_ref.name);
                             }
                         }
                     }
@@ -3435,7 +3439,7 @@ impl Shockwave3dObjectDatumHandlers {
                         // 3. Pass 2 — build the cloned nodes with re-parented names and
                         //    collect the per-node runtime state to copy (live transform +
                         //    shader overrides + visibility). Read under an immutable borrow.
-                        type ClonedNode = (crate::director::chunks::w3d::types::W3dNode, [f32; 16], Option<std::collections::HashMap<usize, Symbol>>, Option<u8>);
+                        type ClonedNode = (crate::director::chunks::w3d::types::W3dNode, [f32; 16], Option<std::collections::HashMap<usize, Symbol>>, Option<u8>, bool);
                         let mut planned: Vec<ClonedNode> = Vec::with_capacity(descendants.len() + 1);
                         // (orig_node, new_name, new_parent): root keeps the source's parent
                         // ("clone shares the parent"); descendants map their parent through
@@ -3452,9 +3456,12 @@ impl Shockwave3dObjectDatumHandlers {
                         for (orig, new_name, new_parent) in &work {
                             let (new_name, new_parent) = (*new_name, *new_parent);
                             let transform = get_node_transform_live(player, &member_ref, orig.name);
-                            let (shaders, visibility) = {
+                            let (shaders, visibility, indexed) = {
                                 let w3d = player.movie.cast_manager.find_member_by_ref(&member_ref)
                                     .and_then(|m| m.member_type.as_shockwave3d());
+                                let indexed = w3d
+                                    .map(|w| w.runtime_state.node_shaders_indexed.contains(&orig.name))
+                                    .unwrap_or(false);
                                 let shaders = w3d.and_then(|w| {
                                     w.runtime_state.node_shaders.get(&orig.name)
                                         .or_else(|| w.runtime_state.node_shaders.iter()
@@ -3467,29 +3474,32 @@ impl Shockwave3dObjectDatumHandlers {
                                             .find(|(k, _)| k.eq_ignore_ascii_case(&orig.name.as_str())).map(|(_, v)| v))
                                         .copied()
                                 });
-                                (shaders, visibility)
+                                (shaders, visibility, indexed)
                             };
                             let mut node = (*orig).clone();
                             node.name = new_name;
                             node.parent_name = new_parent;
                             node.transform = transform;
-                            planned.push((node, transform, shaders, visibility));
+                            planned.push((node, transform, shaders, visibility, indexed));
                         }
 
                         // 4. Commit — push cloned nodes and their runtime state.
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                for (node, transform, shaders, visibility) in &planned {
+                                for (node, transform, shaders, visibility, indexed) in &planned {
                                     w3d.runtime_state.node_transforms.insert(node.name.clone(), *transform);
                                     if let Some(sh) = shaders {
                                         w3d.runtime_state.node_shaders.insert(node.name.clone(), sh.clone());
+                                    }
+                                    if *indexed {
+                                        w3d.runtime_state.node_shaders_indexed.insert(node.name.clone());
                                     }
                                     if let Some(v) = visibility {
                                         w3d.runtime_state.node_visibility.insert(node.name.clone(), *v);
                                     }
                                 }
                                 if let Some(scene) = w3d.scene_mut() {
-                                    for (node, _, _, _) in planned {
+                                    for (node, _, _, _, _) in planned {
                                         scene.nodes.push(node);
                                     }
                                 }
@@ -4365,6 +4375,9 @@ impl Shockwave3dObjectDatumHandlers {
                                             .entry(s3d_ref.name.clone())
                                             .or_insert_with(std::collections::HashMap::new);
                                         shader_map.insert(mesh_idx, shader_ref.name.clone());
+                                        if prop == "shaderList" {
+                                            w3d.runtime_state.node_shaders_indexed.insert(s3d_ref.name.clone());
+                                        }
                                     }
                                 }
                             }
@@ -4476,6 +4489,9 @@ impl Shockwave3dObjectDatumHandlers {
                                             .entry(s3d_ref.name.clone())
                                             .or_insert_with(std::collections::HashMap::new);
                                         shader_map.insert(mesh_idx, shader_ref.name.clone());
+                                        if prop_name == "shaderList" {
+                                            w3d.runtime_state.node_shaders_indexed.insert(s3d_ref.name.clone());
+                                        }
                                     }
                                 }
                             }

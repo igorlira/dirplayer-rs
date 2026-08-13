@@ -3099,14 +3099,25 @@ void main() {
         rs.node_shaders.get(&node_name).and_then(|m| {
             match mesh_idx {
                 Some(idx) => m.get(&idx)
-                    // Whole-model fallback: a `model.shaderList = shader` assignment
-                    // (applied to every mesh) is stored as the SOLE override at index
-                    // 0. Only then does a mesh without its own entry inherit it. When
-                    // the script set specific indices (`shaderList[1]`, `shaderList[2]`,
-                    // …), an unset mesh keeps its DEFAULT resource shader — otherwise the
-                    // LEGO minifig's legs (mesh 2, no override) inherited the head shader
-                    // (mesh 0) and rendered as yellow skin instead of blue legs.
-                    .or_else(|| if m.len() == 1 { m.get(&0) } else { None }),
+                    // Whole-model fallback: a `model.shaderList = shader` (or
+                    // `model.shader = shader`) assignment applies to every mesh and is
+                    // stored as the SOLE override at index 0. Only then does a mesh
+                    // without its own entry inherit it. When the script set specific
+                    // indices (`shaderList[1]`, `shaderList[2]`, …), an unset mesh keeps
+                    // its DEFAULT resource shader — otherwise the LEGO minifig's legs
+                    // (mesh 2, no override) inherited the head shader (mesh 0) and
+                    // rendered as yellow skin instead of blue legs.
+                    //
+                    // `m.len() == 1` alone cannot tell `shaderList = shd` from a lone
+                    // `shaderList[1] = shd`, so the indexed form is tracked explicitly:
+                    // Agent Free Ride 2 voids only the enemy rider's weapon mesh
+                    // (`shaderList[1] = void_mat`) and the fallback used to swallow the
+                    // whole rider, leaving jet skis riding around with nobody on them.
+                    .or_else(|| if m.len() == 1 && !rs.node_shaders_indexed.contains(&node_name) {
+                        m.get(&0)
+                    } else {
+                        None
+                    }),
                 // Whole-model query (no mesh index): return a representative override —
                 // mesh 0, else the lowest index. Used by opacity / transparent-shader /
                 // material lookups that need the model's primary shader (e.g. unicraft's
