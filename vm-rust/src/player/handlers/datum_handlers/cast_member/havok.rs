@@ -634,11 +634,31 @@ impl HavokPhysicsMemberHandlers {
                     if n2 > 1e-9 { for k in 0..3 { c2[k] /= n2; } }
                     [c0[0],c0[1],c0[2], c1[0],c1[1],c1[2], c2[0],c2[1],c2[2], t[12] as f64, t[13] as f64, t[14] as f64]
                 });
+                // Primitive shape offset, body-local, Havok metres -> display units.
+                //
+                // `Import` moves the body origin onto DISPLACEMENT (the authored centre
+                // of mass) and offsets every primitive by -DISPLACEMENT so the shape
+                // stays where it was authored. We honoured the COM half of that pair but
+                // read `local_translation` only for Sphere primitives, so mesh hulls sat
+                // at the body origin instead of under it. Age of Speed's chassis is
+                // offset by (0.007, 3.52, -27.11): without it the hull spans z
+                // [-7.8, 61.0] and cannot touch the road until jump 7.8, where Director
+                // scrapes the loop continuously from jump 43.5 and never sinks past 27.8.
+                let mesh_name_lc = mesh.name.to_string().to_lowercase();
+                let prim_offset: [f64; 3] = body_props.get(&mesh.name)
+                    .and_then(|p| p.primitives.iter().find_map(|pr| match &pr.kind {
+                        super::hke_parser::HkePrimitiveKind::Mesh { mesh_name }
+                            if mesh_name.to_lowercase() == mesh_name_lc => Some(pr.local_translation),
+                        _ => None,
+                    }))
+                    .map(|t| [t[0] as f64 * inv_scale, t[1] as f64 * inv_scale, t[2] as f64 * inv_scale])
+                    .unwrap_or([0.0; 3]);
+
                 let vertices: Vec<[f64; 3]> = mesh.vertices.iter()
                     .map(|v| {
-                        let lx = v[0] as f64 * inv_scale;
-                        let ly = v[1] as f64 * inv_scale;
-                        let lz = v[2] as f64 * inv_scale;
+                        let lx = v[0] as f64 * inv_scale + prim_offset[0];
+                        let ly = v[1] as f64 * inv_scale + prim_offset[1];
+                        let lz = v[2] as f64 * inv_scale + prim_offset[2];
                         if let Some(r) = &xform_rt {
                             let wx = r[0]*lx + r[3]*ly + r[6]*lz + r[9];
                             let wy = r[1]*lx + r[4]*ly + r[7]*lz + r[10];
@@ -652,6 +672,11 @@ impl HavokPhysicsMemberHandlers {
 
                 // Look up parsed body properties from HKE tail
                 let props = body_props.get(&mesh.name);
+
+                // DIAG: Director's chassis hull touches the road from jump 43.5 down,
+                // ours only below ~18. Dump everything the HKE authors for the body so
+                // the missing depth can be attributed to a real field rather than
+                // guessed at.
                 let mass = props.map(|p| p.total_mass as f64).unwrap_or(0.0);
 
                 let mut rb = if mass > 0.0 {
@@ -746,7 +771,7 @@ impl HavokPhysicsMemberHandlers {
                     let (mut lmn, mut lmx) = ([f64::MAX; 3], [f64::MIN; 3]);
                     for v in &mesh.vertices {
                         for i in 0..3 {
-                            let c = v[i] as f64 * inv_scale;
+                            let c = v[i] as f64 * inv_scale + prim_offset[i];
                             if c < lmn[i] { lmn[i] = c; }
                             if c > lmx[i] { lmx[i] = c; }
                         }
