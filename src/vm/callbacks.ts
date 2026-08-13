@@ -11,7 +11,7 @@ import {
 import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
-import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers } from 'vm-rust'
+import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
 import { isUIShown } from "../utils/debug";
@@ -88,6 +88,13 @@ export function initVmCallbacks() {
       } catch {}
       store.dispatch(debugMessagesCleared());
       store.dispatch(movieLoaded());
+      // Re-mirror the VM's breakpoints. `movieUnloaded` resets the vm slice to
+      // its initial state, which empties the store's copy, but the VM keeps the
+      // list it was given (restored from localStorage at boot) and nothing
+      // pushes it again. The script gutter therefore came up blank after a
+      // movie load even though the breakpoints were live, and only reappeared
+      // when the next add/remove finally sent a list.
+      store.dispatch(breakpointListChanged(get_breakpoints() as JsBridgeBreakpoint[]));
     },
     onMovieLoadFailed: (path: string, error: string) => {
       store.dispatch(movieLoadFailed(`Failed to load movie: ${error}`));

@@ -1943,26 +1943,33 @@ impl JsApi {
         onScriptError(data.to_js_object());
     }
 
+    /// The current breakpoint list, in the shape the JS bridge expects.
+    ///
+    /// Shared by the push (`dispatch_breakpoint_list_changed`) and the pull
+    /// (`get_breakpoints`) so the two can never drift.
+    pub fn get_breakpoint_list(player: &DirPlayer) -> Vec<js_sys::Object> {
+        player
+            .breakpoint_manager
+            .breakpoints
+            .iter()
+            .map(|x| {
+                let breakpoint = JsBridgeBreakpoint {
+                    script_name: x.script_name.to_owned(),
+                    handler_name: x.handler_name.to_owned(),
+                    bytecode_index: x.bytecode_index,
+                };
+                let breakpoint_js: js_sys::Map = breakpoint.into();
+                breakpoint_js.to_js_object()
+            })
+            .collect()
+    }
+
     pub fn dispatch_breakpoint_list_changed() {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
             if unsafe { PLAYER_OPT.is_none() } { return; }
             let player = unsafe { crate::player::player_ref() };
-            let breakpoints = player
-                .breakpoint_manager
-                .breakpoints
-                .iter()
-                .map(|x| {
-                    let breakpoint = JsBridgeBreakpoint {
-                        script_name: x.script_name.to_owned(),
-                        handler_name: x.handler_name.to_owned(),
-                        bytecode_index: x.bytecode_index,
-                    };
-                    let breakpoint_js: js_sys::Map = breakpoint.into();
-                    breakpoint_js.to_js_object()
-                })
-                .collect();
-            onBreakpointListChanged(breakpoints);
+            onBreakpointListChanged(Self::get_breakpoint_list(player));
         });
     }
 
@@ -2008,6 +2015,7 @@ impl JsApi {
     pub fn dispatch_debug_update(_: &DirPlayer) {}
     pub fn dispatch_script_error(_: &DirPlayer, _: &ScriptError) {}
     pub fn dispatch_breakpoint_list_changed() {}
+    pub fn get_breakpoint_list(_: &DirPlayer) -> Vec<js_sys::Object> { vec![] }
     pub fn dispatch_script_error_cleared() {}
     pub fn dispatch_external_event(_: &str) {}
     pub fn get_cast_chunk_list_for(_: &DirPlayer, _: u32) -> js_sys::Object { unimplemented!() }

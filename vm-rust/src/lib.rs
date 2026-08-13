@@ -136,6 +136,19 @@ pub fn add_breakpoint(script_name: String, handler_name: String, bytecode_index:
     });
 }
 
+/// Read the current breakpoint list.
+///
+/// The UI otherwise only ever learns breakpoints from the
+/// `onBreakpointListChanged` push, so a view that mounts after the push — or a
+/// session where the push never happened — shows none of them. This gives it a
+/// way to ask.
+#[wasm_bindgen]
+pub fn get_breakpoints() -> js_sys::Array {
+    reserve_player_ref(|player| {
+        JsApi::get_breakpoint_list(player).into_iter().collect()
+    })
+}
+
 #[wasm_bindgen]
 pub fn remove_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
     reserve_player_mut(|player| {
