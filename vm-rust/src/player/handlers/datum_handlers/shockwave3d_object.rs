@@ -1891,17 +1891,29 @@ impl Shockwave3dObjectDatumHandlers {
                             None
                         };
                         if let Some((w, h, mut rgba)) = rgba_data {
-                            // When use_alpha bitmap has white opaque pixels (255,255,255,255),
-                            // make them transparent. This handles the case where setAlpha(0)
-                            // set background transparent but copyPixels overwrote alpha to 255.
-                            // White background pixels should remain transparent for overlay compositing.
-                            if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_ref) {
-                                if bmp.use_alpha {
-                                    let total = (w as usize) * (h as usize);
-                                    for i in 0..total {
-                                        let idx = i * 4;
-                                        if rgba[idx] == 255 && rgba[idx+1] == 255 && rgba[idx+2] == 255 && rgba[idx+3] == 255 {
-                                            rgba[idx+3] = 0; // Make white background transparent
+                            // Legacy salvage for a bitmap whose alpha channel came back
+                            // FULLY opaque even though `useAlpha` is set: treat its white
+                            // pixels as the background (`setAlpha(0)` + a copy that
+                            // clobbered alpha to 255). Only when there is no transparency
+                            // left to trust — `copy_pixels_with_params` now copies RGBA
+                            // verbatim for a 32-bit alpha source into a 32-bit alpha
+                            // destination, so a real alpha channel survives the copy and
+                            // must be believed. Applying this unconditionally punched the
+                            // cores out of every WHITE glyph: Age of Speed builds its HUD
+                            // digits with `member.color = color(255,255,255)` and refreshes
+                            // them through this setter each frame, so the lap/time/speed/
+                            // score readouts kept only their anti-aliased edges and
+                            // rendered as near-invisible ghosts.
+                            let has_transparency = rgba.chunks_exact(4).any(|p| p[3] < 255);
+                            if !has_transparency {
+                                if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_ref) {
+                                    if bmp.use_alpha {
+                                        let total = (w as usize) * (h as usize);
+                                        for i in 0..total {
+                                            let idx = i * 4;
+                                            if rgba[idx] == 255 && rgba[idx+1] == 255 && rgba[idx+2] == 255 {
+                                                rgba[idx+3] = 0; // Make white background transparent
+                                            }
                                         }
                                     }
                                 }
