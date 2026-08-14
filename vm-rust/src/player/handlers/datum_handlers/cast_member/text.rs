@@ -653,31 +653,22 @@ impl TextMemberHandlers {
                     } else {
                         font.char_height
                     };
-                    // Director's per-line height for PFR-rendered text is
-                    // capped at `nominal × 1.5`. The PFR atlas's cell
-                    // height is otherwise authoritative (matches the
-                    // rasterized glyph extent), but pixel fonts pad their
-                    // cell well past 1.5× nominal — 04b_08 * 12pt has
-                    // char_height=26 (cell-1=25) for ~8 px glyphs. Without
-                    // this cap, member 16 (CS Junkbot credits, 19 lines
-                    // of 04b_08 *) reports 19×25=485 vs Director's 375.
-                    // Tight-cell PFR fonts (Verdana/Arial 12pt:
-                    // char_height≈14) still get the smaller cell-1=13 and
-                    // don't regress.
-                    let cell_h = if font.char_widths.is_some() {
-                        font.char_height.saturating_sub(1)
-                    } else {
-                        font.char_height
-                    };
-                    let nominal_capped = (nominal as f32 * 1.5).round() as u16;
                     // When the member has an explicit fixed_line_space,
                     // trust it as the per-line extent — `cell_h = char_h - 1`
                     // is one pixel taller than fixed_line_space for pixel
                     // fonts, which inflates a 16-line list by 16 px.
+                    // Otherwise this is Paige auto leading — see
+                    // `pfr_auto_line_height`, which every other site
+                    // (`.height`, `.image` measure + render) shares so the
+                    // Text-Wrapper bake stays 1:1.
                     let line_h = if text_data.fixed_line_space > 0 {
                         text_data.fixed_line_space
                     } else {
-                        cell_h.min(nominal_capped)
+                        crate::player::font::pfr_auto_line_height(
+                            &font,
+                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                            nominal,
+                        )
                     };
                     // Match the renderer's per-line advance at font.rs:921 —
                     // it adds top_spacing AND bottom_spacing to the line step
@@ -873,24 +864,20 @@ impl TextMemberHandlers {
                             &text_data.text, &font, text_data.word_wrap,
                             wrap_width as i32, text_data.char_spacing,
                         );
-                        // See `.rect` getter for the rationale —
-                        // `min(cell_h, nominal × 1.5)` caps pixel-padded
-                        // PFR atlases without regressing tight-cell ones.
-                        let cell_h = if font.char_widths.is_some() {
-                            font.char_height.saturating_sub(1)
-                        } else {
-                            font.char_height
-                        };
-                        let nominal_capped = (nominal as f32 * 1.5).round() as u16;
                         // Trust the member's fixed_line_space when set —
                         // `cell_h = char_h - 1` runs one pixel hotter than
                         // the authored stride for PFR pixel fonts (e.g.
                         // fixed_line_space=21 → cell_h=22), inflating
                         // single-line height to fixed_line_space+1.
+                        // Otherwise: shared Paige auto leading (see `.rect`).
                         let line_h = if text_data.fixed_line_space > 0 {
                             text_data.fixed_line_space
                         } else {
-                            cell_h.min(nominal_capped)
+                            crate::player::font::pfr_auto_line_height(
+                                &font,
+                                player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                                nominal,
+                            )
                         };
                         // See `.rect` getter for rationale on folding
                         // top_spacing + bottom_spacing into line_step.
@@ -1463,12 +1450,20 @@ impl TextMemberHandlers {
                     // Honor the member's explicit line height (set from the font
                     // struct's #lineHeight → fixedLineSpace) so the produced bitmap
                     // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
-                    // matching the baked login_b_title bitmap) rather than the
-                    // font_size×1.4 heuristic (→14). The bitmap is drawn 1:1.
+                    // matching the baked login_b_title bitmap). The bitmap is
+                    // drawn 1:1. With no fixedLineSpace this is Paige auto
+                    // leading — the shared helper, NOT the old font_size×1.4
+                    // guess, which disagreed with the renderer's own fallback
+                    // (13 here vs 25 there) and sized the box for the wrong
+                    // number of lines.
                     let line_h = if text_data.fixed_line_space > 0 {
                         text_data.fixed_line_space
                     } else {
-                        (nominal as f32 * 1.4).round() as u16
+                        crate::player::font::pfr_auto_line_height(
+                            &font,
+                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                            nominal,
+                        )
                     };
                     // See `.rect` getter for rationale on folding
                     // top_spacing + bottom_spacing into line_step.
@@ -1830,15 +1825,28 @@ impl TextMemberHandlers {
                         (Some(_), _) => text_data.top_spacing as i32,
                         (None, _) => text_data.top_spacing as i32,
                     };
-                    // Underline row sits just below the line's baseline. Use the
-                    // member's explicit line height (fixedLineSpace) when set so
-                    // the underline lands inside the bitmap (Volter login link
-                    // text is 11px tall); the atlas cell height (char_height-1,
-                    // ~25) would place it far below and clip it.
+                    // Underline row sits just below the line's baseline, and this
+                    // is also the per-line advance below. Use the member's explicit
+                    // line height (fixedLineSpace) when set so the underline lands
+                    // inside the bitmap (Volter login link text is 11px tall);
+                    // otherwise Paige auto leading via the shared helper. The raw
+                    // atlas cell (char_height-1, ~25 for Volter-9) is NOT a line
+                    // height — it put 25 px between Habbo v31's 9 px catalogue
+                    // lines and sized the box for a different line count than the
+                    // measure pass above.
                     let line_height = if text_data.fixed_line_space > 0 {
                         (text_data.fixed_line_space as i32).max(1)
                     } else {
-                        (font.char_height as i32 - 1).max(1)
+                        let nominal = if text_data.font_size > 0 {
+                            text_data.font_size
+                        } else if font.font_size > 0 {
+                            font.font_size
+                        } else {
+                            font.char_height
+                        };
+                        (crate::player::font::pfr_auto_line_height(
+                            &font, Some(font_bitmap), nominal,
+                        ) as i32).max(1)
                     };
 
                     // Get char_spacing from styled spans (XMED data)
