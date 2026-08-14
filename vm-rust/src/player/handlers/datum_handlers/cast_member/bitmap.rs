@@ -56,7 +56,18 @@ impl BitmapMemberHandlers {
                         };
                         Ok(Datum::CastMember(member_ref))
                     }
-                    PaletteRef::Default => Ok(Datum::PaletteRef(PaletteRef::Default)),
+                    // "Built-in Director palettes are indicated by symbols"
+                    // (11.5 Scripting Dictionary, `paletteRef`). `Default` is
+                    // our marker for palette_id = 0, i.e. the movie's default
+                    // system palette — still a BUILT-IN, so it must report as a
+                    // symbol like any other. Returning a bare PaletteRef datum
+                    // broke the standard probe
+                    //   if ilk(member.paletteRef) <> #symbol then …member.paletteRef.name
+                    // (Habbo v31's dynamic downloader): the test passed for a
+                    // built-in and the script then asked a non-member for `.name`.
+                    PaletteRef::Default => Ok(Datum::Symbol(Symbol::builtin(
+                        crate::player::bitmap::bitmap::get_system_default_palette().symbol(),
+                    ))),
                 }
             },
             Some(BuiltInSymbol::Rect) => {
@@ -185,7 +196,16 @@ impl BitmapMemberHandlers {
                 )?;
                 match value {
                     Datum::Symbol(name) => {
-                        let palette_ref = BuiltInPalette::from_symbol(name).unwrap();
+                        // A symbol that isn't one of Director's built-in palette
+                        // names is a script error, not a panic — `.unwrap()` here
+                        // took down the whole VM on a typo or an unsupported
+                        // palette name.
+                        let palette_ref = BuiltInPalette::from_symbol(name).ok_or_else(|| {
+                            ScriptError::new(format!(
+                                "Unknown built-in palette symbol #{} for paletteRef",
+                                name
+                            ))
+                        })?;
                         reserve_player_mut(|player| {
                             let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
                             bitmap.palette_ref = PaletteRef::BuiltIn(palette_ref);
