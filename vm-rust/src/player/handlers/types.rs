@@ -497,6 +497,44 @@ impl TypeHandlers {
                 // player scroll into an unparsed/black room). Trimming to the
                 // first balanced list matches Director and recovers the room.
                 let cleaned = truncate_to_first_balanced_list(&cleaned);
+                // `value("")` is 0, not VOID.
+                //
+                // The 11.5 Scripting Dictionary entry for value() says an
+                // unparseable expression yields "the value of the initial
+                // portion of the expression up to the first syntax error" —
+                // for an empty string that initial portion is nothing, which
+                // evaluates to 0. (The doc spells out `value("penny")` → VOID
+                // for an unresolvable IDENTIFIER, but is silent on the empty
+                // case, so the 0 here is inferred, not quoted.)
+                //
+                // Habbo v31's furnidata pins it down: every WALL item ("i")
+                // stores its direction / xdim / ydim as empty fields —
+                //   ["i","1391","window_skyscraper","7339","","","","",...]
+                // — and the Persistent Furni Data Container does
+                // `tdata[#defaultDir] = value(tItem[5])`. The catalogue's
+                // renderLargePreviewImage then only tests `voidp(direction)`
+                // before overwriting it with a hardcoded "2,2,2", so a VOID
+                // here aborted the preview for EVERY wall item (windows,
+                // posters, wallpaper) with "Direction property missing".
+                // Returning 0 also keeps `xdim & "," & ydim` a parseable
+                // "0,0" for the dimensions list that follows.
+                //
+                // Gate on the ORIGINAL string being empty, NOT the normalised
+                // one. Normalisation deliberately strips unbalanced brackets,
+                // so `value("]")` also cleans to "" — and Coke Studios'
+                // ElementManager depends on THAT staying Void: it splits the
+                // window XML on "]" and feeds each fragment to value() until
+                // one parses, using `if not voidp(aElement)` to decide whether
+                // to keep it. The split leaves an empty tail, so the last
+                // fragment is exactly "]"; returning 0 for it appended a bare 0
+                // to the element list and `myelement.id` then failed with
+                // "Cannot get int property id". `is_expected_value_retry_fragment`
+                // below lists "]" as an expected fragment for the same reason.
+                if s.trim().is_empty() {
+                    return reserve_player_mut(|player| {
+                        Ok(player.alloc_datum(Datum::Int(0)))
+                    });
+                }
                 // TEMP diagnostic: log EVERY value() call that looks like a
                 // Lingo prop-list/list so we can confirm whether the Coke
                 // Studios ElementManager retry (concatenating the two halves
