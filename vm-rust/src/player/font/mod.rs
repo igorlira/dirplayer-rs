@@ -1105,6 +1105,47 @@ pub fn pfr_strike_vertical_metrics(
     (cap_top, desc_bot)
 }
 
+/// Per-line height (px) for a member whose `fixedLineSpace` is 0.
+///
+/// Paige calls this auto leading: `par_info.leading_fixed` is documented
+/// "Fixed leading (0 = auto)" (PAIGE.H:1862), and auto means derive the line
+/// from the FONT's ascent + descent — never from whatever box the glyphs are
+/// stored in. Our PFR atlases violate that: the cell is padded well past the
+/// strike, so Volter-9 sits in a 26 px cell. Falling back to `char_height - 1`
+/// therefore stepped 25 px between 9 px lines, which is what blew Habbo v31's
+/// catalogue page text apart (`ctlg_header_text`: fls=0, char_h=26).
+///
+/// Scan the strike's real vertical ink extent (cap top → descender bottom)
+/// instead — for a pixel font that IS ascent + descent. Falls back to the
+/// historical `min(cell, nominal × 1.5)` cap when the strike has no scannable
+/// ink (non-PFR atlases, or a font whose sample glyphs are all blank).
+///
+/// Shared by `.rect`, `.height` and both halves of `.image` (measure + render)
+/// so all four agree: Habbo's window Text-Wrapper bakes with
+/// `pimage.copyPixels(member.image, dst, src = member.rect)`, and any
+/// disagreement there shows up as a vertical stretch, not a clip.
+pub fn pfr_auto_line_height(
+    font: &BitmapFont,
+    font_bitmap: Option<&Bitmap>,
+    nominal: u16,
+) -> u16 {
+    let cell_h = if font.char_widths.is_some() {
+        font.char_height.saturating_sub(1)
+    } else {
+        font.char_height
+    };
+    if let Some(fb) = font_bitmap {
+        if let (Some(cap_top), Some(desc_bottom)) = pfr_strike_vertical_metrics(font, fb) {
+            if desc_bottom >= cap_top {
+                let extent = (desc_bottom - cap_top + 1) as u16;
+                return extent.clamp(1, cell_h.max(1));
+            }
+        }
+    }
+    let nominal_capped = (nominal as f32 * 1.5).round() as u16;
+    cell_h.min(nominal_capped).max(1)
+}
+
 /// Extra rows a PFR text `.image`/`.rect` must reserve BELOW its
 /// `fixedLineSpace`-based content height so the last line's descender — and the
 /// underline drawn on it (`underline_y = y_pos + pfr_desc_bottom`) — are not
