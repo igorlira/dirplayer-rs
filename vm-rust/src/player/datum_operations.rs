@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{datum_formatting::{format_datum, datum_to_string_for_concat}, datum_ref::DatumRef},
+    player::{datum_formatting::{datum_to_string_for_concat, format_datum}, datum_ref::DatumRef, handlers::types::TypeHandlers},
 };
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError};
@@ -379,19 +379,19 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<D
             Ok(Datum::DateRef(shift_date_by_days(*date_id, *days as i64, player)?))
         }
         (Datum::String(left), Datum::Int(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Ok(Datum::Float(left_float + (*right as f64)))
         }
         (Datum::String(left), Datum::Float(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Ok(Datum::Float(left_float + right))
         }
         (Datum::Float(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Ok(Datum::Float(left + right_float))
         }
         (Datum::Int(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Ok(Datum::Float((*left as f64) + right_float))
         }
         // String + anything: concatenate as strings
@@ -627,19 +627,19 @@ pub fn subtract_datums(
             left.parse::<f64>().unwrap_or(0.0) - right.parse::<f64>().unwrap_or(0.0),
         )),
         (Datum::String(left), Datum::Int(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Ok(Datum::Float(left_float - (*right as f64)))
         }
         (Datum::String(left), Datum::Float(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Ok(Datum::Float(left_float - right))
         }
         (Datum::Float(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Ok(Datum::Float(left - right_float))
         }
         (Datum::Int(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Ok(Datum::Float((*left as f64) - right_float))
         }
         (Datum::DateRef(a_id), Datum::DateRef(b_id)) => {
@@ -833,7 +833,7 @@ pub fn multiply_datums(
         (Datum::String(left), Datum::Int(right)) => {
             if *right == 0 {
                 Datum::Int(0)
-            } else if let Ok(left_float) = left.parse::<f64>() {
+            } else if let Some(left_float) = TypeHandlers::float_impl(left) {
                 Datum::Float(left_float * (*right as f64))
             } else {
                 // Director returns random, arbitrarily large int for string * int if string isn't a number
@@ -842,15 +842,15 @@ pub fn multiply_datums(
             }
         }
         (Datum::String(left), Datum::Float(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Datum::Float(left_float * right)
         }
         (Datum::Float(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Datum::Float(left * right_float)
         }
         (Datum::Int(left), Datum::String(right)) => {
-            let right_float = right.parse::<f64>().unwrap_or(0.0);
+            let right_float = TypeHandlers::float_impl(right).unwrap_or(0.0);
             Datum::Float((*left as f64) * right_float)
         }
         (Datum::Point(a, af), Datum::List(_, list, _)) if list.len() == 2 => {
@@ -1060,23 +1060,23 @@ pub fn divide_datums(
             Datum::Rect(vals, flags)
         }
         (Datum::Int(left), Datum::String(right)) => {
-            let right_val = right
-                .parse::<f64>()
-                .map_err(|_| ScriptError::new(format!("Cannot divide int by string: {}", right)))?;
+            let right_val = TypeHandlers::float_impl(right).ok_or_else(|| {
+                ScriptError::new(format!("Cannot divide int by string: {}", right))
+            })?;
             Datum::Float((*left as f64) / right_val)
         }
         (Datum::Float(left), Datum::String(right)) => {
-            let right_val = right.parse::<f64>().map_err(|_| {
+            let right_val = TypeHandlers::float_impl(right).ok_or_else(|| {
                 ScriptError::new(format!("Cannot divide float by string: {}", right))
             })?;
             Datum::Float(left / right_val)
         }
         (Datum::String(left), Datum::Int(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Datum::Float(left_float / (*right as f64))
         }
         (Datum::String(left), Datum::Float(right)) => {
-            let left_float = left.parse::<f64>().unwrap_or(0.0);
+            let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Datum::Float(left_float / right)
         }
         // List / scalar: element-wise division

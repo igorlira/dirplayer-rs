@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, handlers::types::TypeHandlers, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
 };
 
 #[allow(dead_code)]
@@ -498,8 +498,8 @@ impl Datum {
         match self {
             Datum::Int(n) => Ok(*n),
             Datum::Float(n) => Ok(*n as i32),
-            Datum::String(s) => Ok(s.parse().unwrap_or(0)),
-            Datum::StringChunk(_, _, s) => Ok(s.parse().unwrap_or(0)),
+            Datum::String(s) => Ok(TypeHandlers::integer_impl(s).unwrap_or(0)),
+            Datum::StringChunk(_, _, s) => Ok(TypeHandlers::integer_impl(s).unwrap_or(0)),
             Datum::SpriteRef(n) => Ok(*n as i32),
             Datum::CastMember(member_ref) => Ok(member_ref.cast_member as i32),
             Datum::Symbol(_) => Ok(0),
@@ -516,8 +516,8 @@ impl Datum {
         match self {
             Datum::Float(n) => Ok(*n),
             Datum::Int(n) => Ok(*n as f64),
-            Datum::String(s) => Ok(s.parse::<f64>().unwrap_or(0.0)),
-            Datum::StringChunk(_, _, s) => Ok(s.parse::<f64>().unwrap_or(0.0)),
+            Datum::String(s) => Ok(TypeHandlers::float_impl(s).unwrap_or(0.0)),
+            Datum::StringChunk(_, _, s) => Ok(TypeHandlers::float_impl(s).unwrap_or(0.0)),
             Datum::SpriteRef(n) => Ok(*n as f64),
             Datum::Void => Ok(0.0),
             _ => Err(ScriptError::new(format!(
@@ -611,7 +611,7 @@ impl Datum {
         match self {
             Datum::Int(n) => Ok(*n as f64),
             Datum::Float(n) => Ok(*n),
-            Datum::String(s) => Ok(s.parse().unwrap_or(0.0)),
+            Datum::String(s) => Ok(TypeHandlers::float_impl(s).unwrap_or(0.0)),
             _ => Err(ScriptError::new(
                 "Cannot convert datum to float".to_string(),
             )),

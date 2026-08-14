@@ -552,7 +552,7 @@ impl TypeHandlers {
         })
     }
 
-    fn integer_impl(input: &str) -> Option<i32> {
+    pub(crate) fn integer_impl(input: &str) -> Option<i32> {
         if input.is_empty() {
             return None;
         }
@@ -617,6 +617,64 @@ impl TypeHandlers {
         // Even larger than i64: saturate based on sign.
         let is_negative = result.starts_with('-');
         Some(if is_negative { i32::MIN } else { i32::MAX })
+    }
+
+    pub(crate) fn float_impl(input: &str) -> Option<f64> {
+        if input.is_empty() {
+            return None;
+        }
+
+        let trimmed_input = input.trim();
+
+        if trimmed_input.is_empty() {
+            return Some(0.0);
+        }
+
+        if trimmed_input == "-" {
+            return Some(0.0);
+        }
+
+        let mut result = String::new();
+        let mut found_valid_digit = false;
+        let mut found_decimal = false;
+
+        for char in trimmed_input.chars() {
+            match char {
+                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
+                    result.push(char);
+                    found_valid_digit = true;
+                }
+                '.' => {
+                    if found_decimal {
+                        return None;
+                    }
+                    result.push(char);
+                    found_decimal = true;
+                }
+                '-' => {
+                    if result.is_empty() {
+                        result.push(char);
+                    } else {
+                        return None;
+                    }
+                }
+                // Unlike integer(), Director's float() is all-or-nothing: any
+                // character that isn't part of the number makes the conversion
+                // fail and float() hands back its argument untouched — in
+                // Director `put float("5;2;13;1;0;0;")` prints the string back.
+                // Junkbot's config manager relies on that, feeding part strings
+                // through float() and only treating the result as numeric when
+                // the conversion succeeded. Skipping the separators the way
+                // integer_impl does would turn that line into 52131000.
+                _ => return None,
+            };
+        }
+
+        if !found_valid_digit {
+            return None;
+        }
+
+        result.parse::<f64>().ok()
     }
 
     pub fn integer(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -689,15 +747,14 @@ impl TypeHandlers {
                 Datum::Int(i) => Datum::Float(*i as f64),
                 Datum::SpriteRef(sprite_num) => Datum::Float(*sprite_num as f64),
                 Datum::String(s) => {
-                    // Director's float() trims whitespace before parsing
-                    if let Ok(float_value) = s.trim().parse::<f64>() {
+                    if let Some(float_value) = Self::float_impl(s) {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
                     }
                 }
                 Datum::StringChunk(_, _, s) => {
-                    if let Ok(float_value) = s.trim().parse::<f64>() {
+                    if let Some(float_value) = Self::float_impl(s) {
                         Datum::Float(float_value)
                     } else {
                         value.to_owned()
