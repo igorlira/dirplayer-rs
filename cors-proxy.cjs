@@ -35,6 +35,18 @@ const STRIP_RES_HEADERS = new Set([
   "content-length", "content-security-policy", "content-security-policy-report-only",
   "x-frame-options", "cross-origin-opener-policy", "cross-origin-embedder-policy",
   "cross-origin-resource-policy", "set-cookie", // set-cookie can't cross origin usefully anyway
+  // UPSTREAM CORS headers must not survive. `outHeaders` starts from our own
+  // corsHeaders() and then copies upstream headers over the top, so an origin
+  // that sends its own `access-control-allow-origin` would REPLACE ours and the
+  // browser would reject the response. Archive front-ends do exactly this:
+  // ooooooooo.ooo answers with `access-control-allow-origin: https://ooooooooo.ooo`,
+  // which is not the dev server's origin, so the fetch failed with
+  // "…has a value 'https://ooooooooo.ooo' that is not equal to the supplied origin".
+  // Whatever the upstream permits is meaningless once we are the origin.
+  "access-control-allow-origin", "access-control-allow-methods",
+  "access-control-allow-headers", "access-control-allow-credentials",
+  "access-control-expose-headers", "access-control-max-age",
+  "vary", // usually "Origin"; caching our response per-origin serves stale ACAO
 ]);
 
 function corsHeaders(reqHeaders) {
