@@ -981,6 +981,17 @@ impl TypeHandlers {
                 };
                 let cast = player.movie.cast_manager.get_cast_mut(cast_num);
                 let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
+                // Slot 0 is not a member. Creating one there yields a `.number`
+                // with a zero member index, which collides with every other
+                // slot-0 member in the same cast lib and silently corrupts any
+                // name -> number map a movie keeps (see `first_free_member_id`).
+                // Fail loudly instead.
+                if member_slot == 0 {
+                    return Err(ScriptError::new(format!(
+                        "new({}): cast library {} has no free member slots",
+                        s, cast_num
+                    )));
+                }
                 let member_ref = cast.create_member_at(
                     member_slot,
                     &s,

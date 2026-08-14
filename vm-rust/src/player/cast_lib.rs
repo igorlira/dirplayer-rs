@@ -76,9 +76,30 @@ impl CastLib {
         *self.members.keys().max().unwrap_or(&0)
     }
 
+    /// Lowest unused member number in this cast lib — the slot Director's
+    /// `new(type, castLib(n))` allocates. Member numbers are 1-based.
+    ///
+    /// Returns 0 ONLY when the cast is genuinely full; callers must treat that
+    /// as an error rather than creating a member at slot 0 (see `TypeHandlers::new`).
+    ///
+    /// This used to scan a hardcoded `1..5000` window and return 0 the moment
+    /// every slot in it was taken. Habbo v31's dynamic-download bin cast holds
+    /// 4999 members, so it exhausted that window exactly: `new()` then created
+    /// each member AT slot 0, whose `.number` encodes to `(castLib-1) << 16`
+    /// (131072 for the bin at cast 3) with a zero member index. Habbo's
+    /// Resource Manager keys its name -> number map on `member.number`, so
+    /// every downloaded furni member registered the SAME 131072 and clobbered
+    /// slot 0 in turn; `member(getmemnum(name))` then resolved to whichever
+    /// member landed there last — a field — surfacing as "Cannot set castMember
+    /// prop paletteRef for field" and leaving the catalogue product strip stuck
+    /// on loading placeholders.
+    ///
+    /// The 5000 ceiling was arbitrary (its own comment asked where it came
+    /// from). Director's documented limit is 32,000 members per cast library;
+    /// the hard bound here is the 16 bits `get_cast_slot_number` has for the
+    /// member index, so scan the whole encodable range.
     pub fn first_free_member_id(&self) -> u32 {
-        let max_member = 5000; // TODO where from?
-        for i in 1..max_member {
+        for i in 1..=0xFFFFu32 {
             if !self.members.contains_key(&i) {
                 return i;
             }
