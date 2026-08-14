@@ -1,6 +1,8 @@
 import { useCallback, useState } from 'react';
 import styles from './styles.module.css';
-import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override } from 'vm-rust';
+import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override,
+  set_startup_do, set_startup_do_before, set_startup_go } from 'vm-rust';
+import { parseLaunchCommand, findLaunchCommandInHtml, findLegacyServerInHtml, toLegacyUrl } from '../../utils/launchCommand';
 import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { useMountEffect } from '../../utils/hooks';
 import { isDebugSession } from '../../utils/debug';
@@ -168,7 +170,8 @@ export default function LoadMovie() {
     setExternalParams(prev => prev.map((p, i) => i === index ? { ...p, [field]: val } : p));
   }, []);
 
-  const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string, useProxy?: boolean) => {
+  const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string, useProxy?: boolean,
+    launch?: ReturnType<typeof parseLaunchCommand> | null) => {
     try {
       setIsLoading(true);
       setHasError(false);
@@ -201,6 +204,18 @@ export default function LoadMovie() {
       setXtraMovieBase(moviePath);
       set_external_params(paramsArrayToRecord(params ?? externalParams));
       set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
+      // Projector launch-command payloads (`--do` / `--doBefore` / `--go`, plus
+      // the LeechProtectionRemovalHelp flags synthesised into `--do`). These
+      // MUST be installed before load_movie_file: the movie-init sequence
+      // consumes them. See docs/github_wiki/Projector-Launch-Commands.md.
+      if (launch) {
+        if (launch.startupDoBefore) set_startup_do_before(launch.startupDoBefore);
+        if (launch.startupDo) set_startup_do(launch.startupDo);
+        if (launch.startupGo) set_startup_go(launch.startupGo);
+        if (launch.ignored.length) {
+          console.warn('[LoadMovie] launch command: ignored projector-only flags:', launch.ignored.join(', '));
+        }
+      }
       document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
       // Wait for any in-flight boot-time external xtra loads (the
       // localStorage URL list) before touching anything xtra-related.
@@ -250,6 +265,43 @@ export default function LoadMovie() {
       const res = await fetch(proxyBase + encodeURIComponent(lu));
       if (!res.ok) throw new Error(`loader fetch ${res.status}`);
       const html = await res.text();
+
+      // An ARCHIVE ENTRY page (9o3o / Flashpoint) publishes the whole projector
+      // command line in `data-launch-command` instead of embedding the movie.
+      // Prefer it: those entries are usually launched from a leech-protection
+      // wrapper that is inert without the command's `--do` payload, so scraping
+      // an <embed> would either find nothing or find the wrapper with no way to
+      // tell it where the real game lives.
+      const launchCmd = findLaunchCommandInHtml(html);
+      if (launchCmd) {
+        const launch = parseLaunchCommand(launchCmd);
+        if (launch.movieUrl) {
+          const lcParams: ExternalParam[] = Object.entries(launch.externalParams)
+            .map(([key, value]) => ({ key, value }));
+          // The command names the movie by its ORIGINAL url, which is usually
+          // dead (miniclip.com answers a 301 to an HTML page — that arrives as
+          // "Invalid codec"). The archive serves the real bytes from its legacy
+          // server under a scheme-stripped mirror of that path, so rewrite onto
+          // it when the entry page advertises one. Relative fetches the movie
+          // makes later (gameloader.dcr, the .w3d levels) then resolve against
+          // the legacy path too, since they are relative to the movie's base.
+          const legacyServer = findLegacyServerInHtml(html);
+          const loadUrl = toLegacyUrl(launch.movieUrl, legacyServer);
+          console.log('[LoadMovie] launch command:', launchCmd);
+          if (loadUrl !== launch.movieUrl) {
+            console.log('[LoadMovie] legacy server:', legacyServer, '->', loadUrl);
+          }
+          setMovieUrl(loadUrl);
+          setExternalParams(lcParams);
+          if (lcParams.length > 0) setParamsExpanded(true);
+          setUseCorsProxy(true);
+          setRecentMovies(saveRecentMovie(loadUrl, lcParams, undefined, true));
+          await loadMovieFile(loadUrl, lcParams, undefined, true, launch);
+          return;
+        }
+        console.warn('[LoadMovie] data-launch-command names no movie; falling back to embed scrape.');
+      }
+
       const parsed = parseShockwaveLoader(html, lu);
       if (!parsed) {
         console.error('[LoadMovie] No Director <embed>/<object> found in the loader page.');
@@ -374,13 +426,13 @@ export default function LoadMovie() {
             <div className={styles.paramsList}>
               <div className={styles.fieldContainer}>
                 <label className={styles.label} htmlFor="loaderUrl">
-                  Shockwave Loader URL (optional)
+                  Loader / archive entry URL (optional)
                 </label>
                 <input
                   id="loaderUrl"
                   type="text"
                   className={styles.input}
-                  placeholder="https://www.neopets.com/games/dgs/play_shockwave.phtml?game_id=..."
+                  placeholder="Loader page, or an archive entry (ooooooooo.ooo/?id=…)"
                   value={loaderUrl}
                   onChange={e => setLoaderUrl(e.currentTarget.value)}
                   disabled={isLoading}
@@ -421,6 +473,14 @@ export default function LoadMovie() {
                   saved with each recent entry. Enable it only for games whose
                   cross-origin fetches need proxying. Fetch &amp; Load turns it on
                   automatically. Start the proxy first: <code>node cors-proxy.cjs</code>.
+                </div>
+                <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
+                  Fetch &amp; Load also reads a <code>data-launch-command</code> from an
+                  archive entry page (9o3o / Flashpoint) and applies the projector
+                  arguments — the movie URL, <code>--setExternalParam</code> pairs, the
+                  LeechProtectionRemovalHelp flags and the <code>--do</code> payload.
+                  Many archived games are launched from a wrapper movie that does
+                  nothing without them.
                 </div>
               </div>
               <div className={styles.fieldContainer}>

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RootState } from '../../store';
 import { useSelector } from 'react-redux'
-import { load_movie_file, play, set_base_path, set_external_params } from 'vm-rust';
+import {
+  load_movie_file, play, set_base_path, set_external_params,
+  set_startup_do, set_startup_do_before, set_startup_go,
+} from 'vm-rust';
+import { parseLaunchCommand, findLaunchCommand } from '../../utils/launchCommand';
 import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { getFullPathFromOrigin, getBasePath } from '../../utils/path';
 import { initAudioBackend } from '../../audio/audioInit';
@@ -14,11 +18,20 @@ type EmbedPlayerProps = {
   height: string
   src: string
   externalParams?: Record<string, string>
+  /**
+   * A Shockwave Projector (SPR.exe) launch command, as archive front-ends
+   * publish in `data-launch-command`. When present its `--do` / `--doBefore` /
+   * `--go` payloads and LeechProtectionRemovalHelp flags are applied before the
+   * movie loads, and it supplies the movie URL if `src` is empty — many
+   * archived entries only make sense started from their wrapper movie.
+   * See docs/github_wiki/Projector-Launch-Commands.md.
+   */
+  launchCommand?: string
   requireClickToPlay?: boolean
   enableGestures?: boolean
 };
 
-export default function EmbedPlayer({width, height, src, externalParams, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
+export default function EmbedPlayer({width, height, src, externalParams, launchCommand, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
@@ -30,12 +43,37 @@ export default function EmbedPlayer({width, height, src, externalParams, require
 
   useEffect(() => {
     async function loadMovie() {
-      const fullPath = getFullPathFromOrigin(src);
+      // A projector launch command, if the host page published one. It can
+      // name the movie (archived entries are usually launched from a wrapper),
+      // carry external params, and carry Lingo payloads that MUST be installed
+      // before the load — the movie-init sequence consumes them.
+      //
+      // Falls back to scanning the page for `data-launch-command`, which is how
+      // archive front-ends publish it. Doing the lookup HERE rather than
+      // threading a prop down means both entry points get it: the polyfill
+      // (core.tsx -> _renderPlayer) and the extension, which mount this
+      // component through different call chains. The attribute is page-level,
+      // and on such a front-end the embed IS the entry it describes.
+      const command = launchCommand ?? findLaunchCommand(document) ?? null;
+      const launch = command ? parseLaunchCommand(command) : null;
+
+      const fullPath = getFullPathFromOrigin(src || launch?.movieUrl || '');
       const moviePath = getBasePath(fullPath);
       set_base_path(moviePath);
       // Bare xtra filenames resolve against this movie's directory.
       setXtraMovieBase(moviePath);
-      set_external_params(externalParams || {});
+      // Embed-level params win over the launch command's: the host page's
+      // `<param>` / `data-sw-…` values are the more specific statement of
+      // intent, and a curator's command is the general one.
+      set_external_params({ ...(launch?.externalParams || {}), ...(externalParams || {}) });
+      if (launch) {
+        if (launch.startupDoBefore) set_startup_do_before(launch.startupDoBefore);
+        if (launch.startupDo) set_startup_do(launch.startupDo);
+        if (launch.startupGo) set_startup_go(launch.startupGo);
+        if (launch.ignored.length) {
+          console.warn('[DirPlayer] launch command: ignored projector-only flags:', launch.ignored.join(', '));
+        }
+      }
       // Boot-time eager xtras must be loaded first.
       await getExternalXtrasReady();
       // Always load with autoplay=false so the XTRl chunk is parsed
