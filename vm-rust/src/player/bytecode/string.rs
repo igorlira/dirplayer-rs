@@ -495,7 +495,21 @@ impl StringBytecodeHandler {
             //
             // Build the new string and assign it, exactly as `put_chunk` in this
             // file already does.
-            let current = player.get_datum(&string_ref).string_value()?;
+            //
+            // Chunk expressions operate on the value's STRING FORM, so a
+            // non-string variable is coerced the same way `&` concatenation
+            // coerces it (list literal form). Miniclip's gameloader relies on
+            // this: `makeMcExtraJson` does `tx = value(mcExtra)` (a PROP LIST,
+            // returned unchanged per the value() contract) and then
+            // `delete char 1 of tx` to strip the "[" from its literal form —
+            // erroring here aborted the whole wrapper handoff handler.
+            let current_datum = player.get_datum(&string_ref);
+            let current = match current_datum.string_value() {
+                Ok(s) => s,
+                Err(_) => crate::player::datum_formatting::datum_to_string_for_concat(
+                    current_datum, player,
+                ),
+            };
             let new_string = StringChunkUtils::string_by_deleting_chunk(&current, &chunk_expr)?;
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
             player_set_context_var(
