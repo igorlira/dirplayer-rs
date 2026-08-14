@@ -720,7 +720,7 @@ impl BuiltInHandlerManager {
             let handler_name = player.get_datum(&args[0]);
             let receiver_clone = player.get_datum(receiver_ref).clone();
             let args = args[2..].to_vec();
-            if !handler_name.is_symbol() {
+            if !handler_name.is_symbol() && !handler_name.is_string() {
                 return Err(ScriptError::new(format!(
                     "Handler name must be a symbol (got {}: {:?})",
                     handler_name.type_str(),
