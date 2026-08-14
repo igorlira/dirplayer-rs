@@ -352,18 +352,27 @@ impl StringChunkUtils {
                 chunk_list[start..end].join(&delimiter)
             }
             StringChunkType::Word => {
-                let chunk_list = Self::resolve_chunk_list(
-                    string,
-                    chunk_expr.chunk_type.clone(),
-                    chunk_expr.item_delimiter,
-                )?;
-                let (start, end) =
-                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), chunk_list.len());
-
-                if chunk_list.len() == 0 {
+                // Director returns the SOURCE slice spanning the selected
+                // words, so whatever separated them survives verbatim —
+                // RETURNs, tabs, runs of spaces. Tokenizing and rejoining with
+                // a single space (the old approach) collapsed every delimiter,
+                // so `msg.word[2..msg.word.count]` came back as one line with
+                // the newlines turned into spaces. Same reasoning as the
+                // in-place word deletion above.
+                let ranges = super::string::word_char_ranges(string);
+                if ranges.is_empty() {
                     return Ok("".to_string());
                 }
-                chunk_list[start..end].join(" ")
+                let (start, end) =
+                    Self::vm_range_to_host((chunk_expr.start, chunk_expr.end), ranges.len());
+                if start >= end {
+                    return Ok("".to_string());
+                }
+                // vm_range_to_host clamps both ends to ranges.len(), so
+                // `end - 1` is always a valid index here.
+                let (byte_start, byte_end) =
+                    char_range_to_byte_range(string, ranges[start].0, ranges[end - 1].1);
+                string[byte_start..byte_end].to_string()
             }
             StringChunkType::Char => {
                 let (start, end) =
@@ -1294,6 +1303,34 @@ mod tests {
             item_delimiter: ',',
         };
         StringChunkUtils::string_by_deleting_chunk(s, &expr).unwrap()
+    }
+
+    fn get_words(s: &str, start: i32, end: i32) -> String {
+        let expr = StringChunkExpr {
+            chunk_type: StringChunkType::Word,
+            start,
+            end,
+            item_delimiter: ',',
+        };
+        StringChunkUtils::resolve_chunk_expr_string(s, &expr).unwrap()
+    }
+
+    #[test]
+    fn word_range_preserves_original_delimiters() {
+        // `tMessage.word[2..tMessage.word.count]` — the returns between words
+        // must survive; joining tokens with " " turned the message body into
+        // a single line.
+        assert_eq!(get_words("cmd body\rline two\rline three", 2, -1), "body\rline two\rline three");
+        assert_eq!(get_words("a\r\nb\tc", 1, 3), "a\r\nb\tc");
+        // Leading/trailing whitespace outside the range is NOT included.
+        assert_eq!(get_words("  a   b  ", 1, 2), "a   b");
+        assert_eq!(get_words("  a   b  ", 2, 0), "b");
+        // Multi-byte content slices on codepoint boundaries.
+        assert_eq!(get_words("héllo\rwörld", 1, 2), "héllo\rwörld");
+        assert_eq!(get_words("héllo\rwörld", 2, 0), "wörld");
+        // Out-of-range / empty input stay benign.
+        assert_eq!(get_words("a b", 5, 9), "");
+        assert_eq!(get_words("   ", 1, 0), "");
     }
 
     #[test]
