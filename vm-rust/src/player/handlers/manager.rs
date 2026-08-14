@@ -783,7 +783,9 @@ impl BuiltInHandlerManager {
             })?;
             if let Some(handler) = handler {
                 let scope = player_call_script_handler(Some(instance_ref), handler, &args).await?;
-                result = scope.return_value;
+                if scope.return_value != DatumRef::Void {
+                    result = scope.return_value;
+                }
             }
         }
 
