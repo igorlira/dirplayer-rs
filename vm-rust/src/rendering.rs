@@ -4157,7 +4157,27 @@ async fn run_draw_loop() {
             }
         };
         let mut player = player;
-        let draw_fps = 24;
+        // Pace the stage redraw to the MOVIE'S OWN TEMPO rather than a fixed
+        // rate. This used to be a hardcoded 24, so a movie authored above that
+        // — HavocCarDemo runs at 60 — advanced its playhead at full speed while
+        // the canvas only ever showed 24 of those frames per second. The
+        // simulation was right and the picture was stale.
+        //
+        // `current_frame_tempo` is the cached effective tempo (authored
+        // frame_rate, or `puppetTempo` when set), refreshed every frame by
+        // `refresh_frame_tempo` — the same value the frame loop paces from, so
+        // drawing and advancing stay in step, including when a script changes
+        // the tempo mid-movie.
+        //
+        // requestAnimationFrame is the real ceiling: the browser will not call
+        // us faster than the display refresh, so a movie asking for 100fps
+        // simply draws on every rAF (~60 on a 60Hz panel) rather than 100. The
+        // clamp only guards against a nonsense tempo; `MIN` keeps the previous
+        // 24fps as a FLOOR so nothing redraws slower than it did before, which
+        // matters for movies that change the stage without advancing a frame.
+        const MIN_DRAW_FPS: u32 = 24;
+        const MAX_DRAW_FPS: u32 = 240;
+        let draw_fps = player.current_frame_tempo.clamp(MIN_DRAW_FPS, MAX_DRAW_FPS);
 
         let frame_interval = 1000 / draw_fps as i64;
         if chrono::Utc::now().timestamp_millis() - last_frame_ms >= frame_interval {
