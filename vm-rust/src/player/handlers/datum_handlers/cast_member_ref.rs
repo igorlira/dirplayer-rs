@@ -227,6 +227,7 @@ impl CastMemberRefHandlers {
         match handler_name.into_builtin() {
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
             Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
+            Some(BuiltInSymbol::Move) => Self::move_member(datum, args),
             Some(BuiltInSymbol::GetPixel) | Some(BuiltInSymbol::SetPixel) => {
                 // Director lets image methods be called directly on a bitmap MEMBER
                 // (`member.getPixel(x,y)`), proxying to the member's image object.
@@ -568,6 +569,108 @@ impl CastMemberRefHandlers {
                 .movie
                 .cast_manager
                 .remove_member_with_ref(&cast_member_ref);
+            Ok(DatumRef::Void)
+        })
+    }
+
+    /// `member.move({intPosn, castLibName})` — Director 11.5 Scripting
+    /// Dictionary, Member method:
+    ///
+    /// > moves a specified cast member to either the first empty location in
+    /// > its containing cast, or to a specified location in a given cast.
+    ///
+    /// Both parameters are optional and no return value is documented, so this
+    /// answers VOID. The dictionary's own example passes a MEMBER REFERENCE
+    /// rather than the documented `intPosn, castLibName` pair —
+    /// `member("shrine").move(member(20, "Bitmaps"))` — and that is the form
+    /// real movies use (Agent Free Ride's Miniclip wrapper does
+    /// `move(hsController, member(1, 2))`), so all four shapes are accepted:
+    ///
+    ///   move()                      first free slot in the member's own cast
+    ///   move(member(N, lib))        that exact slot
+    ///   move(intPosn)               that slot in the member's own cast
+    ///   move(intPosn, castLibName)  that slot in the named cast
+    ///
+    /// Note the dictionary's caveat that this is an AUTHORING operation ("the
+    /// move is typically saved with the file") — at runtime a member's slot
+    /// rarely matters, and Director itself points scripts at `sprite.member`
+    /// for display changes. It still has to work, because a wrapper script that
+    /// calls it dies at that line otherwise.
+    fn move_member(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let src_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new("Cannot move non-cast-member".to_string())),
+            };
+
+            let dest_arg = args.get(0).map(|x| player.get_datum(x).clone());
+            let lib_arg = args.get(1).map(|x| player.get_datum(x).clone());
+
+            let dest_ref = match &dest_arg {
+                // move(member(N, lib)) — an explicit destination member ref.
+                Some(Datum::CastMember(r)) => r.clone(),
+                // move(intPosn {, castLibName}).
+                Some(d) => {
+                    let posn = d.int_value().map_err(|_| {
+                        ScriptError::new(
+                            "move: expected a member ref or a position number".to_string(),
+                        )
+                    })?;
+                    let cast_lib = match &lib_arg {
+                        Some(lib) => {
+                            let name = lib.string_value()?;
+                            match player.movie.cast_manager.get_cast_by_name(&name) {
+                                Some(c) => c.number as i32,
+                                // Director does not raise for an unknown cast
+                                // name here; there is simply nowhere to move to.
+                                None => return Ok(DatumRef::Void),
+                            }
+                        }
+                        None => src_ref.cast_lib,
+                    };
+                    CastMemberRef { cast_lib, cast_member: posn }
+                }
+                // move() — first empty location in the member's own cast.
+                None => {
+                    let cast = player.movie.cast_manager.get_cast_mut(src_ref.cast_lib as u32);
+                    let free = cast.first_free_member_id();
+                    if free == 0 {
+                        // Cast is full; nothing to do.
+                        return Ok(DatumRef::Void);
+                    }
+                    CastMemberRef { cast_lib: src_ref.cast_lib, cast_member: free as i32 }
+                }
+            };
+
+            // Moving onto itself is a no-op, not a delete-then-reinsert.
+            if dest_ref == src_ref {
+                return Ok(DatumRef::Void);
+            }
+
+            let member = match player.movie.cast_manager.find_member_by_ref(&src_ref) {
+                Some(m) => m.clone(),
+                // Director silently ignores a move of a member that isn't there.
+                None => return Ok(DatumRef::Void),
+            };
+
+            // Remove first, then insert: the two refs can name the same cast,
+            // and removing afterwards would delete what we just wrote when the
+            // destination happens to be the source slot in another guise.
+            let _ = player.movie.cast_manager.remove_member_with_ref(&src_ref);
+
+            let mut moved = member;
+            moved.number = dest_ref.cast_member as u32;
+            let dest_cast = player
+                .movie
+                .cast_manager
+                .get_cast_mut(dest_ref.cast_lib as u32);
+            dest_cast.insert_member(dest_ref.cast_member as u32, moved);
+            player.movie.cast_manager.invalidate_member_name_cache();
+            player
+                .movie
+                .cast_manager
+                .queue_texture_invalidation(dest_ref.clone());
+
             Ok(DatumRef::Void)
         })
     }
@@ -1070,6 +1173,21 @@ impl CastMemberRefHandlers {
                     // gate audio-driven branches — those branches stay off.
                     Some(BuiltInSymbol::Status) => Ok(Datum::Symbol(Symbol::from_str("stopped"))),
                     Some(BuiltInSymbol::NumBuffersToPreload | BuiltInSymbol::PlaybackQuality | BuiltInSymbol::AudioContextLatency) => Ok(Datum::Int(0)),
+                    // `cdpCheckMode` is Get/Set with a documented default of
+                    // `useSwPolicy` (see the setter). Answer the stored value,
+                    // or that default when the movie never set one.
+                    _ if prop.eq_ignore_ascii_case("cdpCheckMode") => {
+                        let mode = reserve_player_ref(|player| {
+                            Ok::<_, ScriptError>(
+                                player
+                                    .cdp_check_modes
+                                    .get(cast_member_ref)
+                                    .cloned()
+                                    .unwrap_or_else(|| "useSwPolicy".to_string()),
+                            )
+                        })?;
+                        Ok(Datum::Symbol(Symbol::from_str(&mode)))
+                    }
                     _ => Err(ScriptError::new(format!(
                         "Cannot get castMember prop {} for member of type {:?}",
                         prop, member_type
@@ -1420,6 +1538,28 @@ impl CastMemberRefHandlers {
                             // Director does for read-only-ish members.
                             _ => Ok(()),
                         }
+                    })
+                } else if prop.eq_ignore_ascii_case("cdpCheckMode") {
+                    // `member(whichFlashMember).cdpCheckMode` — Director 11.5
+                    // reference: Access Get/Set, default `useSwPolicy`. Set to
+                    // `#useMediaPolicy` to use the Flash player's cross-domain
+                    // checks, or `#useSWPolicy` to use Shockwave's.
+                    //
+                    // dirplayer runs in a browser, where the cross-origin
+                    // decision is made by CORS on the actual fetch — neither
+                    // policy path exists for us, so this is stored rather than
+                    // enforced. Storing (not discarding) keeps the documented
+                    // Get/Set round-trip honest for a script that reads it back.
+                    //
+                    // It must not RAISE: Miniclip's gameloader sets it right
+                    // before `preloadNetThing(gameUrl)` ("Miniclip Game Loader"
+                    // behavior, plus three sites in `MiniclipServices script`),
+                    // so an error here aborts the loader and the game never
+                    // starts.
+                    reserve_player_mut(|player| {
+                        let mode = value.string_value().unwrap_or_default();
+                        player.cdp_check_modes.insert(member_ref.clone(), mode);
+                        Ok(())
                     })
                 } else {
                     Err(ScriptError::new(format!(

@@ -525,6 +525,30 @@ pub struct DirPlayer {
     /// Pending gotoNetMovie operation: (task_id, frame_destination).
     /// Overwritten by subsequent gotoNetMovie/go-to-movie calls (cancels previous).
     pub pending_goto_net_movie: Option<(u32, MovieFrameTarget)>,
+    /// True while `go(frame, movie)` is blocked waiting for the target movie's
+    /// fetch. `maybe_hold_dcr_for_preloader` (the Neopets nested-.dcr hold)
+    /// checks it and stands down: Director's `go()` loads the movie NOW — the
+    /// artificial 3s "still streaming" window is for preloadNetThing-style
+    /// game loads, not for a navigation the handler is synchronously waiting on.
+    pub goto_wait_active: bool,
+    /// Set by an EAGER `go(frame, movie)` mount (the movie was swapped while a
+    /// Lingo handler was still executing). The frame loop runs
+    /// `run_movie_init_sequence()` once the handler stack has unwound, and
+    /// `run_single_frame` treats it as "stop processing this frame" so no
+    /// event reaches the new movie's scripts before prepareMovie.
+    pub pending_movie_init: bool,
+    /// Cast libraries of movies replaced by an eager mid-handler `go(frame,
+    /// movie)` mount. The suspended caller's trampoline frames hold raw
+    /// pointers into these (script Rc contents, `name_symbols`), so they must
+    /// stay alive — untouched — until the handler stack unwinds to zero.
+    /// Moving the `Vec<CastLib>` here is safe: the element buffer (where the
+    /// CastLib structs and their `name_symbols` headers live) does not move.
+    pub retired_cast_libs: Vec<Vec<crate::player::cast_lib::CastLib>>,
+    /// Bumped every time a movie is mounted over a live handler stack. Event
+    /// dispatch loops capture it before iterating their (old-movie) receiver
+    /// snapshots and stop when it changes, so no old-movie instance receives
+    /// an event resolved against the new movie's casts.
+    pub movie_mount_generation: u64,
     /// Set by `play movie <the current movie>` (restart). The frame loop, between
     /// frames, re-parses the retained movie bytes and runs the full load+init
     /// (rebuilds the cast → fresh W3D scenes), preserving globals + external params
@@ -582,6 +606,16 @@ pub struct DirPlayer {
     /// movies (e.g. freeT) use it as scratch data storage. We don't compile
     /// Lingo, so we just round-trip the string here keyed by member ref.
     pub script_text_overrides: FxHashMap<CastMemberRef, String>,
+    /// `member(whichFlashMember).cdpCheckMode` — Flash cross-domain-policy
+    /// check mode (Director 11.5 reference: Access Get/Set, default
+    /// `useSwPolicy`; `#useMediaPolicy` selects the Flash player's checks,
+    /// `#useSWPolicy` Shockwave's).
+    ///
+    /// Stored, not acted on: in a browser the cross-origin decision is made by
+    /// CORS on the actual fetch, so neither policy path exists for us. Keeping
+    /// the value means the documented Get/Set round-trip still works for a
+    /// script that reads it back.
+    pub cdp_check_modes: FxHashMap<CastMemberRef, String>,
     /// Optional fake movie path override. When set, `the moviePath` and `the movieName`
     /// return values derived from this path, while actual file fetching uses the real URL.
     /// URLs the script builds from `the moviePath` (e.g. `postNetText(the moviePath & "x.aspx")`)
@@ -597,6 +631,34 @@ pub struct DirPlayer {
     /// the proxy unchanged. Mutually exclusive with the rewrite path —
     /// when both are set, this label wins for `the moviePath`.
     pub movie_path_label: Option<String>,
+    /// Lingo to evaluate once, immediately before the launched movie's
+    /// `prepareMovie` — the equivalent of the Shockwave projector's `--do`
+    /// launch argument. Flashpoint drives archived Shockwave titles this way;
+    /// Agent Free Ride's entry is
+    ///
+    /// ```text
+    /// "…/wrapper_silentbaystudios.dcr"
+    ///   --do "member('gameUrl').text = '…/agent_freeride.dcr'"
+    ///   --bugfixShockwave3DBadDriverList
+    /// ```
+    ///
+    /// The wrapper reads `member("gameUrl").text` on its first `exitFrame` and
+    /// redirects there, but that member ships EMPTY — the launcher seeds it, so
+    /// without this the wrapper has nowhere to go.
+    ///
+    /// Consumed on first use (`Option::take`), matching the projector: the
+    /// argument applies to the movie being launched, not to every movie the
+    /// session later loads.
+    pub startup_do: Option<String>,
+    /// The projector's `--doBefore`: Lingo evaluated once BEFORE the movie is
+    /// loaded, as opposed to [`startup_do`](Self::startup_do)'s "after it has
+    /// been loaded". SPR documents it for curator diagnostics
+    /// (`--doBefore "alert('I am a jelly donut!')"`). Also consumed on use.
+    pub startup_do_before: Option<String>,
+    /// The projector's `--go`: a frame to jump to once the movie has started,
+    /// e.g. `--go 2` to skip a title frame. Applied after the init sequence,
+    /// so the movie's own `prepareMovie` / `startMovie` have run first.
+    pub startup_go: Option<u32>,
     /// Fake environment installed by the LeechProtectionRemovalHelp Xtra.
     /// Lives on the Player rather than the Movie so it outlives a movie load,
     /// which is precisely what that Xtra promises.
@@ -770,6 +832,10 @@ impl DirPlayer {
             eval_scope_index: None,
             delay_until: None,
             pending_goto_net_movie: None,
+            goto_wait_active: false,
+            pending_movie_init: false,
+            retired_cast_libs: Vec::new(),
+            movie_mount_generation: 0,
             pending_restart: false,
             movie_reload_data: None,
             is_in_transition: false,
@@ -780,6 +846,7 @@ impl DirPlayer {
             behavior_channel_cache_generation: 0,
             active_stage_filmloop_cache_generation: 0,
             script_text_overrides: FxHashMap::default(),
+            cdp_check_modes: FxHashMap::default(),
             script_instance_list_cache: FxHashMap::default(),
             script_instance_list_cache_owner: FxHashMap::default(),
             script_instance_list_generation: FxHashMap::default(),
@@ -791,6 +858,9 @@ impl DirPlayer {
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
             movie_path_label: None,
+            startup_do: None,
+            startup_do_before: None,
+            startup_go: None,
             env_overrides: EnvOverrides::default(),
             console: console::ConsoleBuffer::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(0),
@@ -1879,6 +1949,9 @@ impl DirPlayer {
         self.current_breakpoint = None;
         self.scope_count = 0;
         self.pending_goto_net_movie = None;
+        self.goto_wait_active = false;
+        self.pending_movie_init = false;
+        self.retired_cast_libs.clear();
         self.pending_restart = false;
 
         debug!("Resetting allocator");
@@ -2861,6 +2934,10 @@ impl DirPlayer {
             },
             BuiltInSymbol::MouseH => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             BuiltInSymbol::MouseV => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
+            BuiltInSymbol::MouseMember => {
+                let datum = mouse_member_datum(self);
+                Ok(self.alloc_datum(datum))
+            },
             BuiltInSymbol::MouseChar => {
                 let val = compute_mouse_char(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
@@ -3305,6 +3382,10 @@ impl DirPlayer {
             ))),
             Some(BuiltInSymbol::MouseH) => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.0 as i32))),
             Some(BuiltInSymbol::MouseV) => Ok(self.alloc_datum(Datum::Int(self.mouse_loc.1 as i32))),
+            Some(BuiltInSymbol::MouseMember) => {
+                let datum = mouse_member_datum(self);
+                Ok(self.alloc_datum(datum))
+            }
             Some(BuiltInSymbol::MouseChar) => {
                 let val = compute_mouse_char(self);
                 Ok(self.alloc_datum(Datum::Int(val)))
@@ -5213,10 +5294,78 @@ async fn stop_movie_sequence() {
     player_wait_available().await;
 }
 
+/// Normalise a projector `--do` payload to Lingo's own string quoting.
+///
+/// Lingo has exactly one string delimiter, `"` (the grammar's `quote` rule),
+/// and so does Director. Launcher command lines nonetheless write the payload
+/// with `'`, because the whole `--do` argument is itself inside double quotes
+/// and nesting them would need escaping:
+///
+/// ```text
+/// --do "member('gameUrl').text = 'http://…/agent_freeride.dcr'"
+/// ```
+///
+/// The projector undoes that before evaluating. Only rewrite when the payload
+/// contains NO double quote of its own — otherwise it is already Lingo-quoted
+/// and an apostrophe in it is a literal apostrophe, not a delimiter.
+fn normalize_startup_do_quotes(code: &str) -> String {
+    if code.contains('"') || !code.contains('\'') {
+        return code.to_string();
+    }
+    code.replace('\'', "\"")
+}
+
+/// Evaluate the pending `--do` payload, once, before `prepareMovie`.
+///
+/// Failure is reported but never fatal: the projector runs the movie either
+/// way, and a movie that does not depend on the payload must still start.
+pub(crate) async fn run_startup_do_before() {
+    let code = reserve_player_mut(|player| player.startup_do_before.take());
+    eval_startup_payload(code, "--doBefore").await;
+}
+
+async fn run_startup_do() {
+    let code = reserve_player_mut(|player| player.startup_do.take());
+    eval_startup_payload(code, "--do").await;
+}
+
+/// `--go N`: jump to a frame once the movie is running. Consumed on use.
+///
+/// Routed through the same evaluator as `--do` rather than poking
+/// `movie.current_frame`: SPR is itself a Director movie issuing a plain
+/// `go`, and the real handler is what performs the frame jump properly
+/// (async, marker-aware).
+async fn run_startup_go() {
+    let frame = reserve_player_mut(|player| player.startup_go.take());
+    let Some(frame) = frame else { return };
+    eval_startup_payload(Some(format!("go({})", frame)), "--go").await;
+}
+
+async fn eval_startup_payload(code: Option<String>, flag: &str) {
+    let Some(code) = code else { return };
+    let code = normalize_startup_do_quotes(code.trim());
+    if code.is_empty() {
+        return;
+    }
+    debug!(">>> startup {}: {}", flag, code);
+    match crate::player::eval::eval_lingo_command(code.clone()).await {
+        Ok(_) => debug!(">>> startup {} completed", flag),
+        // `console_error!`, not `web_sys::console::error_1` (panics natively —
+        // see `on_script_error`) and not bare `log::error!` (the browser never
+        // shows it). A payload that fails to parse is the single most likely
+        // thing to go wrong here, so it has to be visible in the page console.
+        Err(err) => crate::console_error!("startup {} FAILED ({}): {}", flag, code, err.message),
+    }
+}
+
 /// Run the movie initialization sequence: prepareMovie, beginSprite, behavior init,
 /// stepFrame, prepareFrame, startMovie, enterFrame, exitFrame.
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
+    // The projector's `--do` argument, evaluated before the movie's own code
+    // gets a turn. See `DirPlayer::startup_do`.
+    run_startup_do().await;
+
     // prepareMovie
     debug!(">>> Dispatching prepareMovie");
     dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareMovie, &vec![]).await;
@@ -5491,11 +5640,52 @@ async fn run_movie_init_sequence() {
     reserve_player_mut(|player| {
         player.is_in_frame_update = false;
     });
+
+    // `--go N`, last: the movie's own prepareMovie / startMovie / exitFrame have
+    // had their turn, so a frame the curator picked is not immediately
+    // overwritten by the movie's own opening navigation.
+    run_startup_go().await;
 }
 
 /// Perform the movie transition for gotoNetMovie.
 /// Called from within the frame loop when the pending fetch is complete.
+
+/// Stop the current movie, parse the fetched bytes and MOUNT the new movie —
+/// everything a `go(frame, movie)` transition does EXCEPT running the new
+/// movie's init sequence. Returns false if the movie could not be loaded.
+///
+/// Split out so `go()` can mount eagerly. Director's `go()` (11.5 Scripting
+/// Dictionary, Movie method) "loads frame 1 of the movie", and "if go() is
+/// called from within a handler, the handler in which it is placed continues
+/// executing" — so the REST of the calling handler already sees the new
+/// movie's cast libraries. Miniclip's `wrapper_silentbaystudios.dcr` depends
+/// on exactly that: it calls `go(1, "gameloader.dcr")` and then, still in the
+/// same `exitFrame`, does `move(hsController, member(1, 2))` and
+/// `new(script("MiniclipServices script"))` — cast lib 2 and those parent
+/// scripts belong to GAMELOADER, not to the wrapper.
 async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
+    if mount_net_movie(task_id, target, false).await {
+        // 4. Run new movie initialization sequence
+        run_movie_init_sequence().await;
+
+        reserve_player_mut(|player| {
+            player.is_in_transition = false;
+        });
+    }
+}
+
+/// `eager = true`: called from INSIDE `go()` while the calling Lingo handler is
+/// still on the stack (Director semantics — the handler continues and must see
+/// the new movie's casts). In that mode the live scope stack is left alone, the
+/// old movie's cast libraries are RETIRED instead of dropped (suspended
+/// trampoline frames hold raw pointers into them), and the init sequence is
+/// deferred to the frame loop via `pending_movie_init`.
+///
+/// `eager = false`: the classic frame-loop transition (gotoNetMovie), no Lingo
+/// on the stack; resets scopes and drops the old movie outright.
+///
+/// Returns true if the new movie was mounted.
+pub(crate) async fn mount_net_movie(task_id: u32, target: MovieFrameTarget, eager: bool) -> bool {
     // 1. Parse the fetched movie data
     let dir_file = reserve_player_mut(|player| {
         let task = player.net_manager.get_task(task_id);
@@ -5520,7 +5710,7 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
         None => {
             log::warn!("gotoNetMovie: failed to parse movie data for task {}", task_id);
             reserve_player_mut(|player| { player.pending_goto_net_movie = None; });
-            return;
+            return false;
         }
     };
 
@@ -5529,15 +5719,23 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
     // is_in_transition = true. Direct calls to player_invoke_global_event (for
     // stopMovie, prepareMovie, beginSprite, etc.) are unaffected because they
     // execute inline from the frame loop task, not through the event loop channel.
-    reserve_player_mut(|player| {
+    //
+    // Eager mode: `go()` runs inside `dispatch_event_to_all_behaviors`, whose
+    // re-entrancy guard (`is_dispatching_events`) would silently swallow the
+    // endSprite dispatch inside `stop_movie_sequence`. Lift the guard for the
+    // stop sequence — this nesting is deliberate — and restore it after, so the
+    // suspended outer dispatch keeps its own bookkeeping intact.
+    let prev_dispatching = reserve_player_mut(|player| {
         player.is_playing = false;
         player.is_in_transition = true;
+        std::mem::replace(&mut player.is_dispatching_events, false)
     });
 
     stop_movie_sequence().await;
 
     // 3. Load the new movie data (preserving globals and allocator)
     reserve_player_mut(|player| {
+        player.is_dispatching_events = prev_dispatching;
         player.movie.score.reset();
         player.clear_script_instance_list_caches();
         player.movie.frame_script_instance = None;
@@ -5545,10 +5743,21 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
         player.movie.current_frame = 1;
         player.last_initialized_frame = None;
 
-        for scope in player.scopes.iter_mut() {
-            scope.reset();
+        if eager {
+            // The calling handler (and its whole trampoline chain) is still
+            // suspended on the scope stack and will CONTINUE after go()
+            // returns — Director's documented behaviour. Leave the scopes
+            // alone, and keep the old cast libraries alive: the suspended
+            // frames' BytecodeHandlerContexts hold raw pointers into them
+            // (Rc<Script> contents, HandlerDefs, cast `name_symbols`).
+            let old_casts = std::mem::take(&mut player.movie.cast_manager.casts);
+            player.retired_cast_libs.push(old_casts);
+        } else {
+            for scope in player.scopes.iter_mut() {
+                scope.reset();
+            }
+            player.scope_count = 0;
         }
-        player.scope_count = 0;
 
         // Temporarily set is_playing = false so that begin_all_sprites (called inside
         // load_movie_from_dir) resets entered flags and clears script instance lists,
@@ -5581,14 +5790,14 @@ async fn transition_to_net_movie(task_id: u32, target: MovieFrameTarget) {
         }
         player.pending_goto_net_movie = None;
         player.is_playing = true;
+        if eager {
+            // The frame loop runs the init sequence once the handler stack
+            // unwinds; until then every dispatch loop must stand down.
+            player.pending_movie_init = true;
+            player.movie_mount_generation = player.movie_mount_generation.wrapping_add(1);
+        }
     });
-
-    // 4. Run new movie initialization sequence
-    run_movie_init_sequence().await;
-
-    reserve_player_mut(|player| {
-        player.is_in_transition = false;
-    });
+    true
 }
 
 /// Restart the current movie in place (`play movie <the current movie>`). Re-parses
@@ -5755,6 +5964,24 @@ pub async fn run_single_frame() -> (bool, bool) {
         return (is_playing, is_script_paused);
     }
 
+    // An eager go(frame, movie) swapped the movie while a handler was on the
+    // stack; nothing may run against the new movie until its init sequence
+    // (prepareMovie/startMovie) has run. The browser frame loop normally
+    // handles this before calling us, but the NATIVE test harness drives
+    // run_single_frame directly — so run the deferred init here too once the
+    // handler stack has unwound.
+    if reserve_player_ref(|player| player.pending_movie_init) {
+        if reserve_player_ref(|player| player.handler_stack_depth == 0) {
+            reserve_player_mut(|player| { player.pending_movie_init = false; });
+            run_movie_init_sequence().await;
+            reserve_player_mut(|player| {
+                player.is_in_transition = false;
+                player.retired_cast_libs.clear();
+            });
+        }
+        return (is_playing, is_script_paused);
+    }
+
     // Global idle timeout (`the timeoutScript` / `the timeoutLength`): fire the
     // timeOut event + primary script once the idle period lapses. Runs every tick.
     crate::player::events::check_global_timeout().await;
@@ -5791,6 +6018,11 @@ pub async fn run_single_frame() -> (bool, bool) {
                 }
             });
         }
+    }
+
+    // Eager movie mount during the frame scripts: stop this frame cycle.
+    if reserve_player_ref(|player| player.pending_movie_init) {
+        return (is_playing, is_script_paused);
     }
 
     // --- Phase 2: Advance to next frame ---
@@ -5865,6 +6097,11 @@ pub async fn run_single_frame() -> (bool, bool) {
     // Relay exitFrame to timeout targets
     dispatch_system_event_to_timeouts(BuiltInSymbol::ExitFrame, &vec![]).await;
 
+    // Eager movie mount during a timeout's exitFrame: stop this frame cycle.
+    if reserve_player_ref(|player| player.pending_movie_init) {
+        return (is_playing, is_script_paused);
+    }
+
     let mut stayed_on_same_frame = false;
 
     // Clear stale go_same_frame from previous frame's processing
@@ -5920,6 +6157,13 @@ pub async fn run_single_frame() -> (bool, bool) {
 
         player_wait_available().await;
 
+        // Eager movie mount inside an exitFrame behavior (the Miniclip wrapper
+        // path): the playhead state now belongs to the NEW movie — do not
+        // advance it, do not end/begin sprites; the frame loop takes over.
+        if reserve_player_ref(|player| player.pending_movie_init) {
+            return (is_playing, is_script_paused);
+        }
+
         let (has_frame_changed, go_same_frame) = reserve_player_ref(|player|
             (player.has_frame_changed_in_go, player.go_same_frame));
 
@@ -5974,6 +6218,12 @@ pub async fn run_single_frame() -> (bool, bool) {
     }
 
     player_wait_available().await;
+
+    // Eager movie mount anywhere in the exitFrame dispatches above: hand the
+    // rest of the cycle to the frame loop's pending-init path.
+    if reserve_player_ref(|player| player.pending_movie_init) {
+        return (is_playing, is_script_paused);
+    }
 
     reserve_player_mut(|player| {
         if !stayed_on_same_frame {
@@ -6188,6 +6438,30 @@ fn compute_mouse_line(player: &mut DirPlayer) -> i32 {
     let upto = (char_index as usize).saturating_sub(1).min(chars.len());
     let line = chars[..upto].iter().filter(|&&c| c == '\r' || c == '\n').count() + 1;
     line as i32
+}
+
+/// `_mouse.mouseMember` / `the mouseMember` — Director 11.5 Scripting
+/// Dictionary, Mouse property, read-only: "returns the cast member assigned to
+/// the sprite that is under the pointer when the property is called… When the
+/// pointer is not over a sprite, this property returns the result VOID."
+///
+/// `scripted: false` on the hit test, because the documented subject is "the
+/// sprite that is under the pointer" — any sprite, not just one carrying a
+/// behavior. A sprite occupying the point but holding no member (an empty
+/// channel) also answers VOID, since there is no cast member to report.
+fn mouse_member_datum(player: &DirPlayer) -> Datum {
+    let (x, y) = (player.mouse_loc.0 as i32, player.mouse_loc.1 as i32);
+    let sprite_number = match score::get_sprite_at(player, x, y, false) {
+        Some(n) => n,
+        None => return Datum::Void,
+    };
+    match player.movie.score.get_sprite(sprite_number as i16) {
+        Some(sprite) => match &sprite.member {
+            Some(member_ref) => Datum::CastMember(member_ref.clone()),
+            None => Datum::Void,
+        },
+        None => Datum::Void,
+    }
 }
 
 fn compute_mouse_char(player: &mut DirPlayer) -> i32 {
@@ -6602,6 +6876,26 @@ pub async fn run_frame_loop() {
             continue;
         }
 
+        // A movie was mounted EAGERLY by go(frame, movie) while a handler was
+        // executing. Once that handler stack has fully unwound, run the new
+        // movie's init sequence (prepareMovie/startMovie/…) and release the
+        // retired cast libraries the suspended frames were pointing into.
+        let run_pending_init = reserve_player_ref(|player| {
+            player.pending_movie_init && player.handler_stack_depth == 0
+        });
+        if run_pending_init {
+            reserve_player_mut(|player| { player.pending_movie_init = false; });
+            run_movie_init_sequence().await;
+            reserve_player_mut(|player| {
+                player.is_in_transition = false;
+                player.retired_cast_libs.clear();
+            });
+            (is_playing, _) = reserve_player_ref(|player| {
+                (player.is_playing, player.is_script_paused)
+            });
+            continue;
+        }
+
         // Pre-dispatch Flash members for sprites on the current frame so they start
         // loading before Lingo scripts try to access them.
         reserve_player_mut(|player| {
@@ -6643,7 +6937,9 @@ pub async fn run_frame_loop() {
         // Goes to the frame script + movie scripts (Director's idle hierarchy);
         // a no-op for movies that define no `idle` handler.
         {
-            let active = reserve_player_ref(|player| player.is_playing && !player.is_script_paused);
+            let active = reserve_player_ref(|player| {
+                player.is_playing && !player.is_script_paused && !player.pending_movie_init
+            });
             if active {
                 if let Err(err) = player_invoke_frame_and_movie_scripts(Symbol::from_str("idle"), &vec![]).await {
                     warn!("idle dispatch failed: {}", err.message);

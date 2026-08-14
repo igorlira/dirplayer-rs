@@ -3946,10 +3946,27 @@ impl CastMember {
 
     fn log_unknown_ole(number: u32, chunk: &CastMemberChunk) {
         let name = chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or("");
-        debug!(
-            "Cast member #{} has unimplemented type: Ole (name: {})",
-            number, name
+        // Include the OLE type string — it names the owning Xtra and is the
+        // fastest way to identify what an unimplemented member actually is.
+        let type_str = Self::ole_type_string(&chunk.specific_data_raw).unwrap_or_default();
+        warn!(
+            "Cast member #{} has unimplemented type: Ole (name: '{}', typeStr: '{}', rawLen: {})",
+            number, name, type_str, chunk.specific_data_raw.len()
         );
+    }
+
+    /// The length-prefixed Xtra type string an OLE member's `specific_data_raw`
+    /// opens with (4-byte BE length, then the name) — e.g. `"vectorShape"`.
+    /// This is the authoritative identifier for which Xtra owns the member.
+    fn ole_type_string(raw: &[u8]) -> Option<String> {
+        if raw.len() < 5 {
+            return None;
+        }
+        let str_len = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
+        if str_len == 0 || str_len > 64 || raw.len() < 4 + str_len {
+            return None;
+        }
+        std::str::from_utf8(&raw[4..4 + str_len]).ok().map(|s| s.to_string())
     }
 
     /// Parse SWF stage dimensions from uncompressed SWF header.
@@ -5881,6 +5898,46 @@ impl CastMember {
                 // Try all XMedia children for SWF or fonts
                 if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
                     return cm;
+                }
+
+                // An EMPTY Flash container. The Flash Asset Xtra declares
+                // itself with the length-prefixed OLE type string "flash" (the
+                // same mechanism `vectorShape` uses above), and a member can
+                // legitimately carry no SWF at all — the movie points it at one
+                // at runtime:
+                //
+                //   on advertContainer me, sNum, id, w, h
+                //     sprite(sNum).member.fileName = …advertLoader…
+                //     sprite(sNum).member.cdpCheckMode = #useMediaPolicy
+                //     preload(sprite(sNum).member)
+                //
+                // Both SWF scans above find nothing for such a member, and
+                // falling through to Unknown made every Flash property raise —
+                // Miniclip's gameloader dies on the `.fileName` write. Typing it
+                // as an empty Flash member (exactly as the MemberType::Flash arm
+                // does when its data chunk is missing) lets the runtime load
+                // proceed.
+                if Self::ole_type_string(&chunk.specific_data_raw).as_deref() == Some("flash") {
+                    let flash_info = chunk
+                        .specific_data
+                        .flash_info()
+                        .cloned()
+                        .or_else(|| crate::director::enums::FlashInfo::from(&chunk.specific_data_raw));
+                    let reg_point = Self::flash_reg_point(flash_info.as_ref(), &[]);
+                    debug!("Empty Flash (OLE) member #{} — awaiting a runtime .fileName", number);
+                    return CastMember {
+                        number,
+                        name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                        member_type: CastMemberType::Flash(FlashMember {
+                            data: vec![],
+                            reg_point,
+                            flash_info,
+                        }),
+                        color: ColorRef::PaletteIndex(255),
+                        bg_color: ColorRef::PaletteIndex(0),
+                        reg_point: (reg_point.0 as i32, reg_point.1 as i32),
+                    };
                 }
 
                 // Fallback

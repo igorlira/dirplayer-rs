@@ -101,6 +101,16 @@ impl NetManager {
         return task_states.get(&task_id).map(|x| x.clone());
     }
 
+    /// Non-panicking task-state read for poll loops. `get_task_state` does
+    /// `try_lock().unwrap()`, which PANICS if the fetch task happens to hold
+    /// the shared-state lock at that instant (it holds it across the
+    /// `fulfill_task` await). Returns None both for "lock busy" and "no such
+    /// task" — callers treat either as "not done yet, poll again".
+    pub fn try_get_task_state(&self, task_id: u32) -> Option<NetTaskState> {
+        let shared_state = self.shared_state.try_lock()?;
+        shared_state.task_states.get(&task_id).cloned()
+    }
+
     pub fn is_task_done(&self, task_id: Option<u32>) -> bool {
         return self
             .get_task_state(task_id)
@@ -213,6 +223,10 @@ impl NetManager {
 
         // Check if the task already exists (by original URL) and return it if found
         if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {
+            debug!(
+                "[net] preload '{}' -> REUSED task {} (url match, done={})",
+                url, existing_task.id, self.is_task_done(Some(existing_task.id))
+            );
             return existing_task.id;
         }
 
@@ -228,6 +242,10 @@ impl NetManager {
 
         // Also check by resolved URL to catch relative vs absolute URL duplicates
         if let Some(existing_task) = find_task_with_resolved_url(&self.tasks, &net_task.resolved_url) {
+            debug!(
+                "[net] preload '{}' -> REUSED task {} (resolved match, done={})",
+                url, existing_task.id, self.is_task_done(Some(existing_task.id))
+            );
             return existing_task.id;
         }
         let task_id = net_task.id;
@@ -311,6 +329,15 @@ impl NetManager {
         shared_state_arc: Arc<Mutex<NetManagerSharedState>>,
     ) {
         let result = fetch_net_task(&task, Arc::clone(&shared_state_arc)).await;
+        debug!(
+            "[net] task {} fetched '{}' -> {}",
+            id,
+            task.resolved_url,
+            match &result {
+                Ok(b) => format!("{} bytes", b.len()),
+                Err(code) => format!("error {}", code),
+            }
+        );
         let mut shared_state = shared_state_arc.lock().await;
         shared_state.fulfill_task(id, result).await;
     }

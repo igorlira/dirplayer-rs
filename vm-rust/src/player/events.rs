@@ -359,7 +359,14 @@ async fn player_invoke_frame_and_movie_scripts_inner(
         active_static_scripts
     });
 
+    let mount_gen = reserve_player_ref(|player| player.movie_mount_generation);
     for script_member_ref in active_static_scripts {
+        // An eager go(frame, movie) swapped the movie under this dispatch:
+        // the remaining member refs belong to the OLD movie and would resolve
+        // against the NEW movie's casts. Stop here.
+        if reserve_player_ref(|player| player.movie_mount_generation) != mount_gen {
+            break;
+        }
         let has_handler = reserve_player_ref(|player| {
             let script = player
                 .movie
@@ -1896,13 +1903,34 @@ pub async fn dispatch_event_to_all_behaviors(
     });
     // Dispatch to sprite behaviors first (channel order)
     // Set the score context before invoking each event so sprite property access works correctly
+    let mount_gen = reserve_player_ref(|player| player.movie_mount_generation);
     for (score_ref, sprite_number, behaviors, member_handler) in sprite_behaviors {
+        // An eager go(frame, movie) swapped the movie under this dispatch
+        // (the Miniclip wrapper does exactly this from an exitFrame behavior).
+        // The remaining receivers belong to the OLD movie — their script refs
+        // would resolve against the NEW movie's casts. Stop dispatching.
+        if reserve_player_ref(|player| player.movie_mount_generation) != mount_gen {
+            reserve_player_mut(|player| {
+                player.is_dispatching_events = false;
+                player.current_score_context = ScoreRef::Stage;
+            });
+            return;
+        }
         // Set the score context for this sprite's behaviors
         reserve_player_mut(|player| {
             player.current_score_context = score_ref.clone();
         });
 
         for behavior in behaviors {
+            // Same mid-dispatch movie-swap stop, for sibling behaviors on the
+            // sprite whose earlier behavior called go(frame, movie).
+            if reserve_player_ref(|player| player.movie_mount_generation) != mount_gen {
+                reserve_player_mut(|player| {
+                    player.is_dispatching_events = false;
+                    player.current_score_context = ScoreRef::Stage;
+                });
+                return;
+            }
             let (script_name, instance_id, scope_count) = reserve_player_ref(|player| {
                 let script_instance = player.allocator.get_script_instance(&behavior);
                 let name = player.movie.cast_manager
@@ -1942,7 +1970,9 @@ pub async fn dispatch_event_to_all_behaviors(
 
         // Then the sprite's cast member script — next in Director's message
         // order, after the behaviors and before the frame/movie scripts below.
-        if let Some(handler) = member_handler {
+        // (Skipped if a behavior above swapped the movie via eager go().)
+        let swapped = reserve_player_ref(|player| player.movie_mount_generation) != mount_gen;
+        if let Some(handler) = member_handler.filter(|_| !swapped) {
             reserve_player_mut(|player| {
                 player.member_script_sprite_num = sprite_number as i16;
             });
@@ -1976,10 +2006,15 @@ pub async fn dispatch_event_to_all_behaviors(
             player.current_score_context = ScoreRef::Stage;
         });
     }
-    // Dispatch event to frame/movie scripts
-    if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
-        if err.code != ScriptErrorCode::Abort {
-            reserve_player_mut(|player| player.on_script_error(&err));
+    // Dispatch event to frame/movie scripts — unless the movie was swapped by
+    // an eager go(frame, movie) above; the NEW movie's scripts must not get
+    // this old-movie event (its init sequence has not run yet).
+    let swapped = reserve_player_ref(|player| player.movie_mount_generation) != mount_gen;
+    if !swapped {
+        if let Err(err) = player_invoke_frame_and_movie_scripts(handler_name, args).await {
+            if err.code != ScriptErrorCode::Abort {
+                reserve_player_mut(|player| player.on_script_error(&err));
+            }
         }
     }
 

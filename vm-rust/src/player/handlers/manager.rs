@@ -1755,6 +1755,19 @@ impl BuiltInHandlerManager {
                 ListDatumHandlers::add_at(list, args)
             }
             Some(BuiltInSymbol::GetNodes) => Self::get_nodes(args),
+            // `move(member, dest)` is the command form of the Member method
+            // `member.move(dest)` — Agent Free Ride's Miniclip wrapper calls it
+            // that way (`move(hsController, member(1, 2))`). Delegate with
+            // args[0] as the receiver, exactly as `duplicate` does below.
+            Some(BuiltInSymbol::Move) if !args.is_empty() => {
+                let receiver = &args[0];
+                let rest = args[1..].to_vec();
+                crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
+                    receiver,
+                    Symbol::builtin(BuiltInSymbol::Move),
+                    &rest,
+                )
+            }
             Some(BuiltInSymbol::Duplicate) => {
                 let item = &args[0];
                 let args = &args[1..].to_vec();

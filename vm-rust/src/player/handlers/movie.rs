@@ -169,7 +169,7 @@ impl MovieHandlers {
         }
         // If a second argument is provided, it's a movie path: go frame X of movie "path"
         let go_to_movie = if args.len() >= 2 {
-            reserve_player_mut(|player| {
+            Some(reserve_player_mut(|player| {
                 let movie_path = player.get_datum(&args[1]).string_value()?;
                 let movie_path = if movie_path.contains(".") {
                     movie_path
@@ -189,14 +189,86 @@ impl MovieHandlers {
                 };
 
                 let task_id = player.net_manager.preload_net_thing(movie_path.clone());
-                player.pending_goto_net_movie = Some((task_id, target));
-                Ok(true)
-            })?
+                Ok::<_, ScriptError>((task_id, target, movie_path))
+            })?)
         } else {
-            false
+            None
         };
 
-        if go_to_movie {
+        // Director 11.5 Scripting Dictionary, `go()`: calling go() with the
+        // movieName parameter "loads frame 1 of the movie", and "if go() is
+        // called from within a handler, the handler in which it is placed
+        // continues executing" — the REST of the calling handler must see the
+        // NEW movie's cast libraries (Miniclip's wrapper_silentbaystudios
+        // depends on this: it does `go(1, "gameloader.dcr")` and then, in the
+        // same exitFrame, resolves parent scripts that live in gameloader's
+        // second cast). So: wait for the fetch HERE and mount eagerly.
+        //
+        // The wait is a poll loop rather than `net_manager.await_task()`.
+        // Yielding via a timer keeps this independent of the ManualFuture
+        // completer path and gives the spawned fetch task event-loop time.
+        if let Some((task_id, target, movie_path)) = go_to_movie {
+            debug!("[go] go(_, \"{}\") -> net task {}", movie_path, task_id);
+            // Tell maybe_hold_dcr_for_preloader to stand down for this fetch.
+            reserve_player_mut(|player| { player.goto_wait_active = true; });
+            let mut waited_ms: u64 = 0;
+            const POLL_MS: u64 = 25;
+            const TIMEOUT_MS: u64 = 60_000;
+            let done = loop {
+                let (done, state) = reserve_player_ref(|player| {
+                    let state = player.net_manager.try_get_task_state(task_id);
+                    (
+                        state.as_ref().map_or(false, |s| s.result.is_some()),
+                        state.map(|s| (s.bytes_loaded, s.bytes_total)),
+                    )
+                });
+                if done {
+                    break true;
+                }
+                if waited_ms >= TIMEOUT_MS {
+                    break false;
+                }
+                if waited_ms > 0 && waited_ms % 5_000 == 0 {
+                    crate::console_warn!(
+                        "[go] still waiting for task {} ({} ms, state={:?})",
+                        task_id, waited_ms, state
+                    );
+                }
+                let _ = async_std::future::timeout(
+                    std::time::Duration::from_millis(POLL_MS),
+                    std::future::pending::<()>(),
+                )
+                .await;
+                waited_ms += POLL_MS;
+            };
+            reserve_player_mut(|player| { player.goto_wait_active = false; });
+
+            if !done {
+                // Fetch never finished — fall back to the deferred frame-loop
+                // transition so the movie errs loudly instead of freezing.
+                crate::console_error!(
+                    "[go] movie fetch for \"{}\" (task {}) did not finish within {}s; \
+                     deferring the transition to the frame loop",
+                    movie_path, task_id, TIMEOUT_MS / 1000
+                );
+                reserve_player_mut(|player| {
+                    player.pending_goto_net_movie = Some((task_id, target));
+                });
+                return Ok(DatumRef::Void);
+            }
+
+            let mounted = crate::player::mount_net_movie(task_id, target, true).await;
+            // Success is per-transition noise; a FAILED mount means the calling
+            // handler is about to run against the OLD movie's casts, which is
+            // exactly the bug this path exists to prevent — surface that one.
+            if mounted {
+                debug!("[go] eager mount of \"{}\" succeeded after {} ms", movie_path, waited_ms);
+            } else {
+                crate::console_error!(
+                    "[go] eager mount of \"{}\" FAILED after {} ms — the calling handler will continue against the previous movie's casts",
+                    movie_path, waited_ms
+                );
+            }
             return Ok(DatumRef::Void);
         }
 
@@ -1152,6 +1224,16 @@ impl MovieHandlers {
 
         dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
 
+        // A prepareFrame handler mounted a new movie via eager go(): stop the
+        // frame update; the new movie runs nothing until its init sequence.
+        if reserve_player_ref(|player| player.pending_movie_init) {
+            reserve_player_mut(|player| {
+                player.in_prepare_frame = false;
+                player.is_in_frame_update = false;
+            });
+            return Ok(());
+        }
+
         // Tick W3D registered #timeMS events + animation clock + dispatch
         // any queued PhysX collision callbacks. This is the *real* per-frame
         // path (the one in mod.rs::start_movie_sequence only fires on
@@ -1184,6 +1266,14 @@ impl MovieHandlers {
         reserve_player_mut(|player| {
             player.in_enter_frame = false;
         });
+
+        // An enterFrame handler mounted a new movie via eager go().
+        if reserve_player_ref(|player| player.pending_movie_init) {
+            reserve_player_mut(|player| {
+                player.is_in_frame_update = false;
+            });
+            return Ok(());
+        }
 
         // enterFrame handlers are allowed to change the current visual state
         // (camera/model transforms, tunnelDepth, etc.) without calling
