@@ -223,7 +223,10 @@ async fn maybe_hold_dcr_for_preloader(url: &str) {
     if !path.ends_with(".dcr") {
         return;
     }
-    if !crate::player::reserve_player_ref(|p| p.is_playing) {
+    // A go(frame, movie) is synchronously waiting on this fetch — Director
+    // loads the movie immediately there; holding it would only stall the
+    // calling handler (and the whole frame loop) for 3 extra seconds.
+    if crate::player::reserve_player_ref(|p| p.goto_wait_active || !p.is_playing) {
         return;
     }
     let _ = async_std::future::timeout(

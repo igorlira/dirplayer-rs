@@ -61,6 +61,34 @@ pub fn set_base_path(path: String) {
     player_dispatch(PlayerVMCommand::SetBasePath(path));
 }
 
+/// The Shockwave projector's `--do` launch argument: Lingo evaluated once,
+/// immediately before the launched movie's `prepareMovie`.
+///
+/// Archived titles are often launched through a wrapper movie that the
+/// projector has to seed first — Agent Free Ride's Flashpoint entry is
+/// `"…/wrapper_silentbaystudios.dcr" --do "member('gameUrl').text = '…'"`,
+/// and the wrapper cannot redirect without it because the member ships empty.
+///
+/// Call before `load_movie_*`. Single-quoted strings in the payload are
+/// accepted as the launcher writes them (see `normalize_startup_do_quotes`).
+#[wasm_bindgen]
+pub fn set_startup_do(code: String) {
+    player_dispatch(PlayerVMCommand::SetStartupDo(code));
+}
+
+/// The projector's `--doBefore`: Lingo evaluated once BEFORE the movie loads.
+#[wasm_bindgen]
+pub fn set_startup_do_before(code: String) {
+    player_dispatch(PlayerVMCommand::SetStartupDoBefore(code));
+}
+
+/// The projector's `--go N`: jump to frame `N` once the movie has started.
+/// Pass 0 to clear.
+#[wasm_bindgen]
+pub fn set_startup_go(frame: u32) {
+    player_dispatch(PlayerVMCommand::SetStartupGo(frame));
+}
+
 #[wasm_bindgen]
 pub fn set_movie_path_override(path: String) {
     player_dispatch(PlayerVMCommand::SetMoviePathOverride(path));

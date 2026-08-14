@@ -55,6 +55,22 @@ impl BrowserTestPlayer {
         } else {
             Default::default()
         };
+        // The projector's `--do` / `--doBefore` / `--go` payloads travel with
+        // the external params, and for the same reason: a test calls
+        // `cfg.apply_startup_do()` BEFORE `load_movie`, and this reset happens
+        // INSIDE it. Dropping them here left `startup_do` unset by the time the
+        // movie-init sequence looked for it, so the seeded member kept the
+        // placeholder the .dcr shipped with and the wrapper redirected nowhere.
+        let preserved_startup = if preserve_external_params {
+            unsafe {
+                PLAYER_OPT
+                    .as_ref()
+                    .map(|p| (p.startup_do.clone(), p.startup_do_before.clone(), p.startup_go))
+                    .unwrap_or_default()
+            }
+        } else {
+            Default::default()
+        };
 
         // Stop the current movie and clear all timeouts before resetting.
         // Stop every playing sound too: the old player is about to be dropped,
@@ -175,6 +191,16 @@ impl BrowserTestPlayer {
             unsafe {
                 if let Some(player) = PLAYER_OPT.as_mut() {
                     player.external_params = preserved_external_params;
+                }
+            }
+        }
+        let (startup_do, startup_do_before, startup_go) = preserved_startup;
+        if startup_do.is_some() || startup_do_before.is_some() || startup_go.is_some() {
+            unsafe {
+                if let Some(player) = PLAYER_OPT.as_mut() {
+                    player.startup_do = startup_do;
+                    player.startup_do_before = startup_do_before;
+                    player.startup_go = startup_go;
                 }
             }
         }

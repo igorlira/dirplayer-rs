@@ -44,6 +44,9 @@ pub enum PlayerVMCommand {
     LoadMovieFromFile(String, bool),
     SetExternalParams(IndexMap<String, String>),
     SetBasePath(String),
+    SetStartupDo(String),
+    SetStartupDoBefore(String),
+    SetStartupGo(u32),
     SetMoviePathOverride(String),
     SetMoviePathLabel(String),
     SetSystemFontPath(String),
@@ -107,6 +110,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
             format!("SetExternalParams({:?})", params.keys().collect::<Vec<_>>())
         }
         PlayerVMCommand::SetBasePath(path) => format!("SetBasePath({})", path),
+        PlayerVMCommand::SetStartupDo(code) => format!("SetStartupDo({})", code),
+        PlayerVMCommand::SetStartupDoBefore(code) => format!("SetStartupDoBefore({})", code),
+        PlayerVMCommand::SetStartupGo(frame) => format!("SetStartupGo({})", frame),
         PlayerVMCommand::SetMoviePathOverride(path) => format!("SetMoviePathOverride({})", path),
         PlayerVMCommand::SetMoviePathLabel(path) => format!("SetMoviePathLabel({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
@@ -377,6 +383,21 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                     .expect(&format!("Invalid base path URL: '{}'", path)));
             });
         }
+        PlayerVMCommand::SetStartupDo(code) => {
+            reserve_player_mut(|player| {
+                player.startup_do = if code.is_empty() { None } else { Some(code) };
+            });
+        }
+        PlayerVMCommand::SetStartupDoBefore(code) => {
+            reserve_player_mut(|player| {
+                player.startup_do_before = if code.is_empty() { None } else { Some(code) };
+            });
+        }
+        PlayerVMCommand::SetStartupGo(frame) => {
+            reserve_player_mut(|player| {
+                player.startup_go = if frame == 0 { None } else { Some(frame) };
+            });
+        }
         PlayerVMCommand::SetMoviePathOverride(path) => {
             reserve_player_mut(|player| {
                 player.movie_path_override = if path.is_empty() { None } else { Some(path) };
@@ -392,6 +413,10 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             player_load_system_font(&path).await;
         }
         PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
+            // `--doBefore` runs "in the scope of the game being curated BEFORE
+            // it has been loaded" (SPR README), so it goes here rather than in
+            // `run_movie_init_sequence` where `--do` lives.
+            crate::player::run_startup_do_before().await;
             let player = unsafe { crate::player::player_mut() };
             match player.load_movie_from_file(&file_path).await {
                 Ok(()) => {

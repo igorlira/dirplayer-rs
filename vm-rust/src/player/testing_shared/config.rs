@@ -61,6 +61,19 @@ pub struct TestConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MovieConfig {
     pub path: String,
+    /// The projector's `--do` launch argument — Lingo evaluated once, just
+    /// before this movie's `prepareMovie`. Needed to reproduce a Flashpoint
+    /// launch command that starts at a wrapper movie the launcher must seed
+    /// (see `DirPlayer::startup_do`).
+    #[serde(default)]
+    pub startup_do: String,
+    /// The projector's `--doBefore` — evaluated before the movie loads.
+    #[serde(default)]
+    pub startup_do_before: String,
+    /// The projector's `--go N` — frame to jump to once the movie has started.
+    /// 0 (the default) means "no jump".
+    #[serde(default)]
+    pub startup_go: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +106,8 @@ impl TestConfig {
     pub fn from_toml(toml_str: &str) -> Self {
         let mut cfg: TestConfig = toml::from_str(toml_str).expect("Failed to parse test config TOML");
         cfg.movie.path = Self::resolve_env(&cfg.movie.path);
+        cfg.movie.startup_do = Self::resolve_env(&cfg.movie.startup_do);
+        cfg.movie.startup_do_before = Self::resolve_env(&cfg.movie.startup_do_before);
         cfg.test.suite = Self::resolve_env(&cfg.test.suite);
         cfg.external_params = cfg.external_params.into_iter()
             .map(|(k, v)| (k, Self::resolve_env(&v)))
@@ -123,6 +138,29 @@ impl TestConfig {
         let params = self.external_params.clone();
         reserve_player_mut(|player| {
             player.external_params = params;
+        });
+    }
+
+    /// Apply `[movie] startup_do` to the player, equivalent to the frontend's
+    /// `set_startup_do()` call. Must run BEFORE `load_movie`, since the payload
+    /// is consumed by the movie-init sequence.
+    pub fn apply_startup_do(&self) {
+        let code = self.movie.startup_do.clone();
+        let before = self.movie.startup_do_before.clone();
+        let go = self.movie.startup_go;
+        if code.is_empty() && before.is_empty() && go == 0 {
+            return;
+        }
+        reserve_player_mut(|player| {
+            if !code.is_empty() {
+                player.startup_do = Some(code);
+            }
+            if !before.is_empty() {
+                player.startup_do_before = Some(before);
+            }
+            if go != 0 {
+                player.startup_go = Some(go);
+            }
         });
     }
 
