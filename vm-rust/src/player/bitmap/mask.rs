@@ -98,6 +98,38 @@ impl Bitmap {
         self.matte = Some(Arc::new(matte));
     }
 
+    /// Director `imageObject.createMask()` — a mask object that duplicates MASK
+    /// sprite ink (11.5 Scripting Dictionary p.307). This is a DIFFERENT
+    /// operation from `createMatte()` (p.308), which duplicates matte ink and
+    /// is built from the image's alpha layer; the dictionary lists them as
+    /// separate methods that cross-reference each other.
+    ///
+    /// Mask ink is 1-bit: dark mask pixels are opaque (source shows through),
+    /// light ones transparent. Director thresholds a deeper mask image down to
+    /// 1 bit, so a 50% luminance cut is used here — exact for the pure
+    /// black/white images masks are normally authored as, and a reasonable
+    /// stand-in for Director's dithering on anything deeper.
+    ///
+    /// `createMask` used to be aliased onto `createMatte`, which is an
+    /// edge-connected flood fill: it can only ever reach background that
+    /// touches the border, so an INTERIOR hole is unreachable and stayed
+    /// opaque. Habbo v31's catalogue Spaces preview masks the window glass out
+    /// of `catalog_spaces_window` exactly that way, so its 5076 magenta
+    /// placeholder pixels were copied onto the preview instead of being left
+    /// open for the landscape behind.
+    pub fn create_mask(&self, palettes: &PaletteMap) -> BitmapMask {
+        let mut mask = BitmapMask::new(self.width, self.height, false);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let (r, g, b) = self.get_pixel_color(palettes, x, y);
+                // Rec.601 luma, matching the grayscale conversion used elsewhere.
+                let luma = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
+                mask.set_bit(x, y, luma < 128);
+            }
+        }
+        mask
+    }
+
     pub fn create_matte(&mut self, palettes: &PaletteMap) {
         let bg_color = &self.get_bg_color_ref();
         let mut mask = self.get_mask(palettes, bg_color);

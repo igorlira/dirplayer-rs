@@ -48,7 +48,9 @@ impl BitmapDatumHandlers {
             "duplicate" => Self::duplicate(datum, args),
             "copypixels" => Self::copy_pixels(datum, args),
             "applyfilter" => Self::apply_filter(datum, args),
-            "creatematte" | "createmask" => Self::create_matte(datum, args),
+            "creatematte" => Self::create_matte(datum, args),
+            // NOT an alias for createMatte — see `Bitmap::create_mask`.
+            "createmask" => Self::create_mask(datum, args),
             "trimwhitespace" => Self::trim_whitespace(datum, args),
             "getpixel" => Self::get_pixel(datum, args),
             "crop" => Self::crop(datum, args),
@@ -215,6 +217,26 @@ impl BitmapDatumHandlers {
             bitmap.create_matte(&player.movie.cast_manager.palettes());
             let matte_arc = bitmap.matte.as_ref().unwrap().clone();
             Ok(player.alloc_datum(Datum::Matte(matte_arc)))
+        })
+    }
+
+    /// Director: `imageObject.createMask()`. Takes no arguments (unlike
+    /// createMatte's optional alphaThreshold) per the 11.5 dictionary.
+    pub fn create_mask(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            if !args.is_empty() {
+                return Err(ScriptError::new(
+                    "createMask takes no arguments".to_string(),
+                ));
+            }
+            let bitmap_ref = *player.get_datum(datum).to_bitmap_ref()?;
+            let palettes = player.movie.cast_manager.palettes();
+            let bitmap = player
+                .bitmap_manager
+                .get_bitmap(bitmap_ref)
+                .ok_or_else(|| ScriptError::new("createMask: bitmap not found".to_string()))?;
+            let mask = bitmap.create_mask(&palettes);
+            Ok(player.alloc_datum(Datum::Matte(std::sync::Arc::new(mask))))
         })
     }
 
