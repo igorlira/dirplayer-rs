@@ -30,8 +30,65 @@ pub fn default_motion_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> 
     scene.motions.iter()
         .find(|m| m.name == skeleton.name)
         .or_else(|| scene.motions.iter().find(|m| {
-            m.tracks.len() > 1 && !m.name.eq_ignore_ascii_case("DefaultMotion")
+            m.tracks.len() > 1
+                && !m.name.eq_ignore_ascii_case("DefaultMotion")
+                && motion_drives_skeleton(skeleton, m)
         }))
+}
+
+/// True when `motion` was authored for `skeleton` — at least one of its tracks
+/// names a bone of this rig.
+///
+/// A member's motion table is scene-global, and a game that clones several rigs
+/// plus all their clips into one member has many motions that drive OTHER
+/// skeletons. Sampling one of those leaves every bone on its rest TRS (no track
+/// name matches), which reads as a plausible pose and is silently wrong.
+pub fn motion_drives_skeleton(skeleton: &W3dSkeleton, motion: &W3dMotion) -> bool {
+    motion.tracks.iter().any(|t| skeleton.bones.iter().any(|b| b.name == t.bone_name))
+}
+
+/// The rig's authored idle, whose frame-0 root is the reference the renderer
+/// relativizes a skinned draw by (`[root-relativize]` in `scene3d.rs`).
+///
+/// Restricted to motions that drive this skeleton's ROOT bone: that is what the
+/// caller samples, and it is the authoritative ownership test. AreaZero's level
+/// member holds RobotGun, RobotMelee, RobotFrog and RobotTank with every clip
+/// cloned in beside them, so an unfiltered "first motion whose name contains
+/// idle" hands three of the four rigs a clip that cannot move them — it samples
+/// to the rest TRS and reads as a plausible pose.
+///
+/// Deliberately narrower than `import_root_com_for_skeleton`: falling back to the
+/// rig's like-named motion here would start relativizing draws that were never
+/// relativized before, and a model whose node does NOT carry the fold (a clone
+/// the game positions itself) would then be rotated by the COM. Agent Free Ride
+/// 2's rider is exactly that — it sat 90 degrees across its jetski.
+pub fn idle_reference_motion<'a>(
+    scene: &'a W3dScene,
+    skeleton: &W3dSkeleton,
+) -> Option<&'a W3dMotion> {
+    let root = skeleton.bones.first()?.name;
+    let own = || scene.motions.iter()
+        .filter(move |m| m.tracks.iter().any(|t| t.bone_name == root));
+    own().find(|m| m.name.as_lower_str().contains("idle_rest"))
+        .or_else(|| own().find(|m| m.name.as_lower_str().contains("idle")))
+}
+
+/// Frame 0 of the motion Director samples to fold a skinned model's biped COM
+/// into its model node at import (`apply_root_com_to_model_nodes`).
+///
+/// `None` means "no clip for this rig in this member" — and frame 0 of no motion
+/// is the skeleton's REST pose, which is what the caller then samples. Director
+/// folds that too: AreaZero keeps each robot in its own cast member with zero
+/// MOTION_BLOCKs and every clip in a member of its own, and without the rest-pose
+/// fold `member("RobotGun").model("RobotGun").getWorldTransform()` — the transform
+/// the game copies onto every robot it spawns — comes back without the COM.
+pub fn import_root_com_motion<'a>(
+    scene: &'a W3dScene,
+    skeleton: &W3dSkeleton,
+) -> Option<&'a W3dMotion> {
+    let root = match skeleton.bones.first() { Some(b) => b.name, None => return None };
+    idle_reference_motion(scene, skeleton).or_else(|| scene.motions.iter()
+        .find(|m| m.name == skeleton.name && m.tracks.iter().any(|t| t.bone_name == root)))
 }
 
 pub fn has_meaningful_translation(x: f32, y: f32, z: f32) -> bool {
