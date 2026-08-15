@@ -278,10 +278,16 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 9px 22px;
+  /* Bottom padding is a pixel short of the top so the heavier bottom border
+     below keeps the label optically centred and the button its original height. */
+  padding: 9px 22px 8px;
   background-color: var(--surface-raised);
   color: var(--accent);
   border: 1px solid var(--accent);
+  /* Weighted like the active tab's marking (inset 0 2px 0 in theme.css): the
+     same 2px accent edge, so the primary action and the selected document read
+     as the same emphasis language. */
+  border-bottom-width: 2px;
   border-radius: var(--r-md);
   cursor: pointer;
   font-size: 0.92em;

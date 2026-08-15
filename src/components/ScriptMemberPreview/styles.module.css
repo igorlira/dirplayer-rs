@@ -158,7 +158,16 @@
 .segmentActive:hover {
   color: var(--accent);
   background-color: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  /* The shared emphasis edge — see theme.css. Laid over the ring's bottom
+     pixel, so the edge is 2px total rather than 3px. */
+  box-shadow:
+    inset 0 0 0 1px var(--accent),
+    inset 0 -2px 0 var(--accent);
+  /* Unlike the theme toggle this segment has no fixed height, so the label is
+     shifted up within the *same* 4px of vertical padding — adding padding
+     would make the active segment taller than its neighbours. */
+  padding-top: 1px;
+  padding-bottom: 3px;
   font-weight: 600;
 }
 

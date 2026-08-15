@@ -136,6 +136,10 @@
   composes: pickButton;
   color: var(--accent);
   border-color: var(--accent);
+  /* The shared emphasis edge — see theme.css. The pixel it adds comes back out
+     of the bottom padding so the chip does not grow when it activates. */
+  border-bottom-width: 2px;
+  padding-bottom: 1px;
 }
 
 /* The global reset strips native form appearance, so the range input has no

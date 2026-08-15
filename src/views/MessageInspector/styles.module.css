@@ -34,10 +34,14 @@
 /* Primary action, same chip treatment as the load screen and the branded
    conflict UI: the accent outlines the button instead of flooding it. */
 .evalButton {
-  padding: 0.5rem 1rem;
+  /* Bottom padding is a pixel short of the top, so the heavier bottom border
+     keeps the label centred and the button its original height. */
+  padding: 0.5rem 1rem calc(0.5rem - 1px);
   background-color: var(--surface-raised);
   color: var(--accent);
   border: 1px solid var(--accent);
+  /* The shared emphasis edge — see theme.css. */
+  border-bottom-width: 2px;
   border-radius: var(--r-sm);
   cursor: pointer;
   font-size: 0.9rem;

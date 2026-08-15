@@ -36,7 +36,16 @@
 .themeOptionActive {
   color: var(--accent);
   background-color: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  /* Weighted along the bottom like the active tab's marking and the primary
+     button: a 1px ring with a 2px accent edge under it. The band is laid over
+     the ring's own bottom pixel rather than added to it, so the edge is 2px
+     total, not 3px. */
+  box-shadow:
+    inset 0 0 0 1px var(--accent),
+    inset 0 -2px 0 var(--accent);
+  /* Box is a fixed height, so the band eats into it: nudge the icon up by the
+     1px it would otherwise sit low by. */
+  padding-bottom: 2px;
 
   &:hover {
     color: var(--accent);
