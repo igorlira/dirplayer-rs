@@ -31,12 +31,15 @@
   }
 }
 
+/* Outlined, not filled — the accent lives on the edge and the icon. Same rule
+   as the script view switch and the primary buttons. */
 .themeOptionActive {
   color: var(--accent);
-  background-color: var(--accent-soft);
+  background-color: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--accent);
 
   &:hover {
     color: var(--accent);
-    background-color: var(--accent-soft);
+    background-color: var(--surface);
   }
 }

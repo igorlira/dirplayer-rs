@@ -110,11 +110,12 @@
   border-bottom: 1px solid var(--chrome-hairline);
 }
 
+/* Sits beside the segmented control, so it is outlined for the same reason. */
 .languageBadge {
   margin-left: auto;
-  padding: 1px 7px;
+  padding: 0 6px;
   border-radius: var(--r-sm);
-  background-color: var(--accent-soft);
+  border: 1px solid var(--accent);
   color: var(--accent);
   font-family: var(--font-ui);
   font-size: 11px;

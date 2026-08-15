@@ -45,11 +45,11 @@
 }
 
 .evalButton:hover {
-  background-color: var(--accent-soft);
+  background-color: var(--surface-hover);
 }
 
 .evalButton:active {
-  background-color: var(--accent-soft);
+  background-color: var(--surface-hover);
 }
 
 .clearButton {

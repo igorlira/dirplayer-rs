@@ -130,9 +130,10 @@
   font-size: 12px;
 }
 
+/* Accent on the border and label only; the fill stays the neutral chip
+   inherited from .pickButton. */
 .pickButtonActive {
   composes: pickButton;
-  background: var(--accent-soft);
   color: var(--accent);
   border-color: var(--accent);
 }
