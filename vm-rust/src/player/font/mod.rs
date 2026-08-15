@@ -1115,10 +1115,25 @@ pub fn pfr_strike_vertical_metrics(
 /// therefore stepped 25 px between 9 px lines, which is what blew Habbo v31's
 /// catalogue page text apart (`ctlg_header_text`: fls=0, char_h=26).
 ///
-/// Scan the strike's real vertical ink extent (cap top → descender bottom)
-/// instead — for a pixel font that IS ascent + descent. Falls back to the
-/// historical `min(cell, nominal × 1.5)` cap when the strike has no scannable
-/// ink (non-PFR atlases, or a font whose sample glyphs are all blank).
+/// Scan the strike instead — but measure from the LINE TOP to the descender
+/// bottom (`desc_bottom + 1`), not across the ink extent
+/// (`desc_bottom - cap_top + 1`). The renderer anchors each line's atlas CELL
+/// TOP at the line top and deliberately keeps the ascent-to-cap gap (see the
+/// anchoring rationale in `text.rs`), so a line's ink occupies
+/// `[cap_top, desc_bottom]` and the box has to reach `desc_bottom + 1`.
+///
+/// Measuring the extent dropped exactly `cap_top` rows PER LINE, which cut the
+/// descenders off `y p q j` in every Habbo chat bubble: Volter-9 scans
+/// `cap_top = 1, desc_bottom = 9`, so the bubble's auto-leading text member was
+/// sized 9 for ink that reaches row 9 inclusive. This is the same rule the
+/// outline path uses (`pfr_outline_auto_line_height`, ascender − descender) —
+/// both span the line box, not the ink.
+///
+/// Still well under the padded cell, so Habbo v31's catalogue text keeps its
+/// ~10 px lines rather than the 25 px `char_height - 1` produced.
+///
+/// Falls back to the historical `min(cell, nominal × 1.5)` cap when the strike
+/// has no scannable ink (non-PFR atlases, or all-blank sample glyphs).
 ///
 /// Shared by `.rect`, `.height` and both halves of `.image` (measure + render)
 /// so all four agree: Habbo's window Text-Wrapper bakes with
@@ -1137,13 +1152,80 @@ pub fn pfr_auto_line_height(
     if let Some(fb) = font_bitmap {
         if let (Some(cap_top), Some(desc_bottom)) = pfr_strike_vertical_metrics(font, fb) {
             if desc_bottom >= cap_top {
-                let extent = (desc_bottom - cap_top + 1) as u16;
-                return extent.clamp(1, cell_h.max(1));
+                let line = (desc_bottom + 1) as u16;
+                return line.clamp(1, cell_h.max(1));
             }
         }
     }
     let nominal_capped = (nominal as f32 * 1.5).round() as u16;
     cell_h.min(nominal_capped).max(1)
+}
+
+/// Paige auto leading as the OUTLINE renderer actually steps it: the font's own
+/// `ascender - descender`, scaled to the requested size.
+///
+/// This is the authoritative rule — "auto derives the line from the FONT's
+/// ascent + descent" — and `render_pfr_outline_text_to_bitmap` has always used
+/// it (`line_natural`). The measure side used a scanned strike ink extent
+/// instead, which is SHORTER by the gap above cap height, so every box came out
+/// `cap_top` per line too small and the last line was clipped. Spectral Wizard's
+/// speech bubbles lost the bottom of their final line that way: Comic Sans MS
+/// steps 17 px/line, the box was built on 14, and four lines needed 68 rows in a
+/// 59-row bitmap.
+///
+/// Returns `None` when the font has no usable outline metrics, in which case the
+/// caller falls back to `pfr_auto_line_height`'s strike scan.
+pub fn pfr_outline_auto_line_height(
+    parsed: &crate::director::chunks::pfr1::types::Pfr1ParsedFont,
+    font_size: u16,
+) -> Option<u16> {
+    let res = parsed.physical_font.outline_resolution as f64;
+    if res <= 0.0 || font_size == 0 {
+        return None;
+    }
+    let m = &parsed.physical_font.metrics;
+    let lh = (((m.ascender - m.descender) as f64) * (font_size as f64 / res)).round();
+    if lh >= 1.0 { Some(lh as u16) } else { None }
+}
+
+/// `pfr_outline_auto_line_height` for the font a text member names, resolved the
+/// same way `.image` resolves its outline font: a PFR with real outlines, no
+/// bitmap strikes, and not a pixel font (those stay on the crisp atlas path and
+/// keep the strike-scan rule).
+///
+/// Shared by `.rect`, `.height` and `.image` so all three size a box for the
+/// number of lines the renderer will actually draw.
+pub fn outline_auto_line_height_for_font(
+    player: &crate::player::DirPlayer,
+    font_name: &str,
+    font_size: u16,
+) -> Option<u16> {
+    if font_name.is_empty() {
+        return None;
+    }
+    let lc = font_name.to_ascii_lowercase();
+    let canon = FontManager::canonical_font_name(font_name);
+    for cast in &player.movie.cast_manager.casts {
+        for m in cast.members.values() {
+            let crate::player::cast_member::CastMemberType::Font(fd) = &m.member_type else {
+                continue;
+            };
+            let matches = fd.font_info.name.to_lowercase() == lc
+                || m.name.to_lowercase() == lc
+                || (!canon.is_empty()
+                    && (FontManager::canonical_font_name(&fd.font_info.name) == canon
+                        || FontManager::canonical_font_name(&m.name) == canon));
+            if !matches {
+                continue;
+            }
+            if let Some(p) = &fd.pfr_parsed {
+                if !p.glyphs.is_empty() && p.bitmap_glyphs.is_empty() && !p.is_pixel_font {
+                    return pfr_outline_auto_line_height(p, font_size);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extra rows a PFR text `.image`/`.rect` must reserve BELOW its
