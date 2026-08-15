@@ -78,6 +78,14 @@
   --accent-soft: rgba(255, 102, 0, 0.1);
   --accent-line: rgba(255, 102, 0, 0.35);
   --accent-mark: #ff6600;
+  /* The one place the accent is a solid fill (see the checkbox rule below).
+     A shade deeper than --accent so the white tick clears 3:1 on it — 3.56:1,
+     where plain #ff6600 would sit at 2.94:1. */
+  --check-fill: #e65c00;
+  --check-mark: #ffffff;
+  /* Shape only — the mask takes its alpha, never its colour — so unlike every
+     other token here this one is not redefined per theme. */
+  --check-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M2.4 6.3 4.8 8.7 9.6 3.3'/%3E%3C/svg%3E");
 
   /* Status */
   --danger: #c0392b;
@@ -161,6 +169,10 @@
     --accent-soft: rgba(245, 166, 35, 0.13);
     --accent-line: rgba(245, 166, 35, 0.35);
     --accent-mark: #f5a623;
+    /* Amber is light enough that the mark inverts here: dark on amber is
+       10.4:1, where white would be 2.03:1. */
+    --check-fill: #f5a623;
+    --check-mark: #1a1a1a;
 
     --danger: #e0655a;
     --danger-soft: rgba(224, 101, 90, 0.12);
@@ -237,6 +249,8 @@
   --accent-soft: rgba(245, 166, 35, 0.13);
   --accent-line: rgba(245, 166, 35, 0.35);
   --accent-mark: #f5a623;
+  --check-fill: #f5a623;
+  --check-mark: #1a1a1a;
 
   --danger: #e0655a;
   --danger-soft: rgba(224, 101, 90, 0.12);
@@ -282,19 +296,64 @@
   --accent-wash: rgba(245, 166, 35, 0.055);
 }
 
-/* Native form controls that keep their platform rendering (App.css forces
-   `appearance: checkbox`) take the palette through accent-color. Global rather
-   than per-component, because a checkbox that misses it falls back to the
-   browser's blue — which is how the studio's renderer options ended up off
-   palette while the load screen's were amber.
-   
-   These stay *filled* when checked, unlike the accent rule for buttons and
-   tabs: a checkbox has no label inside it to carry the accent, so the fill is
-   the state, and an outlined tick reads as unchecked. */
-input[type="checkbox"],
+/* Native form controls that keep their platform rendering take the palette
+   through accent-color. Global rather than per-component, because a control
+   that misses it falls back to the browser's blue — which is how the studio's
+   renderer options ended up off palette while the load screen's were amber. */
 input[type="radio"],
 input[type="range"] {
   accent-color: var(--accent);
+}
+
+/* The checkbox is drawn here instead, because accent-color only sets the fill:
+   the browser then picks the tick's colour itself, purely by contrast, and
+   over the light-mode orange it lands on black. Owning the mark is the only
+   way to colour it, and the reset (`all: unset`) has already stripped the
+   native control anyway, so there is nothing to preserve.
+
+   Checked stays *filled*, unlike the accent rule for buttons and tabs: a
+   checkbox has no label inside it to carry the accent, so the fill is the
+   state, and an outlined tick reads as unchecked. */
+input[type="checkbox"] {
+  appearance: none;
+  box-sizing: border-box;
+  display: inline-grid;
+  place-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:checked {
+  background-color: var(--check-fill);
+  border-color: var(--check-fill);
+}
+
+/* Masked rather than drawn with rotated borders, so the stroke keeps its round
+   caps and stays centred at any box size. */
+input[type="checkbox"]:checked::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background-color: var(--check-mark);
+  -webkit-mask: var(--check-glyph) center / contain no-repeat;
+  mask: var(--check-glyph) center / contain no-repeat;
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* The reset strips select chrome; give it the same well as a text input. */

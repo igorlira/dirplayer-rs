@@ -28,13 +28,9 @@
   color: #61dafb;
 }
 
-input[type="checkbox"] {
-  -webkit-appearance: checkbox !important;
-  -moz-appearance: checkbox !important;
-  -ms-appearance: checkbox !important;
-  -o-appearance: checkbox !important;
-  appearance: checkbox !important;
-}
+/* The checkbox used to be restored to its native rendering here, undoing the
+   reset's `all: unset`. It is drawn from scratch in styles/theme.css instead —
+   the native control gives no control over the tick's colour. */
 
 @keyframes App-logo-spin {
   from {

@@ -649,7 +649,6 @@ export default function LoadMovie() {
                   >
                     <input
                       type="checkbox"
-                      className={styles.checkbox}
                       checked={useCorsProxy}
                       onChange={e => setUseCorsProxy(e.currentTarget.checked)}
                       disabled={isLoading}
@@ -747,7 +746,6 @@ export default function LoadMovie() {
                 type="checkbox"
                 id="autoPlay"
                 name="autoPlay"
-                className={styles.checkbox}
                 disabled={isLoading}
                 checked={autoPlay}
                 onChange={e => setAutoPlay(e.currentTarget.checked)}

@@ -269,11 +269,6 @@
   }
 }
 
-.checkbox {
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
-}
 
 /* Primary button. Same treatment as the conflict UI's recommended action:
    a dark chip that the accent outlines rather than floods. */
