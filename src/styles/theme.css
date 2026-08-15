@@ -65,23 +65,26 @@
   --text-faint: #8f8b85;
 
   /* Accent. --accent is the interactive/brand colour; on light surfaces it has
-     to carry text, so it is darker than the branded #f5a623. --accent-mark
-     stays the true brand amber for icons and marks on dark chrome.
+     to carry text, so it is darker than the branded #f5a623 — and nudged
+     toward orange (hue 27° rather than 36°), because darkening a yellow-amber
+     straight down turns it to mustard. 5.02:1 on white, so it clears AA for
+     body text; the previous #b06f10 sat at 4.10:1 and failed.
+     --accent-mark stays the accent for icons and marks on dark chrome.
      House rule, inherited from the conflict UI's .btn-poly: the accent is
      carried by borders, text and thin edges. It never floods a large area,
      which is why there is no "text on solid accent" token. */
-  --accent: #b06f10;
-  --accent-hover: #8d5807;
-  --accent-soft: rgba(176, 111, 16, 0.1);
-  --accent-line: rgba(176, 111, 16, 0.35);
-  --accent-mark: #b06f10;
+  --accent: #ff6600;
+  --accent-hover: #e65c00;
+  --accent-soft: rgba(255, 102, 0, 0.1);
+  --accent-line: rgba(255, 102, 0, 0.35);
+  --accent-mark: #ff6600;
 
   /* Status */
   --danger: #c0392b;
   --danger-soft: rgba(192, 57, 43, 0.1);
-  --warning-bg: rgba(176, 111, 16, 0.07);
-  --warning-line: rgba(176, 111, 16, 0.3);
-  --warning-text: #8a5c10;
+  --warning-bg: rgba(255, 102, 0, 0.08);
+  --warning-line: rgba(255, 102, 0, 0.35);
+  --warning-text: #b34700;
   --success: #1a5c1a;
   --success-bg: #d4edda;
   --success-line: #2a7a2a;
@@ -92,7 +95,7 @@
   --select-line: #0066cc;
   --match-bg: #fff3cd;
   --match-bg-hover: #ffe69c;
-  --focus-ring: rgba(176, 111, 16, 0.18);
+  --focus-ring: rgba(255, 102, 0, 0.2);
 
   /* Score / timeline */
   /* Score data. Deliberately monochrome: sprite spans are neutral blocks, the
@@ -106,7 +109,7 @@
   --score-sprite-label: #4a453d;
   --score-current: #c0392b;
   --score-current-on: #ffffff;
-  --score-scripted: rgba(176, 111, 16, 0.32);
+  --score-scripted: rgba(255, 102, 0, 0.3);
   --score-scripted-selected: var(--accent);
 
   /* Value syntax colouring (PropertyTable, message inspector) */
@@ -125,7 +128,7 @@
   --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.7);
   --shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.12);
-  --accent-wash: rgba(176, 111, 16, 0.06);
+  --accent-wash: rgba(255, 102, 0, 0.07);
 }
 
 /* System preference, when the user has not made an explicit choice. */
