@@ -1,19 +1,33 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import classNames from "classnames";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import styles from "./styles.module.css";
-import { IScoreSpriteSpan, ScoreSpriteSnapshot } from "../../vm";
-import { buildScoreIndex, findSpanAtFrame, ScoreIndex } from "../../utils/scoreIndex";
+import { IScoreBehaviorReference, IScoreSpriteSpan, ScoreSpriteSnapshot } from "../../vm";
+import {
+  buildFrameScriptIndex,
+  buildScoreIndex,
+  findRangeAtFrame,
+  findSpanAtFrame,
+  ScoreIndex,
+} from "../../utils/scoreIndex";
 import { usePlayheadVar } from "../../utils/usePlayhead";
 import { SCORE_CELL_WIDTH, SCORE_LABEL_WIDTH, SCORE_ROW_HEIGHT } from "../../utils/scoreLayout";
 
-// Geometry is shared with the score inspector's ruler so the two line up; see
-// utils/scoreLayout. Published to CSS as custom properties below, so the
-// virtualizer's arithmetic and the stylesheet can't disagree either.
+// Geometry is shared via utils/scoreLayout and published to CSS as custom
+// properties below, so the virtualizer's arithmetic and the stylesheet can't
+// disagree.
 const CELL_WIDTH = SCORE_CELL_WIDTH;
 const ROW_HEIGHT = SCORE_ROW_HEIGHT;
 const LABEL_WIDTH = SCORE_LABEL_WIDTH;
-const HEADER_HEIGHT = 18;
+const RULER_HEIGHT = 18;
+const SCRIPT_LANE_HEIGHT = 20;
+
+export type FrameScriptLane = {
+  behaviorReferences?: IScoreBehaviorReference[];
+  /** Frames covered by the current selection, inclusive. */
+  selectedRange?: [number, number];
+  onSelect: (frame: number) => void;
+};
 
 export interface ScoreTimelineProps {
   frameCount: number;
@@ -23,10 +37,10 @@ export interface ScoreTimelineProps {
   selectedChannel?: number | false;
   onSelectChannel?: (channel: number) => void;
   onCellClick?: (cell: { channel: number; frame: number }) => void;
-  /** Receives the scroll element, so a sibling ruler can be kept in step. */
-  onScrollerRef?: (element: HTMLDivElement | null) => void;
-  /** Fired on horizontal scroll, for the same reason. */
-  onScrollLeftChange?: (scrollLeft: number) => void;
+  /** Adds the frame-script lane above the ruler. Omitted: no lane. */
+  frameScripts?: FrameScriptLane;
+  /** Collapses the channel rows, leaving the header (lane + ruler) in place. */
+  showRows?: boolean;
 }
 
 interface ITimelineSelection {
@@ -101,16 +115,11 @@ export default function ScoreTimeline({
   selectedChannel,
   onSelectChannel,
   onCellClick,
-  onScrollerRef,
-  onScrollLeftChange,
+  frameScripts,
+  showRows = true,
 }: ScoreTimelineProps) {
   const [selectedCell, setSelectedCell] = useState<ITimelineSelection>();
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    onScrollerRef?.(scrollRef.current);
-    return () => onScrollerRef?.(null);
-  }, [onScrollerRef]);
 
   // The playhead writes a CSS variable straight to the DOM; the grid itself
   // never re-renders when the movie advances a frame.
@@ -121,8 +130,16 @@ export default function ScoreTimeline({
     [channelCount, spriteSpans]
   );
 
+  const frameScriptIndex = useMemo(
+    () => buildFrameScriptIndex(frameScripts?.behaviorReferences),
+    [frameScripts?.behaviorReferences]
+  );
+
+  const laneHeight = frameScripts ? SCRIPT_LANE_HEIGHT : 0;
+  const headerHeight = laneHeight + RULER_HEIGHT;
+
   const rowVirtualizer = useVirtualizer({
-    count: channelCount,
+    count: showRows ? channelCount : 0,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 6,
@@ -134,6 +151,8 @@ export default function ScoreTimeline({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => CELL_WIDTH,
     overscan: 12,
+    // Reserves the channel-number gutter so the ruler and the rows below share
+    // an origin.
     paddingStart: LABEL_WIDTH,
   });
 
@@ -153,7 +172,6 @@ export default function ScoreTimeline({
     <div
       ref={scrollRef}
       className={styles.scoreOverviewContainer}
-      onScroll={onScrollLeftChange ? (e) => onScrollLeftChange(e.currentTarget.scrollLeft) : undefined}
       style={{
         // Consumed by the stylesheet for cell sizing and playhead placement.
         ['--frame-cell-width' as string]: `${CELL_WIDTH}px`,
@@ -163,22 +181,52 @@ export default function ScoreTimeline({
     >
       <div
         className={styles.scoreGrid}
-        style={{ width: totalWidth, height: HEADER_HEIGHT + rowVirtualizer.getTotalSize() }}
+        style={{ width: totalWidth, height: headerHeight + rowVirtualizer.getTotalSize() }}
       >
-        <div className={styles.scoreGridHeader} style={{ width: totalWidth }}>
-          <div className={styles.channelLabelCell}>Ch</div>
-          {columns.map((column) => {
-            const frame = column.index + 1;
-            return (
-              <div
-                key={column.index}
-                className={styles.scoreGridFrameCell}
-                style={{ left: column.start }}
-              >
-                {frame === 1 || frame % 5 === 0 ? frame : "·"}
-              </div>
-            );
-          })}
+        {/* Frame-script lane and ruler in one sticky header — the panel's only
+            ruler. The rows below are measured against it by construction,
+            rather than by keeping two scrollers in step. */}
+        <div className={styles.scoreGridHeader} style={{ width: totalWidth, height: headerHeight }}>
+          <div className={styles.headerCorner} style={{ height: headerHeight }}>Ch</div>
+
+          {frameScripts && (
+            <div className={styles.scriptLane} style={{ height: laneHeight }}>
+              {columns.map((column) => {
+                const frame = column.index + 1;
+                const hasScript = !!findRangeAtFrame(frameScriptIndex, frame);
+                const range = frameScripts.selectedRange;
+                const isSelected = !!range && frame >= range[0] && frame <= range[1];
+                return (
+                  <button
+                    key={column.index}
+                    className={classNames(
+                      styles.scriptLaneCell,
+                      hasScript && styles.scripted,
+                      isSelected && styles.selected
+                    )}
+                    style={{ left: column.start }}
+                    onClick={() => frameScripts.onSelect(frame)}
+                    title={hasScript ? `Frame script at frame ${frame}` : undefined}
+                  />
+                );
+              })}
+            </div>
+          )}
+
+          <div className={styles.rulerLane} style={{ top: laneHeight, height: RULER_HEIGHT }}>
+            {columns.map((column) => {
+              const frame = column.index + 1;
+              return (
+                <div
+                  key={column.index}
+                  className={styles.scoreGridFrameCell}
+                  style={{ left: column.start }}
+                >
+                  {frame === 1 || frame % 5 === 0 ? frame : "·"}
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div className={styles.scoreGridBody} style={{ height: rowVirtualizer.getTotalSize() }}>

@@ -15,95 +15,13 @@
   align-items: stretch;
 }
 
-.scoreScrollContainer {
-  overflow-x: auto;
-  overflow-y: hidden;
-  contain: content;
-}
 
-.rulerInner {
-  position: relative;
-}
 
-/* Stands in for the timeline's channel-number column so both strips share an
-   origin. Sticky like that column, so the frame under the playhead stays
-   readable when the pair is scrolled. */
-.rulerGutter {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  float: left;
-  width: var(--channel-label-width);
-  height: 40px;
-  background-color: var(--chrome-header);
-  border-right: 1px solid var(--chrome-hairline);
-}
 
-.scriptHeader {
-  position: relative;
-  width: 100%;
-  height: 20px;
-  background-color: var(--chrome-header);
-}
 
-.scriptHeaderCell {
-  position: absolute;
-  top: 0;
-  display: block;
-  width: var(--frame-cell-width);
-  height: 100%;
-  box-sizing: border-box;
-  border-left: var(--chrome-hairline) 1px solid;
 
-  &.scripted {
-    background-color: var(--score-scripted);
 
-    &.selected {
-      background-color: var(--score-scripted-selected);
-    }
-  }
 
-  &.selected {
-    background-color: var(--surface-hover);
-  }
-}
-
-.frameHeader {
-  position: relative;
-  width: 100%;
-  height: 20px;
-  background-color: var(--chrome-header);
-  border-bottom: 1px solid var(--chrome-hairline);
-}
-
-.frameHeaderCell {
-  position: absolute;
-  top: 0;
-  width: var(--frame-cell-width);
-  height: 100%;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-dim);
-}
-
-/* One element, moved by a custom property. See utils/usePlayhead.ts. */
-.rulerPlayhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: var(--frame-cell-width);
-  pointer-events: none;
-  transform: translateX(
-    calc(var(--channel-label-width) + (var(--playhead-frame, 1) - 1) * var(--frame-cell-width))
-  );
-  background-color: color-mix(in srgb, var(--score-current) 22%, transparent);
-  border-left: 1px solid var(--score-current);
-  border-right: 1px solid var(--score-current);
-}
 
 .channelList {
   height: 300px;
@@ -154,8 +72,39 @@
   align-items: stretch;
 }
 
+/* The score block: one scroller holding the script lane, the ruler and the
+   channel rows. Collapsed, it shrinks to just the sticky header. */
+.timelineBlock {
+  display: flex;
+  flex-direction: column;
+}
+
+.sectionToggle {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  text-align: left;
+  background-color: var(--chrome-header);
+  border-bottom: 1px solid var(--chrome-hairline);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.sectionToggle:hover {
+  background-color: var(--surface-hover);
+  color: var(--text);
+}
+
 .timelineContainer {
   position: relative;
   height: 300px;
   width: 100%;
+}
+
+/* Header only: script lane (20px) + ruler (18px) + its bottom hairline. */
+.timelineContainerCollapsed {
+  height: 39px;
 }

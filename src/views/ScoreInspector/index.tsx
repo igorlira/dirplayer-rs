@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectScoreSnapshot } from "../../store/vmSlice";
@@ -8,16 +8,11 @@ import { player_set_debug_selected_channel, subscribe_to_channel_names, subscrib
 import { channelSelected, scoreSpanSelected, scoreBehaviorSelected } from "../../store/uiSlice";
 import { getScoreFrameBehaviorRef } from "../../utils/score";
 import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
-import { usePlayheadVar } from "../../utils/usePlayhead";
-import { SCORE_CELL_WIDTH, SCORE_CHANNEL_ROW_HEIGHT, SCORE_LABEL_WIDTH } from "../../utils/scoreLayout";
+import { SCORE_CHANNEL_ROW_HEIGHT } from "../../utils/scoreLayout";
 import ExpandableButton from "../../components/ExpandableButton";
 import ScoreTimeline from "../../components/ScoreTimeline";
 import { ScoreSpriteSnapshot } from "../../vm";
 
-// Shared with the timeline so frame columns line up between the two; see
-// utils/scoreLayout.
-const CELL_WIDTH = SCORE_CELL_WIDTH;
-const LABEL_WIDTH = SCORE_LABEL_WIDTH;
 const CHANNEL_ROW_HEIGHT = SCORE_CHANNEL_ROW_HEIGHT;
 
 const ChannelRow = memo(function ChannelRow({
@@ -62,22 +57,7 @@ export default function ScoreInspector() {
   const frameCount = useMemo(() => getFrameCount(score), [score]);
   const channelCount = useMemo(() => getChannelCount(score), [score]);
 
-  const rulerRef = useRef<HTMLDivElement>(null);
   const channelListRef = useRef<HTMLDivElement>(null);
-
-  // Frame ticks move a CSS variable, never a React tree.
-  usePlayheadVar(rulerRef);
-
-  const frameVirtualizer = useVirtualizer({
-    horizontal: true,
-    count: frameCount,
-    getScrollElement: () => rulerRef.current,
-    estimateSize: () => CELL_WIDTH,
-    overscan: 16,
-    // Leaves room for the gutter, so frame N lands at the same x as frame N in
-    // the timeline's grid below.
-    paddingStart: LABEL_WIDTH,
-  });
 
   const channelVirtualizer = useVirtualizer({
     count: isShowingChannels ? channelCount : 0,
@@ -100,33 +80,6 @@ export default function ScoreInspector() {
     return () => unsubscribe_from_channel_names();
   }, [shouldSubscribeToChannelNames]);
 
-  const timelineScrollerRef = useRef<HTMLDivElement | null>(null);
-  const isSyncingScroll = useRef(false);
-
-  const syncScroll = useCallback((from: HTMLElement | null, to: HTMLElement | null) => {
-    if (!from || !to || isSyncingScroll.current) return;
-    if (to.scrollLeft === from.scrollLeft) return;
-    // Assigning scrollLeft fires the other element's scroll handler, which
-    // would bounce straight back here.
-    isSyncingScroll.current = true;
-    to.scrollLeft = from.scrollLeft;
-    requestAnimationFrame(() => { isSyncingScroll.current = false; });
-  }, []);
-
-  const onRulerScroll = useCallback(() => {
-    syncScroll(rulerRef.current, timelineScrollerRef.current);
-  }, [syncScroll]);
-
-  const onTimelineScrollLeft = useCallback(() => {
-    syncScroll(timelineScrollerRef.current, rulerRef.current);
-  }, [syncScroll]);
-
-  const onTimelineScrollerRef = useCallback((element: HTMLDivElement | null) => {
-    timelineScrollerRef.current = element;
-    // Adopt whatever the ruler is already showing when the panel opens.
-    if (element && rulerRef.current) element.scrollLeft = rulerRef.current.scrollLeft;
-  }, []);
-
   const onSelectChannel = (channel: number) => {
     player_set_debug_selected_channel(channel);
     dispatch(channelSelected(channel));
@@ -147,58 +100,39 @@ export default function ScoreInspector() {
     return ref ? [ref.startFrame, ref.endFrame] : [selectedObject.frameNumber, selectedObject.frameNumber];
   }, [score, selectedObject]);
 
-  const frameColumns = frameVirtualizer.getVirtualItems();
-  const rulerWidth = LABEL_WIDTH + frameCount * CELL_WIDTH;
-
   return (
     <div className={styles.container}>
-      <div
-        ref={rulerRef}
-        className={styles.scoreScrollContainer}
-        onScroll={onRulerScroll}
-        style={{
-          ['--frame-cell-width' as string]: `${CELL_WIDTH}px`,
-          ['--channel-label-width' as string]: `${LABEL_WIDTH}px`,
-        }}
-      >
-        <div className={styles.rulerInner} style={{ width: rulerWidth }}>
-          {/* Mirrors the timeline's channel-number column so the two strips
-              share an origin; sticky for the same reason that one is. */}
-          <div className={styles.rulerGutter} />
-          <div className={styles.scriptHeader}>
-            {frameColumns.map((column) => {
-              const frame = column.index + 1;
-              const scriptRef = score && getScoreFrameBehaviorRef(frame, score);
-              const isSelected = selectedRange && frame >= selectedRange[0] && frame <= selectedRange[1];
-              return (
-                <button
-                  key={column.index}
-                  className={classNames(
-                    styles.scriptHeaderCell,
-                    scriptRef && styles.scripted,
-                    isSelected && styles.selected
-                  )}
-                  style={{ left: column.start }}
-                  onClick={() => onSelectBehavior(frame)}
-                />
-              );
-            })}
-          </div>
-          <div className={styles.frameHeader}>
-            {frameColumns.map((column) => {
-              const frame = column.index + 1;
-              return (
-                <div
-                  key={column.index}
-                  className={styles.frameHeaderCell}
-                  style={{ left: column.start }}
-                >
-                  {frame === 1 || frame % 5 === 0 ? frame : "·"}
-                </div>
-              );
-            })}
-          </div>
-          {frameCount > 0 && <div className={styles.rulerPlayhead} aria-hidden="true" />}
+      {/* One block: the frame-script lane and ruler live in the timeline's own
+          sticky header, so there is a single ruler and a single scroller. The
+          toggle collapses the channel rows and leaves the header in place. */}
+      <div className={styles.timelineBlock}>
+        <button
+          className={styles.sectionToggle}
+          onClick={() => setIsShowingscoreTimeline((shown) => !shown)}
+        >
+          [{isShowingscoreTimeline ? '-' : '+'}] Timeline
+        </button>
+        <div
+          className={classNames(
+            styles.timelineContainer,
+            !isShowingscoreTimeline && styles.timelineContainerCollapsed
+          )}
+        >
+          <ScoreTimeline
+            frameCount={frameCount}
+            channelCount={channelCount}
+            spriteSpans={score?.spriteSpans}
+            channelSnapshots={channelSnapshots}
+            selectedChannel={selectedChannel}
+            onSelectChannel={onSelectChannel}
+            onCellClick={onTimelineCellClick}
+            showRows={isShowingscoreTimeline}
+            frameScripts={{
+              behaviorReferences: score?.behaviorReferences,
+              selectedRange,
+              onSelect: onSelectBehavior,
+            }}
+          />
         </div>
       </div>
 
@@ -219,24 +153,6 @@ export default function ScoreInspector() {
               );
             })}
           </div>
-        </div>
-      </ExpandableButton>
-
-      <ExpandableButton label="Timeline" className={styles.scoreTimelineButton} onStateChange={setIsShowingscoreTimeline}>
-        <div className={styles.timelineContainer}>
-          {isShowingscoreTimeline && (
-            <ScoreTimeline
-              frameCount={frameCount}
-              channelCount={channelCount}
-              spriteSpans={score?.spriteSpans}
-              channelSnapshots={channelSnapshots}
-              selectedChannel={selectedChannel}
-              onSelectChannel={onSelectChannel}
-              onCellClick={onTimelineCellClick}
-              onScrollerRef={onTimelineScrollerRef}
-              onScrollLeftChange={onTimelineScrollLeft}
-            />
-          )}
         </div>
       </ExpandableButton>
     </div>

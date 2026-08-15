@@ -1,5 +1,5 @@
 import { ICastMemberRef } from "dirplayer-js-api";
-import { IScoreSpriteSpan, ScoreSnapshot } from "../vm";
+import { IScoreBehaviorReference, IScoreSpriteSpan, ScoreSnapshot } from "../vm";
 
 // Lookup structures for the score views.
 //
@@ -35,22 +35,49 @@ export function buildScoreIndex(score?: ScoreSnapshot): ScoreIndex {
   return { spansByChannel };
 }
 
+type FrameRange = { startFrame: number; endFrame: number };
+
+/**
+ * The range covering `frame`, by binary search. Requires the list to be sorted
+ * by startFrame and non-overlapping, which both sprite spans (per channel) and
+ * frame-script behaviours are.
+ */
+export function findRangeAtFrame<T extends FrameRange>(
+  ranges: T[] | undefined,
+  frame: number
+): T | undefined {
+  if (!ranges || ranges.length === 0) return undefined;
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const range = ranges[mid];
+    if (frame < range.startFrame) hi = mid - 1;
+    else if (frame > range.endFrame) lo = mid + 1;
+    else return range;
+  }
+  return undefined;
+}
+
 /** The span covering `frame` in this channel, or undefined. */
 export function findSpanAtFrame(
   spans: IScoreSpriteSpan[] | undefined,
   frame: number
 ): IScoreSpriteSpan | undefined {
-  if (!spans || spans.length === 0) return undefined;
-  let lo = 0;
-  let hi = spans.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const span = spans[mid];
-    if (frame < span.startFrame) hi = mid - 1;
-    else if (frame > span.endFrame) lo = mid + 1;
-    else return span;
-  }
-  return undefined;
+  return findRangeAtFrame(spans, frame);
+}
+
+/**
+ * Frame scripts (behaviours in channel 0), sorted for findRangeAtFrame. The
+ * ruler asks per visible frame, so a scan of the whole behaviour list per cell
+ * would be needless work.
+ */
+export function buildFrameScriptIndex(
+  behaviorReferences?: IScoreBehaviorReference[]
+): IScoreBehaviorReference[] {
+  return (behaviorReferences ?? [])
+    .filter((behavior) => behavior.channelNumber === 0)
+    .sort((a, b) => a.startFrame - b.startFrame);
 }
 
 /**

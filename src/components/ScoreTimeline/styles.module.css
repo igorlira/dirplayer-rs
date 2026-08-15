@@ -17,15 +17,68 @@
   font-size: 10px;
 }
 
-/* Header sticks to the top of the scrollport; its label cell also sticks left,
-   so the corner stays put on both axes. */
+/* The frame-script lane and the ruler, stuck to the top of the scrollport. The
+   corner sticks left as well, so it holds both axes. */
 .scoreGridHeader {
   position: sticky;
   top: 0;
   z-index: 3;
-  height: var(--score-row-height);
   background-color: var(--score-header-bg);
   border-bottom: 1px solid var(--chrome-hairline);
+}
+
+.headerCorner {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: var(--channel-label-width);
+  box-sizing: border-box;
+  padding-bottom: 2px;
+  font-family: var(--font-mono);
+  font-weight: bold;
+  background-color: var(--score-header-bg);
+  border-right: 1px solid var(--chrome-hairline);
+}
+
+/* Both lanes span the full scroll width; their cells are absolutely placed
+   from the column virtualizer, so the corner above is the only child in flow. */
+.scriptLane,
+.rulerLane {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.scriptLane {
+  top: 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.scriptLaneCell {
+  position: absolute;
+  top: 0;
+  display: block;
+  width: var(--frame-cell-width);
+  height: 100%;
+  box-sizing: border-box;
+  border-left: 1px solid var(--hairline);
+  background: none;
+  cursor: pointer;
+}
+
+.scriptLaneCell.scripted {
+  background-color: var(--score-scripted);
+}
+
+.scriptLaneCell.selected {
+  background-color: var(--surface-hover);
+}
+
+.scriptLaneCell.scripted.selected {
+  background-color: var(--score-scripted-selected);
 }
 
 .scoreGridBody {
@@ -76,6 +129,7 @@
 .scoreGridFrameCell {
   position: absolute;
   top: 0;
+  color: var(--text-dim);
   width: var(--frame-cell-width);
   height: 100%;
   box-sizing: border-box;
