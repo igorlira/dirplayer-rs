@@ -69,7 +69,6 @@ export default function FilmLoopInspector({ memberId }: IMemberInspectorProps) {
           frameCount={getFrameCount(memberSnapshot.score)}
           channelCount={getChannelCount(memberSnapshot.score)}
           spriteSpans={memberSnapshot.score.spriteSpans}
-          channelInitData={memberSnapshot.score.channelInitData}
           onCellClick={(cell) => {
             dispatch(scoreSpanSelected({
               channelNumber: cell.channel,

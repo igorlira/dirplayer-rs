@@ -1383,9 +1383,48 @@ pub fn subscribe_to_channel_names() {
         let player = unsafe { crate::player::player_mut() };
 
         player.is_subscribed_to_channel_names = true;
-        for channel in &player.movie.score.channels {
-            JsApi::dispatch_channel_name_changed(channel.number as i16);
-        }
+        // One message for all of them — see dispatch_all_channel_names.
+        JsApi::dispatch_all_channel_names(player);
+    });
+}
+
+/// The score inspector is showing: start pushing score snapshots, and send the
+/// current one right away. Nothing is pushed while unsubscribed — a full score
+/// snapshot is tens of thousands of objects and ordinary playback needs none of
+/// it.
+#[wasm_bindgen]
+pub fn subscribe_to_score() {
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
+        player.is_subscribed_to_score = true;
+        JsApi::dispatch_score_changed();
+    });
+}
+
+#[wasm_bindgen]
+pub fn unsubscribe_from_score() {
+    crate::player::spawn_player_local(async {
+        let player = unsafe { crate::player::player_mut() };
+        player.is_subscribed_to_score = false;
+    });
+}
+
+/// Same deal per cast library: only the ones the cast inspector has expanded
+/// get their member lists serialized.
+#[wasm_bindgen]
+pub fn subscribe_to_cast_member_list(cast_number: u32) {
+    crate::player::spawn_player_local(async move {
+        let player = unsafe { crate::player::player_mut() };
+        player.subscribed_cast_member_lists.insert(cast_number);
+        JsApi::dispatch_cast_member_list_changed(cast_number);
+    });
+}
+
+#[wasm_bindgen]
+pub fn unsubscribe_from_cast_member_list(cast_number: u32) {
+    crate::player::spawn_player_local(async move {
+        let player = unsafe { crate::player::player_mut() };
+        player.subscribed_cast_member_lists.remove(&cast_number);
     });
 }
 

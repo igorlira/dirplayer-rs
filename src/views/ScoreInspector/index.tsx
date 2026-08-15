@@ -4,7 +4,7 @@ import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectScoreSnapshot } from "../../store/vmSlice";
 import styles from "./styles.module.css";
 import classNames from "classnames";
-import { player_set_debug_selected_channel, subscribe_to_channel_names, unsubscribe_from_channel_names } from "vm-rust";
+import { player_set_debug_selected_channel, subscribe_to_channel_names, subscribe_to_score, unsubscribe_from_channel_names, unsubscribe_from_score } from "vm-rust";
 import { channelSelected, scoreSpanSelected, scoreBehaviorSelected } from "../../store/uiSlice";
 import { getScoreFrameBehaviorRef } from "../../utils/score";
 import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
@@ -79,6 +79,12 @@ export default function ScoreInspector() {
     estimateSize: () => CHANNEL_ROW_HEIGHT,
     overscan: 8,
   });
+
+  // The score snapshot is only pushed while this inspector is mounted.
+  useEffect(() => {
+    subscribe_to_score();
+    return () => unsubscribe_from_score();
+  }, []);
 
   const shouldSubscribeToChannelNames = isShowingChannels || isShowingscoreTimeline;
   useEffect(() => {
@@ -183,7 +189,6 @@ export default function ScoreInspector() {
               frameCount={frameCount}
               channelCount={channelCount}
               spriteSpans={score?.spriteSpans}
-              channelInitData={score?.channelInitData}
               channelSnapshots={channelSnapshots}
               selectedChannel={selectedChannel}
               onSelectChannel={onSelectChannel}

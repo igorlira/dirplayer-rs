@@ -45,6 +45,13 @@ impl ToJsValue for ScoreSpriteSpan {
         span_map.str_set("startFrame", &self.start_frame.to_js_value());
         span_map.str_set("endFrame", &self.end_frame.to_js_value());
         span_map.str_set("channelNumber", &self.channel_number.to_js_value());
+        span_map.str_set(
+            "memberRef",
+            &js_sys::Array::of2(
+                &JsValue::from(self.member_ref[0]),
+                &JsValue::from(self.member_ref[1]),
+            ),
+        );
         span_map.to_js_object().into()
     }
 }
@@ -225,6 +232,16 @@ impl CastMemberRef {
     }
 }
 
+// Coalescing flags for the two dispatches heavy enough to matter. Both are
+// called repeatedly while a movie loads (once per member added, once per score
+// mutation); without this each call would serialize the whole collection.
+// wasm is single-threaded, so thread_local is just "global" here.
+thread_local! {
+    static SCORE_DIRTY: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static PENDING_CAST_LISTS: std::cell::RefCell<std::collections::HashSet<u32>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
 #[wasm_bindgen(module = "dirplayer-js-api")]
 extern "C" {
     pub fn onMovieLoaded(test: OnMovieLoadedCallbackData);
@@ -236,6 +253,7 @@ extern "C" {
     pub fn onScoreChanged(snapshot: js_sys::Object);
     pub fn onChannelChanged(channel: i16, snapshot: js_sys::Object);
     pub fn onChannelDisplayNameChanged(channel: i16, display_name: &str);
+    pub fn onChannelDisplayNamesChanged(names: js_sys::Object);
     pub fn onFrameChanged(frame: u32);
     pub fn onScriptError(data: js_sys::Object);
     pub fn onScopeListChanged(scopes: Vec<js_sys::Object>);
@@ -961,10 +979,19 @@ impl JsApi {
     }
 
     pub fn dispatch_cast_member_list_changed(cast_number: u32) {
+        // Nobody is showing this cast's members: serializing them would be
+        // thousands of objects thrown away. Loading a movie fires this once per
+        // member added, so the saving compounds.
+        if !PENDING_CAST_LISTS.with(|pending| pending.borrow_mut().insert(cast_number)) {
+            // Already queued for this tick; the flush below sends current state.
+            return;
+        }
         crate::player::spawn_player_local(async move {
+            PENDING_CAST_LISTS.with(|pending| pending.borrow_mut().remove(&cast_number));
             // Deferred task — the player may be gone by the time it runs.
             if unsafe { PLAYER_OPT.is_none() } { return; }
             let player = unsafe { crate::player::player_ref() };
+            if !player.subscribed_cast_member_lists.contains(&cast_number) { return; }
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -1036,10 +1063,19 @@ impl JsApi {
     }
 
     pub fn dispatch_score_changed() {
+        // Coalesced: loading a movie calls this dozens of times as the score is
+        // assembled, and each call would serialize the whole thing. Only the
+        // first schedules a task; it sends whatever the final state is.
+        if SCORE_DIRTY.with(|dirty| dirty.replace(true)) {
+            return;
+        }
         crate::player::spawn_player_local(async move {
+            SCORE_DIRTY.with(|dirty| dirty.set(false));
             // Deferred task — the player may be gone by the time it runs.
             if unsafe { PLAYER_OPT.is_none() } { return; }
             let player = unsafe { crate::player::player_ref() };
+            // Only when a score inspector is open. See is_subscribed_to_score.
+            if !player.is_subscribed_to_score { return; }
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             onScoreChanged(snapshot.to_js_object());
@@ -1385,34 +1421,6 @@ impl JsApi {
             &js_sys::Array::from_iter(sprite_spans.iter().map(|span| span.to_js_value())),
         );
         
-        member_map.str_set(
-            "channelInitData",
-            &js_sys::Array::from_iter(score.channel_initialization_data.iter().map(
-                |(frame_index, channel_index, init_data)| {
-                    let channel_map = js_sys::Map::new();
-                    channel_map.str_set("frameIndex", &frame_index.to_js_value());
-                    channel_map.str_set("channelIndex", &channel_index.to_js_value());
-                    channel_map.str_set(
-                        "channelNumber",
-                        &get_channel_number_from_index(*channel_index as u32).to_js_value(),
-                    );
-
-                    let init_data_map = js_sys::Map::new();
-                    init_data_map.str_set("spriteType", &init_data.sprite_type.to_js_value());
-                    init_data_map.str_set("castLib", &init_data.cast_lib.to_js_value());
-                    init_data_map.str_set("castMember", &init_data.cast_member.to_js_value());
-                    init_data_map.str_set("width", &init_data.width.to_js_value());
-                    init_data_map.str_set("height", &init_data.height.to_js_value());
-                    init_data_map.str_set("locH", &init_data.pos_x.to_js_value());
-                    init_data_map.str_set("locV", &init_data.pos_y.to_js_value());
-                    init_data_map.str_set("spriteListIdx", &init_data.sprite_list_idx().to_js_value());
-
-                    channel_map.str_set("initData", &init_data_map.to_js_object());
-                    JsValue::from(channel_map.to_js_object())
-                },
-            )),
-        );
-
         return member_map;
     }
 
@@ -1423,8 +1431,17 @@ impl JsApi {
         let mut spans = Vec::new();
         let mut channel_data: HashMap<u16, Vec<(u32, u16, u16)>> = HashMap::new();
         
-        // Collect all frame data per channel from channel_initialization_data
+        // Collect all frame data per channel from channel_initialization_data.
+        //
+        // channel_initialization_data is keyed by a 0-based frame *index*, but
+        // everything else that crosses to JS — behaviorReferences, the current
+        // frame, the timeline's own columns — uses Director's 1-based frame
+        // *numbers*. Normalise here so the snapshot speaks one language; before
+        // this, spans came out as 0..27 for a 28-frame movie, so the UI's
+        // `frame === span.startFrame` test never matched and sprite labels
+        // never rendered.
         for (frame_index, channel_index, init_data) in &score.channel_initialization_data {
+            let frame_index = &(frame_index + 1);
             let channel_num = get_channel_number_from_index(*channel_index as u32) as u16;
             let cast_lib = init_data.cast_lib;
             let cast_member = init_data.cast_member;
@@ -1486,6 +1503,25 @@ impl JsApi {
         spans.sort_by_key(|s| (s.channel_number, s.start_frame));
         
         spans
+    }
+
+    /// Every channel's display name in one message.
+    ///
+    /// Subscribing used to emit one callback per channel, and a movie has ~1000
+    /// of them: 1000 boundary crossings, 1000 Redux actions, and a reducer that
+    /// copies the whole channel map each time — quadratic, and it blocked the
+    /// main thread for over two seconds when the Channels or Timeline panel was
+    /// first opened. Named channels only; the empty ones carry no information.
+    pub fn dispatch_all_channel_names(player: &DirPlayer) {
+        let names = js_sys::Map::new();
+        for channel in &player.movie.score.channels {
+            let number = channel.number as i16;
+            if let Some(display_name) = Self::get_channel_display_name(&number, player) {
+                if display_name.is_empty() { continue; }
+                names.set(&JsValue::from(number), &JsValue::from(display_name));
+            }
+        }
+        onChannelDisplayNamesChanged(names.to_js_object());
     }
 
     pub fn dispatch_channel_name_changed(channel: i16) {
@@ -2015,6 +2051,7 @@ impl JsApi {
     pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}
     pub fn dispatch_debug_datum(_: &DatumRef, _: &DirPlayer) {}
     pub fn dispatch_channel_name_changed(_: i16) {}
+    pub fn dispatch_all_channel_names(_: &DirPlayer) {}
     pub fn dispatch_scope_list(_: &DirPlayer) {}
     pub fn dispatch_global_list(_: &DirPlayer) {}
     pub fn dispatch_debug_update(_: &DirPlayer) {}

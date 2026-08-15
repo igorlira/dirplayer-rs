@@ -10,7 +10,7 @@ import {
 } from "dirplayer-js-api";
 import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
-import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints } from 'vm-rust'
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
@@ -193,6 +193,9 @@ export function initVmCallbacks() {
     },
     onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => {
       store.dispatch(channelDisplayNameChanged({ channelNumber, displayName }));
+    },
+    onChannelDisplayNamesChanged: (names: Record<number, string>) => {
+      store.dispatch(channelDisplayNamesChanged(names));
     },
     onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => {
       // Copy immediately - swfData is a view into WASM memory that may be invalidated

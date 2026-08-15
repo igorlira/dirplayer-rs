@@ -1,7 +1,8 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { ICastMemberIdentifier, castMemberIdentifier, CastSnapshot, CastMemberRecord } from "../../vm"
 import classNames from "classnames"
 import styles from './styles.module.css'
+import { subscribe_to_cast_member_list, unsubscribe_from_cast_member_list } from 'vm-rust'
 import _ from "lodash"
 
 function getMemberTypeIcon(memberType?: string, scriptType?: string): string | null {
@@ -62,6 +63,15 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
   const [isExpanded, setExpanded] = useState(false);
   const castNumber = number;
   const showExpanded = forceExpanded || isExpanded;
+
+  // The VM only serializes a cast's member list while someone is showing it.
+  // Collapsed libraries cost nothing, which matters: a movie's full member set
+  // ran to tens of thousands of snapshots, re-sent on every member added.
+  useEffect(() => {
+    if (!showExpanded) return;
+    subscribe_to_cast_member_list(castNumber);
+    return () => unsubscribe_from_cast_member_list(castNumber);
+  }, [showExpanded, castNumber]);
 
   const filteredMembers = useMemo(() => {
     if (!filterText) return Object.entries(members);

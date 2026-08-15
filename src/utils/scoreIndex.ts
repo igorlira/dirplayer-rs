@@ -4,22 +4,19 @@ import { IScoreSpriteSpan, ScoreSnapshot } from "../vm";
 // Lookup structures for the score views.
 //
 // The timeline asks "what is in channel C at frame F?" once per visible cell.
-// Answering that by scanning `spriteSpans` / `channelInitData` — as the views
-// used to — is O(cells x entries), which on a real movie (hundreds of channels,
-// thousands of frames, thousands of spans) is millions of comparisons per
-// render. These indices bucket the data by channel once per snapshot, then
-// answer each question with a binary search.
+// Answering that by scanning `spriteSpans` — as the views used to — is
+// O(cells x spans), which on a real movie (hundreds of channels, thousands of
+// frames, thousands of spans) is millions of comparisons per render. This
+// buckets the spans by channel once per snapshot, then answers each question
+// with a binary search.
 
 export type ScoreIndex = {
   /** Spans per channel, sorted by startFrame and non-overlapping. */
   spansByChannel: Map<number, IScoreSpriteSpan[]>;
-  /** Member-ref changes per channel, sorted by frameIndex. */
-  memberChangesByChannel: Map<number, { frameIndex: number; memberRef: ICastMemberRef }[]>;
 };
 
 export const EMPTY_SCORE_INDEX: ScoreIndex = {
   spansByChannel: new Map(),
-  memberChangesByChannel: new Map(),
 };
 
 export function buildScoreIndex(score?: ScoreSnapshot): ScoreIndex {
@@ -35,24 +32,7 @@ export function buildScoreIndex(score?: ScoreSnapshot): ScoreIndex {
     list.sort((a, b) => a.startFrame - b.startFrame);
   }
 
-  // Only entries that actually name a member change what is displayed; the
-  // rest (position, size…) never affect the label, so they are dropped here.
-  const memberChangesByChannel = new Map<number, { frameIndex: number; memberRef: ICastMemberRef }[]>();
-  for (const entry of score.channelInitData ?? []) {
-    if (!entry.initData.castLib && !entry.initData.castMember) continue;
-    const change = {
-      frameIndex: entry.frameIndex,
-      memberRef: [entry.initData.castLib, entry.initData.castMember] as ICastMemberRef,
-    };
-    const list = memberChangesByChannel.get(entry.channelNumber);
-    if (list) list.push(change);
-    else memberChangesByChannel.set(entry.channelNumber, [change]);
-  }
-  for (const list of Array.from(memberChangesByChannel.values())) {
-    list.sort((a, b) => a.frameIndex - b.frameIndex);
-  }
-
-  return { spansByChannel, memberChangesByChannel };
+  return { spansByChannel };
 }
 
 /** The span covering `frame` in this channel, or undefined. */
@@ -74,28 +54,15 @@ export function findSpanAtFrame(
 }
 
 /**
- * The member displayed in this channel at `frame`: the most recent member
- * change at or before it. Mirrors the previous reduce-over-everything
- * behaviour, including its `frameIndex <= frame` comparison.
+ * The member shown in a channel at a frame. The VM splits spans whenever the
+ * member changes, so the covering span carries the answer — no separate
+ * per-frame init-data table has to cross the boundary for this.
  */
 export function findMemberRefAtFrame(
-  changes: { frameIndex: number; memberRef: ICastMemberRef }[] | undefined,
+  spans: IScoreSpriteSpan[] | undefined,
   frame: number
 ): ICastMemberRef | undefined {
-  if (!changes || changes.length === 0) return undefined;
-  let lo = 0;
-  let hi = changes.length - 1;
-  let found: ICastMemberRef | undefined;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (changes[mid].frameIndex <= frame) {
-      found = changes[mid].memberRef;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return found;
+  return findSpanAtFrame(spans, frame)?.memberRef;
 }
 
 // Director's own ceilings, used as a sanity bound rather than as a display

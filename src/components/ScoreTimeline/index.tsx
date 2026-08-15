@@ -2,13 +2,8 @@ import { memo, useCallback, useMemo, useRef, useState } from "react";
 import classNames from "classnames";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import styles from "./styles.module.css";
-import { IScoreSpriteSpan, IScoreChannelInitData, ScoreSpriteSnapshot } from "../../vm";
-import {
-  buildScoreIndex,
-  findMemberRefAtFrame,
-  findSpanAtFrame,
-  ScoreIndex,
-} from "../../utils/scoreIndex";
+import { IScoreSpriteSpan, ScoreSpriteSnapshot } from "../../vm";
+import { buildScoreIndex, findSpanAtFrame, ScoreIndex } from "../../utils/scoreIndex";
 import { usePlayheadVar } from "../../utils/usePlayhead";
 
 // Cell geometry lives here and is published to CSS as custom properties, so the
@@ -22,7 +17,6 @@ export interface ScoreTimelineProps {
   frameCount: number;
   channelCount: number;
   spriteSpans?: IScoreSpriteSpan[];
-  channelInitData?: IScoreChannelInitData[];
   channelSnapshots?: Record<number, ScoreSpriteSnapshot>;
   selectedChannel?: number | false;
   onSelectChannel?: (channel: number) => void;
@@ -59,9 +53,8 @@ const TimelineCell = memo(function TimelineCell({
   const isSpanEnd = span && frame === span.endFrame;
 
   let castMember: string | null = null;
-  if (isSpanStart) {
-    const memberRef = findMemberRefAtFrame(index.memberChangesByChannel.get(channel), frame);
-    castMember = memberRef ? `${memberRef[0]}:${memberRef[1]}` : null;
+  if (isSpanStart && span.memberRef) {
+    castMember = `${span.memberRef[0]}:${span.memberRef[1]}`;
   }
 
   const isCellSelected = selectedCell?.channel === channel && selectedCell?.frame === frame;
@@ -98,7 +91,6 @@ export default function ScoreTimeline({
   frameCount,
   channelCount,
   spriteSpans,
-  channelInitData,
   channelSnapshots,
   selectedChannel,
   onSelectChannel,
@@ -112,8 +104,8 @@ export default function ScoreTimeline({
   usePlayheadVar(scrollRef);
 
   const index = useMemo(
-    () => buildScoreIndex(spriteSpans || channelInitData ? { channelCount, spriteSpans, channelInitData, behaviorReferences: [] } : undefined),
-    [channelCount, spriteSpans, channelInitData]
+    () => buildScoreIndex(spriteSpans ? { channelCount, spriteSpans, behaviorReferences: [] } : undefined),
+    [channelCount, spriteSpans]
   );
 
   const rowVirtualizer = useVirtualizer({

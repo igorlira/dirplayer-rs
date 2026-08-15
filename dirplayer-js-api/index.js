@@ -116,6 +116,12 @@ export function onChannelDisplayNameChanged(channel, displayName) {
   vmCallbacks.onChannelDisplayNameChanged(channel, displayName)
 }
 
+// Bulk form, used when a panel first subscribes: one message for every named
+// channel instead of one per channel.
+export function onChannelDisplayNamesChanged(names) {
+  vmCallbacks.onChannelDisplayNamesChanged(names)
+}
+
 export function onExternalEvent(event) {
   if (vmCallbacks?.onExternalEvent) {
     vmCallbacks.onExternalEvent(event);

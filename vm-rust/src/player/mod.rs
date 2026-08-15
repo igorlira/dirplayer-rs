@@ -354,6 +354,12 @@ pub struct DirPlayer {
     pub audio_sync_anchor: Option<(u32, f64)>,
     pub subscribed_member_refs: Vec<CastMemberRef>, // TODO move to debug module
     pub is_subscribed_to_channel_names: bool,       // TODO move to debug module
+    /// Debug-UI subscriptions. Serializing the score or a cast's member list
+    /// costs tens of thousands of JS objects, so it only happens while an
+    /// inspector is actually showing that data. Nothing is pushed by default:
+    /// during ordinary playback (no debug UI) the boundary stays quiet.
+    pub is_subscribed_to_score: bool,
+    pub subscribed_cast_member_lists: HashSet<u32>,
     pub font_manager: FontManager,
     pub keyboard_manager: KeyboardManager,
     pub float_precision: u8,
@@ -762,6 +768,8 @@ impl DirPlayer {
             trails_bitmap: None,
             subscribed_member_refs: vec![],
             is_subscribed_to_channel_names: false,
+            is_subscribed_to_score: false,
+            subscribed_cast_member_lists: HashSet::new(),
             font_manager: FontManager::new(),
             keyboard_manager: KeyboardManager::new(),
             text_selection_start: 0,

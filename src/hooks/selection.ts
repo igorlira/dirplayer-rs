@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useAppSelector } from "../store/hooks";
-import { getAggregatedSpriteDataForChannelAtFrame, getScoreFrameBehaviorRef } from "../utils/score";
+import { findSpriteMemberAtFrame, getScoreFrameBehaviorRef } from "../utils/score";
 
 export function useSelectedObjects() {
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
@@ -39,8 +39,8 @@ export function useSelectedObjects() {
       return [scoreBehaviorRef.castLib, scoreBehaviorRef.castMember];
     } else if (selectedObject?.type === "sprite" && selectedSprite) {
       return selectedSprite.memberRef;
-    } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef === 'stage' && scoreSnapshot?.channelInitData) {
-      return getAggregatedSpriteDataForChannelAtFrame(scoreSnapshot.channelInitData, selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber)?.memberRef;
+    } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef === 'stage' && scoreSnapshot?.spriteSpans) {
+      return findSpriteMemberAtFrame(scoreSnapshot.spriteSpans, selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber);
     } else if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef !== 'stage') {
       return selectedObject.spanRef.scoreRef;
     }
@@ -48,7 +48,7 @@ export function useSelectedObjects() {
 
   const secondaryMemberRef = useMemo(() => {
     if (selectedObject?.type === "scoreSpan" && selectedObject.spanRef.scoreRef !== 'stage' && selectedScoreSnapshot?.snapshot?.type === 'filmLoop') {
-      const memberRef = getAggregatedSpriteDataForChannelAtFrame(selectedScoreSnapshot.snapshot.score?.channelInitData || [], selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber)?.memberRef;
+      const memberRef = findSpriteMemberAtFrame(selectedScoreSnapshot.snapshot.score?.spriteSpans || [], selectedObject.spanRef.channelNumber, selectedObject.spanRef.frameNumber);
       if (memberRef) {
         const [castLib, memberNumber] = memberRef;
         const actualCastLib = (castLib === 65535 || castLib === 0) && selectedScoreRef ? selectedScoreRef[0] : castLib;

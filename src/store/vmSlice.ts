@@ -73,6 +73,7 @@ export const datumSnapshot = createAction<{ datumRef: DatumRef, datum: JsBridgeD
 export const scriptInstanceSnapshot = createAction<{ scriptInstanceId: ScriptInstanceId, datum: JsBridgeDatum }>('vm/scriptInstanceSnapshot')
 export const channelChanged = createAction<{ channelNumber: number, channelData: ScoreSpriteSnapshot }>('vm/channelChanged')
 export const channelDisplayNameChanged = createAction<{ channelNumber: number, displayName: string }>('vm/channelDisplayNameChanged')
+export const channelDisplayNamesChanged = createAction<Record<number, string>>('vm/channelDisplayNamesChanged')
 export const memberSubscribed = createAction<TMemberSubscription>('vm/memberSubscribed')
 export const memberUnsubscribed = createAction<string>('vm/memberUnsubscribed')
 export const movieLoaded = createAction('vm/movieLoaded')
@@ -131,9 +132,9 @@ const vmReducer = createCompatReducer(initialState, (builder) => {
           [castLibNum]: {
             ...state.castSnapshots[castLibNum],
             members: {
-              ...state.castSnapshots[castLibNum].members,
+              ...state.castSnapshots[castLibNum]?.members,
               [memberNum]: {
-                ...state.castSnapshots[castLibNum].members[memberNum],
+                ...state.castSnapshots[castLibNum]?.members?.[memberNum],
                 snapshot: action.payload.snapshot,
               }
             }
@@ -240,6 +241,16 @@ const vmReducer = createCompatReducer(initialState, (builder) => {
         }
       }
     })
+    // Bulk counterpart of channelDisplayNameChanged: one action, one copy of
+    // the channel map, one re-render — instead of one of each per channel.
+    .addCase(channelDisplayNamesChanged, (state, action) => {
+      const channelSnapshots = { ...state.channelSnapshots };
+      for (const [channelNumber, displayName] of Object.entries(action.payload)) {
+        const number = Number(channelNumber);
+        channelSnapshots[number] = { ...channelSnapshots[number], displayName };
+      }
+      return { ...state, channelSnapshots };
+    })
     .addCase(memberSubscribed, (state, action) => {
       return {
         ...state,
@@ -293,7 +304,9 @@ const vmReducer = createCompatReducer(initialState, (builder) => {
 
 export const selectCastSnapshot = (state: VMSliceState, number: number) => state.castSnapshots[number]
 export const selectMemberSnapshotById = (state: VMSliceState, id: ICastMemberIdentifier) => selectMemberSnapshot(state, id.castNumber, id.memberNumber)
-export const selectMemberSnapshot = (state: VMSliceState, castNumber: number, memberNumber: number): MemberSnapshot | undefined => selectCastSnapshot(state, castNumber).members[String(memberNumber)]?.snapshot
+// The cast entry only exists once something has subscribed to that library's
+// member list or to an individual member, so every hop here is optional.
+export const selectMemberSnapshot = (state: VMSliceState, castNumber: number, memberNumber: number): MemberSnapshot | undefined => selectCastSnapshot(state, castNumber)?.members?.[String(memberNumber)]?.snapshot
 export const selectScoreSnapshot = (state: VMSliceState): ScoreSnapshot | undefined => state.scoreSnapshot
 export const selectCurrentFrame = (state: VMSliceState) => state.currentFrame
 export const selectScopes = (state: VMSliceState) => state.scopes

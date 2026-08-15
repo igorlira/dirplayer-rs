@@ -51,6 +51,7 @@ type TVmCallbacks = {
   onScriptInstanceSnapshot: (scriptInstanceRef: ScriptInstanceId, scriptInstance: JsBridgeDatum) => void,
   onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => void,
   onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => void,
+  onChannelDisplayNamesChanged: (names: Record<number, string>) => void,
   onExternalEvent?: (event: string) => void,
   onFlashMemberLoaded?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => void,
   onFlashMemberUnloaded?: (spriteNum: number) => void,

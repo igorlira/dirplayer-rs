@@ -262,6 +262,9 @@ export interface IScoreSpriteSpan {
   startFrame: number
   endFrame: number
   channelNumber: number
+  /** The member shown for this span. Spans are split whenever the member
+   *  changes, so this is exact for every frame the span covers. */
+  memberRef: ICastMemberRef
 }
 
 export interface IScoreChannelInitData {
@@ -300,7 +303,6 @@ export interface ScoreSnapshot {
   frameCount?: number,
   behaviorReferences: IScoreBehaviorReference[]
   spriteSpans?: IScoreSpriteSpan[]
-  channelInitData?: IScoreChannelInitData[]
 }
 
 export type MemberSnapshot = IBaseMemberSnapshot & (IFieldMemberSnapshot | IScriptMemberSnapshot | IBitmapMemberSnapshot | IPaletteMemberSnapshot | IFontMemberSnapshot | ISoundMemberSnapshot | IFlashMemberSnapshot | IShockwave3dMemberSnapshot | IUnknownMemberSnapshot | IFilmLoopMemberSnapshot)
