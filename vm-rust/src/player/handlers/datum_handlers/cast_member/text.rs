@@ -664,11 +664,13 @@ impl TextMemberHandlers {
                     let line_h = if text_data.fixed_line_space > 0 {
                         text_data.fixed_line_space
                     } else {
-                        crate::player::font::pfr_auto_line_height(
+                        crate::player::font::outline_auto_line_height_for_font(
+                            player, &text_data.font, nominal,
+                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                             &font,
                             player.bitmap_manager.get_bitmap(font.bitmap_ref),
                             nominal,
-                        )
+                        ))
                     };
                     // Match the renderer's per-line advance at font.rs:921 —
                     // it adds top_spacing AND bottom_spacing to the line step
@@ -873,11 +875,13 @@ impl TextMemberHandlers {
                         let line_h = if text_data.fixed_line_space > 0 {
                             text_data.fixed_line_space
                         } else {
-                            crate::player::font::pfr_auto_line_height(
+                            crate::player::font::outline_auto_line_height_for_font(
+                                player, &text_data.font, nominal,
+                            ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                                 &font,
                                 player.bitmap_manager.get_bitmap(font.bitmap_ref),
                                 nominal,
-                            )
+                            ))
                         };
                         // See `.rect` getter for rationale on folding
                         // top_spacing + bottom_spacing into line_step.
@@ -889,7 +893,7 @@ impl TextMemberHandlers {
                             + text_data.top_spacing as i32
                             + text_data.bottom_spacing as i32;
                         (text_data.top_spacing as i32
-                            + line_h as i32
+                                + line_h as i32
                             + (line_count as i32 - 1) * line_step)
                             .max(0) as u16
                     };
@@ -1459,11 +1463,13 @@ impl TextMemberHandlers {
                     let line_h = if text_data.fixed_line_space > 0 {
                         text_data.fixed_line_space
                     } else {
-                        crate::player::font::pfr_auto_line_height(
+                        crate::player::font::outline_auto_line_height_for_font(
+                            player, &text_data.font, nominal,
+                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                             &font,
                             player.bitmap_manager.get_bitmap(font.bitmap_ref),
                             nominal,
-                        )
+                        ))
                     };
                     // See `.rect` getter for rationale on folding
                     // top_spacing + bottom_spacing into line_step.
@@ -1844,9 +1850,13 @@ impl TextMemberHandlers {
                         } else {
                             font.char_height
                         };
-                        (crate::player::font::pfr_auto_line_height(
+                        // Same rule as the measure pass above, so the atlas path
+                        // can't drift from the box it was given.
+                        (crate::player::font::outline_auto_line_height_for_font(
+                            player, &text_data.font, nominal,
+                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                             &font, Some(font_bitmap), nominal,
-                        ) as i32).max(1)
+                        )) as i32).max(1)
                     };
 
                     // Get char_spacing from styled spans (XMED data)
