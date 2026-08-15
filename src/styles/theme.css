@@ -64,24 +64,27 @@
   --text-dim: #605d58;
   --text-faint: #8f8b85;
 
-  /* Accent. --accent is the interactive/brand colour; on light surfaces it has
-     to carry text, so it is darker than the branded #f5a623 — and nudged
-     toward orange (hue 27° rather than 36°), because darkening a yellow-amber
-     straight down turns it to mustard. 5.02:1 on white, so it clears AA for
-     body text; the previous #b06f10 sat at 4.10:1 and failed.
+  /* Accent. --accent is the interactive/brand colour; on light surfaces it is
+     darker than the branded #f5a623 and nudged toward orange (hue 24° rather
+     than 36°), because darkening a yellow-amber straight down turns it to
+     mustard.
+     3.56:1 on white: it clears AA's 3:1 for UI components, borders and large
+     text, but NOT the 4.5:1 for body copy — so accent-coloured running text
+     wants --warning-text (5.5:1) instead. The brighter #ff6600 this replaced
+     managed only 2.94:1 and cleared neither.
      --accent-mark stays the accent for icons and marks on dark chrome.
      House rule, inherited from the conflict UI's .btn-poly: the accent is
-     carried by borders, text and thin edges. It never floods a large area,
-     which is why there is no "text on solid accent" token. */
-  --accent: #ff6600;
-  --accent-hover: #e65c00;
-  --accent-soft: rgba(255, 102, 0, 0.1);
-  --accent-line: rgba(255, 102, 0, 0.35);
-  --accent-mark: #ff6600;
+     carried by borders, marks and thin edges. It never floods a large area,
+     which is why there is no general "text on solid accent" token. */
+  --accent: #e65c00;
+  --accent-hover: #cc5200;
+  --accent-soft: rgba(230, 92, 0, 0.1);
+  --accent-line: rgba(230, 92, 0, 0.35);
+  --accent-mark: #e65c00;
   /* The one place the accent is a solid fill (see the checkbox rule below).
-     A shade deeper than --accent so the white tick clears 3:1 on it — 3.56:1,
-     where plain #ff6600 would sit at 2.94:1. */
-  --check-fill: #e65c00;
+     White on it is 3.56:1, so the tick clears 3:1 — which is what set the
+     accent's depth in the first place. */
+  --check-fill: var(--accent);
   --check-mark: #ffffff;
   /* Shape only — the mask takes its alpha, never its colour — so unlike every
      other token here this one is not redefined per theme. */
@@ -90,8 +93,8 @@
   /* Status */
   --danger: #c0392b;
   --danger-soft: rgba(192, 57, 43, 0.1);
-  --warning-bg: rgba(255, 102, 0, 0.08);
-  --warning-line: rgba(255, 102, 0, 0.35);
+  --warning-bg: rgba(230, 92, 0, 0.08);
+  --warning-line: rgba(230, 92, 0, 0.35);
   --warning-text: #b34700;
   --success: #1a5c1a;
   --success-bg: #d4edda;
@@ -103,7 +106,7 @@
   --select-line: #0066cc;
   --match-bg: #fff3cd;
   --match-bg-hover: #ffe69c;
-  --focus-ring: rgba(255, 102, 0, 0.2);
+  --focus-ring: rgba(230, 92, 0, 0.2);
 
   /* Score / timeline */
   /* Score data. Deliberately monochrome: sprite spans are neutral blocks, the
@@ -117,7 +120,7 @@
   --score-sprite-label: #4a453d;
   --score-current: #c0392b;
   --score-current-on: #ffffff;
-  --score-scripted: rgba(255, 102, 0, 0.3);
+  --score-scripted: rgba(230, 92, 0, 0.3);
   --score-scripted-selected: var(--accent);
 
   /* Value syntax colouring (PropertyTable, message inspector) */
@@ -136,7 +139,7 @@
   --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.7);
   --shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.12);
-  --accent-wash: rgba(255, 102, 0, 0.07);
+  --accent-wash: rgba(230, 92, 0, 0.07);
 }
 
 /* System preference, when the user has not made an explicit choice. */
@@ -171,7 +174,7 @@
     --accent-mark: #f5a623;
     /* Amber is light enough that the mark inverts here: dark on amber is
        10.4:1, where white would be 2.03:1. */
-    --check-fill: #f5a623;
+    --check-fill: var(--accent);
     --check-mark: #1a1a1a;
 
     --danger: #e0655a;
@@ -249,7 +252,7 @@
   --accent-soft: rgba(245, 166, 35, 0.13);
   --accent-line: rgba(245, 166, 35, 0.35);
   --accent-mark: #f5a623;
-  --check-fill: #f5a623;
+  --check-fill: var(--accent);
   --check-mark: #1a1a1a;
 
   --danger: #e0655a;
