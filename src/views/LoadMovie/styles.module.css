@@ -273,7 +273,6 @@
   width: 15px;
   height: 15px;
   cursor: pointer;
-  accent-color: var(--accent);
 }
 
 /* Primary button. Same treatment as the conflict UI's recommended action:
@@ -297,7 +296,7 @@
   transition: background-color 0.15s, box-shadow 0.15s, transform 0.08s;
 
   &:hover:not(:disabled) {
-    background-color: var(--accent-soft);
+    background-color: var(--surface-hover);
     box-shadow: 0 0 0 3px var(--focus-ring);
   }
 
@@ -844,8 +843,10 @@
   color: var(--text-dim);
 }
 
+/* Outlined rather than filled, like every other accented chip. */
 .proxyTag {
-  background-color: var(--accent-soft);
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--accent);
   color: var(--accent);
 }
 
@@ -885,7 +886,7 @@
   color: var(--text);
 
   &:hover:not(:disabled) {
-    background-color: var(--accent-soft);
+    background-color: var(--surface-hover);
     border-color: var(--accent);
     color: var(--accent);
   }

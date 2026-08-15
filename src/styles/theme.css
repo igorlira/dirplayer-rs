@@ -279,6 +279,39 @@
   --accent-wash: rgba(245, 166, 35, 0.055);
 }
 
+/* Native form controls that keep their platform rendering (App.css forces
+   `appearance: checkbox`) take the palette through accent-color. Global rather
+   than per-component, because a checkbox that misses it falls back to the
+   browser's blue — which is how the studio's renderer options ended up off
+   palette while the load screen's were amber.
+   
+   These stay *filled* when checked, unlike the accent rule for buttons and
+   tabs: a checkbox has no label inside it to carry the accent, so the fill is
+   the state, and an outlined tick reads as unchecked. */
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+  accent-color: var(--accent);
+}
+
+/* The reset strips select chrome; give it the same well as a text input. */
+select {
+  padding: 3px 6px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text);
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
 /* The dock's own theme is variable-driven (flexlayout-react 0.8), so the
    imported light.css only needs its variables remapped onto ours. The :root
    prefix outranks the package's `.flexlayout__layout` regardless of import
