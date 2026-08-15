@@ -1,16 +1,18 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import classNames from "classnames";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import styles from "./styles.module.css";
 import { IScoreSpriteSpan, ScoreSpriteSnapshot } from "../../vm";
 import { buildScoreIndex, findSpanAtFrame, ScoreIndex } from "../../utils/scoreIndex";
 import { usePlayheadVar } from "../../utils/usePlayhead";
+import { SCORE_CELL_WIDTH, SCORE_LABEL_WIDTH, SCORE_ROW_HEIGHT } from "../../utils/scoreLayout";
 
-// Cell geometry lives here and is published to CSS as custom properties, so the
-// virtualizer's arithmetic and the stylesheet can never disagree.
-const CELL_WIDTH = 16;
-const ROW_HEIGHT = 18;
-const LABEL_WIDTH = 30;
+// Geometry is shared with the score inspector's ruler so the two line up; see
+// utils/scoreLayout. Published to CSS as custom properties below, so the
+// virtualizer's arithmetic and the stylesheet can't disagree either.
+const CELL_WIDTH = SCORE_CELL_WIDTH;
+const ROW_HEIGHT = SCORE_ROW_HEIGHT;
+const LABEL_WIDTH = SCORE_LABEL_WIDTH;
 const HEADER_HEIGHT = 18;
 
 export interface ScoreTimelineProps {
@@ -21,6 +23,10 @@ export interface ScoreTimelineProps {
   selectedChannel?: number | false;
   onSelectChannel?: (channel: number) => void;
   onCellClick?: (cell: { channel: number; frame: number }) => void;
+  /** Receives the scroll element, so a sibling ruler can be kept in step. */
+  onScrollerRef?: (element: HTMLDivElement | null) => void;
+  /** Fired on horizontal scroll, for the same reason. */
+  onScrollLeftChange?: (scrollLeft: number) => void;
 }
 
 interface ITimelineSelection {
@@ -95,9 +101,16 @@ export default function ScoreTimeline({
   selectedChannel,
   onSelectChannel,
   onCellClick,
+  onScrollerRef,
+  onScrollLeftChange,
 }: ScoreTimelineProps) {
   const [selectedCell, setSelectedCell] = useState<ITimelineSelection>();
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    onScrollerRef?.(scrollRef.current);
+    return () => onScrollerRef?.(null);
+  }, [onScrollerRef]);
 
   // The playhead writes a CSS variable straight to the DOM; the grid itself
   // never re-renders when the movie advances a frame.
@@ -140,6 +153,7 @@ export default function ScoreTimeline({
     <div
       ref={scrollRef}
       className={styles.scoreOverviewContainer}
+      onScroll={onScrollLeftChange ? (e) => onScrollLeftChange(e.currentTarget.scrollLeft) : undefined}
       style={{
         // Consumed by the stylesheet for cell sizing and playhead placement.
         ['--frame-cell-width' as string]: `${CELL_WIDTH}px`,

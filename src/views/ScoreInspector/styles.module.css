@@ -25,6 +25,20 @@
   position: relative;
 }
 
+/* Stands in for the timeline's channel-number column so both strips share an
+   origin. Sticky like that column, so the frame under the playhead stays
+   readable when the pair is scrolled. */
+.rulerGutter {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  float: left;
+  width: var(--channel-label-width);
+  height: 40px;
+  background-color: var(--chrome-header);
+  border-right: 1px solid var(--chrome-hairline);
+}
+
 .scriptHeader {
   position: relative;
   width: 100%;
@@ -83,7 +97,9 @@
   bottom: 0;
   width: var(--frame-cell-width);
   pointer-events: none;
-  transform: translateX(calc((var(--playhead-frame, 1) - 1) * var(--frame-cell-width)));
+  transform: translateX(
+    calc(var(--channel-label-width) + (var(--playhead-frame, 1) - 1) * var(--frame-cell-width))
+  );
   background-color: color-mix(in srgb, var(--score-current) 22%, transparent);
   border-left: 1px solid var(--score-current);
   border-right: 1px solid var(--score-current);

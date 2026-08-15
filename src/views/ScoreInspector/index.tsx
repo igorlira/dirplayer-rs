@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectScoreSnapshot } from "../../store/vmSlice";
@@ -9,13 +9,16 @@ import { channelSelected, scoreSpanSelected, scoreBehaviorSelected } from "../..
 import { getScoreFrameBehaviorRef } from "../../utils/score";
 import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
 import { usePlayheadVar } from "../../utils/usePlayhead";
+import { SCORE_CELL_WIDTH, SCORE_CHANNEL_ROW_HEIGHT, SCORE_LABEL_WIDTH } from "../../utils/scoreLayout";
 import ExpandableButton from "../../components/ExpandableButton";
 import ScoreTimeline from "../../components/ScoreTimeline";
 import { ScoreSpriteSnapshot } from "../../vm";
 
-// Must match the geometry in styles.module.css.
-const CELL_WIDTH = 16;
-const CHANNEL_ROW_HEIGHT = 20;
+// Shared with the timeline so frame columns line up between the two; see
+// utils/scoreLayout.
+const CELL_WIDTH = SCORE_CELL_WIDTH;
+const LABEL_WIDTH = SCORE_LABEL_WIDTH;
+const CHANNEL_ROW_HEIGHT = SCORE_CHANNEL_ROW_HEIGHT;
 
 const ChannelRow = memo(function ChannelRow({
   channel,
@@ -71,6 +74,9 @@ export default function ScoreInspector() {
     getScrollElement: () => rulerRef.current,
     estimateSize: () => CELL_WIDTH,
     overscan: 16,
+    // Leaves room for the gutter, so frame N lands at the same x as frame N in
+    // the timeline's grid below.
+    paddingStart: LABEL_WIDTH,
   });
 
   const channelVirtualizer = useVirtualizer({
@@ -94,6 +100,33 @@ export default function ScoreInspector() {
     return () => unsubscribe_from_channel_names();
   }, [shouldSubscribeToChannelNames]);
 
+  const timelineScrollerRef = useRef<HTMLDivElement | null>(null);
+  const isSyncingScroll = useRef(false);
+
+  const syncScroll = useCallback((from: HTMLElement | null, to: HTMLElement | null) => {
+    if (!from || !to || isSyncingScroll.current) return;
+    if (to.scrollLeft === from.scrollLeft) return;
+    // Assigning scrollLeft fires the other element's scroll handler, which
+    // would bounce straight back here.
+    isSyncingScroll.current = true;
+    to.scrollLeft = from.scrollLeft;
+    requestAnimationFrame(() => { isSyncingScroll.current = false; });
+  }, []);
+
+  const onRulerScroll = useCallback(() => {
+    syncScroll(rulerRef.current, timelineScrollerRef.current);
+  }, [syncScroll]);
+
+  const onTimelineScrollLeft = useCallback(() => {
+    syncScroll(timelineScrollerRef.current, rulerRef.current);
+  }, [syncScroll]);
+
+  const onTimelineScrollerRef = useCallback((element: HTMLDivElement | null) => {
+    timelineScrollerRef.current = element;
+    // Adopt whatever the ruler is already showing when the panel opens.
+    if (element && rulerRef.current) element.scrollLeft = rulerRef.current.scrollLeft;
+  }, []);
+
   const onSelectChannel = (channel: number) => {
     player_set_debug_selected_channel(channel);
     dispatch(channelSelected(channel));
@@ -115,16 +148,23 @@ export default function ScoreInspector() {
   }, [score, selectedObject]);
 
   const frameColumns = frameVirtualizer.getVirtualItems();
-  const rulerWidth = frameCount * CELL_WIDTH;
+  const rulerWidth = LABEL_WIDTH + frameCount * CELL_WIDTH;
 
   return (
     <div className={styles.container}>
       <div
         ref={rulerRef}
         className={styles.scoreScrollContainer}
-        style={{ ['--frame-cell-width' as string]: `${CELL_WIDTH}px` }}
+        onScroll={onRulerScroll}
+        style={{
+          ['--frame-cell-width' as string]: `${CELL_WIDTH}px`,
+          ['--channel-label-width' as string]: `${LABEL_WIDTH}px`,
+        }}
       >
         <div className={styles.rulerInner} style={{ width: rulerWidth }}>
+          {/* Mirrors the timeline's channel-number column so the two strips
+              share an origin; sticky for the same reason that one is. */}
+          <div className={styles.rulerGutter} />
           <div className={styles.scriptHeader}>
             {frameColumns.map((column) => {
               const frame = column.index + 1;
@@ -153,7 +193,7 @@ export default function ScoreInspector() {
                   className={styles.frameHeaderCell}
                   style={{ left: column.start }}
                 >
-                  {frame === 1 || frame % 5 === 0 ? frame : "-"}
+                  {frame === 1 || frame % 5 === 0 ? frame : "·"}
                 </div>
               );
             })}
@@ -193,6 +233,8 @@ export default function ScoreInspector() {
               selectedChannel={selectedChannel}
               onSelectChannel={onSelectChannel}
               onCellClick={onTimelineCellClick}
+              onScrollerRef={onTimelineScrollerRef}
+              onScrollLeftChange={onTimelineScrollLeft}
             />
           )}
         </div>
