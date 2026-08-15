@@ -8,6 +8,7 @@ export function onCastMemberChanged() {}
 export function onScoreChanged() {}
 export function onChannelChanged() {}
 export function onChannelDisplayNameChanged() {}
+export function onChannelDisplayNamesChanged() {}
 export function onFrameChanged() {}
 export function onScriptError(data) {
   const msg = data?.message || JSON.stringify(data);
