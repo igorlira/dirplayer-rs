@@ -23,19 +23,19 @@
   flex-direction: row;
   position: sticky;
   top: 0;
-  background-color: #f5f5f5;
+  background-color: var(--score-header-bg);
   z-index: 10;
-  border-bottom: 2px solid #333;
+  border-bottom: 1px solid var(--chrome-hairline);
 }
 
 .scoreGridRow {
   display: flex;
   flex-direction: row;
-  border-bottom: 1px solid #ddd;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .scoreGridRow:nth-child(even) {
-  background-color: #fafafa;
+  background-color: var(--score-row-alt);
 }
 
 .channelLabelCell {
@@ -44,21 +44,21 @@
   padding: 2px 4px;
   text-align: center;
   font-weight: bold;
-  border-right: 1px solid #999;
+  border-right: 1px solid var(--chrome-hairline);
   position: sticky;
   left: 0;
-  background-color: #f5f5f5;
+  background-color: var(--score-header-bg);
   z-index: 5;
   cursor: pointer;
 }
 
 .channelLabelCell:hover {
-  background-color: #e0e0e0;
+  background-color: var(--surface-hover);
 }
 
 .channelLabelCell.selected {
-  background-color: #ffcccc;
-  border: 2px solid red;
+  background-color: var(--danger-soft);
+  border: 2px solid var(--danger);
 }
 
 .scoreGridFrameCell {
@@ -66,12 +66,12 @@
   max-width: var(--frame-cell-width);
   text-align: center;
   padding: 2px 0;
-  border-left: 1px solid #eee;
+  border-left: 1px solid var(--hairline);
 }
 
 .scoreGridFrameCell.current {
-  background-color: red;
-  color: white;
+  background-color: var(--score-current);
+  color: var(--score-current-on);
   font-weight: bold;
 }
 
@@ -80,35 +80,35 @@
   min-width: var(--frame-cell-width);
   max-width: var(--frame-cell-width);
   min-height: 18px;
-  border-left: 1px solid #eee;
+  border-left: 1px solid var(--hairline);
   box-sizing: border-box;
 }
 
 .scoreGridCell.hasSprite {
-  background-color: #a0d0ff;
+  background-color: var(--score-sprite);
 }
 
 .scoreGridCell.spanStart {
-  border-left: 2px solid #0066cc;
-  background-color: #80c0ff;
+  border-left: 2px solid var(--select-line);
+  background-color: var(--score-sprite-start);
 }
 
 .scoreGridCell.spanEnd {
-  border-right: 2px solid #0066cc;
-  background-color: #80c0ff;
+  border-right: 2px solid var(--select-line);
+  background-color: var(--score-sprite-start);
 }
 
 .scoreGridCell.emptySelected {
-  background-color: #000;
+  background-color: var(--text);
 }
 
 .scoreGridCell.spanSelected {
-  background-color: #0066cc;
+  background-color: var(--select-line);
 }
 
 .scoreGridCell.currentFrame {
-  border-top: 2px solid red;
-  border-bottom: 2px solid red;
+  border-top: 2px solid var(--score-current);
+  border-bottom: 2px solid var(--score-current);
 }
 
 .scoreGridCell.clickable {
@@ -116,7 +116,7 @@
 }
 
 .scoreGridCell.clickable:hover {
-  outline: 2px solid #0066cc;
+  outline: 2px solid var(--select-line);
   outline-offset: -2px;
   z-index: 1;
 }
@@ -126,9 +126,9 @@
   left: 2px;
   top: 2px;
   font-size: 8px;
-  color: #003366;
+  color: var(--score-sprite-label);
   font-weight: bold;
   white-space: nowrap;
   pointer-events: none;
-  text-shadow: 0 0 2px white;;
+  text-shadow: 0 0 2px var(--score-sprite-label-shadow);
 }

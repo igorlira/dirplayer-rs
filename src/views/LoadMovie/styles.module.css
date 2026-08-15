@@ -1,24 +1,10 @@
 /* DirPlayer load screen.
-   The palette mirrors the branded overlays (components/ErrorOverlay and the
-   polyfill's conflict UI): #1a1a1a ground, #2a2a2a surfaces, #404040 hairlines
-   and the amber #f5a623 accent. Like the conflict UI's .btn-poly, the accent is
-   carried by *borders, text and thin edges* — never by large filled areas. */
+   Every colour comes from the shared tokens in styles/theme.css, so this screen
+   and the studio follow light/dark together. Like the branded conflict UI's
+   .btn-poly, the accent is carried by *borders, text and thin edges* — never by
+   large filled areas. */
 
 .container {
-  --ground: #1a1a1a;
-  /* Surfaces carry a trace of warmth so the greys don't read as clinical. */
-  --surface: #222120;
-  --surface-raised: #2b2926;
-  --surface-hover: #302e2a;
-  --hairline: #333230;
-  --hairline-strong: #423f3b;
-  --text: #e8e8e8;
-  --text-dim: #8a8681;
-  --text-faint: #625e59;
-  --accent: #f5a623;
-  --accent-soft: rgba(245, 166, 35, 0.13);
-  --danger: #e0655a;
-
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -31,12 +17,12 @@
   gap: 20px;
   box-sizing: border-box;
   overflow: hidden;
-  background-color: var(--ground);
-  /* A warm pool of light behind the brand mark, over a cool falloff. Keeps the
-     screen from looking like a flat sheet of #1a1a1a. */
+  background-color: var(--bg);
+  /* A warm pool of light behind the brand mark, over a falloff. Keeps the
+     screen from looking like one flat sheet of colour. */
   background-image:
-    radial-gradient(60% 42% at 50% 0%, rgba(245, 166, 35, 0.07) 0%, transparent 70%),
-    radial-gradient(120% 85% at 50% 0%, #262523 0%, #1a1a1a 62%);
+    radial-gradient(60% 42% at 50% 0%, var(--bg-glow) 0%, transparent 70%),
+    radial-gradient(120% 85% at 50% 0%, var(--bg-falloff) 0%, var(--bg) 62%);
   color: var(--text);
   /* .App centers everything; this screen is a left-aligned document. */
   text-align: left;
@@ -65,6 +51,7 @@
 }
 
 .header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -72,11 +59,19 @@
   margin-bottom: 22px;
 }
 
+/* Out of flow so the theme control can't pull the brand lockup off-centre. */
+.headerActions {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .logo {
   border-radius: 9px;
   display: block;
   flex-shrink: 0;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-soft);
 }
 
 .brandText {
@@ -94,7 +89,7 @@
   font-family: sans-serif;
   font-size: 1.5em;
   font-weight: 600;
-  color: #f2f0ee;
+  color: var(--text-strong);
   margin: 0;
   line-height: 1;
   letter-spacing: 0.01em;
@@ -116,14 +111,11 @@
   flex: 0 1 auto;
   min-height: 0;
   background-color: var(--surface);
-  background-image: linear-gradient(180deg, #262523 0%, #201f1e 100%);
+  background-image: linear-gradient(180deg, var(--bg-falloff) 0%, var(--surface) 100%);
   border: 1px solid var(--hairline);
   border-radius: 12px;
   /* Lit from above: a hairline highlight on the top edge, weight underneath. */
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.045),
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 12px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-inset-top), var(--shadow-card);
   overflow: hidden;
 }
 
@@ -137,14 +129,14 @@
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--hairline-strong) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 
   &::-webkit-scrollbar {
     width: 10px;
   }
 
   &::-webkit-scrollbar-thumb {
-    background-color: var(--hairline-strong);
+    background-color: var(--scrollbar-thumb);
     border: 3px solid var(--surface);
     border-radius: 5px;
   }
@@ -158,7 +150,7 @@
   flex-shrink: 0;
   text-align: left;
   border-top: 1px solid var(--hairline);
-  background-color: rgba(0, 0, 0, 0.16);
+  background-color: var(--surface-raised);
 }
 
 .footerRow {
@@ -196,20 +188,20 @@
   border: 1px solid var(--hairline-strong);
   border-radius: 7px;
   font-size: 0.92em;
-  background-color: rgba(0, 0, 0, 0.28);
+  background-color: var(--surface-sunken);
   color: var(--text);
   outline: none;
   text-align: left;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-inset-well);
   transition: border-color 0.15s, box-shadow 0.15s;
 
   &:hover:not(:disabled):not(:focus) {
-    border-color: #4d4a45;
+    border-color: var(--hairline-strong);
   }
 
   &:focus {
     border-color: var(--accent);
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25), 0 0 0 3px rgba(245, 166, 35, 0.13);
+    box-shadow: var(--shadow-inset-well), 0 0 0 3px var(--focus-ring);
   }
 
   &::placeholder {
@@ -217,7 +209,7 @@
   }
 
   &:disabled {
-    background-color: rgba(0, 0, 0, 0.14);
+    background-color: var(--surface-raised);
     color: var(--text-faint);
   }
 }
@@ -227,7 +219,7 @@
 
   &:focus {
     border-color: var(--danger);
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25), 0 0 0 3px rgba(224, 101, 90, 0.16);
+    box-shadow: var(--shadow-inset-well), 0 0 0 3px var(--danger-soft);
   }
 }
 
@@ -247,7 +239,7 @@
 
   &:hover:not(:disabled) {
     background-color: var(--surface-hover);
-    border-color: #524e48;
+    border-color: var(--hairline-strong);
   }
 
   &:active:not(:disabled) {
@@ -310,7 +302,7 @@
 
   &:hover:not(:disabled) {
     background-color: var(--accent-soft);
-    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.09);
+    box-shadow: 0 0 0 3px var(--focus-ring);
   }
 
   &:active:not(:disabled) {
@@ -318,7 +310,7 @@
   }
 
   &:disabled {
-    background-color: rgba(0, 0, 0, 0.2);
+    background-color: var(--surface-raised);
     border-color: var(--hairline-strong);
     color: var(--text-faint);
     cursor: default;
@@ -348,12 +340,12 @@
   align-items: flex-start;
   gap: 10px;
   padding: 10px 13px;
-  background-color: rgba(245, 166, 35, 0.07);
-  border: 1px solid rgba(245, 166, 35, 0.28);
+  background-color: var(--warning-bg);
+  border: 1px solid var(--warning-line);
   border-radius: 7px;
   font-size: 0.85em;
   line-height: 1.45;
-  color: #e3b573;
+  color: var(--warning-text);
 }
 
 .errorIcon {
@@ -409,7 +401,7 @@
   padding: 16px 17px;
   border: 1px solid var(--hairline);
   border-radius: 9px;
-  background-color: rgba(0, 0, 0, 0.16);
+  background-color: var(--surface-raised);
 }
 
 .proxyRow {
@@ -445,14 +437,14 @@
   border-radius: 6px;
   font-size: 0.86em;
   font-family: "SF Mono", Menlo, Consolas, monospace;
-  background-color: rgba(0, 0, 0, 0.28);
+  background-color: var(--surface-sunken);
   color: var(--text);
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 
   &:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.13);
+    box-shadow: 0 0 0 3px var(--focus-ring);
   }
 
   &::placeholder {
@@ -461,7 +453,7 @@
   }
 
   &:disabled {
-    background-color: rgba(0, 0, 0, 0.14);
+    background-color: var(--surface-raised);
     color: var(--text-faint);
   }
 }
@@ -483,13 +475,13 @@
   transition: all 0.15s;
 
   &:hover:not(:disabled) {
-    background-color: rgba(224, 101, 90, 0.12);
-    border-color: rgba(224, 101, 90, 0.4);
+    background-color: var(--danger-soft);
+    border-color: var(--danger);
     color: var(--danger);
   }
 
   &:disabled {
-    color: #333;
+    color: var(--text-faint);
     cursor: default;
   }
 }
@@ -511,7 +503,7 @@
   }
 
   &:disabled {
-    color: #333;
+    color: var(--text-faint);
     cursor: default;
   }
 }
@@ -601,7 +593,7 @@
   border: 1px solid var(--hairline);
   border-radius: 8px;
   font-size: 0.85em;
-  background-color: rgba(0, 0, 0, 0.22);
+  background-color: var(--surface-sunken);
   color: var(--text);
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -612,7 +604,7 @@
 
   &:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.13);
+    box-shadow: 0 0 0 3px var(--focus-ring);
   }
 
   &::placeholder {
@@ -650,20 +642,20 @@
   padding-right: 4px;
   outline: none;
   scrollbar-width: thin;
-  scrollbar-color: var(--hairline-strong) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 
   &::-webkit-scrollbar {
     width: 10px;
   }
 
   &::-webkit-scrollbar-thumb {
-    background-color: var(--hairline-strong);
-    border: 3px solid var(--ground);
+    background-color: var(--scrollbar-thumb);
+    border: 3px solid var(--bg);
     border-radius: 5px;
   }
 
   &::-webkit-scrollbar-thumb:hover {
-    background-color: #55514a;
+    background-color: var(--scrollbar-thumb-hover);
   }
 }
 
@@ -696,7 +688,7 @@
   padding: 4px 4px 7px;
   border: none;
   /* Opaque: rows scroll underneath this. Matches the page ground. */
-  background-color: var(--ground);
+  background-color: var(--bg);
   cursor: pointer;
   text-align: left;
   font-size: 0.75em;
@@ -747,7 +739,7 @@
   flex: 0 0 auto;
   white-space: nowrap;
   font-weight: 700;
-  color: #b5b0a9;
+  color: var(--text);
 }
 
 .groupCount {
@@ -763,7 +755,7 @@
   background-color: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 10px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow: var(--shadow-inset-top);
 }
 
 /* Rows */
@@ -793,12 +785,12 @@
   }
 
   &:hover {
-    background-color: rgba(255, 255, 255, 0.028);
+    background-color: var(--surface-hover);
   }
 }
 
 .recentItemActive {
-  background-color: rgba(245, 166, 35, 0.055);
+  background-color: var(--accent-wash);
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
@@ -825,7 +817,7 @@
   white-space: nowrap;
   font-size: 0.92em;
   font-weight: 500;
-  color: #eceae7;
+  color: var(--text-strong);
 }
 
 .recentQuery {
@@ -862,11 +854,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 1px 6px;
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--surface-raised);
   border-radius: 4px;
   font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.72em;
-  color: #837e78;
+  color: var(--text-dim);
 }
 
 .proxyTag {
@@ -932,7 +924,7 @@
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  color: #6b6660;
+  color: var(--text-faint);
   font-size: 0.82em;
   padding: 0;
   flex-shrink: 0;
@@ -940,7 +932,7 @@
   transition: all 0.15s;
 
   &:hover {
-    background-color: rgba(224, 101, 90, 0.12);
+    background-color: var(--danger-soft);
     color: var(--danger);
   }
 }
@@ -952,7 +944,7 @@
   padding-top: 9px;
   border-top: 1px solid var(--hairline);
   font-size: 0.72em;
-  color: #565350;
+  color: var(--text-faint);
 }
 
 .recentHint kbd {

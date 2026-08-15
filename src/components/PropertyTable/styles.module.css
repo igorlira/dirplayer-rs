@@ -19,11 +19,11 @@
 }
 
 .propRow:hover {
-  background-color: #f5f5f5;
+  background-color: var(--surface-hover);
 }
 
 .propKey {
-  color: #555;
+  color: var(--syn-key);
   flex-shrink: 0;
   font-weight: 500;
   padding-right: 8px;
@@ -39,19 +39,19 @@
 }
 
 .propString {
-  color: #a31515;
+  color: var(--syn-string);
 }
 
 .propNumber {
-  color: #098658;
+  color: var(--syn-number);
 }
 
 .propBool {
-  color: #0000ff;
+  color: var(--syn-bool);
 }
 
 .propNull {
-  color: #999;
+  color: var(--syn-null);
   font-style: italic;
 }
 
@@ -65,18 +65,18 @@
   display: inline-block;
   width: 12px;
   height: 12px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
   border-radius: 2px;
   vertical-align: middle;
 }
 
 .propArray {
-  color: #333;
+  color: var(--text);
 }
 
 .propExpandToggle {
   cursor: pointer;
-  color: #007acc;
+  color: var(--syn-link);
   user-select: none;
   font-size: 10px;
   background: none;
@@ -91,6 +91,6 @@
 
 .propNested {
   margin-left: 4px;
-  border-left: 1px solid #e0e0e0;
+  border-left: 1px solid var(--hairline);
   padding-left: 2px;
 }

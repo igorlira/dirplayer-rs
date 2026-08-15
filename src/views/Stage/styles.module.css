@@ -111,7 +111,9 @@
   bottom: 0;
   left: 0;
   right: 0;
-  background: #eee;
+  background: var(--chrome-header);
+  border-top: 1px solid var(--chrome-hairline);
+  color: var(--text);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -120,16 +122,17 @@
 
 .pickButton {
   padding: 2px 8px;
-  border: 1px solid #999;
+  border: 1px solid var(--hairline-strong);
   border-radius: 3px;
-  background: #ddd;
+  background: var(--surface-raised);
+  color: var(--text);
   cursor: pointer;
   font-size: 12px;
 }
 
 .pickButtonActive {
   composes: pickButton;
-  background: #4a9eff;
-  color: white;
-  border-color: #2a7edf;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }

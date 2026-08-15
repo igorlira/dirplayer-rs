@@ -1,0 +1,333 @@
+/* Shared theme tokens.
+ *
+ * Every surface in the app — the load screen and the studio alike — draws its
+ * colours from here, so the two stay consistent and both follow light/dark.
+ *
+ * Three states, in the order the cascade resolves them:
+ *   1. bare :root                     -> light (the default)
+ *   2. prefers-color-scheme: dark     -> dark, unless the user explicitly chose light
+ *   3. :root[data-theme="dark|light"] -> the user's explicit choice, wins over the system
+ *
+ * A colour must never be defined *only* inside a media or [data-theme] block:
+ * define it in the light block and redefine it in both dark blocks.
+ *
+ * The palette is anchored on the branded overlays (components/ErrorOverlay and
+ * the polyfill's conflict UI): #1a1a1a ground and the amber #f5a623 accent are
+ * the dark side of the ramp. Light mode is the same ramp inverted, with a
+ * darker amber so the accent keeps its contrast on pale surfaces.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Grounds and surfaces */
+  --bg: #eeedec;
+  --bg-glow: rgba(176, 111, 16, 0.05);
+  --bg-falloff: #f7f6f5;
+  --surface: #ffffff;
+  --surface-raised: #f2f1ef;
+  --surface-hover: #ebe9e6;
+  --surface-sunken: #fbfaf9;
+  --surface-header: #f4f3f1;
+
+  /* Chrome: the tool frame around the content — dock ground, tab strips,
+     toolbars, panel section headers. The IDE/DAW convention is that chrome is
+     *darker* than the content it frames (and in dark mode, darker still), so a
+     selected tab reads as continuous with the panel it opens. Content is the
+     brightest surface in light mode; never the other way round.
+
+     In light the step is deliberately small (a few percent) and the separation
+     is carried by hairlines and type weight. Slabs of mid-grey with bevelled
+     double borders read as Windows Classic, not as a modern editor. */
+  --chrome: #f4f3f1;
+  --chrome-header: #f4f3f1;
+  --chrome-hairline: #e2e0dc;
+
+  /* Lines */
+  --hairline: #e7e5e2;
+  --hairline-strong: #d4d1cc;
+
+  /* Type */
+  --text: #1d1c1b;
+  --text-strong: #000000;
+  --text-dim: #605d58;
+  --text-faint: #8f8b85;
+
+  /* Accent. --accent is the interactive/brand colour; on light surfaces it has
+     to carry text, so it is darker than the branded #f5a623. --accent-mark
+     stays the true brand amber for icons and marks on dark chrome.
+     House rule, inherited from the conflict UI's .btn-poly: the accent is
+     carried by borders, text and thin edges. It never floods a large area,
+     which is why there is no "text on solid accent" token. */
+  --accent: #b06f10;
+  --accent-hover: #8d5807;
+  --accent-soft: rgba(176, 111, 16, 0.1);
+  --accent-line: rgba(176, 111, 16, 0.35);
+  --accent-mark: #b06f10;
+
+  /* Status */
+  --danger: #c0392b;
+  --danger-soft: rgba(192, 57, 43, 0.1);
+  --warning-bg: rgba(176, 111, 16, 0.07);
+  --warning-line: rgba(176, 111, 16, 0.3);
+  --warning-text: #8a5c10;
+  --success: #1a5c1a;
+  --success-bg: #d4edda;
+  --success-line: #2a7a2a;
+
+  /* Selection / highlight (data views: cast list, chunk tree, score) */
+  --select-bg: #d0e8ff;
+  --select-bg-hover: #b8dcff;
+  --select-line: #0066cc;
+  --match-bg: #fff3cd;
+  --match-bg-hover: #ffe69c;
+  --focus-ring: rgba(176, 111, 16, 0.18);
+
+  /* Score / timeline */
+  --score-header-bg: var(--chrome-header);
+  --score-row-alt: #faf9f8;
+  --score-sprite: #a0d0ff;
+  --score-sprite-start: #80c0ff;
+  --score-sprite-label: #003366;
+  --score-sprite-label-shadow: #ffffff;
+  --score-current: #d93025;
+  --score-current-on: #ffffff;
+  --score-scripted: #2f4fd0;
+  --score-scripted-selected: #6b2fd0;
+
+  /* Value syntax colouring (PropertyTable, message inspector) */
+  --syn-string: #a31515;
+  --syn-number: #098658;
+  --syn-bool: #0000ff;
+  --syn-null: #999999;
+  --syn-key: #555555;
+  --syn-link: #007acc;
+
+  /* Scrollbars */
+  --scrollbar-thumb: #cbc8c3;
+  --scrollbar-thumb-hover: #b3afa8;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --accent-wash: rgba(176, 111, 16, 0.06);
+}
+
+/* System preference, when the user has not made an explicit choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg: #1a1a1a;
+    --bg-glow: rgba(245, 166, 35, 0.07);
+    --bg-falloff: #262523;
+    --surface: #222120;
+    --surface-raised: #2b2926;
+    --surface-hover: #302e2a;
+    --surface-sunken: rgba(0, 0, 0, 0.28);
+    --surface-header: #262523;
+
+    --chrome: #191817;
+    --chrome-header: #262523;
+    --chrome-hairline: #2f2d2a;
+
+    --hairline: #333230;
+    --hairline-strong: #423f3b;
+
+    --text: #e8e8e8;
+    --text-strong: #f2f0ee;
+    --text-dim: #8a8681;
+    --text-faint: #625e59;
+
+    --accent: #f5a623;
+    --accent-hover: #ffb73d;
+    --accent-soft: rgba(245, 166, 35, 0.13);
+    --accent-line: rgba(245, 166, 35, 0.35);
+    --accent-mark: #f5a623;
+
+    --danger: #e0655a;
+    --danger-soft: rgba(224, 101, 90, 0.12);
+    --warning-bg: rgba(245, 166, 35, 0.07);
+    --warning-line: rgba(245, 166, 35, 0.28);
+    --warning-text: #e3b573;
+    --success: #7bc47b;
+    --success-bg: rgba(123, 196, 123, 0.14);
+    --success-line: #4a8a4a;
+
+    --select-bg: #24405c;
+    --select-bg-hover: #2c4f72;
+    --select-line: #4a9eff;
+    --match-bg: rgba(245, 166, 35, 0.22);
+    --match-bg-hover: rgba(245, 166, 35, 0.32);
+    --focus-ring: rgba(245, 166, 35, 0.13);
+
+    --score-header-bg: var(--chrome-header);
+    --score-row-alt: rgba(255, 255, 255, 0.022);
+    --score-sprite: #2f5c8a;
+    --score-sprite-start: #3d7ab5;
+    --score-sprite-label: #cfe4f7;
+    --score-sprite-label-shadow: #10243a;
+    --score-current: #e0655a;
+    --score-current-on: #1a1a1a;
+    --score-scripted: #4a6fd0;
+    --score-scripted-selected: #8a5cd0;
+
+    --syn-string: #ce9178;
+    --syn-number: #b5cea8;
+    --syn-bool: #569cd6;
+    --syn-null: #7d7a75;
+    --syn-key: #9a968f;
+    --syn-link: #4aa3e0;
+
+    --scrollbar-thumb: #423f3b;
+    --scrollbar-thumb-hover: #55514a;
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.4);
+    --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    --shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.4);
+    --accent-wash: rgba(245, 166, 35, 0.055);
+  }
+}
+
+/* Explicit choice. Same values as the media block; it has to win in both
+   directions, including "dark on a light system". */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #1a1a1a;
+  --bg-glow: rgba(245, 166, 35, 0.07);
+  --bg-falloff: #262523;
+  --surface: #222120;
+  --surface-raised: #2b2926;
+  --surface-hover: #302e2a;
+  --surface-sunken: rgba(0, 0, 0, 0.28);
+  --surface-header: #262523;
+
+  --chrome: #191817;
+  --chrome-header: #262523;
+  --chrome-hairline: #2f2d2a;
+
+  --hairline: #333230;
+  --hairline-strong: #423f3b;
+
+  --text: #e8e8e8;
+  --text-strong: #f2f0ee;
+  --text-dim: #8a8681;
+  --text-faint: #625e59;
+
+  --accent: #f5a623;
+  --accent-hover: #ffb73d;
+  --accent-soft: rgba(245, 166, 35, 0.13);
+  --accent-line: rgba(245, 166, 35, 0.35);
+  --accent-mark: #f5a623;
+
+  --danger: #e0655a;
+  --danger-soft: rgba(224, 101, 90, 0.12);
+  --warning-bg: rgba(245, 166, 35, 0.07);
+  --warning-line: rgba(245, 166, 35, 0.28);
+  --warning-text: #e3b573;
+  --success: #7bc47b;
+  --success-bg: rgba(123, 196, 123, 0.14);
+  --success-line: #4a8a4a;
+
+  --select-bg: #24405c;
+  --select-bg-hover: #2c4f72;
+  --select-line: #4a9eff;
+  --match-bg: rgba(245, 166, 35, 0.22);
+  --match-bg-hover: rgba(245, 166, 35, 0.32);
+  --focus-ring: rgba(245, 166, 35, 0.13);
+
+  --score-header-bg: var(--chrome-header);
+  --score-row-alt: rgba(255, 255, 255, 0.022);
+  --score-sprite: #2f5c8a;
+  --score-sprite-start: #3d7ab5;
+  --score-sprite-label: #cfe4f7;
+  --score-sprite-label-shadow: #10243a;
+  --score-current: #e0655a;
+  --score-current-on: #1a1a1a;
+  --score-scripted: #4a6fd0;
+  --score-scripted-selected: #8a5cd0;
+
+  --syn-string: #ce9178;
+  --syn-number: #b5cea8;
+  --syn-bool: #569cd6;
+  --syn-null: #7d7a75;
+  --syn-key: #9a968f;
+  --syn-link: #4aa3e0;
+
+  --scrollbar-thumb: #423f3b;
+  --scrollbar-thumb-hover: #55514a;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.4);
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.4);
+  --accent-wash: rgba(245, 166, 35, 0.055);
+}
+
+/* The dock's own theme is variable-driven (flexlayout-react 0.8), so the
+   imported light.css only needs its variables remapped onto ours. The :root
+   prefix outranks the package's `.flexlayout__layout` regardless of import
+   order. */
+:root .flexlayout__layout {
+  --color-text: var(--text);
+  /* The dock ground and every tab strip (.flexlayout__tabset_tabbar_outer
+     shares this variable with the tabset) — the frame. */
+  --color-background: var(--chrome);
+  --color-base: var(--chrome);
+  --color-tabset-background: var(--chrome);
+  /* The panel content itself — the bright surface inside the frame. */
+  --color-tab-content: var(--surface);
+  --color-border-tab-content: var(--surface);
+
+  --color-1: var(--surface-raised);
+  --color-2: var(--surface-hover);
+  --color-3: var(--surface-hover);
+  --color-4: var(--chrome-hairline);
+  --color-5: var(--chrome-hairline);
+  --color-6: var(--chrome-header);
+  --color-icon: var(--text-dim);
+  --color-overflow: var(--text-dim);
+  --font-family: inherit;
+  --font-size: 12px;
+
+  --color-tabset-header-background: var(--chrome-header);
+  --color-tabset-header: var(--text);
+  --color-tabset-divider-line: var(--chrome-hairline);
+  --color-border-divider-line: var(--chrome-hairline);
+  --color-border-background: var(--chrome);
+
+  /* Selected tab takes the content colour so the two read as one plane; the
+     rest stay on the chrome. */
+  --color-tab-selected: var(--text);
+  --color-tab-selected-background: var(--surface);
+  --color-tab-unselected: var(--text-dim);
+  --color-tab-unselected-background: transparent;
+  --color-border-tab-selected: var(--text);
+  --color-border-tab-selected-background: var(--surface);
+  --color-border-tab-unselected: var(--text-dim);
+  --color-border-tab-unselected-background: transparent;
+  --color-tab-textbox: var(--text);
+  --color-tab-textbox-background: var(--surface-sunken);
+
+  --color-splitter: var(--chrome);
+  --color-splitter-hover: var(--chrome-hairline);
+  --color-splitter-drag: var(--accent);
+  --color-drag1: var(--accent);
+  --color-drag2: var(--accent);
+  --color-drag1-background: var(--accent-soft);
+  --color-drag2-background: var(--accent-soft);
+}
+
+/* Selected tabs get a little more definition than a colour change alone: an
+   accent edge on top, the way an editor marks the active document. */
+:root .flexlayout__tab_button--selected {
+  box-shadow: inset 0 2px 0 var(--accent);
+  font-weight: 600;
+}
+
+:root .flexlayout__tab_button {
+  padding: 4px 0.7em;
+}

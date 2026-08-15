@@ -2,9 +2,23 @@
   flex: 1
 }
 
+/* Sidebar section header, VS Code style: a whisper of tone, one hairline
+   underneath, and dim bold type doing the work. No slab, no double border. */
 .toggleButton {
-  padding: 8px;
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
   text-align: left;
-  background-color: #bbb;
+  background-color: var(--chrome-header);
+  border-bottom: 1px solid var(--chrome-hairline);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
   cursor: pointer;
+
+  &:hover {
+    background-color: var(--surface-hover);
+    color: var(--text);
+  }
 }

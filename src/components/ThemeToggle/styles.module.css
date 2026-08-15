@@ -1,0 +1,42 @@
+/* Three-state control: Auto / Light / Dark. Auto is a real state, not the
+   absence of a choice, so it needs to be visible and selectable. */
+
+.themeToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background-color: var(--surface-raised);
+  flex-shrink: 0;
+}
+
+.themeOption {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+
+  &:hover {
+    color: var(--text);
+    background-color: var(--surface-hover);
+  }
+}
+
+.themeOptionActive {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+
+  &:hover {
+    color: var(--accent);
+    background-color: var(--accent-soft);
+  }
+}

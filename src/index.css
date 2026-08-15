@@ -1,5 +1,6 @@
 @import "the-new-css-reset/css/reset.css";
 @import "./styles/typography.css";
+@import "./styles/theme.css";
 
 body {
   margin: 0;
@@ -8,6 +9,10 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Painted here too so the page behind the app never flashes white in dark
+     mode, and so overscroll shows the theme's ground. */
+  background-color: var(--bg);
+  color: var(--text);
 }
 
 code {

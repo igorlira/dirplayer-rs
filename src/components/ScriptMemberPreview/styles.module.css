@@ -1,47 +1,53 @@
+/* The editor chrome — surfaces, tabs, gutter, highlights — is drawn from the
+   shared theme tokens (styles/theme.css) so this panel matches the rest of the
+   studio in both light and dark. Only the *syntax* palette below is local:
+   those are VS Code's Dark+/Light+ token colours, switched by the `theme` prop
+   (the .light block), which MemberInspector drives from the app theme. */
 :root {
-  --script-bg: #1e1e1e;
-  --script-fg: #d4d4d4;
+  --script-bg: var(--surface);
+  --script-fg: var(--text);
   --script-font-family: "Consolas", "Monaco", "Courier New", monospace;
 
-  --tab-bg: #252526;
-  --tab-fg: #969696;
-  --tab-fg-hover: #d4d4d4;
-  --tab-bg-hover: #2d2d2d;
-  --tab-fg-active: #ffffff;
-  --tab-bg-active: #1e1e1e;
-  --tab-border: #3c3c3c;
-  --tab-indicator: #007acc;
+  --tab-bg: var(--chrome);
+  --tab-fg: var(--text-dim);
+  --tab-fg-hover: var(--text);
+  --tab-bg-hover: var(--surface-hover);
+  --tab-fg-active: var(--text);
+  --tab-bg-active: var(--surface);
+  --tab-border: var(--chrome-hairline);
+  --tab-indicator: var(--accent);
 
-  --handler-bg: #252526;
-  --handler-bg-hover: #2a2a2a;
-  --handler-border: #2d2d2d;
-  --handler-icon-fg: #858585;
+  --handler-bg: var(--chrome-header);
+  --handler-bg-hover: var(--surface-hover);
+  --handler-border: var(--chrome-hairline);
+  --handler-icon-fg: var(--text-faint);
   --handler-signature-fg: #dcdcaa;
   --handler-keyword-fg: #569cd6;
   --handler-args-fg: #9cdcfe;
 
-  --line-bg-hover: #2a2a2a;
-  --line-highlight-bg: #264f78;
-  --line-highlight-fg: #ffffff;
-  --line-alt-highlight-bg: #2d4f4f;
+  --line-bg-hover: var(--surface-hover);
+  /* Execution position: the accent, same as everywhere else it marks "here". */
+  --line-highlight-bg: var(--accent-soft);
+  --line-highlight-fg: var(--text);
+  --line-alt-highlight-bg: var(--select-bg);
 
-  --gutter-bg: #1e1e1e;
-  --gutter-fg: #6e7681;
+  --gutter-bg: var(--surface);
+  --gutter-fg: var(--text-faint);
 
-  --breakpoint-color: #f14c4c;
-  --breakpoint-hover-bg: rgba(241, 76, 76, 0.4);
+  --breakpoint-color: var(--danger);
+  --breakpoint-hover-bg: var(--danger-soft);
 
   --bytecode-offset-fg: #6a9955;
   --bytecode-opcode-fg: #569cd6;
   --bytecode-operand-fg: #b5cea8;
   --bytecode-text-fg: #ce9178;
 
-  --empty-state-fg: #6e7681;
+  --empty-state-fg: var(--text-faint);
 
-  --scrollbar-track-bg: #1e1e1e;
-  --scrollbar-thumb-bg: #424242;
-  --scrollbar-thumb-border: #1e1e1e;
-  --scrollbar-thumb-hover-bg: #4f4f4f;
+  --scrollbar-track-bg: transparent;
+  --scrollbar-thumb-bg: var(--scrollbar-thumb);
+  --scrollbar-thumb-border: var(--surface);
+  --scrollbar-thumb-hover-bg: var(--scrollbar-thumb-hover);
 
   /* Syntax Highlighting Tokens */
   --token-keyword-fg: #569cd6;
@@ -56,47 +62,14 @@
 }
 
 .scriptContainer.light {
-  --script-bg: #ffffff;
-  --script-fg: #000000;
-
-  --tab-bg: #f3f3f3;
-  --tab-fg: #505050;
-  --tab-fg-hover: #000000;
-  --tab-bg-hover: #e6e6e6;
-  --tab-fg-active: #000000;
-  --tab-bg-active: #ffffff;
-  --tab-border: #e0e0e0;
-
-  --handler-bg: #f3f3f3;
-  --handler-bg-hover: #e6e6e6;
-  --handler-border: #e0e0e0;
-  --handler-icon-fg: #707070;
   --handler-signature-fg: #001080; /* blue */
   --handler-keyword-fg: #0000ff; /* blue */
   --handler-args-fg: #098658; /* dark green */
-
-  --line-bg-hover: #f0f0f0;
-  --line-highlight-bg: #fffbad;
-  --line-highlight-fg: #000000;
-  --line-alt-highlight-bg: #a6e3a1;
-
-  --gutter-bg: #ffffff;
-  --gutter-fg: #858585;
-
-  --breakpoint-color: #e51400;
-  --breakpoint-hover-bg: rgba(229, 20, 0, 0.4);
 
   --bytecode-offset-fg: #008000; /* green */
   --bytecode-opcode-fg: #0000ff; /* blue */
   --bytecode-operand-fg: #098658; /* dark green */
   --bytecode-text-fg: #a31515; /* dark red */
-
-  --empty-state-fg: #858585;
-
-  --scrollbar-track-bg: #ffffff;
-  --scrollbar-thumb-bg: #cccccc;
-  --scrollbar-thumb-border: #ffffff;
-  --scrollbar-thumb-hover-bg: #b3b3b3;
 
   /* Syntax Highlighting Tokens */
   --token-keyword-fg: #0000ff;

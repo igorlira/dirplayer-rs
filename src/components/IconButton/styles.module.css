@@ -1,13 +1,13 @@
 .iconButton {
   width: 32px;
   height: 32px;
-  border: 1px solid #ccc;
-  color: #778;
+  border: 1px solid var(--hairline-strong);
+  color: var(--text-dim);
   border-radius: 5px;
   cursor: pointer;
   text-align: center;
 
   &:hover {
-    background-color: #ddd;
+    background-color: var(--surface-hover);
   }
 }

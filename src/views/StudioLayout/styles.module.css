@@ -20,7 +20,9 @@
 
 .scriptError {
   display: flex;
-  background-color: yellow;
+  background-color: var(--match-bg);
+  color: var(--text);
+  border-bottom: 1px solid var(--hairline);
   align-items: flex-start;
   padding: 5px 10px;
 }

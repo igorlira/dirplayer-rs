@@ -19,49 +19,55 @@
   padding: 0.5rem;
   font-family: monospace;
   font-size: 0.9rem;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
   border-radius: 4px;
+  background-color: var(--surface-sunken);
+  color: var(--text);
 }
 
 .commandInput:focus {
   outline: none;
-  border-color: #007acc;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
+/* Primary action, same chip treatment as the load screen and the branded
+   conflict UI: the accent outlines the button instead of flooding it. */
 .evalButton {
   padding: 0.5rem 1rem;
-  background-color: #007acc;
-  color: white;
-  border: none;
+  background-color: var(--surface-raised);
+  color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .evalButton:hover {
-  background-color: #005a9e;
+  background-color: var(--accent-soft);
 }
 
 .evalButton:active {
-  background-color: #004578;
+  background-color: var(--accent-soft);
 }
 
 .clearButton {
   padding: 0.5rem 1rem;
-  background-color: #666;
-  color: white;
-  border: none;
+  background-color: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--hairline-strong);
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.9rem;
 }
 
 .clearButton:hover {
-  background-color: #555;
+  background-color: var(--surface-hover);
 }
 
 .clearButton:active {
-  background-color: #444;
+  background-color: var(--surface-hover);
 }
 
 .debugMessages {
@@ -76,7 +82,7 @@
   display: block;
   max-width: 100%;
   margin: 4px 0;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
 }
 
 .datumInspector {
@@ -84,7 +90,7 @@
 }
 
 .datumLoading {
-  color: #999;
+  color: var(--text-faint);
   font-style: italic;
 }
 
@@ -103,7 +109,7 @@
 
 .datumChildren {
   margin-left: 16px;
-  border-left: 1px solid #ddd;
+  border-left: 1px solid var(--hairline);
   padding-left: 8px;
 }
 
@@ -114,7 +120,7 @@
 }
 
 .datumKey {
-  color: #666;
+  color: var(--syn-key);
 }
 
 .pagination {
@@ -127,7 +133,7 @@
 
 .pagination button {
   background: none;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
   border-radius: 3px;
   padding: 1px 6px;
   cursor: pointer;
@@ -135,7 +141,7 @@
 }
 
 .pagination button:hover:not(:disabled) {
-  background-color: #eee;
+  background-color: var(--surface-hover);
 }
 
 .pagination button:disabled {

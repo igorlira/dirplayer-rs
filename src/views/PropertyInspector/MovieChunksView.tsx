@@ -221,7 +221,7 @@ function ChunkTreePanel({
       </div>
       <div className={styles.chunkTree}>
         {visibleRoots.length === 0 && (
-          <div style={{ padding: 8, color: "#999", fontSize: 12 }}>
+          <div style={{ padding: 8, color: "var(--text-faint)", fontSize: 12 }}>
             {filterText ? "No chunks match the filter." : "No chunks found."}
           </div>
         )}

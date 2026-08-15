@@ -18,23 +18,26 @@
   align-items: center;
   padding: 4px;
   gap: 4px;
-  border-bottom: 1px solid #ddd;
+  background-color: var(--chrome-header);
+  border-bottom: 1px solid var(--chrome-hairline);
   position: relative;
 }
 
 .chunkSearchInput {
   flex: 1;
   padding: 4px 22px 4px 6px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
   border-radius: 2px;
   font-size: 12px;
   font-family: inherit;
   outline: none;
   min-width: 0;
+  background-color: var(--surface-sunken);
+  color: var(--text);
 }
 
 .chunkSearchInput:focus {
-  border-color: #007acc;
+  border-color: var(--accent);
 }
 
 .chunkSearchClear {
@@ -44,27 +47,29 @@
   border: none;
   cursor: pointer;
   font-size: 14px;
-  color: #999;
+  color: var(--text-faint);
   padding: 0 4px;
   line-height: 1;
 }
 
 .chunkSearchClear:hover {
-  color: #333;
+  color: var(--text);
 }
 
 .chunkCastFilter {
   padding: 4px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hairline-strong);
   border-radius: 2px;
   font-size: 12px;
   font-family: inherit;
   outline: none;
   max-width: 140px;
+  background-color: var(--surface-sunken);
+  color: var(--text);
 }
 
 .chunkCastFilter:focus {
-  border-color: #007acc;
+  border-color: var(--accent);
 }
 
 .chunkTree {
@@ -84,7 +89,7 @@
 }
 
 .chunkNode:hover {
-  background-color: #e3e3e3;
+  background-color: var(--surface-hover);
 }
 
 .chunkNode:hover .chunkSave {
@@ -92,11 +97,11 @@
 }
 
 .chunkNodeMatch {
-  background-color: #fff3cd;
+  background-color: var(--match-bg);
 }
 
 .chunkNodeMatch:hover {
-  background-color: #ffe69c;
+  background-color: var(--match-bg-hover);
 }
 
 .chunkExpander {
@@ -108,26 +113,26 @@
 
 .chunkFourcc {
   font-weight: bold;
-  color: #007acc;
+  color: var(--syn-link);
 }
 
 .chunkId {
-  color: #666;
+  color: var(--text-dim);
 }
 
 .chunkMember {
-  color: #886;
+  color: var(--text-dim);
   font-size: 11px;
   margin-left: 4px;
 }
 
 .chunkSize {
-  color: #999;
+  color: var(--text-faint);
   margin-left: auto;
 }
 
 .chunkSave {
-  color: #007acc;
+  color: var(--syn-link);
   text-decoration: none;
   font-size: 11px;
   visibility: hidden;
@@ -147,11 +152,11 @@
 }
 
 .chunkNodeSelected {
-  background-color: #d0e8ff;
+  background-color: var(--select-bg);
 }
 
 .chunkNodeSelected:hover {
-  background-color: #b8dcff;
+  background-color: var(--select-bg-hover);
 }
 
 /* Chunk detail panel */
@@ -161,7 +166,7 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #999;
+  color: var(--text-faint);
   font-size: 12px;
   padding: 16px;
   text-align: center;
@@ -175,8 +180,8 @@
 
 .chunkDetailTitle {
   padding: 6px 8px;
-  border-bottom: 1px solid #eee;
-  background-color: #f8f8f8;
+  border-bottom: 1px solid var(--chrome-hairline);
+  background-color: var(--chrome-header);
   font-size: 12px;
 }
 

@@ -1,4 +1,7 @@
+/* Transport bar: chrome, like a DAW/editor toolbar. */
 .container {
+  background-color: var(--chrome-header);
+  border-bottom: 1px solid var(--chrome-hairline);
   padding: 8px 16px;
   display: flex;
   flex-direction: row;
@@ -15,34 +18,34 @@
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 600;
-  border: 1px solid #aaa;
+  border: 1px solid var(--hairline-strong);
   border-radius: 3px;
-  background: #e8e8e8;
-  color: #666;
+  background: var(--surface-raised);
+  color: var(--text-dim);
   cursor: pointer;
   letter-spacing: 0.5px;
 }
 
 .mcpButton:hover {
-  background: #ddd;
-  border-color: #888;
+  background: var(--surface-hover);
+  border-color: var(--hairline-strong);
 }
 
 .mcpButtonActive {
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 600;
-  border: 1px solid #2a7a2a;
+  border: 1px solid var(--success-line);
   border-radius: 3px;
-  background: #d4edda;
-  color: #1a5c1a;
+  background: var(--success-bg);
+  color: var(--success);
   cursor: pointer;
   letter-spacing: 0.5px;
 }
 
 .mcpButtonActive:hover {
-  background: #c3e6cb;
-  border-color: #1a5c1a;
+  background: var(--success-bg);
+  border-color: var(--success);
 }
 
 .mcpContainer {
@@ -53,21 +56,23 @@
 
 .mcpUrl {
   font-size: 11px;
-  color: #1a5c1a;
+  color: var(--success);
   font-family: monospace;
   cursor: pointer;
-  border-bottom: 1px dashed #1a5c1a;
+  border-bottom: 1px dashed var(--success-line);
 }
 
 .mcpUrl:hover {
-  color: #0d3d0d;
+  color: var(--success);
 }
 
 .mcpPortInput {
   font-size: 11px;
   font-family: monospace;
   padding: 1px 4px;
-  border: 1px solid #007acc;
+  border: 1px solid var(--accent);
+  background-color: var(--surface-sunken);
+  color: var(--text);
   border-radius: 2px;
   outline: none;
   width: 50px;

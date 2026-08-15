@@ -1,6 +1,6 @@
 
 .selectedListItem {
-  background-color: #f0f0f0;
+  background-color: var(--select-bg);
 }
 
 .listItem {
@@ -10,7 +10,7 @@
   white-space: nowrap;
 
   &:hover {
-    background-color: #e3e3e3;
+    background-color: var(--surface-hover);
   }
 
   > button {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './styles.module.css';
 import logoUrl from '../../assets/logo128.png';
+import ThemeToggle from '../../components/ThemeToggle';
 import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override,
   set_startup_do, set_startup_do_before, set_startup_go } from 'vm-rust';
 import { parseLaunchCommand, findLaunchCommandInHtml, findLegacyServerInHtml, toLegacyUrl } from '../../utils/launchCommand';
@@ -560,6 +561,9 @@ export default function LoadMovie() {
         <div className={styles.brandText}>
           <h1 className={styles.title}>DirPlayer</h1>
           <div className={styles.subtitle}>Load Movie</div>
+        </div>
+        <div className={styles.headerActions}>
+          <ThemeToggle />
         </div>
       </div>
 

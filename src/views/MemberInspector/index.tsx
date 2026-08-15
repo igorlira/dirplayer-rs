@@ -7,6 +7,7 @@ import { ICastMemberIdentifier, ISoundMemberSnapshot, memberRefEqualsSafe } from
 import styles from "./styles.module.css";
 import { player_print_member_bitmap_hex, player_play_member_sound, player_print_member_sound_hex } from 'vm-rust'
 import FilmLoopInspector from "../FilmLoopInspector";
+import { useTheme } from "../../utils/theme";
 
 interface IMemberInspectorProps {
   memberId: ICastMemberIdentifier;
@@ -85,6 +86,9 @@ function FontPreview() {
 
 export default function MemberInspector({ memberId }: IMemberInspectorProps) {
   const memberSnapshot = useMemberSnapshot(memberId);
+  // The script viewer ships its own VS Code-style light and dark palettes;
+  // point it at whichever one the app is currently in.
+  const { resolved: theme } = useTheme();
   const scopes = useAppSelector((state) => state.vm.scopes);
   const currentScope = scopes.at(scopes.length - 1);
   const isScriptExecuting = memberRefEqualsSafe(
@@ -115,6 +119,7 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
             }
             backgroundScopes={bgScopes}
             memberId={memberId}
+            theme={theme}
           />
         )}
         {memberSnapshot?.type === "bitmap" && (

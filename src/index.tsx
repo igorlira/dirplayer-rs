@@ -4,9 +4,13 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { initializeNetLoader } from './services/netLoader';
+import { initTheme } from './utils/theme';
 
 // Initialize network loader for Electron support
 initializeNetLoader();
+
+// Before the first render, so a stored dark preference doesn't flash light.
+initTheme();
 
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement

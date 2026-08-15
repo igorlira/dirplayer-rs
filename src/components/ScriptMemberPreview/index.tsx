@@ -194,7 +194,7 @@ export default function ScriptMemberPreview({
           {isJavaScript ? 'SM bytecode' : 'Assembly'}
         </button>
         {isJavaScript && (
-          <span style={{ marginLeft: 'auto', padding: '2px 8px', background: '#ffd54f', color: '#000', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
+          <span style={{ marginLeft: 'auto', alignSelf: 'center', padding: '2px 8px', background: 'var(--accent-soft)', color: 'var(--accent)', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
             JavaScript
           </span>
         )}

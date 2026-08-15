@@ -5,6 +5,7 @@ import styles from './styles.module.css'
 import { play, stop, reset, start_profiling_recording, stop_profiling_recording, export_profiling_speedscope } from 'vm-rust'
 import { isElectron } from '../../utils/electron'
 import { isMcpEnabled, setMcpEnabled, getMcpPort, setMcpPort, getMcpUrl } from '../../mcp'
+import ThemeToggle from '../ThemeToggle'
 
 // Save the recorded speedscope profile to a downloadable file. Open the result
 // at https://www.speedscope.app/ (or `speedscope <file>`).
@@ -105,9 +106,8 @@ export default function PlaybackControls() {
     <IconButton icon={faStop} onClick={() => { stop() }} />
     <IconButton icon={faRotateBack} onClick={() => { reset() }} />
     <ProfileToggle />
-    {isElectron() && <>
-      <div className={styles.spacer} />
-      <McpToggle />
-    </>}
+    <div className={styles.spacer} />
+    {isElectron() && <McpToggle />}
+    <ThemeToggle />
   </div>
 }

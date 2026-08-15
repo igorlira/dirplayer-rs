@@ -3,17 +3,20 @@
 }
 
 .tabButton {
-  background-color: #f4f4f4;
+  background: none;
   border: none;
-  color: #000;
+  color: var(--text-dim);
   padding: 5px 10px;
   text-align: center;
-  text-decoration: none;
   display: inline-block;
-  font-size: 16px;
+  font-size: 12px;
   cursor: pointer;
-  border-radius: 5px 5px 0 0;
-  margin-right: 5px;
+  border-radius: 4px 4px 0 0;
+
+  &:hover {
+    color: var(--text);
+    background-color: var(--surface-hover);
+  }
 }
 
 .tabItemContainer {
