@@ -57,6 +57,7 @@
 }
 
 .frameHeaderCell {
+  font-family: var(--font-mono);
   min-width: var(--frame-cell-width);
   display: inline-block;
   text-align: center;

@@ -1,4 +1,5 @@
 .propTable {
+  font-family: var(--font-mono);
   padding: 2px 0;
   font-size: 12px;
   width: fit-content;
@@ -66,7 +67,7 @@
   width: 12px;
   height: 12px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   vertical-align: middle;
 }
 

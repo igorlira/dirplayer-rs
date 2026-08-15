@@ -6,7 +6,7 @@
 :root {
   --script-bg: var(--surface);
   --script-fg: var(--text);
-  --script-font-family: "Consolas", "Monaco", "Courier New", monospace;
+  --script-font-family: var(--font-mono);
 
   --tab-bg: var(--chrome);
   --tab-fg: var(--text-dim);

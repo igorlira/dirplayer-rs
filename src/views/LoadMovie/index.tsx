@@ -755,20 +755,20 @@ export default function LoadMovie() {
               Auto-play
             </label>
             <button className={styles.button} onClick={onLoadClick} disabled={isLoading}>
-              {isLoading ? (
-                <>
-                  <span className={styles.spinner} />
-                  Loading
-                </>
-              ) : (
-                <>
-                  Load Movie
-                </>
-              )}
+              {isLoading ? 'Loading…' : 'Load Movie'}
             </button>
           </div>
         </div>
       </div>
+
+      {recentMovies.length === 0 && (
+        <div className={styles.firstRun}>
+          <span>
+            Nothing loaded yet. Point DirPlayer at a <code>.dcr</code>, <code>.dxr</code>{' '}
+            or <code>.dir</code> — a local file or a URL. Whatever you open is kept here.
+          </span>
+        </div>
+      )}
     </div>
 
     {recentMovies.length > 0 && (

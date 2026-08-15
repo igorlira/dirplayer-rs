@@ -7,7 +7,7 @@
   gap: 1px;
   padding: 2px;
   border: 1px solid var(--hairline);
-  border-radius: 7px;
+  border-radius: var(--r-md);
   background-color: var(--surface-raised);
   flex-shrink: 0;
 }
@@ -19,7 +19,7 @@
   width: 26px;
   height: 22px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   background: none;
   color: var(--text-faint);
   cursor: pointer;

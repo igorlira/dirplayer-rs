@@ -17,7 +17,7 @@
   border: 1px solid var(--hairline-strong);
   background-color: var(--surface-sunken);
   color: var(--text);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   font-size: 13px;
   box-sizing: border-box;
 }
@@ -85,6 +85,9 @@
 
 .memberNumberLabel {
   width: 32px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
   display: flex;
   background: var(--surface-raised);
   margin-right: 8px;

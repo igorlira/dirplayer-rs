@@ -27,7 +27,7 @@
   flex: 1;
   padding: 4px 22px 4px 6px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   font-size: 12px;
   font-family: inherit;
   outline: none;
@@ -59,7 +59,7 @@
 .chunkCastFilter {
   padding: 4px;
   border: 1px solid var(--hairline-strong);
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   font-size: 12px;
   font-family: inherit;
   outline: none;
@@ -112,11 +112,13 @@
 }
 
 .chunkFourcc {
+  font-family: var(--font-mono);
   font-weight: bold;
   color: var(--syn-link);
 }
 
 .chunkId {
+  font-family: var(--font-mono);
   color: var(--text-dim);
 }
 
@@ -127,6 +129,7 @@
 }
 
 .chunkSize {
+  font-family: var(--font-mono);
   color: var(--text-faint);
   margin-left: auto;
 }

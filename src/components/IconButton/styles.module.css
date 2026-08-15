@@ -3,7 +3,7 @@
   height: 32px;
   border: 1px solid var(--hairline-strong);
   color: var(--text-dim);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   cursor: pointer;
   text-align: center;
 
