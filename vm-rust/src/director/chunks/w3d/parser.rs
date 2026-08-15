@@ -238,7 +238,7 @@ impl W3dFileParser {
     /// R0 is recorded in `scene.model_root_com` so the renderer strips precisely
     /// the matrix composed here and the two sides cannot drift apart.
     fn apply_root_com_to_model_nodes(&mut self) {
-        let mut fixups: Vec<(usize, [f32; 16])> = Vec::new();
+        let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>)> = Vec::new();
 
         for (i, node) in self.scene.nodes.iter().enumerate() {
             if node.node_type != W3dNodeType::Model { continue; }
@@ -251,25 +251,29 @@ impl W3dFileParser {
                         || s.name == node.name)
             }) else { continue };
 
-            // Reference motion, in the same priority order the renderer uses to pick
-            // its relativization reference: an authored idle first (the bot rigs are
-            // modelled at Idle_Rest), otherwise the rig's own like-named motion.
-            let reference = self.scene.motions.iter()
-                .find(|m| m.name.as_lower_str().contains("idle_rest"))
-                .or_else(|| self.scene.motions.iter().find(|m| m.name.as_lower_str().contains("idle")))
-                .or_else(|| self.scene.motions.iter().find(|m| m.name == skel.name));
-            let Some(reference) = reference else { continue };
+            // A member may hold the rig with NO motion at all: AreaZero keeps each
+            // robot in its own cast member and every clip in a member of its own,
+            // then clones both into the level at runtime. Frame 0 of "no motion" is
+            // the skeleton's REST pose, so that is what Director folds — and it has
+            // to, or `member("RobotGun").model("RobotGun").getWorldTransform()` (the
+            // transform the game copies onto every robot it spawns) comes back
+            // without the biped COM while the renderer still strips it. The robots
+            // then aim correctly and render 90 degrees off, because a 3ds-Max biped
+            // root sits at +90 about Z.
+            let reference = super::skeleton::import_root_com_motion(&self.scene, skel);
 
-            let posed = super::skeleton::build_bone_matrices(skel, Some(reference), 0.0);
+            let posed = super::skeleton::build_bone_matrices(skel, reference, 0.0);
             let Some(r0) = posed.first() else { continue };
             if is_identity_mat4(r0) { continue; }
 
-            fixups.push((i, *r0));
+            fixups.push((i, *r0, reference.map(|m| m.name)));
         }
 
-        for (i, r0) in fixups {
+        for (i, r0, reference) in fixups {
             let name = self.scene.nodes[i].name.to_ascii_lowercase();
-            log(&format!("  Root COM folded into model node {:?}", self.scene.nodes[i].name));
+            log(&format!("  Root COM folded into model node {:?} (from {})",
+                self.scene.nodes[i].name,
+                reference.map(|n| n.as_str()).unwrap_or("the rest pose")));
             self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
             self.scene.model_root_com.insert(name, r0);
         }

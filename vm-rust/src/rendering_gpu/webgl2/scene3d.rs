@@ -4977,10 +4977,13 @@ void main() {
         // (the per-frame posed root removed the run's small turn too → bots looked
         // "slightly off while moving"). The bot mesh is authored at "Idle_Rest", so use
         // that motion's frame-0 root as the fixed reference; models with no idle motion
-        // (dino/frog) fall back to the per-frame posed root (idle-dominant → no residual).
-        let idle_root_mats = scene.motions.iter()
-            .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
-            .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
+        // (dino/frog) get no relativization at all.
+        //
+        // The idle MUST be one that drives THIS rig — `scene.motions` is a member-wide
+        // table and a game can clone several skeletons plus all their clips into one
+        // member. Keep this to an authored idle: it is a FALLBACK for models whose fold
+        // was not recorded, and widening it relativizes draws that never were.
+        let idle_root_mats = crate::director::chunks::w3d::skeleton::idle_reference_motion(scene, skeleton)
             .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
         // Only models with an idle-rest motion (the biped actors/bots) are relativized;
         // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
