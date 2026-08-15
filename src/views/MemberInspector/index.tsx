@@ -17,6 +17,21 @@ interface ITextMemberPreviewProps {
   text: string;
 }
 
+/** Key/value list shared by every member type's detail panel. */
+function Facts({ children }: { children: React.ReactNode }) {
+  return <div className={styles.facts}>{children}</div>;
+}
+
+function Fact({ label, value }: { label: string; value: React.ReactNode }) {
+  if (value === undefined || value === null || value === '') return null;
+  return (
+    <>
+      <div className={styles.factLabel}>{label}</div>
+      <div className={styles.factValue}>{value}</div>
+    </>
+  );
+}
+
 const normalizeLineEndings = (str: string, normalized = "\r\n") =>
   str.replace(/\r?\n|\r/g, normalized);
 
@@ -33,19 +48,18 @@ function SoundMemberPreview({
 }) {
   const durationSec = snapshot.duration ? (snapshot.duration / 1000).toFixed(2) : "?";
   return (
-    <div>
-      <p>
-        {snapshot.sampleRate} Hz · {snapshot.channels} ch · {snapshot.bitsPerSample}-bit
-      </p>
-      <p>
-        Samples: {snapshot.sampleCount} · Duration: {durationSec}s · Loop:{" "}
-        {String(snapshot.loop)}
-      </p>
-      <p>
-        Codec: {snapshot.codec || "?"} · Data: {snapshot.dataSize} bytes
-      </p>
-      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+    <div className={styles.detail}>
+      <Facts>
+        <Fact label="Format" value={`${snapshot.sampleRate} Hz · ${snapshot.channels} ch · ${snapshot.bitsPerSample}-bit`} />
+        <Fact label="Samples" value={snapshot.sampleCount} />
+        <Fact label="Duration" value={`${durationSec}s`} />
+        <Fact label="Loop" value={String(snapshot.loop)} />
+        <Fact label="Codec" value={snapshot.codec || "?"} />
+        <Fact label="Data size" value={`${snapshot.dataSize} bytes`} />
+      </Facts>
+      <div className={styles.actions}>
         <button
+          className={styles.actionButton}
           onClick={() =>
             player_play_member_sound(memberId.castNumber, memberId.memberNumber)
           }
@@ -53,6 +67,7 @@ function SoundMemberPreview({
           ▶ Play
         </button>
         <button
+          className={styles.actionButton}
           onClick={() =>
             player_print_member_sound_hex(memberId.castNumber, memberId.memberNumber)
           }
@@ -67,18 +82,20 @@ function SoundMemberPreview({
 function FontPreview() {
   const [fontSize, setFontSize] = useState(12);
   return (
-    <div>
-      <label>
-        Font size:{" "}
-        <input
-          type="number"
-          min={4}
-          max={72}
-          value={fontSize}
-          onChange={(e) => setFontSize(Number(e.target.value))}
-          style={{ width: 50 }}
-        />
-      </label>
+    <div className={styles.detail}>
+      <div className={styles.actions}>
+        <label className={styles.fieldLabel}>
+          Font size
+          <input
+            className={styles.numberInput}
+            type="number"
+            min={4}
+            max={72}
+            value={fontSize}
+            onChange={(e) => setFontSize(Number(e.target.value))}
+          />
+        </label>
+      </div>
       <PreviewCanvas fontSize={fontSize} />
     </div>
   );
@@ -103,7 +120,13 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
 
   return (
     <div className={styles.container}>
-      #{memberSnapshot?.number} {memberSnapshot?.type}: {memberSnapshot?.name}
+      <header className={styles.memberHeader}>
+        <span className={styles.memberNumber}>#{memberSnapshot.number}</span>
+        <span className={styles.memberName}>
+          {memberSnapshot.name || <span className={styles.memberUnnamed}>untitled</span>}
+        </span>
+        <span className={styles.memberType}>{memberSnapshot.type}</span>
+      </header>
       <div className={styles.preview}>
         {memberSnapshot?.type === "field" && (
           <TextMemberPreview text={memberSnapshot?.text || ''} />
@@ -123,11 +146,21 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
           />
         )}
         {memberSnapshot?.type === "bitmap" && (
-          <div>
-            <p>{memberSnapshot.width}x{memberSnapshot.height}x{memberSnapshot.bitDepth}</p>
-            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
-            <p>Palette ref: {memberSnapshot.paletteRef}</p>
-            <button onClick={() => player_print_member_bitmap_hex(memberId.castNumber, memberId.memberNumber)}>Print hex</button>
+          <div className={styles.detail}>
+            <Facts>
+              <Fact label="Size" value={`${memberSnapshot.width} × ${memberSnapshot.height}`} />
+              <Fact label="Bit depth" value={`${memberSnapshot.bitDepth}-bit`} />
+              <Fact label="Reg point" value={`${memberSnapshot.regX}, ${memberSnapshot.regY}`} />
+              <Fact label="Palette" value={memberSnapshot.paletteRef} />
+            </Facts>
+            <div className={styles.actions}>
+              <button
+                className={styles.actionButton}
+                onClick={() => player_print_member_bitmap_hex(memberId.castNumber, memberId.memberNumber)}
+              >
+                Print hex
+              </button>
+            </div>
             <PreviewCanvas />
           </div>)}
         {memberSnapshot?.type === "filmLoop" && (
@@ -140,25 +173,35 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
           <SoundMemberPreview memberId={memberId} snapshot={memberSnapshot} />
         )}
         {memberSnapshot?.type === "flash" && (
-          <div>
-            <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
-            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
-            <p>Data size: {memberSnapshot.dataSize} bytes</p>
-            {memberSnapshot.directToStage !== undefined && <p>Direct to stage: {String(memberSnapshot.directToStage)}</p>}
-            {memberSnapshot.sourceFileName && <p>Source: {memberSnapshot.sourceFileName}</p>}
-            {memberSnapshot.quality && <p>Quality: {memberSnapshot.quality}</p>}
-            {memberSnapshot.scaleMode && <p>Scale mode: {memberSnapshot.scaleMode}</p>}
-            {memberSnapshot.playbackMode && <p>Playback: {memberSnapshot.playbackMode}</p>}
+          <div className={styles.detail}>
+            <Facts>
+              <Fact label="Size" value={`${memberSnapshot.width} × ${memberSnapshot.height}`} />
+              <Fact label="Reg point" value={`${memberSnapshot.regX}, ${memberSnapshot.regY}`} />
+              <Fact label="Data size" value={`${memberSnapshot.dataSize} bytes`} />
+              <Fact
+                label="Direct to stage"
+                value={memberSnapshot.directToStage === undefined ? undefined : String(memberSnapshot.directToStage)}
+              />
+              <Fact label="Source" value={memberSnapshot.sourceFileName} />
+              <Fact label="Quality" value={memberSnapshot.quality} />
+              <Fact label="Scale mode" value={memberSnapshot.scaleMode} />
+              <Fact label="Playback" value={memberSnapshot.playbackMode} />
+            </Facts>
           </div>
         )}
         {memberSnapshot?.type === "shockwave3d" && (
-          <div>
-            <p>{memberSnapshot.width}x{memberSnapshot.height}</p>
-            <p>Reg point: {memberSnapshot.regX}x{memberSnapshot.regY}</p>
+          <div className={styles.detail}>
+            <Facts>
+              <Fact label="Size" value={`${memberSnapshot.width} × ${memberSnapshot.height}`} />
+              <Fact label="Reg point" value={`${memberSnapshot.regX}, ${memberSnapshot.regY}`} />
+            </Facts>
           </div>
         )}
-        {memberSnapshot?.type === "palette" && <div>
-          Ref id: {memberSnapshot.paletteRef}
+        {memberSnapshot?.type === "palette" && <div className={styles.detail}>
+          <Facts>
+            <Fact label="Ref id" value={memberSnapshot.paletteRef} />
+            <Fact label="Colors" value={memberSnapshot.colors?.length} />
+          </Facts>
           {memberSnapshot.colors && <div className={styles.paletteGrid}>
             {memberSnapshot.colors.map((color, i) => (
               <div key={i} style={{ backgroundColor: `rgb(${color[0]}, ${color[1]}, ${color[2]})`, width: 20, height: 20 }} />

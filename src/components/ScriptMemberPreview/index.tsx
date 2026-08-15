@@ -174,30 +174,27 @@ export default function ScriptMemberPreview({
 
   return (
     <div className={classNames(styles.scriptContainer, theme === 'light' && styles.light)}>
-      <div className={styles.viewModeToggle}>
-        <button
-          className={classNames(
-            styles.viewModeButton,
-            viewMode === 'lingo' && styles.viewModeButtonActive
-          )}
-          onClick={() => setViewMode('lingo')}
-        >
-          {isJavaScript ? 'JS' : 'Lingo'}
-        </button>
-        <button
-          className={classNames(
-            styles.viewModeButton,
-            viewMode === 'assembly' && styles.viewModeButtonActive
-          )}
-          onClick={() => setViewMode('assembly')}
-        >
-          {isJavaScript ? 'SM bytecode' : 'Assembly'}
-        </button>
-        {isJavaScript && (
-          <span style={{ marginLeft: 'auto', alignSelf: 'center', padding: '2px 8px', background: 'var(--accent-soft)', color: 'var(--accent)', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
-            JavaScript
-          </span>
-        )}
+      {/* Source and bytecode are two representations of one script, not two
+          documents, so this is a segmented control rather than a third tab
+          strip stacked under the dock's tabs and the member header. */}
+      <div className={styles.viewModeBar}>
+        <div className={styles.segmented} role="group" aria-label="Script view">
+          <button
+            className={classNames(styles.segment, viewMode === 'lingo' && styles.segmentActive)}
+            onClick={() => setViewMode('lingo')}
+            aria-pressed={viewMode === 'lingo'}
+          >
+            {isJavaScript ? 'JS' : 'Lingo'}
+          </button>
+          <button
+            className={classNames(styles.segment, viewMode === 'assembly' && styles.segmentActive)}
+            onClick={() => setViewMode('assembly')}
+            aria-pressed={viewMode === 'assembly'}
+          >
+            {isJavaScript ? 'SM bytecode' : 'Assembly'}
+          </button>
+        </div>
+        {isJavaScript && <span className={styles.languageBadge}>JavaScript</span>}
       </div>
 
       {snapshot.script.handlers.map((handler) => {

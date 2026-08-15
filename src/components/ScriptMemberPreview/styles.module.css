@@ -97,44 +97,68 @@
 }
 
 /* View Mode Toggle - Tab style */
-.viewModeToggle {
+/* View switch: a segmented control, since Lingo and Assembly are two
+   representations of the same script. Tabs would imply separate documents —
+   and would be the third tab strip in a row, under the dock's tabs and the
+   member header. */
+.viewModeBar {
   display: flex;
-  background-color: var(--tab-bg);
-  border-bottom: 1px solid var(--tab-border);
-  padding: 0;
-  margin: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background-color: var(--chrome);
+  border-bottom: 1px solid var(--chrome-hairline);
 }
 
-.viewModeButton {
-  padding: 8px 16px;
+.languageBadge {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: var(--r-sm);
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Left-aligned, over the code it switches: the panel can be very wide, and a
+   right-aligned control ends up marooned across an empty bar. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background-color: var(--surface-raised);
+}
+
+.segment {
+  padding: 2px 12px;
   border: none;
-  background: transparent;
-  color: var(--tab-fg);
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--text-dim);
   cursor: pointer;
-  font-size: 12px;
-  font-family: inherit;
-  position: relative;
-  transition: color 0.15s ease;
+  transition: color 0.15s, background-color 0.15s;
 }
 
-.viewModeButton:hover {
-  color: var(--tab-fg-hover);
-  background: var(--tab-bg-hover);
+.segment + .segment {
+  border-left: 1px solid var(--hairline-strong);
 }
 
-.viewModeButtonActive {
-  color: var(--tab-fg-active);
-  background: var(--tab-bg-active);
+.segment:hover {
+  color: var(--text);
+  background-color: var(--surface-hover);
 }
 
-.viewModeButtonActive::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--tab-indicator);
+/* Outlined, not filled: the accent is carried by the edge and the label, the
+   same rule the primary button and the branded conflict UI follow. */
+.segmentActive,
+.segmentActive:hover {
+  color: var(--accent);
+  background-color: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  font-weight: 600;
 }
 
 /* Handler Header - Collapsible section */
