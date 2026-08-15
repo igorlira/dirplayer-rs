@@ -41,6 +41,11 @@
   box-sizing: border-box;
   text-align: left;
   border: 1px solid transparent;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 
   &:hover {
     background-color: var(--surface-hover);
@@ -104,7 +109,8 @@
   width: 100%;
 }
 
-/* Header only: script lane (20px) + ruler (18px) + its bottom hairline. */
+/* Collapsed, the timeline sizes itself to its header (plus any scrollbar), so
+   the container must not impose a height of its own. */
 .timelineContainerCollapsed {
-  height: 39px;
+  height: auto;
 }

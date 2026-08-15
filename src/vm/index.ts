@@ -256,6 +256,8 @@ export interface IScoreBehaviorReference {
   castLib: number
   castMember: number
   channelNumber: number
+  /** Resolved by the VM; empty when the member is unnamed. */
+  memberName?: string
 }
 
 export interface IScoreSpriteSpan {
@@ -265,6 +267,8 @@ export interface IScoreSpriteSpan {
   /** The member shown for this span. Spans are split whenever the member
    *  changes, so this is exact for every frame the span covers. */
   memberRef: ICastMemberRef
+  /** Resolved by the VM; empty when the member is unnamed. */
+  memberName?: string
 }
 
 export interface IScoreChannelInitData {

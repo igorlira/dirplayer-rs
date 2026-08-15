@@ -113,13 +113,12 @@
 
 .chunkFourcc {
   font-family: var(--font-mono);
-  font-weight: bold;
-  color: var(--syn-link);
+  color: var(--text);
 }
 
 .chunkId {
   font-family: var(--font-mono);
-  color: var(--text-dim);
+  color: var(--text-faint);
 }
 
 .chunkMember {
@@ -135,7 +134,7 @@
 }
 
 .chunkSave {
-  color: var(--syn-link);
+  color: var(--accent);
   text-decoration: none;
   font-size: 11px;
   visibility: hidden;

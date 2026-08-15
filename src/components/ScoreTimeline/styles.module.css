@@ -12,6 +12,16 @@
   contain: strict;
 }
 
+/* Rows hidden: the element hugs its header instead of filling the panel, and
+   can only ever scroll sideways. */
+.scoreOverviewCollapsed {
+  position: relative;
+  inset: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  contain: content;
+}
+
 .scoreGrid {
   position: relative;
   font-size: 10px;
@@ -22,7 +32,7 @@
 .scoreGridHeader {
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: 4;
   background-color: var(--score-header-bg);
   border-bottom: 1px solid var(--chrome-hairline);
 }
@@ -54,31 +64,13 @@
 
 .scriptLane {
   top: 0;
+  left: var(--channel-label-width);
   border-bottom: 1px solid var(--hairline);
-}
-
-.scriptLaneCell {
-  position: absolute;
-  top: 0;
-  display: block;
-  width: var(--frame-cell-width);
-  height: 100%;
-  box-sizing: border-box;
-  border-left: 1px solid var(--hairline);
-  background: none;
-  cursor: pointer;
-}
-
-.scriptLaneCell.scripted {
-  background-color: var(--score-scripted);
-}
-
-.scriptLaneCell.selected {
-  background-color: var(--surface-hover);
-}
-
-.scriptLaneCell.scripted.selected {
-  background-color: var(--score-scripted-selected);
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--hairline) 0 1px,
+    transparent 1px var(--frame-cell-width)
+  );
 }
 
 .scoreGridBody {
@@ -102,7 +94,7 @@
 .channelLabelCell {
   position: sticky;
   left: 0;
-  z-index: 2;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -126,6 +118,35 @@
   box-shadow: inset 0 0 0 1px var(--danger);
 }
 
+/* Same clip treatment as a sprite span, tinted to read as a script. */
+.scriptBar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 2px;
+  background-color: var(--score-scripted);
+  border: 1px solid var(--accent-line);
+  cursor: pointer;
+}
+
+.scriptBar:hover {
+  background-color: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.scriptBarSelected {
+  background-color: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.scriptBar .spanLabel {
+  color: var(--accent);
+}
+
 .scoreGridFrameCell {
   position: absolute;
   top: 0;
@@ -140,55 +161,88 @@
   border-left: 1px solid var(--hairline);
 }
 
-.scoreGridCell {
+/* The frame grid is painted once per lane as a repeating gradient rather than
+   one bordered div per frame — crisper, and it keeps the DOM to a few clips. */
+.channelLane {
   position: absolute;
+  left: var(--channel-label-width);
+  right: 0;
   top: 0;
-  width: var(--frame-cell-width);
-  height: 100%;
+  bottom: 0;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--hairline) 0 1px,
+    transparent 1px var(--frame-cell-width)
+  );
+}
+
+/* One bar per sprite span, sized to its frame range. */
+.span {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
   box-sizing: border-box;
-  border-left: 1px solid var(--hairline);
-}
-
-.scoreGridCell.hasSprite {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 2px;
   background-color: var(--score-sprite);
+  border: 1px solid var(--score-sprite-edge);
+  border-left-width: 2px;
 }
 
-.scoreGridCell.spanStart {
-  border-left: 2px solid var(--select-line);
-  background-color: var(--score-sprite-start);
-}
-
-.scoreGridCell.spanEnd {
-  border-right: 2px solid var(--select-line);
-  background-color: var(--score-sprite-start);
-}
-
-.scoreGridCell.emptySelected {
-  background-color: var(--text);
-}
-
-.scoreGridCell.spanSelected {
-  background-color: var(--select-line);
-}
-
-.scoreGridCell.clickable {
+.spanClickable {
   cursor: pointer;
 }
 
-.scoreGridCell.clickable:hover {
-  outline: 2px solid var(--select-line);
-  outline-offset: -2px;
-  z-index: 1;
+.spanClickable:hover {
+  background-color: var(--score-sprite-start);
+}
+
+.spanSelected {
+  background-color: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* Rides the whole clip now, so it has room to be read and to ellipsize. */
+.spanLabel {
+  padding: 0 3px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--score-sprite-label);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.spanSelected .spanLabel {
+  color: var(--accent);
+}
+
+/* Clicking empty track still selects a frame; mark it without inventing a clip. */
+.emptySelection {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  box-sizing: border-box;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
 }
 
 /* Positioned purely from --playhead-frame, which usePlayheadVar writes outside
-   of React. Moving it costs one style recalculation, not a re-render. */
-.playhead {
+   of React. Moving it costs one style recalculation, not a re-render.
+   Two elements rather than one: the header is sticky and therefore its own
+   stacking context, so a single marker could not cross both it and the rows
+   while still passing beneath the pinned channel gutter. */
+.playhead,
+.headerPlayhead {
   position: absolute;
   top: 0;
   bottom: 0;
   width: var(--frame-cell-width);
-  z-index: 2;
   pointer-events: none;
   transform: translateX(
     calc(var(--channel-label-width) + (var(--playhead-frame, 1) - 1) * var(--frame-cell-width))
@@ -198,14 +252,23 @@
   background-color: color-mix(in srgb, var(--score-current) 16%, transparent);
 }
 
+.playhead {
+  z-index: 2;
+}
+
+/* Inside the header: over the ruler numbers and script bars, under the corner. */
+.headerPlayhead {
+  z-index: 1;
+}
+
 .castMemberLabel {
   position: absolute;
   left: 2px;
   top: 2px;
   font-size: 8px;
+  font-family: var(--font-mono);
   color: var(--score-sprite-label);
-  font-weight: bold;
+  font-weight: 600;
   white-space: nowrap;
   pointer-events: none;
-  text-shadow: 0 0 2px var(--score-sprite-label-shadow);
 }

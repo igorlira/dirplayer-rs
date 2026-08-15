@@ -8,10 +8,10 @@ import {
   buildScoreIndex,
   findRangeAtFrame,
   findSpanAtFrame,
-  ScoreIndex,
+  sliceRangesInWindow,
 } from "../../utils/scoreIndex";
 import { usePlayheadVar } from "../../utils/usePlayhead";
-import { SCORE_CELL_WIDTH, SCORE_LABEL_WIDTH, SCORE_ROW_HEIGHT } from "../../utils/scoreLayout";
+import { getScrollbarSize, SCORE_CELL_WIDTH, SCORE_LABEL_WIDTH, SCORE_ROW_HEIGHT } from "../../utils/scoreLayout";
 
 // Geometry is shared via utils/scoreLayout and published to CSS as custom
 // properties below, so the virtualizer's arithmetic and the stylesheet can't
@@ -48,60 +48,155 @@ interface ITimelineSelection {
   frame: number;
 }
 
-type CellProps = {
+const EMPTY_SPANS: IScoreSpriteSpan[] = [];
+
+type ChannelLaneProps = {
   channel: number;
-  frame: number;
-  left: number;
-  index: ScoreIndex;
-  selectedCell?: ITimelineSelection;
+  spans: IScoreSpriteSpan[];
+  firstFrame: number;
+  lastFrame: number;
+  selected?: ITimelineSelection;
   clickable: boolean;
   onClick: (cell: ITimelineSelection) => void;
 };
 
-const TimelineCell = memo(function TimelineCell({
+/**
+ * One channel's clips.
+ *
+ * A sprite span is drawn as a single bar across its frame range, not as one
+ * element per frame. The old per-cell rendering made a continuous sprite read
+ * as a row of disconnected boxes — a selected span appeared as a dozen separate
+ * outlines — and left no room for the member label, which had to be crammed
+ * into the 16px start cell and clipped. Drawing the span once also means the
+ * DOM holds a handful of bars per row instead of one node per visible frame,
+ * and the frame grid behind them is a repeating CSS gradient rather than
+ * thousands of bordered divs.
+ */
+const ChannelLane = memo(function ChannelLane({
   channel,
-  frame,
-  left,
-  index,
-  selectedCell,
+  spans,
+  firstFrame,
+  lastFrame,
+  selected,
   clickable,
   onClick,
-}: CellProps) {
-  const spans = index.spansByChannel.get(channel);
-  const span = findSpanAtFrame(spans, frame);
-  const isSpanStart = span && frame === span.startFrame;
-  const isSpanEnd = span && frame === span.endFrame;
+}: ChannelLaneProps) {
+  const handleLaneClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const x = event.clientX - event.currentTarget.getBoundingClientRect().left;
+    onClick({ channel, frame: Math.max(1, Math.floor(x / CELL_WIDTH) + 1) });
+  };
 
-  let castMember: string | null = null;
-  if (isSpanStart && span.memberRef) {
-    castMember = `${span.memberRef[0]}:${span.memberRef[1]}`;
-  }
-
-  const isCellSelected = selectedCell?.channel === channel && selectedCell?.frame === frame;
-  const isSpanSelected =
-    span &&
-    selectedCell &&
-    channel === selectedCell.channel &&
-    selectedCell.frame >= span.startFrame &&
-    selectedCell.frame <= span.endFrame;
+  const selectedInThisChannel = selected?.channel === channel ? selected.frame : undefined;
+  const emptySelected =
+    selectedInThisChannel !== undefined &&
+    !findSpanAtFrame(spans, selectedInThisChannel);
 
   return (
-    <div
-      className={classNames(
-        styles.scoreGridCell,
-        span && styles.hasSprite,
-        isSpanStart && styles.spanStart,
-        isSpanEnd && styles.spanEnd,
-        span && clickable && styles.clickable,
-        isCellSelected && !span && styles.emptySelected,
-        isSpanSelected && styles.spanSelected
+    <div className={styles.channelLane} onClick={handleLaneClick}>
+      {sliceRangesInWindow(spans, firstFrame, lastFrame).map((span) => {
+        const isSelected =
+          selectedInThisChannel !== undefined &&
+          selectedInThisChannel >= span.startFrame &&
+          selectedInThisChannel <= span.endFrame;
+        const memberRef = span.memberRef ? `${span.memberRef[0]}:${span.memberRef[1]}` : undefined;
+        const label = span.memberName || memberRef;
+        return (
+          <div
+            key={span.startFrame}
+            className={classNames(
+              styles.span,
+              isSelected && styles.spanSelected,
+              clickable && styles.spanClickable
+            )}
+            style={{
+              left: (span.startFrame - 1) * CELL_WIDTH,
+              width: (span.endFrame - span.startFrame + 1) * CELL_WIDTH,
+            }}
+            title={
+              label
+                // Unnamed members have nothing but the ref, so don't repeat it.
+                ? `${span.memberName ? `${span.memberName} (${memberRef})` : `Member ${memberRef}`}` +
+                  ` — frames ${span.startFrame}–${span.endFrame}`
+                : undefined
+            }
+          >
+            {label && <span className={styles.spanLabel}>{label}</span>}
+          </div>
+        );
+      })}
+      {emptySelected && (
+        <div
+          className={styles.emptySelection}
+          style={{ left: (selectedInThisChannel - 1) * CELL_WIDTH, width: CELL_WIDTH }}
+        />
       )}
-      style={{ left }}
-      title={castMember || undefined}
-      onClick={() => onClick({ channel, frame })}
-    >
-      {isSpanStart && castMember && (
-        <div className={styles.castMemberLabel}>{castMember}</div>
+    </div>
+  );
+});
+
+type ScriptLaneProps = {
+  lane: FrameScriptLane;
+  behaviors: IScoreBehaviorReference[];
+  firstFrame: number;
+  lastFrame: number;
+  height: number;
+};
+
+/**
+ * Frame scripts, drawn the same way as sprite clips: one bar per behaviour
+ * range rather than one box per frame. A script covering frames 8-12 is one
+ * thing, and showing it as five identical squares said otherwise — and left
+ * nowhere to name the script it points at.
+ */
+const ScriptLane = memo(function ScriptLane({
+  lane,
+  behaviors,
+  firstFrame,
+  lastFrame,
+  height,
+}: ScriptLaneProps) {
+  const handleLaneClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const x = event.clientX - event.currentTarget.getBoundingClientRect().left;
+    lane.onSelect(Math.max(1, Math.floor(x / CELL_WIDTH) + 1));
+  };
+
+  const [selectedFrom, selectedTo] = lane.selectedRange ?? [];
+  const visible = sliceRangesInWindow(behaviors, firstFrame, lastFrame);
+  const selectionHitsABehavior =
+    selectedFrom !== undefined && !!findRangeAtFrame(behaviors, selectedFrom);
+
+  return (
+    <div className={styles.scriptLane} style={{ height }} onClick={handleLaneClick}>
+      {visible.map((behavior) => {
+        const isSelected =
+          selectedFrom !== undefined &&
+          selectedTo !== undefined &&
+          behavior.startFrame <= selectedTo &&
+          behavior.endFrame >= selectedFrom;
+        const memberRef = `${behavior.castLib}:${behavior.castMember}`;
+        const label = behavior.memberName || memberRef;
+        return (
+          <div
+            key={behavior.startFrame}
+            className={classNames(styles.scriptBar, isSelected && styles.scriptBarSelected)}
+            style={{
+              left: (behavior.startFrame - 1) * CELL_WIDTH,
+              width: (behavior.endFrame - behavior.startFrame + 1) * CELL_WIDTH,
+            }}
+            title={
+              `Frame script ${behavior.memberName ? `${behavior.memberName} (${memberRef})` : memberRef}` +
+              ` — frames ${behavior.startFrame}–${behavior.endFrame}`
+            }
+          >
+            <span className={styles.spanLabel}>{label}</span>
+          </div>
+        );
+      })}
+      {selectedFrom !== undefined && !selectionHitsABehavior && (
+        <div
+          className={styles.emptySelection}
+          style={{ left: (selectedFrom - 1) * CELL_WIDTH, width: CELL_WIDTH }}
+        />
       )}
     </div>
   );
@@ -167,12 +262,22 @@ export default function ScoreTimeline({
   const columns = columnVirtualizer.getVirtualItems();
   const rows = rowVirtualizer.getVirtualItems();
   const totalWidth = LABEL_WIDTH + frameCount * CELL_WIDTH;
+  // Which frames the lanes need to consider, from the ruler's own window.
+  const firstVisibleFrame = (columns[0]?.index ?? 0) + 1;
+  const lastVisibleFrame = (columns[columns.length - 1]?.index ?? frameCount - 1) + 1;
 
   return (
     <div
       ref={scrollRef}
-      className={styles.scoreOverviewContainer}
+      className={classNames(
+        styles.scoreOverviewContainer,
+        !showRows && styles.scoreOverviewCollapsed
+      )}
       style={{
+        // Collapsed, the element is sized to its header — plus whatever a
+        // horizontal scrollbar occupies, or it would overflow into a vertical
+        // one and hide the ruler.
+        ...(showRows ? null : { height: headerHeight + getScrollbarSize() }),
         // Consumed by the stylesheet for cell sizing and playhead placement.
         ['--frame-cell-width' as string]: `${CELL_WIDTH}px`,
         ['--score-row-height' as string]: `${ROW_HEIGHT}px`,
@@ -190,28 +295,16 @@ export default function ScoreTimeline({
           <div className={styles.headerCorner} style={{ height: headerHeight }}>Ch</div>
 
           {frameScripts && (
-            <div className={styles.scriptLane} style={{ height: laneHeight }}>
-              {columns.map((column) => {
-                const frame = column.index + 1;
-                const hasScript = !!findRangeAtFrame(frameScriptIndex, frame);
-                const range = frameScripts.selectedRange;
-                const isSelected = !!range && frame >= range[0] && frame <= range[1];
-                return (
-                  <button
-                    key={column.index}
-                    className={classNames(
-                      styles.scriptLaneCell,
-                      hasScript && styles.scripted,
-                      isSelected && styles.selected
-                    )}
-                    style={{ left: column.start }}
-                    onClick={() => frameScripts.onSelect(frame)}
-                    title={hasScript ? `Frame script at frame ${frame}` : undefined}
-                  />
-                );
-              })}
-            </div>
+            <ScriptLane
+              lane={frameScripts}
+              behaviors={frameScriptIndex}
+              firstFrame={firstVisibleFrame}
+              lastFrame={lastVisibleFrame}
+              height={laneHeight}
+            />
           )}
+
+          {frameCount > 0 && <div className={styles.headerPlayhead} aria-hidden="true" />}
 
           <div className={styles.rulerLane} style={{ top: laneHeight, height: RULER_HEIGHT }}>
             {columns.map((column) => {
@@ -249,18 +342,15 @@ export default function ScoreTimeline({
                 >
                   {channel}
                 </div>
-                {columns.map((column) => (
-                  <TimelineCell
-                    key={column.index}
-                    channel={channel}
-                    frame={column.index + 1}
-                    left={column.start}
-                    index={index}
-                    selectedCell={selectedCell}
-                    clickable={!!onCellClick}
-                    onClick={handleCellClick}
-                  />
-                ))}
+                <ChannelLane
+                  channel={channel}
+                  spans={index.spansByChannel.get(channel) ?? EMPTY_SPANS}
+                  firstFrame={firstVisibleFrame}
+                  lastFrame={lastVisibleFrame}
+                  selected={selectedCell}
+                  clickable={!!onCellClick}
+                  onClick={handleCellClick}
+                />
               </div>
             );
           })}

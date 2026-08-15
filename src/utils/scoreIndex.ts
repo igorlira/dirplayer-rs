@@ -68,6 +68,42 @@ export function findSpanAtFrame(
 }
 
 /**
+ * The slice of `ranges` overlapping [firstFrame, lastFrame].
+ *
+ * Spans are sorted by startFrame and don't overlap, so endFrame is increasing
+ * too and both bounds are binary-searchable. The timeline needs this because a
+ * channel can hold thousands of spans — one per member change — and scanning
+ * them all for every visible row on every scroll frame would undo the point of
+ * virtualizing.
+ */
+export function sliceRangesInWindow<T extends FrameRange>(
+  ranges: T[],
+  firstFrame: number,
+  lastFrame: number
+): T[] {
+  if (ranges.length === 0) return ranges;
+
+  // First range whose endFrame reaches the window.
+  let lo = 0;
+  let hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].endFrame < firstFrame) lo = mid + 1;
+    else hi = mid;
+  }
+  const start = lo;
+
+  // One past the last range that starts before the window ends.
+  hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].startFrame <= lastFrame) lo = mid + 1;
+    else hi = mid;
+  }
+  return start === 0 && lo === ranges.length ? ranges : ranges.slice(start, lo);
+}
+
+/**
  * Frame scripts (behaviours in channel 0), sorted for findRangeAtFrame. The
  * ruler asks per visible frame, so a scan of the whole behaviour list per cell
  * would be needless work.

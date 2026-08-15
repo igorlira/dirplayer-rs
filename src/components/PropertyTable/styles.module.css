@@ -77,7 +77,7 @@
 
 .propExpandToggle {
   cursor: pointer;
-  color: var(--syn-link);
+  color: var(--accent);
   user-select: none;
   font-size: 10px;
   background: none;

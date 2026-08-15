@@ -37,6 +37,11 @@ pub struct ScoreSpriteSpan {
     pub start_frame: u32,
     pub end_frame: u32,
     pub member_ref: [u16; 2], // [cast_lib, cast_member]
+    /// Resolved once here rather than in the UI: the timeline labels clips with
+    /// it, and the alternative — shipping cast member lists to JS so it could
+    /// look names up — is exactly the wholesale transfer we removed. Empty when
+    /// the member is unnamed or missing, and the UI falls back to the numbers.
+    pub member_name: String,
 }
 
 impl ToJsValue for ScoreSpriteSpan {
@@ -52,6 +57,7 @@ impl ToJsValue for ScoreSpriteSpan {
                 &JsValue::from(self.member_ref[1]),
             ),
         );
+        span_map.str_set("memberName", &safe_js_string(&self.member_name));
         span_map.to_js_object().into()
     }
 }
@@ -1408,6 +1414,13 @@ impl JsApi {
                         script_ref_map.str_set("castLib", &behavior.cast_lib.to_js_value());
                         script_ref_map.str_set("castMember", &behavior.cast_member.to_js_value());
                         script_ref_map.str_set("channelNumber", &span.channel_number.to_js_value());
+                        script_ref_map.str_set(
+                            "memberName",
+                            &safe_js_string(&Self::lookup_member_name(
+                                player,
+                                [behavior.cast_lib as u16, behavior.cast_member as u16],
+                            )),
+                        );
                         JsValue::from(script_ref_map.to_js_object())
                     }),
             ),
@@ -1424,8 +1437,26 @@ impl JsApi {
         return member_map;
     }
 
+    /// Member name for a [cast_lib, cast_member] pair; empty when unnamed or
+    /// unresolvable. One map lookup per span, done once per score snapshot.
+    fn lookup_member_name(player: &DirPlayer, member_ref: [u16; 2]) -> String {
+        if member_ref[0] == 0 && member_ref[1] == 0 {
+            return String::new();
+        }
+        let reference = CastMemberRef {
+            cast_lib: member_ref[0] as i32,
+            cast_member: member_ref[1] as i32,
+        };
+        player
+            .movie
+            .cast_manager
+            .find_member_by_ref(&reference)
+            .map(|member| member.name.clone())
+            .unwrap_or_default()
+    }
+
     // Create sprite spans by examining actual channel state across frames
-    fn create_sprite_spans_from_channels(score: &Score, _player: &DirPlayer) -> Vec<ScoreSpriteSpan> {
+    fn create_sprite_spans_from_channels(score: &Score, player: &DirPlayer) -> Vec<ScoreSpriteSpan> {
         use std::collections::HashMap;
         
         let mut spans = Vec::new();
@@ -1480,6 +1511,7 @@ impl JsApi {
                             start_frame: frame,
                             end_frame: frame,
                             member_ref,
+                            member_name: Self::lookup_member_name(player, member_ref),
                         });
                     }
                 } else {
@@ -1489,6 +1521,7 @@ impl JsApi {
                         start_frame: frame,
                         end_frame: frame,
                         member_ref,
+                        member_name: Self::lookup_member_name(player, member_ref),
                     });
                 }
             }

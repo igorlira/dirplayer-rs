@@ -75,7 +75,7 @@
 .castMemberItem {
   display: flex;
   width: 100%;
-  min-height: 32px;
+  min-height: 26px;
   align-items: stretch;
 
   &.selected {
@@ -112,4 +112,10 @@
 .memberNameLabel {
   display: flex;
   align-items: center;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

@@ -136,3 +136,54 @@
   color: var(--accent);
   border-color: var(--accent);
 }
+
+/* The global reset strips native form appearance, so the range input has no
+   track at all until it is drawn here. Thumb and fill use the accent; the
+   readout is machine data, so it is mono. */
+.zoomControl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.zoomSlider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 110px;
+  height: 4px;
+  border-radius: 2px;
+  background-color: var(--hairline-strong);
+  cursor: pointer;
+}
+
+.zoomSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+
+.zoomSlider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+
+.zoomSlider:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.zoomValue {
+  min-width: 38px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}

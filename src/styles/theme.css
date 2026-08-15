@@ -95,16 +95,19 @@
   --focus-ring: rgba(176, 111, 16, 0.18);
 
   /* Score / timeline */
+  /* Score data. Deliberately monochrome: sprite spans are neutral blocks, the
+     accent marks scripts and selection, and red is reserved for the playhead.
+     The blue/purple this replaced belonged to no other part of the palette. */
   --score-header-bg: var(--chrome-header);
   --score-row-alt: #faf9f8;
-  --score-sprite: #a0d0ff;
-  --score-sprite-start: #80c0ff;
-  --score-sprite-label: #003366;
-  --score-sprite-label-shadow: #ffffff;
-  --score-current: #d93025;
+  --score-sprite: #ddd8cf;
+  --score-sprite-start: #cdc6b9;
+  --score-sprite-edge: #b3aa9b;
+  --score-sprite-label: #4a453d;
+  --score-current: #c0392b;
   --score-current-on: #ffffff;
-  --score-scripted: #2f4fd0;
-  --score-scripted-selected: #6b2fd0;
+  --score-scripted: rgba(176, 111, 16, 0.32);
+  --score-scripted-selected: var(--accent);
 
   /* Value syntax colouring (PropertyTable, message inspector) */
   --syn-string: #a31515;
@@ -174,14 +177,14 @@
 
     --score-header-bg: var(--chrome-header);
     --score-row-alt: rgba(255, 255, 255, 0.022);
-    --score-sprite: #2f5c8a;
-    --score-sprite-start: #3d7ab5;
-    --score-sprite-label: #cfe4f7;
-    --score-sprite-label-shadow: #10243a;
+    --score-sprite: #464038;
+    --score-sprite-start: #554e42;
+    --score-sprite-edge: #6e6555;
+    --score-sprite-label: #c9c2b6;
     --score-current: #e0655a;
     --score-current-on: #1a1a1a;
-    --score-scripted: #4a6fd0;
-    --score-scripted-selected: #8a5cd0;
+    --score-scripted: rgba(245, 166, 35, 0.33);
+    --score-scripted-selected: var(--accent);
 
     --syn-string: #ce9178;
     --syn-number: #b5cea8;
@@ -250,14 +253,14 @@
 
   --score-header-bg: var(--chrome-header);
   --score-row-alt: rgba(255, 255, 255, 0.022);
-  --score-sprite: #2f5c8a;
-  --score-sprite-start: #3d7ab5;
-  --score-sprite-label: #cfe4f7;
-  --score-sprite-label-shadow: #10243a;
+  --score-sprite: #464038;
+  --score-sprite-start: #554e42;
+  --score-sprite-edge: #6e6555;
+  --score-sprite-label: #c9c2b6;
   --score-current: #e0655a;
   --score-current-on: #1a1a1a;
-  --score-scripted: #4a6fd0;
-  --score-scripted-selected: #8a5cd0;
+  --score-scripted: rgba(245, 166, 35, 0.33);
+  --score-scripted-selected: var(--accent);
 
   --syn-string: #ce9178;
   --syn-number: #b5cea8;

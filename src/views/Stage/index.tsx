@@ -74,16 +74,18 @@ function getEffectiveScale(scale: number): number {
 
 function ZoomSlider({ scale, setScale }: { scale: number; setScale: (scale: number) => void }) {
   return (
-    <div>
+    <div className={styles.zoomControl}>
       <input
+        className={styles.zoomSlider}
         type="range"
         min="0.5"
         max="2"
         step="0.1"
         value={scale}
         onChange={(e) => setScale(parseFloat(e.target.value))}
+        title="Stage zoom"
       />
-      {Math.round(scale * 100)}%
+      <span className={styles.zoomValue}>{Math.round(scale * 100)}%</span>
     </div>
   );
 }

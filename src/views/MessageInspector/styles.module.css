@@ -75,6 +75,9 @@
   flex: 1;
   overflow-y: scroll;
   font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
   padding: 8px;
 }
 
@@ -105,10 +108,11 @@
 
 .datumToggle {
   font-size: 0.75em;
+  color: var(--accent);
 }
 
 .datumChildren {
-  margin-left: 16px;
+  margin-left: 12px;
   border-left: 1px solid var(--hairline);
   padding-left: 8px;
 }
@@ -121,6 +125,7 @@
 
 .datumKey {
   color: var(--syn-key);
+  font-weight: 600;
 }
 
 .pagination {
