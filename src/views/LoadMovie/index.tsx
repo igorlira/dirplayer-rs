@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './styles.module.css';
 import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override,
   set_startup_do, set_startup_do_before, set_startup_go } from 'vm-rust';
@@ -139,6 +139,78 @@ function clearRecentMovies(): RecentMovie[] {
   return [];
 }
 
+// --- Recent list presentation helpers -------------------------------------
+// Movie URLs are long and frequently differ only in their directory (the same
+// `game.dcr` living under a dozen version folders), so the list groups entries
+// by folder and shows the file name on its own. Nothing here parses with `new
+// URL()`: entries can be relative paths or Windows-style `file://` paths.
+
+type MovieParts = { dir: string; file: string; query: string };
+
+function lastSeparator(s: string): number {
+  return Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+}
+
+function splitMoviePath(url: string): MovieParts {
+  const queryStart = url.search(/[?#]/);
+  const query = queryStart >= 0 ? url.slice(queryStart) : '';
+  const path = queryStart >= 0 ? url.slice(0, queryStart) : url;
+  const sep = lastSeparator(path);
+  if (sep < 0) {
+    return { dir: '', file: path, query };
+  }
+  return { dir: path.slice(0, sep) || path.slice(0, sep + 1), file: path.slice(sep + 1), query };
+}
+
+// Split a folder path so the last segment can be pinned while the head
+// ellipsizes: truncating from the right would hide exactly the segment that
+// tells two same-named movies apart.
+function splitFolderTail(dir: string): { head: string; tail: string } {
+  const sep = lastSeparator(dir);
+  if (sep <= 0) return { head: '', tail: dir };
+  return { head: dir.slice(0, sep), tail: dir.slice(sep) };
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  const minute = 60_000, hour = 3_600_000, day = 86_400_000;
+  if (diff < minute) return 'just now';
+  if (diff < hour) return `${Math.floor(diff / minute)}m ago`;
+  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
+  if (diff < 30 * day) return `${Math.floor(diff / day)}d ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+type MovieGroup = { dir: string; movies: { movie: RecentMovie; parts: MovieParts }[] };
+
+// Group by folder, keeping the incoming (most-recent-first) order both for the
+// entries inside a group and for the groups themselves.
+function groupMoviesByFolder(movies: RecentMovie[]): MovieGroup[] {
+  const groups: MovieGroup[] = [];
+  const byDir = new Map<string, MovieGroup>();
+  for (const movie of movies) {
+    const parts = splitMoviePath(movie.url);
+    let group = byDir.get(parts.dir);
+    if (!group) {
+      group = { dir: parts.dir, movies: [] };
+      byDir.set(parts.dir, group);
+      groups.push(group);
+    }
+    group.movies.push({ movie, parts });
+  }
+  return groups;
+}
+
+function matchesFilter(movie: RecentMovie, tokens: string[]): boolean {
+  if (tokens.length === 0) return true;
+  const haystack = [
+    movie.url,
+    movie.fakeMoviePath ?? '',
+    ...movie.params.map(p => `${p.key}=${p.value}`),
+  ].join(' ').toLowerCase();
+  return tokens.every(token => haystack.includes(token));
+}
+
 export default function LoadMovie() {
   const dispatch = useDispatch();
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
@@ -155,6 +227,10 @@ export default function LoadMovie() {
   const [corsProxy, setCorsProxy] = useState<string>(DEFAULT_CORS_PROXY);
   // CORS proxy is OPT-IN per movie (default OFF); persisted per recent entry.
   const [useCorsProxy, setUseCorsProxy] = useState<boolean>(false);
+  const [recentFilter, setRecentFilter] = useState<string>('');
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
+  const [activeIndex, setActiveIndex] = useState<number>(-1);
+  const activeItemRef = useRef<HTMLDivElement | null>(null);
   const isInElectron = isElectron();
 
   const addParam = useCallback(() => {
@@ -363,8 +439,71 @@ export default function LoadMovie() {
   }, []);
 
   const onClearRecent = useCallback(() => {
+    if (!window.confirm(`Remove all ${loadRecentMovies().length} saved movies?`)) return;
     setRecentMovies(clearRecentMovies());
   }, []);
+
+  const filterTokens = useMemo(
+    () => recentFilter.toLowerCase().split(/\s+/).filter(Boolean),
+    [recentFilter],
+  );
+  const isFiltering = filterTokens.length > 0;
+
+  const filteredMovies = useMemo(
+    () => recentMovies.filter(m => matchesFilter(m, filterTokens)),
+    [recentMovies, filterTokens],
+  );
+  const groups = useMemo(() => groupMoviesByFolder(filteredMovies), [filteredMovies]);
+
+  // A folder stays expanded while filtering: hiding matches behind a collapsed
+  // header would make the search look like it found nothing.
+  const isFolderCollapsed = useCallback(
+    (dir: string) => !isFiltering && collapsedFolders.has(dir),
+    [isFiltering, collapsedFolders],
+  );
+
+  const toggleFolder = useCallback((dir: string) => {
+    setCollapsedFolders(prev => {
+      const next = new Set(prev);
+      if (!next.delete(dir)) next.add(dir);
+      return next;
+    });
+  }, []);
+
+  // Flattened view of everything currently rendered, in visual order — the
+  // index space the arrow keys move through.
+  const visibleMovies = useMemo(
+    () => groups.flatMap(g => isFolderCollapsed(g.dir) ? [] : g.movies.map(m => m.movie)),
+    [groups, isFolderCollapsed],
+  );
+
+  // The highlighted row must not survive a change to what is on screen,
+  // otherwise Enter would load whatever entry slid into that index.
+  useEffect(() => { setActiveIndex(-1); }, [recentFilter, collapsedFolders, recentMovies]);
+
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex]);
+
+  const onRecentKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (visibleMovies.length === 0) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const delta = e.key === 'ArrowDown' ? 1 : -1;
+      setActiveIndex(prev => {
+        const next = prev + delta;
+        if (next < 0) return visibleMovies.length - 1;
+        if (next >= visibleMovies.length) return 0;
+        return next;
+      });
+    } else if (e.key === 'Enter' && activeIndex >= 0) {
+      e.preventDefault();
+      onLoadRecent(visibleMovies[activeIndex]);
+    } else if (e.key === 'Escape') {
+      setRecentFilter('');
+      setActiveIndex(-1);
+    }
+  }, [visibleMovies, activeIndex, onLoadRecent]);
 
   useMountEffect(async () => {
     if (movieUrl && process.env.REACT_APP_MOVIE_AUTO_LOAD === 'true' && !isDebugSession()) {
@@ -375,258 +514,338 @@ export default function LoadMovie() {
   const hasParams = externalParams.length > 0;
 
   return <div className={styles.container}>
-    <div className={styles.header}>
-      <h1 className={styles.title}>DirPlayer</h1>
-      <div className={styles.subtitle}>Load Movie</div>
-    </div>
+    <div className={styles.topPane}>
+      <div className={styles.header}>
+        <h1 className={styles.title}>DirPlayer</h1>
+        <div className={styles.subtitle}>Load Movie</div>
+      </div>
 
-    <div className={styles.card}>
-      <div className={styles.cardBody}>
-        <div className={styles.fieldContainer}>
-          <label className={styles.label} htmlFor="url">
-            {isInElectron ? 'Movie Path' : 'Movie URL'}
-          </label>
-          <div className={styles.inputGroup}>
-            <input
-              id="url"
-              name="url"
-              type="text"
-              className={`${styles.input} ${hasError ? styles.inputError : ''}`}
-              placeholder={isInElectron ? '/path/to/movie.dcr' : 'https://example.com/movie.dcr'}
-              value={movieUrl}
-              onChange={e => { setMovieUrl(e.currentTarget.value); setHasError(false); }}
-              disabled={isLoading}
-            />
-            {isInElectron && (
-              <button
-                className={styles.browseButton}
-                onClick={onBrowseClick}
+      <div className={styles.card}>
+        <div className={styles.cardBody}>
+          <div className={styles.fieldContainer}>
+            <label className={styles.label} htmlFor="url">
+              {isInElectron ? 'Movie Path' : 'Movie URL'}
+            </label>
+            <div className={styles.inputGroup}>
+              <input
+                id="url"
+                name="url"
+                type="text"
+                className={`${styles.input} ${hasError ? styles.inputError : ''}`}
+                placeholder={isInElectron ? '/path/to/movie.dcr' : 'https://example.com/movie.dcr'}
+                value={movieUrl}
+                onChange={e => { setMovieUrl(e.currentTarget.value); setHasError(false); }}
                 disabled={isLoading}
-              >
-                Browse...
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className={styles.paramsSection}>
-          <button
-            className={styles.paramsToggle}
-            onClick={() => setParamsExpanded(prev => !prev)}
-          >
-            <span className={`${styles.paramsToggleArrow} ${paramsExpanded ? styles.paramsToggleArrowOpen : ''}`}>
-              &#9654;
-            </span>
-            Advanced Options
-            {(hasParams || fakeMoviePath) && !paramsExpanded && (
-              <span> ({[hasParams && `${externalParams.length} params`, fakeMoviePath && 'fake path'].filter(Boolean).join(', ')})</span>
-            )}
-          </button>
-          {paramsExpanded && (
-            <div className={styles.paramsList}>
-              <div className={styles.fieldContainer}>
-                <label className={styles.label} htmlFor="loaderUrl">
-                  Loader / archive entry URL (optional)
-                </label>
-                <input
-                  id="loaderUrl"
-                  type="text"
-                  className={styles.input}
-                  placeholder="Loader page, or an archive entry (ooooooooo.ooo/?id=…)"
-                  value={loaderUrl}
-                  onChange={e => setLoaderUrl(e.currentTarget.value)}
+              />
+              {isInElectron && (
+                <button
+                  className={styles.browseButton}
+                  onClick={onBrowseClick}
                   disabled={isLoading}
-                />
-                <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                >
+                  Browse...
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className={styles.paramsSection}>
+            <button
+              className={styles.paramsToggle}
+              onClick={() => setParamsExpanded(prev => !prev)}
+            >
+              <span className={`${styles.paramsToggleArrow} ${paramsExpanded ? styles.paramsToggleArrowOpen : ''}`}>
+                &#9654;
+              </span>
+              Advanced Options
+              {(hasParams || fakeMoviePath) && !paramsExpanded && (
+                <span> ({[hasParams && `${externalParams.length} params`, fakeMoviePath && 'fake path'].filter(Boolean).join(', ')})</span>
+              )}
+            </button>
+            {paramsExpanded && (
+              <div className={styles.paramsList}>
+                <div className={styles.fieldContainer}>
+                  <label className={styles.label} htmlFor="loaderUrl">
+                    Loader / archive entry URL (optional)
+                  </label>
                   <input
+                    id="loaderUrl"
                     type="text"
                     className={styles.input}
-                    style={{ flex: 1 }}
-                    placeholder="CORS proxy base"
-                    value={corsProxy}
-                    onChange={e => setCorsProxy(e.currentTarget.value)}
+                    placeholder="Loader page, or an archive entry (ooooooooo.ooo/?id=…)"
+                    value={loaderUrl}
+                    onChange={e => setLoaderUrl(e.currentTarget.value)}
                     disabled={isLoading}
-                    title="Run: node cors-proxy.cjs"
                   />
-                  <button
-                    className={styles.browseButton}
-                    onClick={onLoadLoader}
-                    disabled={isLoading}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <input
+                      type="text"
+                      className={styles.input}
+                      style={{ flex: 1 }}
+                      placeholder="CORS proxy base"
+                      value={corsProxy}
+                      onChange={e => setCorsProxy(e.currentTarget.value)}
+                      disabled={isLoading}
+                      title="Run: node cors-proxy.cjs"
+                    />
+                    <button
+                      className={styles.browseButton}
+                      onClick={onLoadLoader}
+                      disabled={isLoading}
+                    >
+                      Fetch &amp; Load
+                    </button>
+                  </div>
+                  <label
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer' }}
+                    title="When off, this movie's cross-origin fetches go direct. Enable only for games that need the proxy (e.g. Neopets DGS). Saved per entry."
                   >
-                    Fetch &amp; Load
-                  </button>
+                    <input
+                      type="checkbox"
+                      checked={useCorsProxy}
+                      onChange={e => setUseCorsProxy(e.currentTarget.checked)}
+                      disabled={isLoading}
+                    />
+                    Use CORS proxy for this movie
+                  </label>
+                  <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
+                    CORS proxy is <strong>opt-in per movie</strong> (default off) and
+                    saved with each recent entry. Enable it only for games whose
+                    cross-origin fetches need proxying. Fetch &amp; Load turns it on
+                    automatically. Start the proxy first: <code>node cors-proxy.cjs</code>.
+                  </div>
+                  <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
+                    Fetch &amp; Load also reads a <code>data-launch-command</code> from an
+                    archive entry page (9o3o / Flashpoint) and applies the projector
+                    arguments — the movie URL, <code>--setExternalParam</code> pairs, the
+                    LeechProtectionRemovalHelp flags and the <code>--do</code> payload.
+                    Many archived games are launched from a wrapper movie that does
+                    nothing without them.
+                  </div>
                 </div>
-                <label
-                  style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer' }}
-                  title="When off, this movie's cross-origin fetches go direct. Enable only for games that need the proxy (e.g. Neopets DGS). Saved per entry."
-                >
+                <div className={styles.fieldContainer}>
+                  <label className={styles.label} htmlFor="fakeMoviePath">
+                    Fake Movie Path (optional)
+                  </label>
                   <input
-                    type="checkbox"
-                    checked={useCorsProxy}
-                    onChange={e => setUseCorsProxy(e.currentTarget.checked)}
+                    id="fakeMoviePath"
+                    type="text"
+                    className={styles.input}
+                    placeholder="https://original-server.com/path/movie.dcr"
+                    value={fakeMoviePath}
+                    onChange={e => setFakeMoviePath(e.currentTarget.value)}
                     disabled={isLoading}
                   />
-                  Use CORS proxy for this movie
-                </label>
-                <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
-                  CORS proxy is <strong>opt-in per movie</strong> (default off) and
-                  saved with each recent entry. Enable it only for games whose
-                  cross-origin fetches need proxying. Fetch &amp; Load turns it on
-                  automatically. Start the proxy first: <code>node cors-proxy.cjs</code>.
                 </div>
-                <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
-                  Fetch &amp; Load also reads a <code>data-launch-command</code> from an
-                  archive entry page (9o3o / Flashpoint) and applies the projector
-                  arguments — the movie URL, <code>--setExternalParam</code> pairs, the
-                  LeechProtectionRemovalHelp flags and the <code>--do</code> payload.
-                  Many archived games are launched from a wrapper movie that does
-                  nothing without them.
-                </div>
-              </div>
-              <div className={styles.fieldContainer}>
-                <label className={styles.label} htmlFor="fakeMoviePath">
-                  Fake Movie Path (optional)
-                </label>
-                <input
-                  id="fakeMoviePath"
-                  type="text"
-                  className={styles.input}
-                  placeholder="https://original-server.com/path/movie.dcr"
-                  value={fakeMoviePath}
-                  onChange={e => setFakeMoviePath(e.currentTarget.value)}
+                {externalParams.map((param, index) => (
+                  <div key={index} className={styles.paramRow}>
+                    <input
+                      type="text"
+                      className={styles.paramInput}
+                      placeholder="key (e.g. sw1)"
+                      value={param.key}
+                      onChange={e => updateParam(index, 'key', e.currentTarget.value)}
+                      disabled={isLoading}
+                    />
+                    <input
+                      type="text"
+                      className={styles.paramInput}
+                      placeholder="value"
+                      value={param.value}
+                      onChange={e => updateParam(index, 'value', e.currentTarget.value)}
+                      disabled={isLoading}
+                    />
+                    <button
+                      className={styles.removeParamButton}
+                      onClick={() => removeParam(index)}
+                      disabled={isLoading}
+                      title="Remove parameter"
+                    >
+                      &#10005;
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className={styles.addParamButton}
+                  onClick={addParam}
                   disabled={isLoading}
-                />
+                >
+                  + Add parameter
+                </button>
               </div>
-              {externalParams.map((param, index) => (
-                <div key={index} className={styles.paramRow}>
-                  <input
-                    type="text"
-                    className={styles.paramInput}
-                    placeholder="key (e.g. sw1)"
-                    value={param.key}
-                    onChange={e => updateParam(index, 'key', e.currentTarget.value)}
-                    disabled={isLoading}
-                  />
-                  <input
-                    type="text"
-                    className={styles.paramInput}
-                    placeholder="value"
-                    value={param.value}
-                    onChange={e => updateParam(index, 'value', e.currentTarget.value)}
-                    disabled={isLoading}
-                  />
-                  <button
-                    className={styles.removeParamButton}
-                    onClick={() => removeParam(index)}
-                    disabled={isLoading}
-                    title="Remove parameter"
-                  >
-                    &#10005;
-                  </button>
-                </div>
-              ))}
-              <button
-                className={styles.addParamButton}
-                onClick={addParam}
+            )}
+          </div>
+
+        </div>
+
+        {/* Pinned outside the scrolling card body: the primary action and any
+            load error must stay visible however long the form gets. */}
+        <div className={styles.cardFooter}>
+          <div className={styles.optionsRow}>
+            <label className={styles.checkboxContainer}>
+              <input
+                type="checkbox"
+                id="autoPlay"
+                name="autoPlay"
+                className={styles.checkbox}
                 disabled={isLoading}
-              >
-                + Add parameter
-              </button>
+                checked={autoPlay}
+                onChange={e => setAutoPlay(e.currentTarget.checked)}
+              />
+              Auto-play
+            </label>
+          </div>
+
+          {movieLoadError && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '10px',
+              padding: '10px 14px',
+              backgroundColor: '#fff3f3',
+              border: '1px solid #f5c0c0',
+              borderRadius: '4px',
+              fontSize: '0.88em',
+              color: '#a33',
+            }}>
+              <svg style={{ flexShrink: 0, marginTop: '1px' }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <span style={{ wordBreak: 'break-word' }}>{movieLoadError}</span>
             </div>
           )}
+          <button className={styles.button} onClick={onLoadClick} disabled={isLoading}>
+            {isLoading ? 'Loading...' : 'Load Movie'}
+          </button>
         </div>
-
-        <div className={styles.optionsRow}>
-          <label className={styles.checkboxContainer}>
-            <input
-              type="checkbox"
-              id="autoPlay"
-              name="autoPlay"
-              className={styles.checkbox}
-              disabled={isLoading}
-              checked={autoPlay}
-              onChange={e => setAutoPlay(e.currentTarget.checked)}
-            />
-            Auto-play
-          </label>
-        </div>
-
-        {movieLoadError && (
-          <div style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '10px',
-            padding: '10px 14px',
-            backgroundColor: '#fff3f3',
-            border: '1px solid #f5c0c0',
-            borderRadius: '4px',
-            fontSize: '0.88em',
-            color: '#a33',
-          }}>
-            <svg style={{ flexShrink: 0, marginTop: '1px' }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/>
-              <line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span style={{ wordBreak: 'break-word' }}>{movieLoadError}</span>
-          </div>
-        )}
-        <button className={styles.button} onClick={onLoadClick} disabled={isLoading}>
-          {isLoading ? 'Loading...' : 'Load Movie'}
-        </button>
       </div>
     </div>
 
     {recentMovies.length > 0 && (
-      <div className={styles.recentSection}>
+      <div className={styles.recentSection} onKeyDown={onRecentKeyDown}>
         <div className={styles.recentHeader}>
           <span className={styles.recentTitle}>Recent Movies</span>
+          <span className={styles.recentCount}>
+            {isFiltering
+              ? `${filteredMovies.length} of ${recentMovies.length}`
+              : recentMovies.length}
+          </span>
           <button className={styles.clearRecent} onClick={onClearRecent}>
             Clear all
           </button>
         </div>
-        <div className={styles.recentList}>
-          {recentMovies.map((movie) => (
-            <div key={movie.url} className={styles.recentItem} onClick={() => onEditRecent(movie)}>
-              <div className={styles.recentItemBody}>
-                <span className={styles.recentUrl} title={movie.url}>
-                  {movie.url}
-                </span>
-                {(movie.params.length > 0 || movie.fakeMoviePath) && (
-                  <div className={styles.recentParams}>
-                    {movie.fakeMoviePath && (
-                      <span className={styles.paramTag}>
-                        fakePath={movie.fakeMoviePath}
-                      </span>
-                    )}
-                    {movie.params
-                      .filter(p => p.key.trim())
-                      .map((p, i) => (
-                        <span key={i} className={styles.paramTag}>
-                          {p.key}={p.value}
-                        </span>
-                      ))}
-                  </div>
-                )}
-              </div>
-              <div className={styles.recentActions}>
+
+        <div className={styles.searchRow}>
+          <input
+            type="text"
+            className={styles.searchInput}
+            placeholder="Filter by file name, folder or parameter..."
+            value={recentFilter}
+            onChange={e => setRecentFilter(e.currentTarget.value)}
+            spellCheck={false}
+          />
+          {isFiltering && (
+            <button
+              className={styles.clearSearchButton}
+              onClick={() => setRecentFilter('')}
+              title="Clear filter"
+            >
+              &#10005;
+            </button>
+          )}
+        </div>
+
+        <div className={styles.recentList} tabIndex={0}>
+          {groups.length === 0 && (
+            <div className={styles.recentEmpty}>No movies match this filter.</div>
+          )}
+          {groups.map(group => {
+            const collapsed = isFolderCollapsed(group.dir);
+            const folder = splitFolderTail(group.dir);
+            return (
+              <div key={group.dir} className={styles.recentGroup}>
                 <button
-                  className={styles.loadRecentButton}
-                  onClick={e => { e.stopPropagation(); onLoadRecent(movie); }}
-                  disabled={isLoading}
+                  className={styles.groupHeader}
+                  onClick={() => toggleFolder(group.dir)}
+                  title={group.dir || 'No folder'}
                 >
-                  Load
+                  <span className={`${styles.groupArrow} ${collapsed ? '' : styles.groupArrowOpen}`}>
+                    &#9654;
+                  </span>
+                  <span className={styles.groupPath}>
+                    <span className={styles.groupPathHead}>
+                      <span className={styles.groupPathHeadText}>
+                        {folder.head || group.dir || 'No folder'}
+                      </span>
+                    </span>
+                    {folder.head && <span className={styles.groupPathTail}>{folder.tail}</span>}
+                  </span>
+                  <span className={styles.groupCount}>{group.movies.length}</span>
                 </button>
+                {!collapsed && group.movies.map(({ movie, parts }) => {
+                  const isActive = visibleMovies[activeIndex] === movie;
+                  return (
+                    <div
+                      key={movie.url}
+                      ref={isActive ? activeItemRef : undefined}
+                      className={`${styles.recentItem} ${isActive ? styles.recentItemActive : ''}`}
+                      onClick={() => onEditRecent(movie)}
+                      onDoubleClick={() => onLoadRecent(movie)}
+                      title={movie.url}
+                    >
+                      <div className={styles.recentItemBody}>
+                        <div className={styles.recentItemTitleRow}>
+                          <span className={styles.recentFileName}>{parts.file}</span>
+                          {parts.query && <span className={styles.recentQuery}>{parts.query}</span>}
+                          <span className={styles.recentTime}>{formatRelativeTime(movie.timestamp)}</span>
+                        </div>
+                        {(movie.params.length > 0 || movie.fakeMoviePath || movie.useCorsProxy) && (
+                          <div className={styles.recentParams}>
+                            {movie.useCorsProxy && (
+                              <span className={`${styles.paramTag} ${styles.proxyTag}`}>proxy</span>
+                            )}
+                            {movie.fakeMoviePath && (
+                              <span className={styles.paramTag} title={movie.fakeMoviePath}>
+                                fakePath={movie.fakeMoviePath}
+                              </span>
+                            )}
+                            {movie.params
+                              .filter(p => p.key.trim())
+                              .map((p, i) => (
+                                <span key={i} className={styles.paramTag}>
+                                  {p.key}={p.value}
+                                </span>
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className={styles.recentActions}>
+                        <button
+                          className={styles.loadRecentButton}
+                          onClick={e => { e.stopPropagation(); onLoadRecent(movie); }}
+                          disabled={isLoading}
+                        >
+                          Load
+                        </button>
+                      </div>
+                      <button
+                        className={styles.removeRecentButton}
+                        onClick={e => { e.stopPropagation(); onRemoveRecent(movie.url); }}
+                        title="Remove from recent"
+                      >
+                        &#10005;
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
-              <button
-                className={styles.removeRecentButton}
-                onClick={e => { e.stopPropagation(); onRemoveRecent(movie.url); }}
-                title="Remove from recent"
-              >
-                &#10005;
-              </button>
-            </div>
-          ))}
+            );
+          })}
+        </div>
+        <div className={styles.recentHint}>
+          Click an entry to edit it, double-click or press Enter to load. &#8593;&#8595; to navigate.
         </div>
       </div>
     )}

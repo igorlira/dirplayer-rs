@@ -1,19 +1,35 @@
+/* The screen is pinned to the viewport and never scrolls as a whole: the
+   recent-movies list is the one scrollable region, so it can absorb all the
+   height the window has to give instead of pushing the page taller. */
 .container {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 32px 16px;
+  height: 100vh;
+  height: 100dvh;
+  padding: 24px 16px;
+  gap: 20px;
   box-sizing: border-box;
+  overflow: hidden;
   background-color: #e0e0e0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-.header {
-  margin-bottom: 24px;
+/* Header + form. Sized to its content, but never allowed past ~60% of the
+   window: past that the card body scrolls on its own so a long form (lots of
+   external params) can't squeeze the movie list down to nothing. */
+.topPane {
+  display: flex;
+  flex-direction: column;
   width: 600px;
   max-width: 100%;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 62%;
+}
+
+.header {
+  margin-bottom: 24px;
 }
 
 .title {
@@ -33,8 +49,11 @@
 /* Card */
 
 .card {
-  width: 600px;
-  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  flex: 0 1 auto;
+  min-height: 0;
   background-color: #fff;
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
@@ -47,6 +66,20 @@
   flex-direction: column;
   gap: 16px;
   text-align: left;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cardFooter {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 24px 16px;
+  flex-shrink: 0;
+  text-align: left;
+  border-top: 1px solid #eee;
+  background-color: #fff;
 }
 
 /* Form fields */
@@ -300,18 +333,32 @@
 
 /* Recent Movies */
 
+/* Takes every pixel the form leaves over (flex-basis 0 keeps its own content
+   from claiming space back), down to a floor that keeps a few rows visible. */
 .recentSection {
+  display: flex;
+  flex-direction: column;
   width: 600px;
   max-width: 100%;
-  margin-top: 24px;
+  flex: 1 1 0;
+  min-height: 170px;
   text-align: left;
 }
 
 .recentHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.recentCount {
+  font-size: 0.75em;
+  color: #888;
+  background-color: rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  padding: 1px 8px;
+  margin-right: auto;
 }
 
 .recentTitle {
@@ -336,20 +383,163 @@
   }
 }
 
-.recentList {
+/* Filter */
+
+.searchRow {
   display: flex;
-  flex-direction: column;
   gap: 6px;
-  max-height: 350px;
+  margin-bottom: 8px;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.88em;
+  background-color: #fff;
+  color: #222;
+  outline: none;
+  transition: border-color 0.15s;
+
+  &:focus {
+    border-color: #888;
+  }
+
+  &::placeholder {
+    color: #aaa;
+  }
+}
+
+.clearSearchButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: #fff;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.8em;
+  flex-shrink: 0;
+
+  &:hover {
+    color: #c44;
+    border-color: #bbb;
+  }
+}
+
+/* Scrollable list */
+
+.recentList {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Room for the sticky folder headers to sit flush against the edge. */
+  padding-right: 2px;
+  outline: none;
+}
+
+.recentEmpty {
+  font-size: 0.85em;
+  color: #999;
+  font-style: italic;
+  padding: 8px 2px;
+}
+
+/* Folder groups */
+
+.recentGroup {
+  margin-bottom: 10px;
+}
+
+.groupHeader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 4px;
+  margin-bottom: 4px;
+  border: none;
+  /* Opaque: rows scroll underneath this. Matches the page background. */
+  background-color: #e0e0e0;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.78em;
+  color: #666;
+
+  &:hover {
+    color: #222;
+  }
+}
+
+.groupArrow {
+  font-size: 0.7em;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.groupArrowOpen {
+  transform: rotate(90deg);
+}
+
+/* The head ellipsizes and the last folder segment is pinned, so the part that
+   actually distinguishes two same-named movies always stays on screen. */
+.groupPath {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  font-family: monospace;
+}
+
+/* RTL flow puts the ellipsis at the *start*, so a long path loses its shared
+   `file:///Users/…` prefix rather than the version folder that identifies it.
+   The inner span restores LTR rendering for the path text itself. */
+.groupPathHead {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.groupPathHeadText {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.groupPathTail {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-weight: 700;
+  color: #444;
+}
+
+.groupCount {
+  flex-shrink: 0;
+  color: #999;
+  background-color: rgba(0, 0, 0, 0.06);
+  border-radius: 9px;
+  padding: 0 7px;
+  font-size: 0.92em;
 }
 
 .recentItem {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
   background-color: #fff;
+  border: 1px solid transparent;
   border-radius: 6px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
   cursor: pointer;
@@ -361,21 +551,61 @@
   }
 }
 
+.recentItemActive {
+  border-color: #555;
+  background-color: #f4f4f4;
+  box-shadow: 0 0 0 2px rgba(51, 51, 51, 0.18);
+}
+
+.recentItemTitleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recentFileName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.92em;
+  font-weight: 500;
+  color: #222;
+}
+
+.recentQuery {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 0.78em;
+  color: #888;
+}
+
+.recentTime {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 0.75em;
+  color: #aaa;
+  white-space: nowrap;
+}
+
+.recentHint {
+  margin-top: 8px;
+  font-size: 0.75em;
+  color: #999;
+}
+
 .recentItemBody {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-
-.recentUrl {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.9em;
-  color: #333;
-  text-align: left;
 }
 
 .recentParams {
@@ -386,12 +616,21 @@
 }
 
 .paramTag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 1px 6px;
   background-color: #f0f0f0;
   border-radius: 3px;
   font-family: monospace;
   font-size: 0.78em;
   color: #666;
+}
+
+.proxyTag {
+  background-color: #eaf1fb;
+  color: #4a6da7;
 }
 
 .recentActions {
