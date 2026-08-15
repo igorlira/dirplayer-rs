@@ -24,6 +24,16 @@ type RecentMovie = {
   // Whether this entry routes its cross-origin fetches through the CORS proxy.
   // Opt-in per movie (advanced-options checkbox); undefined/false = direct.
   useCorsProxy?: boolean;
+  // The projector command line this entry was launched from, kept RAW rather
+  // than pre-parsed so it stays re-parsable as the parser gains flags — and so
+  // it can be read and edited in Advanced Options.
+  //
+  // This has to be persisted: the player CONSUMES its startup payloads
+  // (`run_startup_do` does a `.take()`), so replaying an entry without the
+  // command leaves a leech-protection wrapper with no idea where the real game
+  // lives. It loads its default — the original, long-dead url — and you get a
+  // 404 followed by "[go] eager mount FAILED".
+  launchCommand?: string;
   timestamp: number;
 };
 
@@ -123,9 +133,10 @@ function loadRecentMovies(): RecentMovie[] {
   }
 }
 
-function saveRecentMovie(url: string, params: ExternalParam[], fakeMoviePath?: string, useCorsProxy?: boolean): RecentMovie[] {
+function saveRecentMovie(url: string, params: ExternalParam[], fakeMoviePath?: string, useCorsProxy?: boolean,
+  launchCommand?: string): RecentMovie[] {
   const existing = loadRecentMovies().filter(m => m.url !== url);
-  const updated = [{ url, params, fakeMoviePath, useCorsProxy, timestamp: Date.now() }, ...existing].slice(0, MAX_RECENT_MOVIES);
+  const updated = [{ url, params, fakeMoviePath, useCorsProxy, launchCommand, timestamp: Date.now() }, ...existing].slice(0, MAX_RECENT_MOVIES);
   window.localStorage.setItem(RECENT_MOVIES_KEY, JSON.stringify(updated));
   return updated;
 }
@@ -226,6 +237,7 @@ const MAX_ROW_TAGS = 4;
 function movieTags(movie: RecentMovie): MovieTag[] {
   const tags: MovieTag[] = [];
   if (movie.useCorsProxy) tags.push({ key: 'proxy', label: 'proxy', accent: true });
+  if (movie.launchCommand) tags.push({ key: 'launch', label: 'launch cmd', accent: true });
   if (movie.fakeMoviePath) tags.push({ key: 'fakePath', label: `fakePath=${movie.fakeMoviePath}` });
   movie.params.forEach((p, i) => {
     if (p.key.trim()) tags.push({ key: `p${i}`, label: `${p.key}=${p.value}` });
@@ -238,6 +250,7 @@ function matchesFilter(movie: RecentMovie, tokens: string[]): boolean {
   const haystack = [
     movie.url,
     movie.fakeMoviePath ?? '',
+    movie.launchCommand ?? '',
     ...movie.params.map(p => `${p.key}=${p.value}`),
   ].join(' ').toLowerCase();
   return tokens.every(token => haystack.includes(token));
@@ -253,6 +266,7 @@ export default function LoadMovie() {
   const [autoPlay, setAutoPlay] = useState<boolean>(process.env.REACT_APP_MOVIE_AUTO_PLAY === 'true');
   const [externalParams, setExternalParams] = useState<ExternalParam[]>(() => getEnvExternalParams());
   const [fakeMoviePath, setFakeMoviePath] = useState<string>('');
+  const [launchCommand, setLaunchCommand] = useState<string>('');
   const [recentMovies, setRecentMovies] = useState<RecentMovie[]>(() => loadRecentMovies());
   const [paramsExpanded, setParamsExpanded] = useState(() => getEnvExternalParams().length > 0);
   const [loaderUrl, setLoaderUrl] = useState<string>('');
@@ -279,7 +293,7 @@ export default function LoadMovie() {
   }, []);
 
   const loadMovieFile = useCallback(async (fullPath: string, params?: ExternalParam[], fakePath?: string, useProxy?: boolean,
-    launch?: ReturnType<typeof parseLaunchCommand> | null) => {
+    launchCmd?: string) => {
     try {
       setIsLoading(true);
       setHasError(false);
@@ -316,13 +330,18 @@ export default function LoadMovie() {
       // the LeechProtectionRemovalHelp flags synthesised into `--do`). These
       // MUST be installed before load_movie_file: the movie-init sequence
       // consumes them. See docs/github_wiki/Projector-Launch-Commands.md.
-      if (launch) {
-        if (launch.startupDoBefore) set_startup_do_before(launch.startupDoBefore);
-        if (launch.startupDo) set_startup_do(launch.startupDo);
-        if (launch.startupGo) set_startup_go(launch.startupGo);
-        if (launch.ignored.length) {
-          console.warn('[LoadMovie] launch command: ignored projector-only flags:', launch.ignored.join(', '));
-        }
+      //
+      // Re-parsed and re-applied on EVERY load, never just the first. The
+      // player TAKES these slots when it runs them, so they are gone by the
+      // second load of the same entry; and an empty string CLEARS the slot, so
+      // a payload left behind by a load that failed before consuming it cannot
+      // leak into the next movie (same hazard as the CORS proxy global above).
+      const launch = parseLaunchCommand(launchCmd ?? launchCommand);
+      set_startup_do_before(launch.startupDoBefore);
+      set_startup_do(launch.startupDo);
+      set_startup_go(launch.startupGo);
+      if (launch.ignored.length) {
+        console.warn('[LoadMovie] launch command: ignored projector-only flags:', launch.ignored.join(', '));
       }
       document.title = `${fullPath.split('/').pop() || fullPath} - ${APP_TITLE}`;
       // Wait for any in-flight boot-time external xtra loads (the
@@ -345,14 +364,14 @@ export default function LoadMovie() {
     } finally {
       setIsLoading(false);
     }
-  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy, useCorsProxy]);
+  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy, useCorsProxy, launchCommand]);
 
   const onLoadClick = useCallback(async () => {
     if (!movieUrl.trim()) { setHasError(true); return; }
-    const updated = saveRecentMovie(movieUrl, externalParams, fakeMoviePath, useCorsProxy);
+    const updated = saveRecentMovie(movieUrl, externalParams, fakeMoviePath, useCorsProxy, launchCommand.trim() || undefined);
     setRecentMovies(updated);
     await loadMovieFile(movieUrl, undefined, undefined, useCorsProxy);
-  }, [movieUrl, externalParams, fakeMoviePath, useCorsProxy, loadMovieFile]);
+  }, [movieUrl, externalParams, fakeMoviePath, useCorsProxy, launchCommand, loadMovieFile]);
 
   // Loader mode: fetch a Shockwave loader page through the dev CORS proxy,
   // extract the Director embed (movie URL + sw* external params), enable proxy
@@ -401,10 +420,11 @@ export default function LoadMovie() {
           }
           setMovieUrl(loadUrl);
           setExternalParams(lcParams);
+          setLaunchCommand(launchCmd);
           if (lcParams.length > 0) setParamsExpanded(true);
           setUseCorsProxy(true);
-          setRecentMovies(saveRecentMovie(loadUrl, lcParams, undefined, true));
-          await loadMovieFile(loadUrl, lcParams, undefined, true, launch);
+          setRecentMovies(saveRecentMovie(loadUrl, lcParams, undefined, true, launchCmd));
+          await loadMovieFile(loadUrl, lcParams, undefined, true, launchCmd);
           return;
         }
         console.warn('[LoadMovie] data-launch-command names no movie; falling back to embed scrape.');
@@ -418,12 +438,15 @@ export default function LoadMovie() {
       }
       setMovieUrl(parsed.movieUrl);
       setExternalParams(parsed.params);
+      // A scraped embed carries no projector arguments; drop whatever command
+      // the previously-inspected entry left in the form.
+      setLaunchCommand('');
       if (parsed.params.length > 0) setParamsExpanded(true);
       // Loader mode inherently requires the proxy (the game's own cross-origin
       // fetches route through it), so force it on and persist that for the entry.
       setUseCorsProxy(true);
       setRecentMovies(saveRecentMovie(parsed.movieUrl, parsed.params, undefined, true));
-      await loadMovieFile(parsed.movieUrl, parsed.params, undefined, true);
+      await loadMovieFile(parsed.movieUrl, parsed.params, undefined, true, '');
     } catch (e) {
       console.error('[LoadMovie] Loader load failed', e);
       setHasError(true);
@@ -448,20 +471,25 @@ export default function LoadMovie() {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
     setFakeMoviePath(movie.fakeMoviePath ?? '');
+    const launch = movie.launchCommand ?? '';
+    setLaunchCommand(launch);
     // Honor the per-entry opt-in (default OFF for legacy entries with no flag).
     const proxy = movie.useCorsProxy ?? false;
     setUseCorsProxy(proxy);
-    const updated = saveRecentMovie(movie.url, movie.params, movie.fakeMoviePath, proxy);
+    const updated = saveRecentMovie(movie.url, movie.params, movie.fakeMoviePath, proxy, movie.launchCommand);
     setRecentMovies(updated);
-    loadMovieFile(movie.url, movie.params, movie.fakeMoviePath, proxy);
+    // Pass the command explicitly: `setLaunchCommand` above has not landed in
+    // state yet, and a replay without it is exactly the bug this fixes.
+    loadMovieFile(movie.url, movie.params, movie.fakeMoviePath, proxy, launch);
   }, [loadMovieFile]);
 
   const onEditRecent = useCallback((movie: RecentMovie) => {
     setMovieUrl(movie.url);
     setExternalParams(movie.params);
     setFakeMoviePath(movie.fakeMoviePath ?? '');
+    setLaunchCommand(movie.launchCommand ?? '');
     setUseCorsProxy(movie.useCorsProxy ?? false);
-    if (movie.params.length > 0 || movie.fakeMoviePath) {
+    if (movie.params.length > 0 || movie.fakeMoviePath || movie.launchCommand) {
       setParamsExpanded(true);
     }
   }, []);
@@ -605,8 +633,9 @@ export default function LoadMovie() {
                 &#9654;
               </span>
               Advanced Options
-              {(hasParams || fakeMoviePath) && !paramsExpanded && (
-                <span> ({[hasParams && `${externalParams.length} params`, fakeMoviePath && 'fake path'].filter(Boolean).join(', ')})</span>
+              {(hasParams || fakeMoviePath || launchCommand) && !paramsExpanded && (
+                <span> ({[hasParams && `${externalParams.length} params`, fakeMoviePath && 'fake path',
+                  launchCommand && 'launch cmd'].filter(Boolean).join(', ')})</span>
               )}
             </button>
             {paramsExpanded && (
@@ -661,13 +690,35 @@ export default function LoadMovie() {
                     cross-origin fetches need proxying. Fetch &amp; Load turns it on
                     automatically. Start the proxy first: <code>node cors-proxy.cjs</code>.
                   </div>
-                  <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
+                  <div className={styles.hintText} style={{ marginTop: 4 }}>
                     Fetch &amp; Load also reads a <code>data-launch-command</code> from an
                     archive entry page (9o3o / Flashpoint) and applies the projector
                     arguments — the movie URL, <code>--setExternalParam</code> pairs, the
                     LeechProtectionRemovalHelp flags and the <code>--do</code> payload.
                     Many archived games are launched from a wrapper movie that does
                     nothing without them.
+                  </div>
+                </div>
+                <div className={styles.fieldContainer}>
+                  <label className={styles.label} htmlFor="launchCommand">
+                    Launch command (optional)
+                  </label>
+                  <textarea
+                    id="launchCommand"
+                    className={`${styles.input} ${styles.commandInput}`}
+                    rows={3}
+                    spellCheck={false}
+                    placeholder={'"…/wrapper.dcr" --do "member(\'gameUrl\').text = \'…/game.dcr\'"'}
+                    value={launchCommand}
+                    onChange={e => setLaunchCommand(e.currentTarget.value)}
+                    disabled={isLoading}
+                    title="Projector arguments, re-applied on every load of this entry."
+                  />
+                  <div className={styles.hintText}>
+                    Filled in by Fetch &amp; Load and saved with the entry. It is
+                    re-applied on every load, because the player consumes its
+                    startup payloads — without it a wrapper movie reloads with no
+                    game URL and 404s.
                   </div>
                 </div>
                 <div className={styles.fieldContainer}>

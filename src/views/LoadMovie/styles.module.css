@@ -210,6 +210,17 @@
   }
 }
 
+/* A projector command line is long, quote-dense and worth reading exactly, so
+   it gets a monospace box that grows downwards rather than a one-line input. */
+.commandInput {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.82em;
+  line-height: 1.45;
+  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .inputError {
   border-color: var(--danger);
 
