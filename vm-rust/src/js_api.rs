@@ -1351,6 +1351,11 @@ impl JsApi {
     pub fn get_score_snapshot(player: &DirPlayer, score: &Score) -> js_sys::Map {
         let member_map = js_sys::Map::new();
         member_map.str_set("channelCount", &JsValue::from(score.get_channel_count()));
+        // The score's own frame count, already reconciled from the chunk header,
+        // sprite spans, init data, keyframes and frame labels. The UI needs it to
+        // size the timeline; deriving it again in JS would only see the subset of
+        // that information the snapshot happens to carry.
+        member_map.str_set("frameCount", &JsValue::from(score.frame_count.unwrap_or(1)));
 
         member_map.str_set(
             "behaviorReferences",

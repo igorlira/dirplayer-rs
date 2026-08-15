@@ -296,6 +296,8 @@ export interface ScoreSpriteSnapshot {
 
 export interface ScoreSnapshot {
   channelCount: number,
+  /** Total frames in the score, as reconciled by the VM. */
+  frameCount?: number,
   behaviorReferences: IScoreBehaviorReference[]
   spriteSpans?: IScoreSpriteSpan[]
   channelInitData?: IScoreChannelInitData[]

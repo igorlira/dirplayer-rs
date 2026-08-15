@@ -1,54 +1,66 @@
-:root {
-  --frame-cell-width: 16px;
-}
+/* Virtualized score timeline.
+   Rows and frame cells are absolutely positioned from the virtualizer's
+   offsets, so only what is on screen exists in the DOM. Geometry comes from
+   the custom properties the component sets (--frame-cell-width,
+   --score-row-height, --channel-label-width) — the single source of truth is
+   the constants in index.tsx. */
 
 .scoreOverviewContainer {
-  overflow-x: scroll;
-  overflow-y: scroll;
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
+  inset: 0;
+  overflow: auto;
+  contain: strict;
 }
 
 .scoreGrid {
-  display: flex;
-  flex-direction: column;
+  position: relative;
   font-size: 10px;
 }
 
+/* Header sticks to the top of the scrollport; its label cell also sticks left,
+   so the corner stays put on both axes. */
 .scoreGridHeader {
-  display: flex;
-  flex-direction: row;
   position: sticky;
   top: 0;
+  z-index: 3;
+  height: var(--score-row-height);
   background-color: var(--score-header-bg);
-  z-index: 10;
   border-bottom: 1px solid var(--chrome-hairline);
 }
 
+.scoreGridBody {
+  position: relative;
+}
+
 .scoreGridRow {
-  display: flex;
-  flex-direction: row;
+  position: absolute;
+  left: 0;
+  height: var(--score-row-height);
+  box-sizing: border-box;
   border-bottom: 1px solid var(--hairline);
 }
 
-.scoreGridRow:nth-child(even) {
+/* Parity comes from the channel number (see .rowAlt in index.tsx): virtualized
+   rows are recycled in DOM order, so :nth-child would flicker while scrolling. */
+.rowAlt {
   background-color: var(--score-row-alt);
 }
 
 .channelLabelCell {
-  min-width: 30px;
-  max-width: 30px;
-  padding: 2px 4px;
-  text-align: center;
-  font-weight: bold;
-  border-right: 1px solid var(--chrome-hairline);
   position: sticky;
   left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--channel-label-width);
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-weight: bold;
+  border-right: 1px solid var(--chrome-hairline);
   background-color: var(--score-header-bg);
-  z-index: 5;
   cursor: pointer;
 }
 
@@ -58,30 +70,29 @@
 
 .channelLabelCell.selected {
   background-color: var(--danger-soft);
-  border: 2px solid var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
 }
 
 .scoreGridFrameCell {
-  min-width: var(--frame-cell-width);
-  max-width: var(--frame-cell-width);
-  text-align: center;
-  padding: 2px 0;
+  position: absolute;
+  top: 0;
+  width: var(--frame-cell-width);
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
   border-left: 1px solid var(--hairline);
-}
-
-.scoreGridFrameCell.current {
-  background-color: var(--score-current);
-  color: var(--score-current-on);
-  font-weight: bold;
 }
 
 .scoreGridCell {
-  position: relative;
-  min-width: var(--frame-cell-width);
-  max-width: var(--frame-cell-width);
-  min-height: 18px;
-  border-left: 1px solid var(--hairline);
+  position: absolute;
+  top: 0;
+  width: var(--frame-cell-width);
+  height: 100%;
   box-sizing: border-box;
+  border-left: 1px solid var(--hairline);
 }
 
 .scoreGridCell.hasSprite {
@@ -106,11 +117,6 @@
   background-color: var(--select-line);
 }
 
-.scoreGridCell.currentFrame {
-  border-top: 2px solid var(--score-current);
-  border-bottom: 2px solid var(--score-current);
-}
-
 .scoreGridCell.clickable {
   cursor: pointer;
 }
@@ -119,6 +125,23 @@
   outline: 2px solid var(--select-line);
   outline-offset: -2px;
   z-index: 1;
+}
+
+/* Positioned purely from --playhead-frame, which usePlayheadVar writes outside
+   of React. Moving it costs one style recalculation, not a re-render. */
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--frame-cell-width);
+  z-index: 2;
+  pointer-events: none;
+  transform: translateX(
+    calc(var(--channel-label-width) + (var(--playhead-frame, 1) - 1) * var(--frame-cell-width))
+  );
+  border-left: 1px solid var(--score-current);
+  border-right: 1px solid var(--score-current);
+  background-color: color-mix(in srgb, var(--score-current) 16%, transparent);
 }
 
 .castMemberLabel {

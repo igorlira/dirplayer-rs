@@ -1,6 +1,7 @@
 import { useDispatch } from "react-redux";
 import PreviewCanvas from "../../components/PreviewCanvas";
 import ScoreTimeline from "../../components/ScoreTimeline";
+import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
 import { useMemberSnapshot } from "../../store/hooks";
 import { scoreSpanSelected } from "../../store/uiSlice";
 import { ICastMemberIdentifier } from "../../vm";
@@ -65,8 +66,8 @@ export default function FilmLoopInspector({ memberId }: IMemberInspectorProps) {
     } else if (node.getComponent() === 'timeline') {
       return memberSnapshot.score && <div className={styles.filmLoopTimeline}>
         <ScoreTimeline
-          framesToRender={Math.min(memberSnapshot.score.spriteSpans?.reduce((max, span) => Math.max(max, span.endFrame), 0) || 30, 100)}
-          channelCount={memberSnapshot.score.channelCount}
+          frameCount={getFrameCount(memberSnapshot.score)}
+          channelCount={getChannelCount(memberSnapshot.score)}
           spriteSpans={memberSnapshot.score.spriteSpans}
           channelInitData={memberSnapshot.score.channelInitData}
           onCellClick={(cell) => {
