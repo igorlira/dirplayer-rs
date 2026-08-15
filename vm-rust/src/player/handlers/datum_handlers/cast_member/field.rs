@@ -70,13 +70,17 @@ impl FieldMemberHandlers {
                     resolved_str,
                 )))
             }
-            "setContents" => {
+            "setContents" | "setContentsAfter" | "setContentsBefore" => {
                 if args.len() != 1 {
-                    return Err(ScriptError::new(
-                        "setContents requires 1 argument".to_string(),
-                    ));
+                    return Err(ScriptError::new(format!(
+                        "{handler_name} requires 1 argument"
+                    )));
                 }
-                let new_contents = player.get_datum(&args[0]).string_value()?;
+                let new_contents = player
+                    .get_datum(&args[0])
+                    .string_value()?
+                    .trim_end_matches('\0')
+                    .to_string();
                 let member_ref = player.get_datum(datum).to_member_ref()?;
                 let member = player
                     .movie
@@ -86,7 +90,17 @@ impl FieldMemberHandlers {
                     .member_type
                     .as_field_mut()
                     .unwrap();
-                member.set_text_preserving_caret(new_contents.trim_end_matches('\0').to_string());
+                // Field text loaded from the cast can carry trailing NULs;
+                // concatenating past them would hide the appended text behind
+                // a terminator, so strip them from the existing side too.
+                let existing = member.text.trim_end_matches('\0');
+                let new_text = match handler_name {
+                    "setContents" => new_contents,
+                    "setContentsAfter" => format!("{existing}{new_contents}"),
+                    "setContentsBefore" => format!("{new_contents}{existing}"),
+                    _ => unreachable!(),
+                };
+                member.set_text_preserving_caret(new_text);
                 Ok(DatumRef::Void)
             }
             "locToCharPos" => {
