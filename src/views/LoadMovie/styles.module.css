@@ -1,23 +1,59 @@
-/* The screen is pinned to the viewport and never scrolls as a whole: the
-   recent-movies list is the one scrollable region, so it can absorb all the
-   height the window has to give instead of pushing the page taller. */
+/* DirPlayer load screen.
+   The palette mirrors the branded overlays (components/ErrorOverlay and the
+   polyfill's conflict UI): #1a1a1a ground, #2a2a2a surfaces, #404040 hairlines
+   and the amber #f5a623 accent. Like the conflict UI's .btn-poly, the accent is
+   carried by *borders, text and thin edges* — never by large filled areas. */
+
 .container {
+  --ground: #1a1a1a;
+  /* Surfaces carry a trace of warmth so the greys don't read as clinical. */
+  --surface: #222120;
+  --surface-raised: #2b2926;
+  --surface-hover: #302e2a;
+  --hairline: #333230;
+  --hairline-strong: #423f3b;
+  --text: #e8e8e8;
+  --text-dim: #8a8681;
+  --text-faint: #625e59;
+  --accent: #f5a623;
+  --accent-soft: rgba(245, 166, 35, 0.13);
+  --danger: #e0655a;
+
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* Pinned to the viewport and never scrolled as a whole: the recent-movies
+     list is the one scrollable region, so it absorbs all the height the window
+     has to give instead of pushing the page taller. */
   height: 100vh;
   height: 100dvh;
-  padding: 24px 16px;
+  padding: 28px 16px 20px;
   gap: 20px;
   box-sizing: border-box;
   overflow: hidden;
-  background-color: #e0e0e0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--ground);
+  /* A warm pool of light behind the brand mark, over a cool falloff. Keeps the
+     screen from looking like a flat sheet of #1a1a1a. */
+  background-image:
+    radial-gradient(60% 42% at 50% 0%, rgba(245, 166, 35, 0.07) 0%, transparent 70%),
+    radial-gradient(120% 85% at 50% 0%, #262523 0%, #1a1a1a 62%);
+  color: var(--text);
+  /* .App centers everything; this screen is a left-aligned document. */
+  text-align: left;
 }
 
-/* Header + form. Sized to its content, but never allowed past ~60% of the
-   window: past that the card body scrolls on its own so a long form (lots of
-   external params) can't squeeze the movie list down to nothing. */
+.containerEmpty {
+  justify-content: center;
+}
+
+/* Nothing is competing for the height, so the form can use all of it. */
+.containerEmpty .topPane {
+  max-height: 100%;
+}
+
+/* Brand lockup + form. Sized to its content, but never allowed past ~60% of
+   the window: past that the card body scrolls on its own so a long form (lots
+   of external params) can't squeeze the movie list down to nothing. */
 .topPane {
   display: flex;
   flex-direction: column;
@@ -29,21 +65,46 @@
 }
 
 .header {
-  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  margin-bottom: 22px;
 }
 
+.logo {
+  border-radius: 9px;
+  display: block;
+  flex-shrink: 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+/* The wordmark matches the branded overlays exactly (ErrorOverlay and the
+   polyfill's conflict UI): bare `sans-serif` at weight 600, +0.01em. Only the
+   scale and colour differ, since this is the hero lockup and those are
+   watermarks. Don't "fix" the font stack to match the rest of this screen. */
 .title {
-  font-size: 1.6em;
-  font-weight: 700;
-  color: #222;
+  font-family: sans-serif;
+  font-size: 1.5em;
+  font-weight: 600;
+  color: #f2f0ee;
   margin: 0;
-  letter-spacing: -0.02em;
+  line-height: 1;
+  letter-spacing: 0.01em;
 }
 
 .subtitle {
-  font-size: 0.85em;
-  color: #777;
-  margin-top: 4px;
+  font-size: 0.73em;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /* Card */
@@ -54,32 +115,57 @@
   width: 100%;
   flex: 0 1 auto;
   min-height: 0;
-  background-color: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  background-color: var(--surface);
+  background-image: linear-gradient(180deg, #262523 0%, #201f1e 100%);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  /* Lit from above: a hairline highlight on the top edge, weight underneath. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 12px 32px rgba(0, 0, 0, 0.4);
   overflow: hidden;
 }
 
 .cardBody {
-  padding: 20px 24px;
+  padding: 22px 24px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
   text-align: left;
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--hairline-strong);
+    border: 3px solid var(--surface);
+    border-radius: 5px;
+  }
 }
 
 .cardFooter {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 14px 24px 16px;
+  padding: 13px 18px 13px 22px;
   flex-shrink: 0;
   text-align: left;
-  border-top: 1px solid #eee;
-  background-color: #fff;
+  border-top: 1px solid var(--hairline);
+  background-color: rgba(0, 0, 0, 0.16);
+}
+
+.footerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 /* Form fields */
@@ -87,15 +173,15 @@
 .fieldContainer {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 
 .label {
-  font-size: 0.8em;
+  font-size: 0.72em;
   font-weight: 600;
-  color: #555;
+  color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.07em;
 }
 
 .inputGroup {
@@ -105,47 +191,71 @@
 
 .input {
   flex: 1;
-  padding: 9px 12px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 0.95em;
-  background-color: #fff;
-  color: #222;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 7px;
+  font-size: 0.92em;
+  background-color: rgba(0, 0, 0, 0.28);
+  color: var(--text);
   outline: none;
   text-align: left;
-  transition: border-color 0.15s;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: border-color 0.15s, box-shadow 0.15s;
+
+  &:hover:not(:disabled):not(:focus) {
+    border-color: #4d4a45;
+  }
 
   &:focus {
-    border-color: #888;
+    border-color: var(--accent);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25), 0 0 0 3px rgba(245, 166, 35, 0.13);
   }
 
   &::placeholder {
-    color: #aaa;
+    color: var(--text-faint);
   }
 
   &:disabled {
-    background-color: #f5f5f5;
-    color: #999;
+    background-color: rgba(0, 0, 0, 0.14);
+    color: var(--text-faint);
   }
 }
 
+.inputError {
+  border-color: var(--danger);
+
+  &:focus {
+    border-color: var(--danger);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25), 0 0 0 3px rgba(224, 101, 90, 0.16);
+  }
+}
+
+/* Secondary button (Browse, Fetch & Load) */
+
 .browseButton {
   padding: 9px 16px;
-  background-color: #f0f0f0;
-  color: #333;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+  background-color: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 7px;
   cursor: pointer;
   white-space: nowrap;
-  font-size: 0.9em;
-  transition: background-color 0.15s;
+  font-size: 0.88em;
+  font-weight: 500;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.08s;
 
   &:hover:not(:disabled) {
-    background-color: #e4e4e4;
+    background-color: var(--surface-hover);
+    border-color: #524e48;
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(1px);
   }
 
   &:disabled {
-    color: #aaa;
+    color: var(--text-faint);
     cursor: default;
   }
 }
@@ -161,48 +271,99 @@
 .checkboxContainer {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.9em;
-  color: #444;
+  gap: 7px;
+  font-size: 0.88em;
+  color: var(--text-dim);
   cursor: pointer;
+
+  &:hover {
+    color: var(--text);
+  }
 }
 
 .checkbox {
   width: 15px;
   height: 15px;
   cursor: pointer;
+  accent-color: var(--accent);
 }
 
-.inputError {
-  border-color: #c44;
-
-  &:focus {
-    border-color: #c44;
-  }
-}
-
-/* Primary button */
+/* Primary button. Same treatment as the conflict UI's recommended action:
+   a dark chip that the accent outlines rather than floods. */
 
 .button {
-  padding: 10px 16px;
-  background-color: #333;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 22px;
+  background-color: var(--surface-raised);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 7px;
   cursor: pointer;
-  font-size: 0.95em;
-  font-weight: 500;
-  transition: background-color 0.15s;
-  text-align: center;
+  font-size: 0.92em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  transition: background-color 0.15s, box-shadow 0.15s, transform 0.08s;
 
   &:hover:not(:disabled) {
-    background-color: #444;
+    background-color: var(--accent-soft);
+    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.09);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(1px);
   }
 
   &:disabled {
-    background-color: #bbb;
+    background-color: rgba(0, 0, 0, 0.2);
+    border-color: var(--hairline-strong);
+    color: var(--text-faint);
     cursor: default;
   }
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0.8;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Load error, in the branded overlay's warning colours */
+
+.errorBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 13px;
+  background-color: rgba(245, 166, 35, 0.07);
+  border: 1px solid rgba(245, 166, 35, 0.28);
+  border-radius: 7px;
+  font-size: 0.85em;
+  line-height: 1.45;
+  color: #e3b573;
+}
+
+.errorIcon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.errorMessage {
+  word-break: break-word;
 }
 
 /* External Params - collapsible */
@@ -210,25 +371,25 @@
 .paramsSection {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .paramsToggle {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   background: none;
   border: none;
   padding: 0;
   cursor: pointer;
-  font-size: 0.8em;
+  font-size: 0.72em;
   font-weight: 600;
-  color: #555;
+  color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.07em;
 
   &:hover {
-    color: #333;
+    color: var(--text);
   }
 }
 
@@ -244,33 +405,64 @@
 .paramsList {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
+  padding: 16px 17px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background-color: rgba(0, 0, 0, 0.16);
+}
+
+.proxyRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.hintText {
+  font-size: 0.78em;
+  line-height: 1.55;
+  color: var(--text-faint);
+  margin-top: 6px;
 }
 
 .paramRow {
   display: flex;
-  gap: 6px;
+  gap: 7px;
   align-items: center;
+}
+
+/* Keys are short and predictable (sw1, multiuser_websocket_path); values are
+   long URLs. An even split starves the value for no benefit. */
+.paramRow .paramInput:first-child {
+  flex: 0 1 44%;
 }
 
 .paramInput {
   flex: 1;
+  min-width: 0;
   padding: 7px 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 0.9em;
-  background-color: #fff;
-  color: #222;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  font-size: 0.86em;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  background-color: rgba(0, 0, 0, 0.28);
+  color: var(--text);
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
 
   &:focus {
-    border-color: #888;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.13);
+  }
+
+  &::placeholder {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--text-faint);
   }
 
   &:disabled {
-    background-color: #f5f5f5;
-    color: #999;
+    background-color: rgba(0, 0, 0, 0.14);
+    color: var(--text-faint);
   }
 }
 
@@ -282,59 +474,52 @@
   height: 28px;
   background: none;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
-  color: #999;
-  font-size: 1em;
+  color: var(--text-faint);
+  font-size: 0.95em;
   padding: 0;
   flex-shrink: 0;
   transition: all 0.15s;
 
   &:hover:not(:disabled) {
-    background-color: #fee;
-    border-color: #fcc;
-    color: #c44;
+    background-color: rgba(224, 101, 90, 0.12);
+    border-color: rgba(224, 101, 90, 0.4);
+    color: var(--danger);
   }
 
   &:disabled {
-    color: #ddd;
+    color: #333;
     cursor: default;
   }
 }
 
 .addParamButton {
   align-self: flex-start;
-  padding: 5px 12px;
+  padding: 6px 12px;
   background: none;
-  border: 1px dashed #ccc;
-  border-radius: 4px;
+  border: 1px dashed var(--hairline-strong);
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 0.85em;
-  color: #666;
+  font-size: 0.82em;
+  color: var(--text-dim);
   transition: all 0.15s;
 
   &:hover:not(:disabled) {
-    border-color: #999;
-    color: #333;
-    background-color: #f8f8f8;
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   &:disabled {
-    color: #bbb;
+    color: #333;
     cursor: default;
   }
 }
 
-.paramsEmpty {
-  font-size: 0.85em;
-  color: #aaa;
-  font-style: italic;
-}
-
-/* Recent Movies */
-
-/* Takes every pixel the form leaves over (flex-basis 0 keeps its own content
+/* Recent Movies.
+   Takes every pixel the form leaves over (flex-basis 0 keeps its own content
    from claiming space back), down to a floor that keeps a few rows visible. */
+
 .recentSection {
   display: flex;
   flex-direction: column;
@@ -349,37 +534,39 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
-}
-
-.recentCount {
-  font-size: 0.75em;
-  color: #888;
-  background-color: rgba(0, 0, 0, 0.06);
-  border-radius: 10px;
-  padding: 1px 8px;
-  margin-right: auto;
+  margin-bottom: 10px;
+  padding: 0 2px;
 }
 
 .recentTitle {
-  font-size: 0.8em;
+  font-size: 0.72em;
   font-weight: 600;
-  color: #888;
+  color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.07em;
+}
+
+.recentCount {
+  font-size: 0.72em;
+  font-weight: 600;
+  color: var(--text-faint);
+  background-color: var(--surface-raised);
+  border-radius: 10px;
+  padding: 2px 8px;
+  margin-right: auto;
 }
 
 .clearRecent {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 0.8em;
-  color: #aaa;
+  font-size: 0.78em;
+  color: var(--text-faint);
   padding: 2px 4px;
   transition: color 0.15s;
 
   &:hover {
-    color: #c44;
+    color: var(--danger);
   }
 }
 
@@ -388,27 +575,48 @@
 .searchRow {
   display: flex;
   gap: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
+}
+
+.searchField {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
 }
 
 .searchInput {
   flex: 1;
   min-width: 0;
-  padding: 7px 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 0.88em;
-  background-color: #fff;
-  color: #222;
+  padding: 9px 11px 9px 33px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  font-size: 0.85em;
+  background-color: rgba(0, 0, 0, 0.22);
+  color: var(--text);
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
+
+  &:hover:not(:focus) {
+    border-color: var(--hairline-strong);
+  }
 
   &:focus {
-    border-color: #888;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.13);
   }
 
   &::placeholder {
-    color: #aaa;
+    color: var(--text-faint);
   }
 }
 
@@ -416,18 +624,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background-color: #fff;
-  color: #888;
+  width: 34px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background-color: var(--surface);
+  color: var(--text-faint);
   cursor: pointer;
-  font-size: 0.8em;
+  font-size: 0.78em;
   flex-shrink: 0;
+  transition: all 0.15s;
 
   &:hover {
-    color: #c44;
-    border-color: #bbb;
+    color: var(--text);
+    border-color: var(--hairline-strong);
   }
 }
 
@@ -438,22 +647,42 @@
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  /* Room for the sticky folder headers to sit flush against the edge. */
-  padding-right: 2px;
+  padding-right: 4px;
   outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--hairline-strong);
+    border: 3px solid var(--ground);
+    border-radius: 5px;
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background-color: #55514a;
+  }
 }
 
 .recentEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 34px 12px;
   font-size: 0.85em;
-  color: #999;
-  font-style: italic;
-  padding: 8px 2px;
+  color: var(--text-faint);
+  text-align: center;
 }
 
-/* Folder groups */
+/* Folder groups: a label over one panel of rows, so the list reads as a few
+   folders rather than as N floating boxes. */
 
 .recentGroup {
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
 .groupHeader {
@@ -462,20 +691,20 @@
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
-  padding: 5px 4px;
-  margin-bottom: 4px;
+  padding: 4px 4px 7px;
   border: none;
-  /* Opaque: rows scroll underneath this. Matches the page background. */
-  background-color: #e0e0e0;
+  /* Opaque: rows scroll underneath this. Matches the page ground. */
+  background-color: var(--ground);
   cursor: pointer;
   text-align: left;
-  font-size: 0.78em;
-  color: #666;
+  font-size: 0.75em;
+  color: var(--text-faint);
+  transition: color 0.15s;
 
   &:hover {
-    color: #222;
+    color: var(--text-dim);
   }
 }
 
@@ -489,13 +718,11 @@
   transform: rotate(90deg);
 }
 
-/* The head ellipsizes and the last folder segment is pinned, so the part that
-   actually distinguishes two same-named movies always stays on screen. */
 .groupPath {
   display: flex;
   min-width: 0;
   flex: 1;
-  font-family: monospace;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
 }
 
 /* RTL flow puts the ellipsis at the *start*, so a long path loses its shared
@@ -520,47 +747,73 @@
   flex: 0 0 auto;
   white-space: nowrap;
   font-weight: 700;
-  color: #444;
+  color: #b5b0a9;
 }
 
 .groupCount {
   flex-shrink: 0;
-  color: #999;
-  background-color: rgba(0, 0, 0, 0.06);
+  color: var(--text-faint);
+  background-color: var(--surface-raised);
   border-radius: 9px;
-  padding: 0 7px;
+  padding: 1px 7px;
   font-size: 0.92em;
 }
+
+.groupRows {
+  background-color: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* Rows */
 
 .recentItem {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px;
-  margin-bottom: 4px;
-  background-color: #fff;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  padding: 10px 12px 10px 14px;
   cursor: pointer;
-  transition: all 0.15s;
+  border-top: 1px solid var(--hairline);
+  /* Keyboard focus rides the left edge; inset so nothing shifts. */
+  box-shadow: inset 0 0 0 0 transparent;
+  transition: background-color 0.13s, box-shadow 0.13s;
+
+  &:first-child {
+    border-top: none;
+    border-radius: 9px 9px 0 0;
+  }
+
+  &:last-child {
+    border-radius: 0 0 9px 9px;
+  }
+
+  &:only-child {
+    border-radius: 9px;
+  }
 
   &:hover {
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-    background-color: #fafafa;
+    background-color: rgba(255, 255, 255, 0.028);
   }
 }
 
 .recentItemActive {
-  border-color: #555;
-  background-color: #f4f4f4;
-  box-shadow: 0 0 0 2px rgba(51, 51, 51, 0.18);
+  background-color: rgba(245, 166, 35, 0.055);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.recentItemBody {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .recentItemTitleRow {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -572,7 +825,7 @@
   white-space: nowrap;
   font-size: 0.92em;
   font-weight: 500;
-  color: #222;
+  color: #eceae7;
 }
 
 .recentQuery {
@@ -581,31 +834,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: monospace;
-  font-size: 0.78em;
-  color: #888;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.74em;
+  color: var(--text-faint);
 }
 
 .recentTime {
   flex: 0 0 auto;
   margin-left: auto;
-  font-size: 0.75em;
-  color: #aaa;
+  font-size: 0.72em;
+  color: var(--text-faint);
   white-space: nowrap;
-}
-
-.recentHint {
-  margin-top: 8px;
-  font-size: 0.75em;
-  color: #999;
-}
-
-.recentItemBody {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
 .recentParams {
@@ -616,69 +855,69 @@
 }
 
 .paramTag {
-  max-width: 100%;
+  /* Long values (fakePath, external.*.txt URLs) ellipsize rather than each
+     claiming a whole line; the full text is in the tooltip. */
+  max-width: 230px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 1px 6px;
-  background-color: #f0f0f0;
-  border-radius: 3px;
-  font-family: monospace;
-  font-size: 0.78em;
-  color: #666;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.72em;
+  color: #837e78;
 }
 
 .proxyTag {
-  background-color: #eaf1fb;
-  color: #4a6da7;
+  background-color: var(--accent-soft);
+  color: var(--accent);
 }
+
+/* Row actions stay out of the way until the row is under the cursor. */
 
 .recentActions {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.13s;
+}
+
+.recentItem:hover .recentActions,
+.recentItem:hover .removeRecentButton,
+.recentItemActive .recentActions,
+.recentItemActive .removeRecentButton,
+.recentActions:focus-within,
+.removeRecentButton:focus {
+  opacity: 1;
 }
 
 .recentActionButton {
-  padding: 5px 12px;
-  border-radius: 4px;
+  padding: 5px 13px;
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 0.82em;
+  font-size: 0.78em;
+  font-weight: 600;
   white-space: nowrap;
   transition: all 0.15s;
 }
 
-.editButton {
-  composes: recentActionButton;
-  background: none;
-  border: 1px solid #ddd;
-  color: #555;
-
-  &:hover:not(:disabled) {
-    border-color: #bbb;
-    background-color: #f8f8f8;
-  }
-
-  &:disabled {
-    color: #ccc;
-    cursor: default;
-  }
-}
-
 .loadRecentButton {
   composes: recentActionButton;
-  background-color: #333;
-  border: 1px solid #333;
-  color: #fff;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--hairline-strong);
+  color: var(--text);
 
   &:hover:not(:disabled) {
-    background-color: #444;
-    border-color: #444;
+    background-color: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   &:disabled {
-    background-color: #bbb;
-    border-color: #bbb;
+    color: var(--text-faint);
+    border-color: var(--hairline);
     cursor: default;
   }
 }
@@ -691,16 +930,93 @@
   height: 24px;
   background: none;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
-  color: #ccc;
-  font-size: 0.85em;
+  color: #6b6660;
+  font-size: 0.82em;
   padding: 0;
   flex-shrink: 0;
+  opacity: 0;
   transition: all 0.15s;
 
   &:hover {
-    background-color: #fee;
-    color: #c44;
+    background-color: rgba(224, 101, 90, 0.12);
+    color: var(--danger);
+  }
+}
+
+/* Closes the composition: rows scroll away under a hairline instead of just
+   being cut off by the bottom of the window. */
+.recentHint {
+  margin-top: 2px;
+  padding-top: 9px;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.72em;
+  color: #565350;
+}
+
+.recentHint kbd {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 0.95em;
+  color: var(--text-dim);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 0 1px;
+  line-height: 1.5;
+}
+
+/* Wide windows: stop running one narrow ribbon down the middle of a big dark
+   screen. The form takes a fixed column and the library fills the rest, each
+   scrolling on its own. */
+
+@media (min-width: 1000px) {
+  .container {
+    display: grid;
+    /* The form column has to hold a key/value param pair side by side without
+       squeezing either into an unreadable stub. */
+    grid-template-columns: 545px minmax(0, 720px);
+    grid-template-rows: minmax(0, 1fr);
+    justify-content: center;
+    align-items: stretch;
+    column-gap: 36px;
+    padding: 36px 32px 26px;
+  }
+
+  .topPane {
+    width: 100%;
+    align-self: start;
+    max-height: 100%;
+  }
+
+  .header {
+    justify-content: flex-start;
+    margin-bottom: 20px;
+  }
+
+  .recentSection {
+    width: 100%;
+    min-height: 0;
+  }
+
+  /* One pane and nothing to sit beside: centre it again. Restores the base
+     flex layout, including the align-items the grid rule overrode. */
+  .containerEmpty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .containerEmpty .topPane {
+    width: 600px;
+    /* The grid rule's `align-self: start` top-aligns the column there, but this
+       branch is back to a column flex, where the cross axis is horizontal. */
+    align-self: center;
+  }
+
+  .containerEmpty .header {
+    justify-content: center;
   }
 }

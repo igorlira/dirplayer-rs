@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './styles.module.css';
+import logoUrl from '../../assets/logo128.png';
 import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override,
   set_startup_do, set_startup_do_before, set_startup_go } from 'vm-rust';
 import { parseLaunchCommand, findLaunchCommandInHtml, findLegacyServerInHtml, toLegacyUrl } from '../../utils/launchCommand';
@@ -154,12 +155,26 @@ function lastSeparator(s: string): number {
 function splitMoviePath(url: string): MovieParts {
   const queryStart = url.search(/[?#]/);
   const query = queryStart >= 0 ? url.slice(queryStart) : '';
-  const path = queryStart >= 0 ? url.slice(0, queryStart) : url;
-  const sep = lastSeparator(path);
-  if (sep < 0) {
-    return { dir: '', file: path, query };
+  let path = queryStart >= 0 ? url.slice(0, queryStart) : url;
+
+  // A URL ending in a separator (…/pepworks.com/leo3d/) has no file component.
+  // Name the entry after its last segment instead of rendering a blank row.
+  let trailing = '';
+  while (path.length > 1 && (path.endsWith('/') || path.endsWith('\\'))) {
+    trailing = path.slice(-1);
+    path = path.slice(0, -1);
   }
-  return { dir: path.slice(0, sep) || path.slice(0, sep + 1), file: path.slice(sep + 1), query };
+
+  const sep = lastSeparator(path);
+  // Nothing but a scheme and a host left (https://example.com): all name.
+  if (sep < 0 || /:\/?$/.test(path.slice(0, sep))) {
+    return { dir: '', file: path + trailing, query };
+  }
+  return {
+    dir: path.slice(0, sep) || path.slice(0, sep + 1),
+    file: path.slice(sep + 1) + trailing,
+    query,
+  };
 }
 
 // Split a folder path so the last segment can be pinned while the head
@@ -199,6 +214,22 @@ function groupMoviesByFolder(movies: RecentMovie[]): MovieGroup[] {
     group.movies.push({ movie, parts });
   }
   return groups;
+}
+
+// Everything worth showing about an entry besides its path. Rows cap how many
+// they render (see MAX_ROW_TAGS) so a movie with a dozen sw* params stays one
+// row tall instead of towering over its neighbours.
+type MovieTag = { key: string; label: string; accent?: boolean };
+const MAX_ROW_TAGS = 4;
+
+function movieTags(movie: RecentMovie): MovieTag[] {
+  const tags: MovieTag[] = [];
+  if (movie.useCorsProxy) tags.push({ key: 'proxy', label: 'proxy', accent: true });
+  if (movie.fakeMoviePath) tags.push({ key: 'fakePath', label: `fakePath=${movie.fakeMoviePath}` });
+  movie.params.forEach((p, i) => {
+    if (p.key.trim()) tags.push({ key: `p${i}`, label: `${p.key}=${p.value}` });
+  });
+  return tags;
 }
 
 function matchesFilter(movie: RecentMovie, tokens: string[]): boolean {
@@ -505,6 +536,13 @@ export default function LoadMovie() {
     }
   }, [visibleMovies, activeIndex, onLoadRecent]);
 
+  // A failed load never resolves whenMovieLoaded(), so loadMovieFile's `finally`
+  // never runs and the form would stay disabled behind a stuck "Loading...".
+  // The error landing in the store is the signal that the attempt is over.
+  useEffect(() => {
+    if (movieLoadError) setIsLoading(false);
+  }, [movieLoadError]);
+
   useMountEffect(async () => {
     if (movieUrl && process.env.REACT_APP_MOVIE_AUTO_LOAD === 'true' && !isDebugSession()) {
       await loadMovieFile(movieUrl);
@@ -513,11 +551,16 @@ export default function LoadMovie() {
 
   const hasParams = externalParams.length > 0;
 
-  return <div className={styles.container}>
+  // First run (or after Clear all) there is no list to fill the window, so the
+  // form centers itself instead of hanging off the top edge.
+  return <div className={`${styles.container} ${recentMovies.length === 0 ? styles.containerEmpty : ''}`}>
     <div className={styles.topPane}>
       <div className={styles.header}>
-        <h1 className={styles.title}>DirPlayer</h1>
-        <div className={styles.subtitle}>Load Movie</div>
+        <img className={styles.logo} src={logoUrl} alt="" width={40} height={40} />
+        <div className={styles.brandText}>
+          <h1 className={styles.title}>DirPlayer</h1>
+          <div className={styles.subtitle}>Load Movie</div>
+        </div>
       </div>
 
       <div className={styles.card}>
@@ -577,11 +620,10 @@ export default function LoadMovie() {
                     onChange={e => setLoaderUrl(e.currentTarget.value)}
                     disabled={isLoading}
                   />
-                  <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                  <div className={styles.proxyRow}>
                     <input
                       type="text"
                       className={styles.input}
-                      style={{ flex: 1 }}
                       placeholder="CORS proxy base"
                       value={corsProxy}
                       onChange={e => setCorsProxy(e.currentTarget.value)}
@@ -597,18 +639,20 @@ export default function LoadMovie() {
                     </button>
                   </div>
                   <label
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, cursor: 'pointer' }}
+                    className={styles.checkboxContainer}
+                    style={{ marginTop: 10 }}
                     title="When off, this movie's cross-origin fetches go direct. Enable only for games that need the proxy (e.g. Neopets DGS). Saved per entry."
                   >
                     <input
                       type="checkbox"
+                      className={styles.checkbox}
                       checked={useCorsProxy}
                       onChange={e => setUseCorsProxy(e.currentTarget.checked)}
                       disabled={isLoading}
                     />
                     Use CORS proxy for this movie
                   </label>
-                  <div style={{ fontSize: '0.8em', color: '#888', marginTop: 4 }}>
+                  <div className={styles.hintText}>
                     CORS proxy is <strong>opt-in per movie</strong> (default off) and
                     saved with each recent entry. Enable it only for games whose
                     cross-origin fetches need proxying. Fetch &amp; Load turns it on
@@ -681,7 +725,19 @@ export default function LoadMovie() {
         {/* Pinned outside the scrolling card body: the primary action and any
             load error must stay visible however long the form gets. */}
         <div className={styles.cardFooter}>
-          <div className={styles.optionsRow}>
+          {movieLoadError && (
+            <div className={styles.errorBanner}>
+              {/* Same warning mark as the full-screen ErrorOverlay. */}
+              <svg className={styles.errorIcon} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <span className={styles.errorMessage}>{movieLoadError}</span>
+            </div>
+          )}
+          {/* Action bar: settings on the left, the commit action on the right. */}
+          <div className={styles.footerRow}>
             <label className={styles.checkboxContainer}>
               <input
                 type="checkbox"
@@ -694,31 +750,19 @@ export default function LoadMovie() {
               />
               Auto-play
             </label>
+            <button className={styles.button} onClick={onLoadClick} disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <span className={styles.spinner} />
+                  Loading
+                </>
+              ) : (
+                <>
+                  Load Movie
+                </>
+              )}
+            </button>
           </div>
-
-          {movieLoadError && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '10px',
-              padding: '10px 14px',
-              backgroundColor: '#fff3f3',
-              border: '1px solid #f5c0c0',
-              borderRadius: '4px',
-              fontSize: '0.88em',
-              color: '#a33',
-            }}>
-              <svg style={{ flexShrink: 0, marginTop: '1px' }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                <line x1="12" y1="9" x2="12" y2="13"/>
-                <line x1="12" y1="17" x2="12.01" y2="17"/>
-              </svg>
-              <span style={{ wordBreak: 'break-word' }}>{movieLoadError}</span>
-            </div>
-          )}
-          <button className={styles.button} onClick={onLoadClick} disabled={isLoading}>
-            {isLoading ? 'Loading...' : 'Load Movie'}
-          </button>
         </div>
       </div>
     </div>
@@ -738,14 +782,20 @@ export default function LoadMovie() {
         </div>
 
         <div className={styles.searchRow}>
-          <input
-            type="text"
-            className={styles.searchInput}
-            placeholder="Filter by file name, folder or parameter..."
-            value={recentFilter}
-            onChange={e => setRecentFilter(e.currentTarget.value)}
-            spellCheck={false}
-          />
+          <div className={styles.searchField}>
+            <svg className={styles.searchIcon} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <line x1="16.5" y1="16.5" x2="21" y2="21" />
+            </svg>
+            <input
+              type="text"
+              className={styles.searchInput}
+              placeholder="Filter by file name, folder or parameter..."
+              value={recentFilter}
+              onChange={e => setRecentFilter(e.currentTarget.value)}
+              spellCheck={false}
+            />
+          </div>
           {isFiltering && (
             <button
               className={styles.clearSearchButton}
@@ -759,7 +809,13 @@ export default function LoadMovie() {
 
         <div className={styles.recentList} tabIndex={0}>
           {groups.length === 0 && (
-            <div className={styles.recentEmpty}>No movies match this filter.</div>
+            <div className={styles.recentEmpty}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="16.5" y1="16.5" x2="21" y2="21" />
+              </svg>
+              <span>No movies match &ldquo;{recentFilter.trim()}&rdquo;</span>
+            </div>
           )}
           {groups.map(group => {
             const collapsed = isFolderCollapsed(group.dir);
@@ -784,8 +840,12 @@ export default function LoadMovie() {
                   </span>
                   <span className={styles.groupCount}>{group.movies.length}</span>
                 </button>
-                {!collapsed && group.movies.map(({ movie, parts }) => {
+                {!collapsed && <div className={styles.groupRows}>
+                  {group.movies.map(({ movie, parts }) => {
                   const isActive = visibleMovies[activeIndex] === movie;
+                  const tags = movieTags(movie);
+                  const shownTags = tags.slice(0, MAX_ROW_TAGS);
+                  const hiddenTags = tags.slice(MAX_ROW_TAGS);
                   return (
                     <div
                       key={movie.url}
@@ -801,23 +861,25 @@ export default function LoadMovie() {
                           {parts.query && <span className={styles.recentQuery}>{parts.query}</span>}
                           <span className={styles.recentTime}>{formatRelativeTime(movie.timestamp)}</span>
                         </div>
-                        {(movie.params.length > 0 || movie.fakeMoviePath || movie.useCorsProxy) && (
+                        {tags.length > 0 && (
                           <div className={styles.recentParams}>
-                            {movie.useCorsProxy && (
-                              <span className={`${styles.paramTag} ${styles.proxyTag}`}>proxy</span>
-                            )}
-                            {movie.fakeMoviePath && (
-                              <span className={styles.paramTag} title={movie.fakeMoviePath}>
-                                fakePath={movie.fakeMoviePath}
+                            {shownTags.map(tag => (
+                              <span
+                                key={tag.key}
+                                className={`${styles.paramTag} ${tag.accent ? styles.proxyTag : ''}`}
+                                title={tag.label}
+                              >
+                                {tag.label}
+                              </span>
+                            ))}
+                            {hiddenTags.length > 0 && (
+                              <span
+                                className={styles.paramTag}
+                                title={hiddenTags.map(t => t.label).join('\n')}
+                              >
+                                +{hiddenTags.length}
                               </span>
                             )}
-                            {movie.params
-                              .filter(p => p.key.trim())
-                              .map((p, i) => (
-                                <span key={i} className={styles.paramTag}>
-                                  {p.key}={p.value}
-                                </span>
-                              ))}
                           </div>
                         )}
                       </div>
@@ -839,13 +901,15 @@ export default function LoadMovie() {
                       </button>
                     </div>
                   );
-                })}
+                  })}
+                </div>}
               </div>
             );
           })}
         </div>
         <div className={styles.recentHint}>
-          Click an entry to edit it, double-click or press Enter to load. &#8593;&#8595; to navigate.
+          Click an entry to edit it, double-click or <kbd>Enter</kbd> to load.
+          {' '}<kbd>&#8593;</kbd><kbd>&#8595;</kbd> to navigate.
         </div>
       </div>
     )}
