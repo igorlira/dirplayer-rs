@@ -346,7 +346,28 @@ impl MultiuserXtraManager {
                         if let Some(instance) = manager.instances.get_mut(&instance_id) {
                             match instance.connection_mode {
                                 MultiuserConnectionMode::Text => {
-                                    let message_str = message_bytes.into_iter().map(|b| b as char).collect::<String>();
+                                    // A Unicode Director (11.5) Multiuser Xtra hands
+                                    // the movie UNICODE text — it decodes the wire
+                                    // itself. Habbo relies on that: `String Services
+                                    // Class.decodeUTF8` opens with
+                                    //   `if pUnicodeDirector and not tForceDecode then return tStr`
+                                    // and `pUnicodeDirector` is 1 whenever
+                                    // `_player.productVersion >= 11`, so the client
+                                    // deliberately does NOT decode incoming chat.
+                                    //
+                                    // Mapping each byte to a char (Latin-1) therefore
+                                    // surfaced the server's UTF-8 verbatim: `ö` came
+                                    // back as `C3 B6` and rendered as two characters,
+                                    // which is the `ÄÖÄÖ` garbling in v26/v31 chat.
+                                    // v7 predates all of this (`pUnicodeDirector = 0`,
+                                    // no `encodeUTF8`) and sends plain Latin-1, so it
+                                    // never showed the fault.
+                                    //
+                                    // `decode_text_auto` decodes valid UTF-8 as UTF-8
+                                    // and falls back to per-byte for anything else, so
+                                    // a Latin-1 server (v7) is untouched.
+                                    let message_str =
+                                        crate::io::encoding::decode_text_auto(&message_bytes);
                                     instance.dispatch_message(MultiuserMessage {
                                         error_code: 0,
                                         recipients: vec!["*".to_string()],
@@ -549,7 +570,13 @@ impl MultiuserXtraManager {
                         let msg_bytes = match instance.connection_mode {
                             MultiuserConnectionMode::Text => {
                                 let msg_data = player.get_datum(args.get(2).unwrap());
-                                msg_data.string_value()?.chars().map(|c| c as u8).collect::<Vec<u8>>()
+                                let s = msg_data.string_value()?;
+                                // Mirror of the receive side: a Unicode Director's
+                                // Multiuser Xtra puts UTF-8 on the wire. Truncating
+                                // each char to a byte (`c as u8`) silently mangled
+                                // anything outside Latin-1 and disagreed with what the
+                                // server sends back.
+                                s.into_bytes()
                             }
                             MultiuserConnectionMode::Binary => {
                                 let subject = player.get_datum(args.get(1).unwrap()).string_value()?;
