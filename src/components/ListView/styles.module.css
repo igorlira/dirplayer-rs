@@ -13,8 +13,14 @@
     background-color: var(--surface-hover);
   }
 
+  /* The reset strips buttons bare, so rows had no padding and centred text. */
   > button {
     width: 100%;
+    min-width: 0;
+    padding: 3px 8px;
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
   }
 }
 

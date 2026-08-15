@@ -19,3 +19,50 @@
   height: 100%;
   align-items: center;
 }
+
+/* Call stack frames. Innermost first, with the executing frame marked — the
+   list used to be a bare "on handlerName" per row with no script and no sense
+   of which frame you were looking at. */
+.scopeItem {
+  font-size: 12px;
+}
+
+.scopeItem > button {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  text-align: left;
+}
+
+.scopeHandler {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.scopeKeyword {
+  color: var(--text-dim);
+}
+
+/* Which script the handler belongs to; pushed right and allowed to truncate,
+   since the handler name is what you scan for. */
+.scopeScript {
+  flex: 1;
+  min-width: 0;
+  margin-left: auto;
+  text-align: right;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The frame the VM is stopped in. */
+.scopeItemCurrent > button {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.scopeItemCurrent .scopeHandler {
+  color: var(--accent);
+}

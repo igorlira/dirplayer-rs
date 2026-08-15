@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectGlobals, selectScopes, scopeListChanged } from "../../store/vmSlice";
 import styles from "./styles.module.css";
@@ -165,11 +166,22 @@ function DatumTable({ datums }: { datums: Record<string, DatumAccessRef> }) {
   );
 }
 
-function DatumList({ items }: { items: DatumRef[] }) {
+/**
+ * Positional datums (arguments, the operand stack).
+ *
+ * `labels` names the entries where the VM could resolve them — argument names
+ * say far more than `0`, `1`, `2`. Falls back to the index for anything
+ * unnamed, and for the stack, which has no names by nature.
+ */
+function DatumList({ items, labels }: { items: DatumRef[]; labels?: string[] }) {
   return (
     <div className={pts.propTable}>
       {items.map((ref, i) => (
-        <DatumRow key={i} label={String(i)} datumRef={{ type: "datum", datumRef: ref }} />
+        <DatumRow
+          key={i}
+          label={labels?.[i] || String(i)}
+          datumRef={{ type: "datum", datumRef: ref }}
+        />
       ))}
     </div>
   );
@@ -358,6 +370,10 @@ function Scopes({ selectedScopeIndex, setSelectedScopeIndex }: { selectedScopeIn
   >
     {scopes
       .map((scope, scopeIndex) => {
+        // Frames are listed innermost first (the list is reversed below), so
+        // the last scope is the one currently executing.
+        const isCurrent = scopeIndex === scopes.length - 1;
+        const memberRef = `${scope.script_member_ref[0]}:${scope.script_member_ref[1]}`;
         return (
           <ListView.Item
             key={
@@ -367,11 +383,17 @@ function Scopes({ selectedScopeIndex, setSelectedScopeIndex }: { selectedScopeIn
               "-" +
               scopeIndex
             }
+            className={classNames(styles.scopeItem, isCurrent && styles.scopeItemCurrent)}
             isSelected={selectedScopeIndex === scopeIndex}
             onClick={() => onSelectScope(scopeIndex)}
           >
-            {/* {castNames[scope.script_member_ref[0] - 1]} - {casts[scope.script_member_ref[0] - 1].members[scope.script_member_ref[1]].name} - on {scope.handler_name} */}
-            on {scope.handler_name}
+            <span className={styles.scopeHandler}>
+              <span className={styles.scopeKeyword}>on </span>
+              {scope.handler_name}
+            </span>
+            <span className={styles.scopeScript} title={`${scope.script_member_name || 'script'} (${memberRef})`}>
+              {scope.script_member_name || memberRef}
+            </span>
           </ListView.Item>
         );
       })
@@ -406,7 +428,7 @@ function Args({ selectedScopeIndex }: { selectedScopeIndex?: number }) {
 
   return (
     <div className={pts.propTableScrollable}>
-      <DatumList items={selectedScope?.args || []} />
+      <DatumList items={selectedScope?.args || []} labels={selectedScope?.arg_names} />
     </div>
   );
 }

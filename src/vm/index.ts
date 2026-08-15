@@ -42,10 +42,14 @@ export type JsBridgeDatum = TJsBridgeDatumScriptInstance | TJsBridgeDatumList | 
 
 export interface IVMScope {
   script_member_ref: ICastMemberRef,
+  /** Name of the script this frame is running; resolved by the VM. */
+  script_member_name?: string,
   bytecode_index: number,
   handler_name: string,
   locals: Record<string, DatumRef>,
   args: DatumRef[],
+  /** Parameter names, positionally matching `args`; resolved by the VM. */
+  arg_names?: string[],
   stack: DatumRef[],
 }
 

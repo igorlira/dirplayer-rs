@@ -166,17 +166,27 @@ pub type JsBridgeDatum = js_sys::Object;
 
 pub struct JsBridgeScope {
     pub script_member_ref: JsBridgeMemberRef,
+    /// Name of the script the frame is running, resolved here so the call
+    /// stack can say which script a handler belongs to without the debug UI
+    /// having to hold every cast's member list.
+    pub script_member_name: String,
     pub bytecode_index: u32,
     pub handler_name: String,
     pub locals: HashMap<String, DatumRef>,
     pub stack: Vec<DatumRef>,
     pub args: Vec<DatumRef>,
+    /// Parameter names, positionally matching `args`. Kept alongside the values
+    /// rather than folded into a map because argument order is meaningful, and
+    /// resolved here for the same reason locals are: the ids only mean anything
+    /// against the owning cast's name table.
+    pub arg_names: Vec<String>,
 }
 
 impl Into<js_sys::Map> for JsBridgeScope {
     fn into(self) -> js_sys::Map {
         let map = js_sys::Map::new();
         map.str_set("script_member_ref", &self.script_member_ref.to_js_value());
+        map.str_set("script_member_name", &safe_js_string(&self.script_member_name));
         map.str_set("bytecode_index", &JsValue::from(self.bytecode_index));
         map.str_set("handler_name", &safe_js_string(&self.handler_name));
 
@@ -197,6 +207,12 @@ impl Into<js_sys::Map> for JsBridgeScope {
             args.push(&item.unwrap().to_js_value());
         }
         map.str_set("args", &args);
+
+        let arg_names = js_sys::Array::new();
+        for name in self.arg_names {
+            arg_names.push(&safe_js_string(&name));
+        }
+        map.str_set("arg_names", &arg_names);
 
         map
     }
@@ -1928,6 +1944,10 @@ impl JsApi {
                     let names = &cast_lib.lctx.as_ref().unwrap().names;
                     let scope = JsBridgeScope {
                         script_member_ref: scope.script_ref.to_js(),
+                        script_member_name: Self::lookup_member_name(
+                            player,
+                            [scope.script_ref.cast_lib as u16, scope.script_ref.cast_member as u16],
+                        ),
                         bytecode_index: scope.bytecode_index as u32,
                         handler_name: handler_name.to_owned(),
                         // Locals are slot-indexed, so recover the name via
@@ -1955,6 +1975,20 @@ impl JsApi {
                         },
                         stack: scope.stack.iter().cloned().collect(),
                         args: scope.args.clone(),
+                        // Same slot -> name id -> name walk the locals use.
+                        arg_names: {
+                            let arg_name_ids = player
+                                .movie
+                                .cast_manager
+                                .get_script_by_ref(&scope.script_ref)
+                                .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                                    .map(|h| h.argument_name_ids.clone()))
+                                .unwrap_or_default();
+                            arg_name_ids
+                                .iter()
+                                .map(|nid| names.get(*nid as usize).cloned().unwrap_or_default())
+                                .collect()
+                        },
                     };
                     let scope_js: js_sys::Map = scope.into();
                     scope_js.to_js_object()
