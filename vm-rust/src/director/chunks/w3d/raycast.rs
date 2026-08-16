@@ -176,7 +176,7 @@ pub fn raycast_scene(
     scene: &W3dScene,
     max_dist: f32,
 ) -> Option<RayHit> {
-    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None).into_iter().next()
+    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None, None).into_iter().next()
 }
 
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
@@ -190,6 +190,11 @@ pub fn raycast_scene_multi(
     node_transforms: Option<&std::collections::HashMap<Symbol, [f32; 16]>>,
     excluded_nodes: Option<&std::collections::HashSet<Symbol>>,
     included_nodes: Option<&std::collections::HashSet<Symbol>>,
+    // Per-model animation state: (model, skeleton) -> (motion name, time, rootLock).
+    // Supplied by the player, which owns the bonesPlayer state the renderer draws
+    // from; passing it as a closure keeps this module free of player types.
+    // `None` disables skinned raycasting and tests bind-pose geometry.
+    anim: Option<&dyn Fn(Symbol, Symbol) -> Option<(Option<Symbol>, f32, bool)>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
@@ -288,6 +293,25 @@ pub fn raycast_scene_multi(
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
             direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
         };
+        // Skinned models are tested against their POSED geometry. `anim` supplies
+        // the same (motion, time, rootLock) the renderer is drawing with, so the
+        // hit volume tracks the body instead of the bind pose. `None` (no rig, or
+        // a caller that passed no animation state) falls through to the raw mesh,
+        // which is correct for rigid geometry.
+        let skin_pose: Option<Vec<[f32; 16]>> = anim.and_then(|a| {
+            let skeleton = scene.skeletons.iter()
+                .find(|s| s.name == *resource && s.bones.len() > 1)?;
+            let (motion, time, root_lock) = a(node.name, skeleton.name)?;
+            let relinv = super::skeleton::root_relativizer(scene, skeleton, node.name, *resource);
+            Some(super::skeleton::build_skinning_matrices(
+                skeleton,
+                motion.and_then(|m| scene.motions.iter().find(|x| x.name == m)),
+                time,
+                root_lock,
+                &relinv,
+            ))
+        });
+
         // Handedness of this node's world transform. The ray is tested in LOCAL
         // space against a normal built as cross(e1,e2) from the local winding, but
         // the front/back test below is a statement about WORLD space. A transform
@@ -391,7 +415,20 @@ pub fn raycast_scene_multi(
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                // Pose the mesh before intersecting it. A skinned model's drawn
+                // geometry is `skin_mat * vertex`, so testing the raw (BIND) mesh
+                // hit a T-pose standing wherever the bind pose rests — for
+                // Rifleman's soldiers that is sunk into the ground, and only the
+                // belly, which barely moves relative to the skeleton root,
+                // overlapped the animated body enough to be shootable.
+                let posed = skin_pose.as_ref().and_then(|mats| {
+                    if mesh.bone_indices.is_empty() { return None; }
+                    Some(super::skeleton::skin_positions(
+                        &mesh.positions, &mesh.bone_indices, &mesh.bone_weights, mats,
+                    ))
+                });
+                let positions = posed.as_deref().unwrap_or(&mesh.positions);
+                if let Some(mut hit) = raycast_mesh(&local_ray, positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);

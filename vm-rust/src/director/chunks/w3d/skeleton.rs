@@ -249,6 +249,93 @@ pub fn build_bone_matrices_ex(
 
 /// Build inverse bind matrices (rest pose inverted).
 /// These transform from world space back to bone-local space for skinning.
+/// The matrix a skinned draw is relativized by, given the model's recorded biped
+/// COM fold.
+///
+/// Shared so the renderer and the RAYCASTER pose a model identically. They used
+/// to disagree completely — the raycaster had no skinning at all and intersected
+/// the bind pose, so a soldier could only be shot where the T-pose happened to
+/// overlap the animated body (its belly), and the hit volume sat sunk into the
+/// ground where the bind pose rests.
+///
+/// Mirrors the renderer's `root_relinv` exactly — recorded fold first, then the
+/// rig's authored idle at frame 0, then identity.
+pub fn root_relativizer(
+    scene: &W3dScene,
+    skeleton: &W3dSkeleton,
+    model_name: Symbol,
+    resource_name: Symbol,
+) -> [f32; 16] {
+    const IDENTITY: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let key = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
+        .into_iter()
+        .find(|k| scene.model_root_com.contains_key(k));
+    if let Some(k) = key {
+        let r0 = scene.model_root_com[&k];
+        return invert_matrix(&r0);
+    }
+    // Fallback for models whose fold was never recorded: the rig's authored idle,
+    // frame 0. Deliberately narrow — widening it relativizes draws that never were.
+    match idle_reference_motion(scene, skeleton) {
+        Some(im) => {
+            let m = build_bone_matrices(skeleton, Some(im), 0.0);
+            m.first().map(|r| invert_matrix(r)).unwrap_or(IDENTITY)
+        }
+        None => IDENTITY,
+    }
+}
+
+/// Final per-bone skinning matrices: `root_relinv * world[b] * inv_bind[b]`.
+/// This is the transform a skinned vertex is pushed through, so applying it to
+/// the mesh gives the geometry that is actually on screen.
+pub fn build_skinning_matrices(
+    skeleton: &W3dSkeleton,
+    motion: Option<&W3dMotion>,
+    time: f32,
+    root_lock: bool,
+    root_relinv: &[f32; 16],
+) -> Vec<[f32; 16]> {
+    let world = build_bone_matrices_ex(skeleton, motion, time, root_lock, None);
+    let inv_bind = build_inverse_bind_matrices(skeleton);
+    world.iter().zip(inv_bind.iter())
+        .map(|(w, ib)| multiply_matrix(&multiply_matrix(root_relinv, w), ib))
+        .collect()
+}
+
+/// Skin `positions` with `skin_mats`, weighting each vertex by its bone list.
+/// Vertices with no weights are passed through unchanged (rigid geometry welded
+/// into a skinned resource).
+pub fn skin_positions(
+    positions: &[[f32; 3]],
+    bone_indices: &[Vec<u32>],
+    bone_weights: &[Vec<f32>],
+    skin_mats: &[[f32; 16]],
+) -> Vec<[f32; 3]> {
+    positions.iter().enumerate().map(|(vi, p)| {
+        let (Some(idx), Some(wts)) = (bone_indices.get(vi), bone_weights.get(vi)) else {
+            return *p;
+        };
+        let mut acc = [0.0f32; 3];
+        let mut total = 0.0f32;
+        for (bi, w) in idx.iter().zip(wts.iter()) {
+            let Some(m) = skin_mats.get(*bi as usize) else { continue };
+            if *w == 0.0 { continue; }
+            // Column-major affine transform of a point.
+            acc[0] += w * (m[0] * p[0] + m[4] * p[1] + m[8]  * p[2] + m[12]);
+            acc[1] += w * (m[1] * p[0] + m[5] * p[1] + m[9]  * p[2] + m[13]);
+            acc[2] += w * (m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]);
+            total += w;
+        }
+        // An unweighted or fully zero-weighted vertex must not collapse to the
+        // origin — that would drag stray triangles across the whole model and
+        // make the hit volume enormous.
+        if total <= 1e-6 { *p } else { [acc[0] / total, acc[1] / total, acc[2] / total] }
+    }).collect()
+}
+
 pub fn build_inverse_bind_matrices(skeleton: &W3dSkeleton) -> Vec<[f32; 16]> {
     let rest_matrices = build_bone_matrices(skeleton, None, 0.0);
     let inverted: Vec<_> = rest_matrices.iter().map(|m| invert_matrix(m)).collect();
