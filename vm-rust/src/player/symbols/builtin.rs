@@ -1009,6 +1009,7 @@ define_builtin_symbols! {
     "emitter" => Emitter,
     "bone" => Bone,
     "meshDeformMesh" => MeshDeformMesh,
+    "meshDeformFace" => MeshDeformFace,
     "sds" => Sds,
     "lod" => Lod,
     "synchronized" => Synchronized,

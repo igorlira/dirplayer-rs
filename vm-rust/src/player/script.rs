@@ -717,6 +717,19 @@ pub fn get_obj_prop(
                 let s = crate::player::datum_formatting::format_concrete_datum(&datum_clone, player);
                 return Ok(player.alloc_datum(Datum::String(s)));
             }
+            // `meshDeform.mesh[m].face[f].neighbor`. `face[f]` is a plain list so
+            // that it keeps VALUE semantics (Splat harvests faces, deletes the
+            // model, and only then reads them), so the adjacency hangs off the
+            // identity of the datum that was handed out. This chained-prop path is
+            // the one Rifleman's `...face[f].neighbor` actually takes — the mirror
+            // intercept in ListDatumHandlers::get_prop is never reached for it.
+            if prop_name.as_str().eq_ignore_ascii_case("neighbor") {
+                if let Some(d) = crate::player::handlers::datum_handlers::shockwave3d_object
+                    ::meshdeform_face_neighbor_of(player, obj_ref)
+                {
+                    return Ok(player.alloc_datum(d));
+                }
+            }
             Ok(player.alloc_datum(ListDatumUtils::get_prop(
                 &list,
                 prop_name,
