@@ -350,12 +350,12 @@ impl FlowControlBytecodeHandler {
             // stack order, so it is at index 0.
             let (mut all_args, is_no_ret) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.pop_call_args() {
-                    Some(v) => v,
-                    None => {
+                match scope.pop_call_args_diagnosed() {
+                    Ok(v) => v,
+                    Err(why) => {
                         let current_handler_name = ctx.get_name(scope.handler_name_id);
                         return Err(ScriptError::new(format!(
-                            "obj_call '{}': expected arg marker in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                            "obj_call '{}': {why} in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
                             target_handler_name, current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
                         )));
                     }
