@@ -1892,8 +1892,7 @@ impl WebGL2Renderer {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             if let Some(scene) = w3d.scene_mut() {
                                 for (name, data) in resolved {
-                                    scene.texture_images.insert(name, data);
-                                    scene.texture_content_version += 1;
+                                    scene.put_texture_image(name, data);
                                 }
                             }
                         }
@@ -1913,7 +1912,11 @@ impl WebGL2Renderer {
                         w3d.runtime_state.animation_start_time = next.start_time;
                         w3d.runtime_state.animation_end_time = next.end_time;
                         w3d.runtime_state.animation_scale = next.scale;
-                        w3d.runtime_state.animation_time = if next.offset >= 0.0 { next.offset } else { 0.0 };
+                        // No offset given => start at the entry's OWN startTime, not at 0.
+                        // Same contract as the per-model queue in events.rs; a queued
+                        // slice of a long combined clip must not rewind to frame 0.
+                        w3d.runtime_state.animation_time =
+                            if next.offset >= 0.0 { next.offset } else { next.start_time };
                         w3d.runtime_state.animation_playing = true;
                         w3d.runtime_state.motion_ended = false;
                         self.scene3d.motion_ended = false;

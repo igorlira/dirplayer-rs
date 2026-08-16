@@ -1452,20 +1452,20 @@ void main() {
             // are stored right-side-up). The skyline mesh UVs use the same convention
             // as everything else, and the texture declarations carry no orientation
             // flag, so flip these on upload to render the horizon the right way up.
-            // Same signature `update_textures_incremental` uses: the image's
-            // byte length. Unchanged => hand the existing GPU texture straight
-            // over and skip decode + upload entirely.
-            // Byte length can only prove an image is DIFFERENT, never that it is
-            // the same — a recolour that re-encodes to the same size compares
-            // equal (Heatwave Daytona's selected car rendered black off a stale
-            // texture). So require the scene's own texture_content_version to be
-            // unchanged as well.
-            let data_len = image_data.len() as u64;
+            // Same signature `update_textures_incremental` uses: the scene's
+            // per-texture WRITE counter. Unchanged => hand the existing GPU
+            // texture straight over and skip decode + upload entirely.
+            // Byte length used to stand in for this and could only prove an
+            // image DIFFERENT, never the same — a recolour that re-encodes to
+            // the same size compared equal (Heatwave Daytona's selected car
+            // rendered black off a stale texture), and a fixed-size HUD readout
+            // never compared unequal at all (Rifleman's frozen clock).
+            let write_version = scene.texture_write_versions.get(tex_name).copied().unwrap_or(0);
             let tex_content_same = old_gpu
                 .as_ref()
                 .map_or(false, |o| o.texture_content_version == scene.texture_content_version);
             if let Some(old) = old_gpu.as_mut().filter(|_| tex_content_same) {
-                if old.texture_versions.get(tex_name) == Some(&data_len) {
+                if old.texture_versions.get(tex_name) == Some(&write_version) {
                     if let Some(tex) = old.textures.remove(tex_name) {
                         if let Some(sz) = old.texture_sizes.get(tex_name) {
                             texture_sizes.insert(*tex_name, *sz);
@@ -1527,8 +1527,11 @@ void main() {
         let cube_maps = self.detect_and_create_cubemaps(context, scene);
 
         let mut texture_versions = HashMap::new();
-        for (tex_name, image_data) in &scene.texture_images {
-            texture_versions.insert(*tex_name, image_data.len() as u64);
+        for tex_name in scene.texture_images.keys() {
+            texture_versions.insert(
+                *tex_name,
+                scene.texture_write_versions.get(tex_name).copied().unwrap_or(0),
+            );
         }
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, mesh_signatures, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
@@ -1600,11 +1603,16 @@ void main() {
 
         for (tex_name, image_data) in &scene.texture_images {
             let lower = tex_name.as_lower_str();
-            let data_len = image_data.len() as u64;
-            let needs_upload = match gpu_data.texture_versions.get(tex_name) {
-                None => true,
-                Some(&old_len) => old_len != data_len,
-            };
+            // The scene's per-texture write counter, NOT the byte length.
+            // Length can only prove an image is different, never that it is the
+            // same — and this function runs precisely when some texture DID
+            // change. Rifleman's HUD clock regenerates a fixed 64x64 RGBA image
+            // every second, so its length never moves and a length check froze
+            // the on-screen clock until an unrelated scene change forced a full
+            // rebuild (shooting something), which is what "the timer only
+            // updates when I shoot" was.
+            let write_version = scene.texture_write_versions.get(tex_name).copied().unwrap_or(0);
+            let needs_upload = gpu_data.texture_versions.get(tex_name) != Some(&write_version);
             if needs_upload {
                 let flip_v = lower.contains("skyline");
                 if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
@@ -1620,7 +1628,7 @@ void main() {
                         gpu_data.soft_alpha_textures.remove(tex_name);
                     }
                     gpu_data.textures.insert(*tex_name, tex);
-                    gpu_data.texture_versions.insert(*tex_name, data_len);
+                    gpu_data.texture_versions.insert(*tex_name, write_version);
                 }
             }
         }
@@ -2574,12 +2582,40 @@ void main() {
             // tube vanished. translate = loc − R·regPoint.
             let sw = sx * tex_w;
             let sh = sy * tex_h;
+            // Rotation pivot. The dictionary says rotation is "about its
+            // regPoint" and that regPoint defaults to point(0,0) — the texture's
+            // UPPER-LEFT — but taken literally that spins an unrotated-regPoint
+            // overlay around its own top corner, which no movie wants and
+            // Director visibly does not do. Rifleman pins this down: its radar
+            // view-cone is a 64x64 texture placed at `playerCentre - (32,32)`,
+            // i.e. deliberately centred on the player dot, and then rotated to
+            // the aim direction every frame. That only tracks the player if the
+            // pivot is the quad's CENTRE; pivoting at the top-left swung the
+            // cone around a point 32px up-left of the dot, so it changed
+            // direction but never rotated about the player.
+            // So: pivot at regPoint when a script actually set one (that is the
+            // documented behaviour and what e.g. a scaled scope reticle asks
+            // for), and at the quad centre when regPoint is merely sitting at
+            // its default.
+            //
+            // translate = loc + anchor − R·pivot, where `pivot` is the point held
+            // fixed by the rotation and `anchor` is where that point sits
+            // relative to loc. With an explicit regPoint the two coincide
+            // (anchor 0: loc IS the regPoint's screen position, the documented
+            // meaning of loc); with the default they do not, because loc still
+            // places the upper-left while the quad turns about its middle.
+            let (ax, ay, px, py) = if overlay.reg_point_explicit {
+                (0.0, 0.0, rx, ry)
+            } else {
+                let (cx, cy) = (sw * 0.5, sh * 0.5);
+                (cx, cy, cx, cy)
+            };
             let model: [f32; 16] = [
                 cos_r * sw, sin_r * sw, 0.0, 0.0,
                -sin_r * sh, cos_r * sh, 0.0, 0.0,
                 0.0,        0.0,        1.0, 0.0,
-                x - rx * cos_r + ry * sin_r,
-                y - rx * sin_r - ry * cos_r,
+                x + ax - px * cos_r + py * sin_r,
+                y + ay - px * sin_r - py * cos_r,
                 0.0, 1.0,
             ];
             gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &model);
@@ -4946,7 +4982,20 @@ void main() {
             } else {
                 time.clamp(eff_start, eff_end)
             }
-        } else { 0.0 };
+        } else {
+            // Zero-length range = "hold exactly this frame", so hold it — do NOT
+            // rewind to 0, which is frame 0 of the clip and, on a combined clip
+            // authored from a T-pose, is literally the bind pose.
+            //
+            // Games freeze a pose this way: Rifleman ends every animation with
+            // `queue(motion, 1, endTime, endTime, 0.0)` to hold the last frame,
+            // and that entry LOOPS, so the soldier snapped to a T-pose and stayed
+            // there until the next state change. Agent Free Ride 2's rider shows
+            // the same flash on landing. `eff_start` is the frame the caller asked
+            // for; when no range was ever set it is 0 anyway, so the old behaviour
+            // is preserved for everything that was not asking for a hold.
+            eff_start
+        };
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
             skeleton, motion, t, root_lock,
             if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },

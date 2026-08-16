@@ -1527,14 +1527,18 @@ pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &
                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         if let Some(scene) = w3d.scene_mut() {
-                            // Only bump the content version when the pixels actually
-                            // change size (cheap static-SWF guard mirroring the
-                            // renderer's length-based incremental check).
+                            // A static SWF re-renders identical pixels every frame,
+                            // and bumping the version for those would re-decode and
+                            // re-upload the texture each frame for nothing. Compare
+                            // the PIXELS, not their length: these are raw RGBA
+                            // buffers already in hand, so the comparison is exact
+                            // and far cheaper than the upload it avoids. Length
+                            // alone would call a changed frame unchanged whenever
+                            // the dimensions held steady — which is every frame.
                             let changed = scene.texture_images.get(&Symbol::from_str(&tex_name))
-                                .map_or(true, |old| old.len() != tex_data.len());
-                            scene.texture_images.insert(Symbol::from_str(&tex_name.clone()), tex_data);
+                                .map_or(true, |old| old.as_slice() != tex_data.as_slice());
                             if changed {
-                                scene.texture_content_version += 1;
+                                scene.put_texture_image(Symbol::from_str(&tex_name.clone()), tex_data);
                             }
                         }
                     }

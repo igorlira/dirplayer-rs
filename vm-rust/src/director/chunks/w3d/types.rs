@@ -501,6 +501,15 @@ pub struct W3dScene {
     pub mesh_content_version: u64,
     /// Monotonically increasing counter; bumped whenever texture_images is mutated
     pub texture_content_version: u64,
+    /// Per-texture write counter, bumped by `put_texture_image` on every write.
+    ///
+    /// The renderer needs to know WHICH texture changed, and it cannot tell from
+    /// the bytes: a HUD readout regenerated from a fixed-size image object
+    /// (Rifleman's clock is always a 64x64 RGBA buffer) writes the exact same
+    /// byte length every second, so a length comparison reports "unchanged"
+    /// forever and the GPU copy freezes at whatever was first uploaded. This
+    /// counter changes on every write regardless of content or size.
+    pub texture_write_versions: HashMap<Symbol, u64>,
     /// Per skinned model (lowercased node name): the biped COM that Director folds
     /// into the model node at import — the root bone's frame-0 pose from the model's
     /// reference motion. Recorded here so the renderer strips exactly the matrix the
@@ -510,6 +519,18 @@ pub struct W3dScene {
 }
 
 impl W3dScene {
+    /// Write a texture's RGBA/encoded bytes and record that it changed.
+    ///
+    /// Every write to `texture_images` should go through here: it keeps
+    /// `texture_write_versions` (which texture changed) and
+    /// `texture_content_version` (whether ANY texture changed) in step, and the
+    /// renderer relies on both to decide what to re-upload.
+    pub fn put_texture_image(&mut self, name: Symbol, data: Vec<u8>) {
+        self.texture_images.insert(name, data);
+        *self.texture_write_versions.entry(name).or_insert(0) += 1;
+        self.texture_content_version = self.texture_content_version.wrapping_add(1);
+    }
+
     /// Export the scene to OBJ format with default mtl name.
     pub fn export_obj(&self) -> String {
         self.export_obj_with_mtl("scene.mtl")

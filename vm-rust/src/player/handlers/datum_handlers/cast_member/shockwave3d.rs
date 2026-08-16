@@ -678,7 +678,7 @@ impl Shockwave3dMemberHandlers {
                             tex_data.extend_from_slice(&tex_w.to_le_bytes());
                             tex_data.extend_from_slice(&tex_h.to_le_bytes());
                             tex_data.extend_from_slice(tex_rgba);
-                            scene.texture_images.insert(Symbol::from_str("TextBitmap"), tex_data);
+                            scene.put_texture_image(Symbol::from_str("TextBitmap"), tex_data);
                             if !scene.texture_infos.iter().any(|t| t.name == Symbol::from_str("TextBitmap")) {
                                 scene.texture_infos.push(W3dTextureInfo {
                                     name: Symbol::from_str("TextBitmap"),
@@ -1801,8 +1801,7 @@ impl Shockwave3dMemberHandlers {
                                             let target = texture_name_map.get(tex_name).cloned()
                                                 .unwrap_or_else(|| Symbol::from_str(&tex_name.clone().to_string()));
                                             if !scene.texture_images.contains_key(&Symbol::from_str(&target.as_str())) {
-                                                scene.texture_images.insert(Symbol::from_str(&target.as_str()), tex_data.clone());
-                                                scene.texture_content_version += 1;
+                                                scene.put_texture_image(Symbol::from_str(&target.as_str()), tex_data.clone());
                                             }
                                         }
                                         // Raw meshes: insert under their (collision-renamed) names.
@@ -1909,6 +1908,39 @@ impl Shockwave3dMemberHandlers {
                                 .unwrap_or_default()
                         } else { Vec::new() };
 
+                        // The biped COM the PARSER folded into the source node
+                        // (`apply_root_com_to_model_nodes`). `source_transform` below
+                        // carries that matrix, so the clone inherits the fold — and the
+                        // renderer strips it back out of the skin only when it can find
+                        // the recorded value for the DESTINATION node. Without carrying
+                        // it, `root_relinv` falls through to identity and the fold is
+                        // never undone: the model aims correctly and draws 90 degrees
+                        // out, because a 3ds-Max biped root sits at +/-90 about Z.
+                        //
+                        // Rifleman is exactly this shape — no soldier, skeleton or motion
+                        // lives in level_N.W3D; the rig is cloned in from its own member
+                        // at runtime, and it animates by millisecond ranges on one long
+                        // clip, so it has no motion named "idle"/"idle_rest" and the
+                        // `idle_reference_motion` fallback cannot cover for the miss.
+                        // The whole-scene merge already carries this table (merge.rs);
+                        // the single-model clone path was the hole. See commit 7b1ed02
+                        // for why the fold and the strip must stay a matched pair keyed
+                        // by the RECORDED matrix rather than a recomputed one.
+                        let src_root_com: Option<[f32; 16]> = if obj_type == "model" {
+                            source_member_ref.as_ref()
+                                .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                                .and_then(|sm| sm.member_type.as_shockwave3d())
+                                .and_then(|sw| sw.parsed_scene.as_ref())
+                                .and_then(|sc| {
+                                    [source_model_name.to_string(),
+                                     source_model_resource_name.to_string(),
+                                     source_resource_name.to_string()]
+                                        .iter()
+                                        .filter(|n| !n.is_empty())
+                                        .find_map(|n| sc.model_root_com.get(&n.to_ascii_lowercase()).copied())
+                                })
+                        } else { None };
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
@@ -1932,6 +1964,8 @@ impl Shockwave3dMemberHandlers {
                                             screen_width: 640, screen_height: 480,
                                             transform: source_transform,
                                         });
+                                        // NO biped-COM carry — see the note in `clone`.
+                                        let _ = &src_root_com;
                                         // Namespace every descendant's name to avoid collisions
                                         // with prior clones from the same source.
                                         let mut node_name_map: std::collections::HashMap<Symbol, Symbol> =
@@ -2571,8 +2605,7 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_sym, tex_data);
-                                                    scene.texture_content_version += 1;
+                                                    scene.put_texture_image(obj_sym, tex_data);
                                                     log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
                                                         obj_name, w, h
@@ -2606,8 +2639,7 @@ impl Shockwave3dMemberHandlers {
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&[0u8, 0, 0, 0]);
-                                                        scene.texture_images.insert(Symbol::from_str(&obj_name.clone()), ph);
-                                                        scene.texture_content_version += 1;
+                                                        scene.put_texture_image(Symbol::from_str(&obj_name.clone()), ph);
                                                     }
                                                 }
                                             }
@@ -2675,8 +2707,7 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_sym, tex_data);
-                                                    scene.texture_content_version += 1;
+                                                    scene.put_texture_image(obj_sym, tex_data);
                                                     // Log pixel stats
                                                     let total = rgba.len() / 4;
                                                     let alpha_lt255 = rgba.chunks(4).filter(|p| p[3] < 255).count();
@@ -2797,6 +2828,7 @@ impl Shockwave3dMemberHandlers {
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,
                             texture_content_version: 0,
+                            texture_write_versions: HashMap::new(),
                             model_root_com: HashMap::new(),
                         };
                         empty_scene.nodes.push(W3dNode {
@@ -3079,11 +3111,50 @@ impl Shockwave3dMemberHandlers {
                         // Presence, not emptiness: a supplied-but-empty #modelList is a
                         // whitelist that includes nothing, which must yield no hits.
                         let included_ref = if model_list_present { Some(&model_whitelist) } else { None };
+                        // Animation state for skinned models, so the ray meets the POSED
+                        // body rather than the bind pose. Snapshotted before the raycast
+                        // borrows the scene. Mirrors the renderer's resolution order:
+                        // the model's own bonesPlayer first, then the member-wide state,
+                        // and finally the rig's default motion — a model left on "no
+                        // motion" would otherwise be tested as a T-pose.
+                        let anim_state: std::collections::HashMap<Symbol, (Option<Symbol>, f32, bool)> = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .map(|w3d| {
+                                    let rs = &w3d.runtime_state;
+                                    let mut map: std::collections::HashMap<Symbol, (Option<Symbol>, f32, bool)> =
+                                        std::collections::HashMap::new();
+                                    for (name, bp) in &rs.bones_players {
+                                        map.insert(*name, (bp.current_motion, bp.animation_time, bp.root_lock));
+                                    }
+                                    map
+                                })
+                                .unwrap_or_default()
+                        };
+                        let member_wide = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .map(|w3d| (w3d.runtime_state.current_motion,
+                                            w3d.runtime_state.animation_time,
+                                            w3d.runtime_state.root_lock))
+                                .unwrap_or((None, 0.0, false))
+                        };
+                        let anim_fn = |model: Symbol, _skel: Symbol| -> Option<(Option<Symbol>, f32, bool)> {
+                            let (motion, time, lock) = anim_state.get(&model)
+                                .copied()
+                                .unwrap_or(member_wide);
+                            let motion = motion.or_else(|| {
+                                crate::director::chunks::w3d::skeleton::default_motion_for_model(&scene, model)
+                                    .map(|m| m.name)
+                            });
+                            Some((motion, time, lock))
+                        };
                         let hits = raycast_scene_multi(
                             &ray, &scene, world_max_dist, max_models as usize,
                             node_transforms.as_ref(),
                             excluded_ref,
                             included_ref,
+                            Some(&anim_fn),
                         );
                         for hit in &hits {
                             if detailed {
