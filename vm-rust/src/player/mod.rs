@@ -3411,20 +3411,30 @@ impl DirPlayer {
         }
     }
 
+    /// Programmatic mouse warp — the FPS mouselook recentre.
+    ///
+    /// A movie does this either with `_mouse.mouseLoc = point(x, y)` or through
+    /// a cursor-warping Xtra (MoveCursor's `move_cursor x, y`, which Miniclip's
+    /// Rifleman uses). BOTH spellings mean the same thing and must behave
+    /// identically — including requesting pointer lock — or the camera turns in
+    /// movies that use one and stays frozen in movies that use the other.
+    /// Callers must go through here rather than assigning `mouse_loc`.
+    pub fn warp_mouse_loc(&mut self, x: i32, y: i32) {
+        self.mouse_loc = (x, y);
+        // Only request pointer lock if the cursor is hidden AND 3D content is
+        // active — a movie nudging the cursor on a 2D stage isn't mouselook.
+        if self.cursor_is_hidden && self.w3d_any_rendered {
+            self.wants_pointer_lock = true;
+        }
+    }
+
     fn set_mouse_prop(&mut self, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
         match prop.into_builtin() {
             Some(BuiltInSymbol::MouseLoc) => {
                 let value = self.get_datum(value_ref).clone();
                 match value {
                     Datum::Point(vals, _flags) => {
-                        let x = vals[0] as i32;
-                        let y = vals[1] as i32;
-                        self.mouse_loc = (x, y);
-                        // Game is programmatically warping the mouse — this is the FPS mouselook pattern.
-                        // Only request pointer lock if cursor is hidden AND 3D content is active.
-                        if self.cursor_is_hidden && self.w3d_any_rendered {
-                            self.wants_pointer_lock = true;
-                        }
+                        self.warp_mouse_loc(vals[0] as i32, vals[1] as i32);
                         Ok(())
                     }
                     _ => Err(ScriptError::new("mouseLoc requires a point value".to_string())),

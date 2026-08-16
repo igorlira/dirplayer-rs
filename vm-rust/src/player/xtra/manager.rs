@@ -9,6 +9,7 @@ use super::external;
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
 use super::leechprotection::LeechProtectionXtra;
 use super::multiuser::{borrow_multiuser_manager_mut, MultiuserXtraManager};
+use super::movecursor::MoveCursorXtra;
 use super::openurl::OpenUrlXtra;
 use super::sysmenu::SysMenuXtra;
 use super::xmlparser::{borrow_xmlparser_manager_mut, XmlParserXtraManager};
@@ -24,6 +25,7 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "xmlparser"
         || name_lower == "fileio"
         || name_lower == "curl"
+        || name_lower == "movecursor"
         || name_lower == "openurl"
         || name_lower == "sysmenu"
         || name_lower == "budapi"
@@ -36,6 +38,7 @@ pub fn get_registered_xtra_names() -> Vec<String> {
         "XmlParser".to_string(),
         "FileIO".to_string(),
         "Curl".to_string(),
+        "MoveCursor".to_string(),
         "OpenURL".to_string(),
         "SysMenu".to_string(),
         "BudAPI".to_string(),
@@ -55,6 +58,9 @@ pub fn try_call_xtra_static_handler(
     name: &str,
     args: &Vec<DatumRef>,
 ) -> Option<Result<DatumRef, ScriptError>> {
+    if MoveCursorXtra::has_handler(name) {
+        return Some(MoveCursorXtra::call_handler(name, args));
+    }
     if OpenUrlXtra::has_handler(name) {
         return Some(OpenUrlXtra::call_handler(name, args));
     }
@@ -219,7 +225,7 @@ pub fn create_xtra_instance(
         // static-only — `new` still hands back
         // an opaque instance id for parity with the real Xtras, but the id
         // is never consulted by any handler.
-        "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
+        "movecursor" | "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
     }
 }

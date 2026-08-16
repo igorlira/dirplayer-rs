@@ -159,9 +159,28 @@ pub async fn player_call_datum_handler(
                 full_args.extend(args.iter().cloned());
                 Box::pin(crate::player::handlers::types::TypeHandlers::new(&full_args)).await
             } else {
+                // A Director Xtra's message table marks CLASS-level methods
+                // with `+` — they take the Xtra itself as `me` and are called
+                // on the class datum, not an instance. MoveCursor's table is
+                //   + register object me, string SerialNumber
+                //   * move_cursor integer X, integer Y
+                // and Rifleman's camera does exactly
+                // `xtra("movecursor").register("AAMOVC-…")`. Route those to the
+                // Xtra's static handler surface, which already serves the `*`
+                // global-handler form, so both spellings reach one impl.
+                let xtra_name = reserve_player_ref(|player| {
+                    player.get_datum(obj_ref).to_xtra_name().map(|s| s.to_owned())
+                })?;
+                if let Some(res) = crate::player::xtra::manager::try_call_xtra_static_handler(
+                    handler_name.as_str(),
+                    args,
+                ) {
+                    return res;
+                }
+                let _ = &xtra_name;
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
-                    format!("No handler {handler_name} for Xtra datum"),
+                    format!("No handler {handler_name} for Xtra datum {xtra_name}"),
                 ))
             }
         }
