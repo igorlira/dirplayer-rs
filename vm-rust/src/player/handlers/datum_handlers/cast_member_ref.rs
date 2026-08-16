@@ -182,32 +182,59 @@ impl CastMemberRefHandlers {
                 return crate::player::handlers::datum_handlers::cast_member::shockwave3d::
                     Shockwave3dMemberHandlers::load_file(&member_ref, args).await;
             }
-            // Run the full physics step via the monolithic sync path.
-            // This does: Euler integrate (full_dt) + Rapier substeps + readback + W3D sync + clear forces.
-            let (step_result, step_cbs, collision_cbs) = HavokPhysicsMemberHandlers::step_with_callbacks(datum, args)?;
-
-            // After the step, invoke step callbacks (async, post-step). A step
-            // callback may apply per-sub-step forces (age-of-speed applies gravity
-            // this way); mark that context so applyForce routes to the full-strength
-            // `step_force` accumulator rather than the force_scale-attenuated one.
-            // The gravity callback runs synchronously (a plain applyForce loop), so
-            // the flag can't leak across an await.
+            // Run the physics step with step callbacks fired BETWEEN substeps,
+            // which is when the Xtra fires them ("called at each sub step").
             //
-            // NB the Xtra actually fires these per SUB-STEP (Havok Xtra Lingo
-            // Reference: "called at each sub step"), so post-step invocation leaves
-            // the applied force one frame stale. Moving it BEFORE the step was
-            // tried: it did NOT fix Age of Speed's loop and it REGRESSED
-            // SuperSonic (supersonic.rs:231). Don't repeat it without also
-            // reworking how `step_force` is accumulated.
+            // This matters for any callback whose result depends on body state.
+            // Rifleman's character controller computes a hover spring from its
+            // CURRENT distance to the ground; firing once per step gave it
+            // 1/subSteps of the support it asks for and the character sank
+            // through the floor (z 140.7 spawn → ~19.8), which put it off the
+            // navmesh and deadlocked every NPC's cover pathing. Cheaper fixes
+            // were tried and are dead ends: firing the callback N times AFTER
+            // the step multiplies an applyForce callback by N (breaks
+            // age_of_speed's gravity), and banking the impulse for replay
+            // diverges because the spring is state-dependent, not constant.
             use super::cast_member::havok_physics::IN_STEP_CALLBACK;
-            for (cb_handler, cb_instance, dt_value) in &step_cbs {
-                let dt_ref = reserve_player_mut(|player| {
-                    player.alloc_datum(Datum::Float(*dt_value))
-                });
-                IN_STEP_CALLBACK.with(|c| c.set(true));
-                let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![dt_ref]).await;
-                IN_STEP_CALLBACK.with(|c| c.set(false));
+            let (hv_member_ref, prep, time_increment, sim_time_at_start, step_cb_targets) =
+                HavokPhysicsMemberHandlers::begin_interleaved_step(datum, args)?;
+
+            for sub in 0..prep.n_subs {
+                // Callback FIRST, then integrate. The Xtra's callback exists to
+                // set up the forces for the substep that follows — age_of_speed's
+                // `applyGravityForce` is the whole reason its cars fall onto the
+                // road. Integrating first and calling back afterwards leaves the
+                // first substep with no gravity and (because `step_finish`
+                // cleared the accumulator at the end of the previous step) the
+                // rest of them too.
+                //
+                // `simTime` is the accumulated clock; a script derives its own
+                // timestep from the difference between successive callbacks
+                // (`lTimeStep = kSimTime - pOldSimTime`), so it advances by one
+                // substep each time.
+                let sim_time = sim_time_at_start + prep.sub_dt * (sub + 1) as f64;
+                // `applyForce` accumulates, so clear before each substep's
+                // callbacks — otherwise the per-substep contributions pile up
+                // across the step instead of applying once each.
+                if !step_cb_targets.is_empty() {
+                    HavokPhysicsMemberHandlers::clear_step_forces(&hv_member_ref)?;
+                }
+                for (cb_handler, cb_instance) in &step_cb_targets {
+                    let t_ref = reserve_player_mut(|player| {
+                        player.alloc_datum(Datum::Float(sim_time))
+                    });
+                    // Mark the context so applyForce routes to the full-strength
+                    // `step_force` accumulator rather than the attenuated one.
+                    IN_STEP_CALLBACK.with(|c| c.set(true));
+                    let _ = super::player_call_datum_handler(cb_instance, *cb_handler, &vec![t_ref]).await;
+                    IN_STEP_CALLBACK.with(|c| c.set(false));
+                }
+
+                HavokPhysicsMemberHandlers::interleaved_substep(&hv_member_ref, &prep)?;
             }
+
+            let (step_result, collision_cbs) =
+                HavokPhysicsMemberHandlers::finish_interleaved_step(&hv_member_ref, time_increment)?;
 
             // Invoke collision interest callbacks (async, post-step).
             for (cb_handler, cb_instance, collision_info_ref) in &collision_cbs {

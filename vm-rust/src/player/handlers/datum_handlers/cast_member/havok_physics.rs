@@ -1524,7 +1524,31 @@ const MIN_BISECTION_DT: f64 = 0.00001;
 /// Maximum bisection retries.
 const MAX_BISECTION_RETRIES: usize = 30;
 
+/// Per-step setup shared by every substep. Held by the caller so the substep
+/// loop can be driven from OUTSIDE this module — the Xtra fires step callbacks
+/// between substeps, and a callback that computes a state-dependent impulse (a
+/// hover spring, say) must re-evaluate against the position the previous
+/// substep produced. Banking one value and replaying it diverges.
+pub struct StepPrep {
+    pub n_subs: usize,
+    pub sub_dt: f64,
+    force_scale: f64,
+    torque_scale_pitch_roll: f64,
+    torque_scale_yaw: f64,
+    saved_forces: Vec<([f64; 3], [f64; 3])>,
+    saved_step: Vec<([f64; 3], [f64; 3])>,
+}
+
 pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_steps: i32) {
+    let prep = step_begin(state, time_increment, num_sub_steps);
+    for _ in 0..prep.n_subs {
+        step_substep(state, &prep);
+    }
+    step_finish(state, time_increment);
+}
+
+/// Snapshot the forces and scaling factors this step will use.
+pub fn step_begin(state: &mut HavokPhysicsState, time_increment: f64, num_sub_steps: i32) -> StepPrep {
     let n_subs = num_sub_steps.max(1) as usize;
     let sub_dt = time_increment / n_subs as f64;
 
@@ -1595,7 +1619,30 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     let saved_step: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
         .map(|rb| (rb.step_force, rb.step_torque)).collect();
 
-    for _sub in 0..n_subs {
+    StepPrep {
+        n_subs,
+        sub_dt,
+        force_scale,
+        torque_scale_pitch_roll,
+        torque_scale_yaw,
+        saved_forces,
+        saved_step,
+    }
+}
+
+/// One substep: re-seat this step's forces, then integrate.
+pub fn step_substep(state: &mut HavokPhysicsState, prep: &StepPrep) {
+    let StepPrep {
+        sub_dt,
+        force_scale,
+        torque_scale_pitch_roll,
+        torque_scale_yaw,
+        saved_forces,
+        ..
+    } = prep;
+    let (sub_dt, force_scale) = (*sub_dt, *force_scale);
+    let (torque_scale_pitch_roll, torque_scale_yaw) = (*torque_scale_pitch_roll, *torque_scale_yaw);
+    {
         // Reset forces to game values each substep (gravity/drag added in
         // step_single). The per-axis force/torque dividers are a SuperSonic-
         // specific calibration; applying them to OTHER hover cars crushes their
@@ -1612,22 +1659,33 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
                     // pitch/roll/yaw asymmetry that crushed levelling torque.
                     (force_scale, force_scale, force_scale)
                 };
+                // Step-callback force/torque is read LIVE from the body, not
+                // from the begin-time snapshot. With callbacks interleaved, the
+                // callback for THIS substep has already run and written
+                // `step_force`; using a snapshot taken before the step began
+                // would read the value `step_finish` cleared at the end of the
+                // previous step — i.e. zero. That is what left Age of Speed's
+                // cars hanging in the air with no gravity.
+                let (sf, st) = (rb.step_force, rb.step_torque);
                 rb.force = [
-                    saved_forces[i].0[0]/fs + saved_step[i].0[0],
-                    saved_forces[i].0[1]/fs + saved_step[i].0[1],
-                    saved_forces[i].0[2]/fs + saved_step[i].0[2],
+                    saved_forces[i].0[0]/fs + sf[0],
+                    saved_forces[i].0[1]/fs + sf[1],
+                    saved_forces[i].0[2]/fs + sf[2],
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/tsp + saved_step[i].1[0],   // world X ≈ body pitch
-                    saved_forces[i].1[1]/tsp + saved_step[i].1[1],   // world Y ≈ body roll
-                    saved_forces[i].1[2]/tsy + saved_step[i].1[2],   // world Z ≈ body yaw
+                    saved_forces[i].1[0]/tsp + st[0],   // world X ≈ body pitch
+                    saved_forces[i].1[1]/tsp + st[1],   // world Y ≈ body roll
+                    saved_forces[i].1[2]/tsy + st[2],   // world Z ≈ body yaw
                 ];
             }
         }
 
         step_single(state, sub_dt);
     }
+}
 
+/// Everything that runs once per step, after the last substep.
+pub fn step_finish(state: &mut HavokPhysicsState, time_increment: f64) {
     // Clear forces after all substeps. step_force too — the step callback re-sets
     // it fresh each frame (post-step), so it must not accumulate across frames.
     for rb in &mut state.rigid_bodies {

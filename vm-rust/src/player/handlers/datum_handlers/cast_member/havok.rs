@@ -394,6 +394,149 @@ impl HavokPhysicsMemberHandlers {
     /// Returns: (step_result, step_callbacks, collision_callbacks)
     /// Step callbacks: Vec<(handler_name, script_instance, sub_dt)>
     /// Collision callbacks: Vec<(handler_name, script_instance, collision_info_datum)>
+    /// Match this step's contacts against registered collision interests and
+    /// build the Lingo callback payloads. Shared by the one-shot and interleaved
+    /// step paths.
+    fn collect_collision_callbacks(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Vec<(Symbol, DatumRef, DatumRef)> {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+        let havok = member.and_then(|m| match &m.member_type {
+            CastMemberType::HavokPhysics(h) => Some(h),
+            _ => None,
+        });
+        let mut raw_collisions: Vec<(Symbol, DatumRef, Symbol, Symbol, [f64;3], [f64;3], f64)> = Vec::new();
+        if let Some(havok) = havok {
+        // Collision interests matched against cached contacts
+            for contact in &havok.state.collision_list_cache {
+                for interest in &havok.state.collision_interests {
+                    if interest.handler_name.is_none() || interest.script_instance.is_none() { continue; }
+                    let matches = if interest.rb_name2 == BuiltInSymbol::All || interest.rb_name2 == BuiltInSymbol::All {
+                        contact.body_a == interest.rb_name1
+                            || contact.body_b == interest.rb_name1
+                    } else {
+                        (contact.body_a == interest.rb_name1 && contact.body_b == interest.rb_name2)
+                        || (contact.body_a == interest.rb_name2 && contact.body_b == interest.rb_name1)
+                    };
+                    // Gate on the registerInterest threshold: the Xtra only
+                    // fires the callback when the impact (normal relative)
+                    // speed reaches the threshold, so a body merely resting on
+                    // or sliding along a surface (nrv≈0) doesn't trigger a
+                    // collision event. (Frequency throttling is not yet
+                    // applied; freq is 0 for the player car so it's a no-op
+                    // there, and the scripts self-throttle via sndCollisionWait.)
+                    if matches && contact.normal_rel_vel >= interest.threshold {
+                        // Report the registered body (rb_name1) first so the
+                        // callback can treat cd[1] as "self" and cd[2] as the
+                        // other object (matches the Havok Xtra ordering).
+                        let (name_self, name_other) =
+                            if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1.as_str()) {
+                                (contact.body_b.clone(), contact.body_a.clone())
+                            } else {
+                                (contact.body_a.clone(), contact.body_b.clone())
+                            };
+                        raw_collisions.push((
+                            interest.handler_name.clone().unwrap(),
+                            interest.script_instance.clone().unwrap(),
+                            name_self, name_other,
+                            contact.point, contact.normal, contact.normal_rel_vel,
+                        ));
+                    }
+                }
+            }
+        }
+        drop(member);
+
+        // Now allocate datums (requires mutable player, no longer borrowing havok)
+        let mut collision_cbs = Vec::new();
+        for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
+            // Match the Havok Xtra collision-callback signature
+            // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
+            // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
+            // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
+            // read cd[5] as an impact speed — On the Run's DriveHuman damage
+            // logic — saw a position instead.)
+            let ba_r = player.alloc_datum(Datum::String(ba.to_string()));
+            let bb_r = player.alloc_datum(Datum::String(bb.to_string()));
+            let pt_r = player.alloc_datum(Datum::Vector(pt));
+            let nm_r = player.alloc_datum(Datum::Vector(nm));
+            let nrv_r = player.alloc_datum(Datum::Float(nrv));
+            let info = player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
+                false,
+            ));
+            collision_cbs.push((handler, instance, info));
+        }
+        collision_cbs
+    }
+
+    /// INTERLEAVED step, phase 1. Parses args, snapshots the step's forces and
+    /// returns everything the async caller needs to drive the substep loop and
+    /// fire step callbacks BETWEEN substeps — which is when the Xtra fires them.
+    ///
+    /// Firing them only after the completed step is wrong for any callback whose
+    /// output depends on body state: Rifleman's character controller computes a
+    /// hover spring from its current distance to the ground, so it must see each
+    /// substep's result. (Banking one impulse and replaying it per substep was
+    /// tried and diverges — it is positive feedback.)
+    pub fn begin_interleaved_step(
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<(CastMemberRef, super::havok_physics::StepPrep, f64, f64, Vec<(Symbol, DatumRef)>), ScriptError> {
+        reserve_player_mut(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                _ => return Err(ScriptError::new("Cannot call Havok handler on non-cast-member".to_string())),
+            };
+            let (prep, time_increment) = Self::step_begin_phase(player, &member_ref, args)?;
+            let havok = Self::havok_mut(player, &member_ref)?;
+            let sim_time_at_start = havok.state.sim_time;
+            let cbs: Vec<(Symbol, DatumRef)> = havok.state.step_callbacks.clone();
+            Ok((member_ref, prep, time_increment, sim_time_at_start, cbs))
+        })
+    }
+
+    /// Clear the step-callback force accumulator. Called before each substep's
+    /// callbacks in the interleaved path.
+    ///
+    /// `applyForce` ACCUMULATES (`+=`). With the callback firing once per step
+    /// that was fine — one contribution, replayed each substep. Interleaved, the
+    /// callback fires per substep, so without clearing, gravity piles up 1x, 2x,
+    /// ... Nx across the step: a total impulse (N+1)/2 times too large. Havok
+    /// clears the force accumulator on every integrate step; this mirrors that.
+    pub fn clear_step_forces(member_ref: &CastMemberRef) -> Result<(), ScriptError> {
+        reserve_player_mut(|player| {
+            let havok = Self::havok_mut(player, member_ref)?;
+            for rb in &mut havok.state.rigid_bodies {
+                rb.step_force = [0.0; 3];
+                rb.step_torque = [0.0; 3];
+            }
+            Ok(())
+        })
+    }
+
+    /// INTERLEAVED step, phase 2: run a single substep.
+    pub fn interleaved_substep(
+        member_ref: &CastMemberRef,
+        prep: &super::havok_physics::StepPrep,
+    ) -> Result<(), ScriptError> {
+        reserve_player_mut(|player| Self::step_substep_phase(player, member_ref, prep))
+    }
+
+    /// INTERLEAVED step, phase 3: the per-step tail plus collision callbacks.
+    pub fn finish_interleaved_step(
+        member_ref: &CastMemberRef,
+        time_increment: f64,
+    ) -> Result<(DatumRef, Vec<(Symbol, DatumRef, DatumRef)>), ScriptError> {
+        reserve_player_mut(|player| {
+            let step_result = Self::step_finish_phase(player, member_ref, time_increment)?;
+            let collision_cbs = Self::collect_collision_callbacks(player, member_ref);
+            Ok((step_result, collision_cbs))
+        })
+    }
+
     pub fn step_with_callbacks(
         datum: &DatumRef,
         args: &Vec<DatumRef>,
@@ -423,12 +566,14 @@ impl HavokPhysicsMemberHandlers {
                 // Step callbacks
                 let time_step = havok.state.time_step;
                 let sub_steps = havok.state.sub_steps;
+                let mut time_step_increment = time_step;
                 let sub_dt = {
                     let time_inc = if !args.is_empty() {
                         player.get_datum(&args[0]).to_float().unwrap_or(time_step)
                     } else {
                         time_step
                     };
+                    time_step_increment = time_inc;
                     let num_sub = if args.len() > 1 {
                         player.get_datum(&args[1]).int_value().unwrap_or(sub_steps)
                     } else {
@@ -436,72 +581,33 @@ impl HavokPhysicsMemberHandlers {
                     };
                     if num_sub > 0 { time_inc / num_sub as f64 } else { time_inc }
                 };
+                // Fired ONCE per step, passing the ACCUMULATED simulation
+                // time (not a delta). A script derives its own timestep from
+                // successive callbacks:
+                //   on OnStep me, kSimTime
+                //     lTimeStep = kSimTime - pOldSimTime
+                // Passing a constant `sub_dt` made that difference 0 from the
+                // second call on, silently zeroing anything scaled by the
+                // timestep — Rifleman's character controller scales its entire
+                // movement impulse by it, so the player could not be moved.
+                //
+                // KNOWN DIVERGENCE, deliberately left: the Xtra fires this per
+                // SUBSTEP. Firing per substep here fixes Rifleman's character,
+                // whose hover impulse does not scale with the timestep and so
+                // gets 1/subSteps of the intended support at this rate (its z
+                // sinks 19.80 → 19.78 → 19.74 instead of resting at ~19.97).
+                // But a callback that applies FORCE then applies it subSteps
+                // times per step, against a force law calibrated at the current
+                // rate — measured: that regresses age_of_speed. Fixing this
+                // properly means scaling forces applied from inside a step
+                // callback by 1/subSteps, not just changing the callback count.
+                let _ = (sub_dt, time_step_increment);
                 for (handler, instance) in &havok.state.step_callbacks {
-                    step_cbs.push((handler.clone(), instance.clone(), sub_dt));
-                }
-
-                // Collision interests matched against cached contacts
-                for contact in &havok.state.collision_list_cache {
-                    for interest in &havok.state.collision_interests {
-                        if interest.handler_name.is_none() || interest.script_instance.is_none() { continue; }
-                        let matches = if interest.rb_name2 == BuiltInSymbol::All || interest.rb_name2 == BuiltInSymbol::All {
-                            contact.body_a == interest.rb_name1
-                                || contact.body_b == interest.rb_name1
-                        } else {
-                            (contact.body_a == interest.rb_name1 && contact.body_b == interest.rb_name2)
-                            || (contact.body_a == interest.rb_name2 && contact.body_b == interest.rb_name1)
-                        };
-                        // Gate on the registerInterest threshold: the Xtra only
-                        // fires the callback when the impact (normal relative)
-                        // speed reaches the threshold, so a body merely resting on
-                        // or sliding along a surface (nrv≈0) doesn't trigger a
-                        // collision event. (Frequency throttling is not yet
-                        // applied; freq is 0 for the player car so it's a no-op
-                        // there, and the scripts self-throttle via sndCollisionWait.)
-                        if matches && contact.normal_rel_vel >= interest.threshold {
-                            // Report the registered body (rb_name1) first so the
-                            // callback can treat cd[1] as "self" and cd[2] as the
-                            // other object (matches the Havok Xtra ordering).
-                            let (name_self, name_other) =
-                                if contact.body_b.eq_ignore_ascii_case(&interest.rb_name1.as_str()) {
-                                    (contact.body_b.clone(), contact.body_a.clone())
-                                } else {
-                                    (contact.body_a.clone(), contact.body_b.clone())
-                                };
-                            raw_collisions.push((
-                                interest.handler_name.clone().unwrap(),
-                                interest.script_instance.clone().unwrap(),
-                                name_self, name_other,
-                                contact.point, contact.normal, contact.normal_rel_vel,
-                            ));
-                        }
-                    }
+                    step_cbs.push((handler.clone(), instance.clone(), havok.state.sim_time));
                 }
             }
-            drop(member);
 
-            // Now allocate datums (requires mutable player, no longer borrowing havok)
-            let mut collision_cbs = Vec::new();
-            for (handler, instance, ba, bb, pt, nm, nrv) in raw_collisions {
-                // Match the Havok Xtra collision-callback signature
-                // `(bodyNameA, bodyNameB, contactPoint, contactNormal, nrv)`:
-                // cd[3]/cd[4] are VECTORS and cd[5] is the impact speed. (The old
-                // 8-flat-scalar form put contactPoint.z at cd[5], so scripts that
-                // read cd[5] as an impact speed — On the Run's DriveHuman damage
-                // logic — saw a position instead.)
-                let ba_r = player.alloc_datum(Datum::String(ba.to_string()));
-                let bb_r = player.alloc_datum(Datum::String(bb.to_string()));
-                let pt_r = player.alloc_datum(Datum::Vector(pt));
-                let nm_r = player.alloc_datum(Datum::Vector(nm));
-                let nrv_r = player.alloc_datum(Datum::Float(nrv));
-                let info = player.alloc_datum(Datum::List(
-                    DatumType::List,
-                    VecDeque::from([ba_r, bb_r, pt_r, nm_r, nrv_r]),
-                    false,
-                ));
-                collision_cbs.push((handler, instance, info));
-            }
-
+            let collision_cbs = Self::collect_collision_callbacks(player, &member_ref);
             Ok((step_result, step_cbs, collision_cbs))
         })
     }
@@ -1206,11 +1312,69 @@ impl HavokPhysicsMemberHandlers {
         Ok(DatumRef::Void)
     }
 
-    fn step(
+    /// Phase 1 of an INTERLEAVED step: parse the arguments and snapshot this
+    /// step's forces, returning the prep so the caller can run substeps itself.
+    /// Used by `step_with_callbacks_interleaved`, which fires step callbacks
+    /// between substeps the way the Xtra does.
+    pub fn step_begin_phase(
         player: &mut crate::player::DirPlayer,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
+    ) -> Result<(super::havok_physics::StepPrep, f64), ScriptError> {
+        let (time_increment, num_sub_steps) = Self::step_args(player, member_ref, args)?;
+        let havok = Self::havok_mut(player, member_ref)?;
+        let prep = super::havok_physics::step_begin(&mut havok.state, time_increment, num_sub_steps);
+        Ok((prep, time_increment))
+    }
+
+    /// Phase 2: one substep. Called once per substep, with the step callbacks
+    /// invoked in between so a state-dependent callback re-evaluates against
+    /// the position the previous substep produced.
+    pub fn step_substep_phase(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        prep: &super::havok_physics::StepPrep,
+    ) -> Result<(), ScriptError> {
+        let havok = Self::havok_mut(player, member_ref)?;
+        super::havok_physics::step_substep(&mut havok.state, prep);
+        Ok(())
+    }
+
+    /// Phase 3: the once-per-step tail (force clearing, damping, sleep) plus
+    /// the ground-Z estimate and W3D transform sync that `step` does.
+    pub fn step_finish_phase(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        time_increment: f64,
     ) -> Result<DatumRef, ScriptError> {
+        {
+            let havok = Self::havok_mut(player, member_ref)?;
+            super::havok_physics::step_finish(&mut havok.state, time_increment);
+        }
+        Self::step_post(player, member_ref)
+    }
+
+    fn havok_mut<'a>(
+        player: &'a mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<&'a mut crate::player::cast_member::HavokPhysicsMember, ScriptError> {
+        let member = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(member_ref)
+            .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
+        match &mut member.member_type {
+            CastMemberType::HavokPhysics(h) => Ok(h),
+            _ => Err(ScriptError::new("Not a Havok member".to_string())),
+        }
+    }
+
+    /// Argument parsing shared by the one-shot and interleaved step paths.
+    fn step_args(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<(f64, i32), ScriptError> {
         let time_increment = if !args.is_empty() {
             player.get_datum(&args[0]).to_float()?
         } else {
@@ -1238,19 +1402,15 @@ impl HavokPhysicsMemberHandlers {
             }
         };
 
-        let member = player
-            .movie
-            .cast_manager
-            .find_mut_member_by_ref(member_ref)
-            .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
-        let havok = match &mut member.member_type {
-            CastMemberType::HavokPhysics(h) => h,
-            _ => return Err(ScriptError::new("Not a Havok member".to_string())),
-        };
+        Ok((time_increment, num_sub_steps))
+    }
 
-        // Use native Havok physics (replaces Rapier)
-        super::havok_physics::step_native(&mut havok.state, time_increment, num_sub_steps);
-
+    /// The per-step tail shared by both paths: ground-Z estimate and W3D sync.
+    fn step_post(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<DatumRef, ScriptError> {
+        let havok = Self::havok_mut(player, member_ref)?;
         // Detect ground Z on first step if not set
         // Derive ground Z from the scene if not set yet.
         // If we have collision meshes, the per-body raycast in
@@ -1289,7 +1449,7 @@ impl HavokPhysicsMemberHandlers {
         // Without this, Lingo sees a stale initial transform and wheel.ls's
         // `pCar.getModel().transform.inverse() * pRealWorldPos` produces garbage
         // local points → wrong torque lever arms → car flips.
-        drop(member);
+        drop(havok);
         let w3d_ref = CastMemberRef { cast_lib: w3d_cast_lib, cast_member: w3d_cast_member };
         for (name, t) in &sync_data {
             if t.iter().any(|v| !v.is_finite()) { continue; }
@@ -1299,6 +1459,23 @@ impl HavokPhysicsMemberHandlers {
         }
 
         Ok(DatumRef::Void)
+    }
+
+    fn step(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let (time_increment, num_sub_steps) = Self::step_args(player, member_ref, args)?;
+        {
+            let havok = Self::havok_mut(player, member_ref)?;
+            let prep = super::havok_physics::step_begin(&mut havok.state, time_increment, num_sub_steps);
+            for _ in 0..prep.n_subs {
+                super::havok_physics::step_substep(&mut havok.state, &prep);
+            }
+            super::havok_physics::step_finish(&mut havok.state, time_increment);
+        }
+        Self::step_post(player, member_ref)
     }
 
     fn reset(
