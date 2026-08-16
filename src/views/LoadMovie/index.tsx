@@ -418,13 +418,29 @@ export default function LoadMovie() {
           if (loadUrl !== launch.movieUrl) {
             console.log('[LoadMovie] legacy server:', legacyServer, '->', loadUrl);
           }
+          // KEEP what the user typed. `lcParams` is what the archive's command
+          // line carries, but the form also holds dirplayer-side overrides that
+          // no real launch command would ever mention — `_moviePath` above all,
+          // which is how you satisfy a movie's domain check (Rifleman parks on
+          // "Frame Invalid Domain" forever without it). Replacing the params
+          // wholesale threw those away, so Fetch & Load could never be combined
+          // with a domain override. Launch-command values still win on a key
+          // collision; the user's extras are merged in behind them.
+          const lcKeys = new Set(lcParams.map(p => p.key));
+          const mergedParams = [
+            ...lcParams,
+            ...externalParams.filter(p => p.key && !lcKeys.has(p.key)),
+          ];
           setMovieUrl(loadUrl);
-          setExternalParams(lcParams);
+          setExternalParams(mergedParams);
           setLaunchCommand(launchCmd);
-          if (lcParams.length > 0) setParamsExpanded(true);
+          if (mergedParams.length > 0) setParamsExpanded(true);
           setUseCorsProxy(true);
-          setRecentMovies(saveRecentMovie(loadUrl, lcParams, undefined, true, launchCmd));
-          await loadMovieFile(loadUrl, lcParams, undefined, true, launchCmd);
+          // Persist the fake moviePath too — passing `undefined` wrote a recent
+          // entry with the override stripped, so re-loading the entry later
+          // silently lost it.
+          setRecentMovies(saveRecentMovie(loadUrl, mergedParams, fakeMoviePath || undefined, true, launchCmd));
+          await loadMovieFile(loadUrl, mergedParams, fakeMoviePath || undefined, true, launchCmd);
           return;
         }
         console.warn('[LoadMovie] data-launch-command names no movie; falling back to embed scrape.');
@@ -436,24 +452,34 @@ export default function LoadMovie() {
         setHasError(true);
         return;
       }
+      // Same merge as the launch-command branch above: a scraped <embed> knows
+      // nothing about dirplayer-side overrides like `_moviePath`, so keep the
+      // user's extras instead of dropping them.
+      const scrapedKeys = new Set(parsed.params.map(p => p.key));
+      const mergedScraped = [
+        ...parsed.params,
+        ...externalParams.filter(p => p.key && !scrapedKeys.has(p.key)),
+      ];
       setMovieUrl(parsed.movieUrl);
-      setExternalParams(parsed.params);
+      setExternalParams(mergedScraped);
       // A scraped embed carries no projector arguments; drop whatever command
       // the previously-inspected entry left in the form.
       setLaunchCommand('');
-      if (parsed.params.length > 0) setParamsExpanded(true);
+      if (mergedScraped.length > 0) setParamsExpanded(true);
       // Loader mode inherently requires the proxy (the game's own cross-origin
       // fetches route through it), so force it on and persist that for the entry.
       setUseCorsProxy(true);
-      setRecentMovies(saveRecentMovie(parsed.movieUrl, parsed.params, undefined, true));
-      await loadMovieFile(parsed.movieUrl, parsed.params, undefined, true, '');
+      setRecentMovies(saveRecentMovie(parsed.movieUrl, mergedScraped, fakeMoviePath || undefined, true));
+      await loadMovieFile(parsed.movieUrl, mergedScraped, fakeMoviePath || undefined, true, '');
     } catch (e) {
       console.error('[LoadMovie] Loader load failed', e);
       setHasError(true);
     } finally {
       setIsLoading(false);
     }
-  }, [loaderUrl, corsProxy, loadMovieFile]);
+    // externalParams / fakeMoviePath are read above to merge the user's
+    // dirplayer-side overrides into the scraped or launch-command params.
+  }, [loaderUrl, corsProxy, loadMovieFile, externalParams, fakeMoviePath]);
 
   const onBrowseClick = useCallback(async () => {
     if (!isInElectron) return;
