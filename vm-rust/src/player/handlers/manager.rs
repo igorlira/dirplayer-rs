@@ -2526,8 +2526,36 @@ impl BuiltInHandlerManager {
                     }
                     Ok(s)
                 })?;
+                // Handlers a movie CALLS but never DEFINES. Director's contract
+                // for an undefined handler is an error alert (11.5 Scripting
+                // Dictionary, `call`), but the Shockwave PLUGIN suppresses
+                // alerts and play continues — which is why games ship with dead
+                // calls in them and still work. Raising here instead parks the
+                // player on a `break_on_error` breakpoint, turning a harmless
+                // leftover into a dead stop.
+                //
+                // Deliberately a NAME FILTER and not a blanket VOID return: the
+                // "No built-in handler:" message doubles as a control-flow
+                // signal (datum_handlers/mod.rs maps it to HandlerNotFound so
+                // callers know to keep searching, and it is how genuinely
+                // missing built-ins get noticed). Only names verified dead in a
+                // real movie are excused, and the warning is still logged.
+                //
+                // - InitializeProfileStep: Miniclip "Rifleman" (BOTH cuts) calls
+                //   it from "Frame Init Load Data" `beginSprite`; grepping every
+                //   script in both builds finds the call and no definition. The
+                //   Profiler parent script has StartProfile/EndProfile/Output
+                //   and nothing of this name — a rename that left the call site
+                //   behind. It only guards `gTestBeginTime`, which feeds a debug
+                //   `put` in "Frame Loop 3D", so skipping it costs nothing.
+                let is_known_dead_movie_handler =
+                    name.as_str().eq_ignore_ascii_case("InitializeProfileStep");
+
                 let msg = format!("No built-in handler: {}({})", name, formatted_args);
                 warn!("{msg}");
+                if is_known_dead_movie_handler {
+                    return Ok(DatumRef::Void);
+                }
                 return Err(ScriptError::new(msg));
             }
         }
