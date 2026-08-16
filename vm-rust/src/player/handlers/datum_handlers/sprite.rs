@@ -126,6 +126,15 @@ extern "C" {
 /// AS-initialized), so a Flash interop call reads/writes a live instance rather
 /// than returning null. Bounded (~10s) so a sprite that never gets a ready
 /// instance falls back to the caller's existing lazy-handle / VOID behaviour.
+/// Non-blocking readiness check for one sprite's Ruffle instance: loaded AND
+/// finished AS init. Backs the documented `member.state` codes (3 vs 4).
+pub(crate) fn is_flash_sprite_ready(sprite_num: i16) -> bool {
+    is_flash_instance_ready(sprite_num as i32)
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 async fn wait_for_flash_ready(sprite_num: i16) {
     for _ in 0..100u32 {
         let ready = is_flash_instance_ready(sprite_num as i32)

@@ -35,10 +35,11 @@ interface FlashInstance {
   nativeW: number; // SWF native stage size (detail floor for resizes); 0 if unknown
   nativeH: number;
   animFrameId: number | null;
-  /// Becomes true only after the SWF has loaded AND the 3s AS init wait
-  /// has elapsed AND the inheritance/queue replay has finished. Lingo
-  /// calls (goTo / play / stop / rewind) that arrive before this is
-  /// true are queued instead of going to the half-initialised player.
+  /// Becomes true only after the SWF has loaded AND its ActionScript has
+  /// initialized (polled for a live root timeline, capped at 3s) AND the
+  /// inheritance/queue replay has finished. Lingo calls (goTo / play / stop /
+  /// rewind) that arrive before this is true are queued instead of going to
+  /// the half-initialised player.
   ready: boolean;
   /// Mirrors the Director Flash member property of the same name.
   /// When true we pass `autoplay: 'off'` to Ruffle's loadConfig (so
@@ -767,6 +768,10 @@ export async function createFlashInstance(
   flashLoadingCount++;
   console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
 
+
+  // Declared out here because the `finally` releases it. See the comment at the
+  // pin site below.
+
   try {
 
   // Bridge mode: extension content scripts run in an isolated world
@@ -922,6 +927,34 @@ export async function createFlashInstance(
     preferredRenderer: 'canvas',
     socketProxy: getSocketProxyConfig(),
   };
+
+  // Director's Flash Asset Xtra intercepts `getURL("event: …")` and routes
+  // the body into the host movie's event chain (e.g. `event: send #done`
+  // fires the `done` handler). Register the handler speculatively — when
+  // the Ruffle-fork patch is present, navigations whose URL starts with
+  // `event:` get routed into dispatch_flash_event and the real open is
+  // suppressed. Otherwise it's a safe no-op.
+  // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
+  // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
+  //
+  // MUST be registered BEFORE `load()`. `load()` starts the SWF, so a movie
+  // that fires its callback from a FRAME 1 action does so while still inside
+  // that await — registering afterwards meant the very first event was handed
+  // to Ruffle's navigator instead ("SWF tried to open a website, but opening a
+  // website is not allowed") and lost. Rifleman's storage gate is a ONE-frame
+  // SWF whose only job is `getURL("event:flash_start_game")` from frame 1; it
+  // then `stop()`s and never retries, so the movie waited on frame 6 forever.
+  if (bridgeId) {
+    // Bridge mode (MV3 extension): the player + its handlers live in the main
+    // world, and callback functions can't cross worlds — so the host registers
+    // its own forwarders and posts each event/fscommand back here. Handles both
+    // the event:/lingo: URL channel and fscommand in one call.
+    registerBridgeCallbacks(bridgeId, castLib, castMember);
+  } else {
+    registerEventUrlHandler(player, castLib, castMember);
+    registerFSCommandHandler(player, castLib, castMember);
+  }
+
   if (bridgeId) {
     // The host's `callMethod` convention: methodName='load' resolves
     // via `player.ruffle().load(args)` on the main-world side.
@@ -946,6 +979,20 @@ export async function createFlashInstance(
   // StoryScramble's 3 story tiles share cast 2:1 but each must show its own
   // poster; pinning them all to frame 1 (pausedAtStart) shows the SAME picture.
   const initialPin = assertedFrame >= 0 ? assertedFrame : (pausedAtStart ? 1 : -1);
+
+  // In Director a Flash sprite starts when the SPRITE starts: the SWF never
+  // runs ahead of the Director playhead. Here, instance creation is async and
+  // holds the frame loop across the AS-init window below, which handed the SWF
+  // a multi-second head start over the movie's own frame 1. Miniclip's Rifleman
+  // is the case that exposes it — its intro SWF ran its whole 3-frame timeline
+  // and stopped before any Lingo executed, and by then the loading MovieClip
+  // that watches Lingo's `loadedPercent` (and calls `_root.play()` to raise
+  // `isLoaded`) only existed on the frames the root had already left. The movie
+  // then sat on frame 1 forever waiting for an `isLoaded` nothing could set.
+  //
+  // So hold every instance at frame 1 for the window and release it in the
+  // `finally` below, once the movie is allowed to run again. `pausedAtStart` /
+  // asserted-frame instances keep their own pin and are NOT released.
   if (initialPin >= 0) {
     try {
       // Two-step: gotoAndPlay so Ruffle paints the frame (it skips paint for an
@@ -960,28 +1007,17 @@ export async function createFlashInstance(
     }
   }
 
-  // Director's Flash Asset Xtra intercepts `getURL("event: …")` and routes
-  // the body into the host movie's event chain (e.g. `event: send #done`
-  // fires the `done` handler). Register the handler speculatively — when
-  // the Ruffle-fork patch is present, navigations whose URL starts with
-  // `event:` get routed into dispatch_flash_event and the real open is
-  // suppressed. Otherwise it's a safe no-op.
-  // The other Flash→Director channel: `fscommand("handler", "args")`. DGS's
-  // include movie (objMain) uses this to fire `on FlashLoaderLoaded`.
-  if (bridgeId) {
-    // Bridge mode (MV3 extension): the player + its handlers live in the main
-    // world, and callback functions can't cross worlds — so the host registers
-    // its own forwarders and posts each event/fscommand back here. Handles both
-    // the event:/lingo: URL channel and fscommand in one call.
-    registerBridgeCallbacks(bridgeId, castLib, castMember);
-  } else {
-    registerEventUrlHandler(player, castLib, castMember);
-    registerFSCommandHandler(player, castLib, castMember);
-  }
 
-  // Find the internal canvas element that Ruffle renders to
-  await new Promise<void>((resolve) => {
-    setTimeout(() => {
+  // Find the internal canvas element that Ruffle renders to.
+  //
+  // POLL, don't sleep. This was a flat `setTimeout(500)`, which put a 500ms
+  // floor under every instance's time-to-ready on top of the AS-init wait below
+  // — and a movie that continuously spawns transient Flash sprites
+  // (bogey_nights' "superstar" splashes) therefore always has an instance in
+  // flight. The canvas usually exists within a frame or two.
+  {
+    const canvasDeadline = Date.now() + 500;
+    for (;;) {
       const shadow = player.shadowRoot;
       if (shadow) {
         const canvas = shadow.querySelector('canvas');
@@ -991,16 +1027,45 @@ export async function createFlashInstance(
         const canvas = player.querySelector('canvas');
         if (canvas) instance.canvas = canvas;
       }
-      if (instance.canvas) {
-        startFrameCapture(key);
-      }
-      resolve();
-    }, 500);
-  });
+      if (instance.canvas || Date.now() >= canvasDeadline) break;
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    }
+    if (instance.canvas) {
+      startFrameCapture(key);
+    }
+  }
 
-  // Give the SWF time to run its ActionScript initialization (ExternalInterface callbacks etc.)
+  // Wait for the SWF's ActionScript to initialize.
+  //
+  // This used to be a flat `setTimeout(3000)`, which made EVERY instance take
+  // ~3s to reach `ready` no matter how small it was — Splat's 1786-byte "mspac"
+  // paid exactly what a large movie pays. That single constant is behind most of
+  // the Flash timing pain: the ~3s-per-spawn stall documented on
+  // `dirplayer_isFlashLoading`, Rifleman needing a manual pause before its PLAY
+  // click, and Splat's loading-screen pacman never being ready in time.
+  //
+  // Poll for a real signal instead, with the old 3s kept only as a CAP, so this
+  // can never be slower than before and is usually far faster. The probe is
+  // movie-agnostic: `_level0._totalframes` returns a value only once AVM1 has
+  // built the root timeline, which is exactly "the root movie clip exists and
+  // its script can be reached".
   console.log(`[Flash] Instance ${key} loaded, waiting for SWF ActionScript to initialize...`);
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  {
+    const asDeadline = Date.now() + 3000;
+    let asReadyMs = -1;
+    for (;;) {
+      const probe = playerGetVar(instance, '_level0._totalframes');
+      if (probe !== null && probe !== '' && probe !== 'undefined') {
+        asReadyMs = 3000 - (asDeadline - Date.now());
+        break;
+      }
+      if (Date.now() >= asDeadline) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    console.log(
+      `[Flash] Instance ${key} AS init ${asReadyMs >= 0 ? `ready in ${asReadyMs}ms` : 'TIMED OUT at 3000ms'}`
+    );
+  }
 
   } finally {
     flashLoadingCount--;
@@ -1024,6 +1089,9 @@ export async function createFlashInstance(
     // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
     // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
     // reflects that).
+    // Release the begin-sprite hold: the movie is running again, so the SWF
+    // may start. `flushPendingGoto` above may already have resumed it (a queued
+    // `play`), in which case `stopped` is false and there's nothing to do.
     if (assertedFrame >= 0 && live && live.stopped) {
       try {
         playerExec(live, 'GotoFrame', [assertedFrame, false]);
@@ -1189,6 +1257,22 @@ function translateLevel0(path: string): string {
 // `createFlashInstance` / `bridgeCallMethod`) still works; only
 // Lingo-driven Flash interactivity is degraded.
 
+// Director's Flash asset `getVariable()` reaches the player through the classic
+// string-valued GetVariable interface, so the ActionScript value arrives having
+// already been through AVM1's ToString — an AS boolean reads back as the STRING
+// "true"/"false". Ruffle's JS API skips that step and hands back a real JS
+// boolean, which the Rust side turns into Lingo 1/0; a movie testing
+// `getVariable("isLoaded") = "true"` then never matches. Miniclip's Rifleman
+// gates its entire boot on exactly that comparison against its intro SWF.
+//
+// (AVM1 stringifies booleans as "1"/"0" for SWF version <= 4 and "true"/"false"
+// from 5 on. We don't track a per-instance SWF version, and Director-hosted
+// content is >= 5 in practice, so assume the modern rule.)
+function coerceFlashValue(val: unknown): string | null {
+  if (typeof val === "boolean") return val ? "true" : "false";
+  return val as string | null;
+}
+
 function getVariable(spriteNum: number, path: string): string | null {
   const key = instanceKey(spriteNum);
   const instance = instances.get(key);
@@ -1216,10 +1300,10 @@ function getVariable(spriteNum: number, path: string): string | null {
     // its GetVariable method isn't visible on the isolated-world element — route
     // the read through the synchronous bridge instead.
     if (instance.bridgeId) {
-      return bridgeGetVariableSync(instance.bridgeId, translateLevel0(path));
+      return coerceFlashValue(bridgeGetVariableSync(instance.bridgeId, translateLevel0(path)));
     }
     const val = instance.rufflePlayer.GetVariable(translateLevel0(path));
-    return val;
+    return coerceFlashValue(val);
   } catch (e) {
     console.warn(`ruffleGetVariable error:`, e);
     return null;
@@ -2083,7 +2167,31 @@ export function initFlashBridge(): void {
   // player input — for ~3s per spawn, perpetually, since there's always a load
   // in flight. Those sprites are never scripted, so blocking for them is pure
   // lost time; they just pop in when their background load finishes.
-  win.dirplayer_isFlashLoading = () => flashAccessBeforeReady;
+  //
+  // Self-clearing when nothing is actually loading. `flashAccessBeforeReady`
+  // records that a script touched an instance that wasn't ready — but it is
+  // only lowered in the `finally` of an instance FINISHING its load. If the
+  // instance the script asked for is never created at all, nothing lowers it
+  // and the latch sticks forever: every frame then burns the full 2 x 15s of
+  // waiting and the movie stops advancing.
+  //
+  // Argent Free Ride hits this during its level load. `OffGame.GetSprite` does
+  //   getVariable(sprite(pFlashSprite), "_level0", 0)
+  // and once the off-game menu's sprite is gone that resolves to a sprite with
+  // no Flash instance — logged as "no instance yet for sprite#0" — which raises
+  // the flag with no pending load to ever lower it. The game froze at 84% with
+  // `clearTimeout` (the 100 ms wait slices) at 78% of profile self time.
+  //
+  // A pending load is what makes waiting meaningful, so treat "nothing in
+  // flight" as "not loading" AND drop the stale flag — otherwise the next
+  // unrelated Flash load would inherit it and block for 15s.
+  win.dirplayer_isFlashLoading = () => {
+    if (flashLoadingCount === 0) {
+      flashAccessBeforeReady = false;
+      return false;
+    }
+    return flashAccessBeforeReady;
+  };
 
   // Per-sprite readiness, used by the WASM side to BLOCK an individual Flash
   // interop call (getVariable / setVariable / callFunction / setCallback) until

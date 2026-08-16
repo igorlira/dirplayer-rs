@@ -1119,6 +1119,45 @@ impl CastMemberRefHandlers {
                         Some(BuiltInSymbol::Width) => Ok(Datum::Int((r - l) as i32)),
                         Some(BuiltInSymbol::Height) => Ok(Datum::Int((b - t) as i32)),
                         Some(BuiltInSymbol::Rect) => Ok(Datum::Rect([l as f64, t as f64, r as f64, b as f64], 0)),
+                        // Director 11.5 Scripting Dictionary, `state (Flash, SWA)`
+                        // — for a FLASH cast member:
+                        //   0  not in memory      1  header loading
+                        //   2  header loaded      3  media loading
+                        //   4  media finished loading
+                        //  -1  an error occurred
+                        // "This property can be tested but not set."
+                        //
+                        // This used to fall through to a generic SWA/streaming
+                        // default of 0, i.e. "never in memory" — forever. A movie
+                        // waiting the DOCUMENTED way (`repeat while
+                        // member(x).state < 4`) would hang on that.
+                        //
+                        // Reported from the real Ruffle instance: this member is
+                        // ready when some sprite showing it has an instance that
+                        // has loaded AND finished AS init. The bytes themselves
+                        // are always resident (they come out of the .dcr), so the
+                        // header is never the thing in flight — the distinction
+                        // that matters to a caller is 3 (still coming) vs 4
+                        // (usable).
+                        Some(BuiltInSymbol::State) => {
+                            let (cl, cm) = (cast_member_ref.cast_lib, cast_member_ref.cast_member);
+                            let channels: Vec<i16> = player
+                                .flash_sprite_loaded
+                                .iter()
+                                .filter(|(_, l, m)| *l == cl && *m == cm)
+                                .map(|(ch, _, _)| *ch)
+                                .collect();
+                            let state = if channels.is_empty() {
+                                0
+                            } else if channels.iter().any(|ch| {
+                                crate::player::handlers::datum_handlers::sprite::is_flash_sprite_ready(*ch)
+                            }) {
+                                4
+                            } else {
+                                3
+                            };
+                            Ok(Datum::Int(state))
+                        }
                         Some(BuiltInSymbol::RegPoint) => {
                             let rp = flash.reg_point;
                             Ok(Datum::Point([rp.0 as f64, rp.1 as f64], 0))
