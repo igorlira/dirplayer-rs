@@ -1424,6 +1424,19 @@ pub struct Shockwave3dRuntimeState {
     /// Each mesh has a Vec of texture layers, each layer has texture coordinates
     pub mesh_deform: std::collections::HashMap<Symbol, MeshDeformState>,
 
+    /// Cached `meshDeform.mesh[m].face[f].neighbor` adjacency, keyed by
+    /// "modelname:meshindex" (0-based mesh index, as the meshDeformMesh refs are).
+    /// The value is `(face_count, per_face_neighbours)`; each face carries its
+    /// three edge neighbours in the documented order (the edge OPPOSITE corner 1,
+    /// 2, then 3), `None` meaning no neighbour across that edge, and each entry
+    /// `(mesh_index, face_index, vertex_index, flipped)` already 1-based.
+    /// Cached because the adjacency is a whole-mesh property: building it per
+    /// face read is O(faces²), and Rifleman's navmesh reads every face five
+    /// times while it builds its A* graph. `face_count` is the staleness guard —
+    /// a rebuilt mesh (`newMesh`/`build`) changes it and forces a recompute.
+    pub meshdeform_face_neighbors:
+        std::collections::HashMap<Symbol, (usize, Vec<[Option<(u32, u32, u32, u8)>; 3]>)>,
+
     // ─── Particle emitter state ───
     /// Per-resource emitter state: resource_name -> emitter properties
     pub emitters: std::collections::HashMap<Symbol, EmitterState>,
@@ -1599,6 +1612,10 @@ pub struct CameraOverlay {
     pub scale_x: f64,
     pub scale_y: f64,
     pub reg_point: [f64; 2],
+    /// Whether a script actually assigned `regPoint`, as opposed to it sitting
+    /// at its documented `point(0,0)` default. Rotation needs to tell those
+    /// apart — see the pivot note in `render_overlays_to_fbo`.
+    pub reg_point_explicit: bool,
     pub shader_name: Symbol,
 }
 
@@ -1614,6 +1631,7 @@ impl Default for CameraOverlay {
             scale_x: 1.0,
             scale_y: 1.0,
             reg_point: [0.0, 0.0],
+            reg_point_explicit: false,
             shader_name: Symbol::empty(),
         }
     }

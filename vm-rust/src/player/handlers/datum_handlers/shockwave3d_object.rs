@@ -26,9 +26,302 @@ fn log(msg: &str) {
     }
 }
 
+/// Which `meshDeform.mesh[m].face[f]` a given face-list datum came from.
+///
+/// `face[f]` must stay a plain 3-element LIST — Director returns a value and
+/// movies outlive the model they read it from (Splat deletes the sphere it
+/// harvests its pac-dot faces from). `.neighbor` therefore cannot live on the
+/// returned datum's type, so the origin is recorded out of band and recovered by
+/// datum identity.
+///
+/// `verts` is the guard: datum slots are recycled, so a stale entry could
+/// otherwise answer for an unrelated list. A lookup only succeeds when the
+/// caller's list still holds exactly the indices this face had.
+struct FaceOrigin {
+    member_ref: CastMemberRef,
+    model: Symbol,
+    mesh_idx: usize,
+    face_idx: usize,
+    verts: [u32; 3],
+}
+
+thread_local! {
+    static FACE_ORIGINS: std::cell::RefCell<std::collections::HashMap<usize, FaceOrigin>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn register_face_origin(
+    list_ref: &DatumRef,
+    member_ref: CastMemberRef,
+    model: Symbol,
+    mesh_idx: usize,
+    face_idx: usize,
+    verts: [u32; 3],
+) {
+    FACE_ORIGINS.with(|m| {
+        let mut m = m.borrow_mut();
+        // Bounded: a movie walking a large mesh would otherwise grow this without
+        // limit. Entries are pure cache — dropping them only costs a VOID
+        // `.neighbor` on a face datum harvested long ago, which no movie does.
+        if m.len() > 8192 { m.clear(); }
+        m.insert(list_ref.unwrap(), FaceOrigin { member_ref, model, mesh_idx, face_idx, verts });
+    });
+}
+
+/// `face[f].neighbor` for a face list produced above, or `None` if this datum is
+/// not one (or has been recycled into something else).
+pub fn meshdeform_face_neighbor_of(
+    player: &mut crate::player::DirPlayer,
+    datum_ref: &DatumRef,
+) -> Option<Datum> {
+    let current: Vec<i32> = match player.get_datum(datum_ref) {
+        Datum::List(_, items, _) if items.len() == 3 => items
+            .iter()
+            .map(|i| player.get_datum(i).int_value().unwrap_or(-1))
+            .collect(),
+        _ => return None,
+    };
+    let origin = FACE_ORIGINS.with(|m| {
+        m.borrow().get(&datum_ref.unwrap()).map(|o| {
+            (o.member_ref.clone(), o.model, o.mesh_idx, o.face_idx, o.verts)
+        })
+    })?;
+    let (member_ref, model, mesh_idx, face_idx, verts) = origin;
+    if current != vec![verts[0] as i32, verts[1] as i32, verts[2] as i32] {
+        return None; // recycled slot — not our face any more
+    }
+    let entry = Shockwave3dObjectDatumHandlers::face_neighbors_cached(
+        player, &member_ref, model, mesh_idx, face_idx,
+    )?;
+    Some(Shockwave3dObjectDatumHandlers::neighbor_datum(player, &entry))
+}
+
 pub struct Shockwave3dObjectDatumHandlers {}
 
 impl Shockwave3dObjectDatumHandlers {
+    /// Run `f` over the triangle list of `model(name).meshDeform.mesh[mesh_idx]`,
+    /// resolved the same way the `face` property resolves it (clod_meshes first,
+    /// then raw_meshes, keyed by model-resource name then resource name).
+    ///
+    /// Borrows rather than returning the list, so the per-face reads below can
+    /// take a count or a single triangle without copying the whole mesh each
+    /// time — a navmesh touches every face several times over.
+    fn with_mesh_faces<T>(
+        player: &crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        model_name: Symbol,
+        mesh_idx: usize,
+        f: impl FnOnce(&[[u32; 3]]) -> T,
+    ) -> Option<T> {
+        let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+        let w3d = member.member_type.as_shockwave3d()?;
+        let scene = w3d.parsed_scene.as_ref()?;
+        let node = scene.nodes.iter().find(|n| n.name == model_name);
+        let model_res = node.map(|n| n.model_resource_name).unwrap_or_default();
+        let res = node.map(|n| n.resource_name).unwrap_or_default();
+        let keys: Vec<Symbol> = [model_res, res].iter()
+            .filter(|k| !k.as_str().is_empty() && **k != ".")
+            .copied().collect();
+        for key in &keys {
+            if let Some(meshes) = scene.clod_meshes.get(key) {
+                if let Some(mesh) = meshes.get(mesh_idx) {
+                    if !mesh.faces.is_empty() {
+                        return Some(f(&mesh.faces));
+                    }
+                }
+            }
+        }
+        for key in &keys {
+            for raw in &scene.raw_meshes {
+                if raw.name == *key && raw.chain_index as usize == mesh_idx && !raw.faces.is_empty() {
+                    return Some(f(&raw.faces));
+                }
+            }
+        }
+        None
+    }
+
+    /// The triangle list of `model(name).meshDeform.mesh[mesh_idx]`.
+    pub fn mesh_faces(
+        player: &crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        model_name: Symbol,
+        mesh_idx: usize,
+    ) -> Option<Vec<[u32; 3]>> {
+        Self::with_mesh_faces(player, member_ref, model_name, mesh_idx, |faces| faces.to_vec())
+    }
+
+    /// That mesh's triangle count, without copying the list.
+    fn mesh_face_count(
+        player: &crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        model_name: Symbol,
+        mesh_idx: usize,
+    ) -> usize {
+        Self::with_mesh_faces(player, member_ref, model_name, mesh_idx, |faces| faces.len())
+            .unwrap_or(0)
+    }
+
+    /// One triangle's vertex indices (0-based, as stored), without copying the list.
+    pub(crate) fn mesh_face(
+        player: &crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        model_name: Symbol,
+        mesh_idx: usize,
+        face_idx: usize,
+    ) -> Option<[u32; 3]> {
+        Self::with_mesh_faces(player, member_ref, model_name, mesh_idx,
+            |faces| faces.get(face_idx).copied())?
+    }
+
+    /// Whole-mesh face adjacency behind `meshDeform.mesh[m].face[f].neighbor`.
+    ///
+    /// Matches the Director 11.5 Scripting Dictionary entry for `neighbor`: a
+    /// list of THREE entries, where entry `i` describes the neighbour across the
+    /// edge OPPOSITE face corner `i`. Each entry is itself a list — empty when
+    /// there is no neighbour in that direction, and otherwise one inner list of
+    /// four integers `[meshIndex, faceIndex, vertexIndex, flipped]`:
+    ///   * meshIndex  — 1-based index into `mesh[]` holding the neighbour
+    ///   * faceIndex  — 1-based index of the neighbour face in that mesh
+    ///   * vertexIndex— 1-based index, within the neighbour face, of its
+    ///                  NON-SHARED vertex
+    ///   * flipped    — 1 when the neighbour's winding matches, 2 when opposed
+    /// (More than one inner list would mean a non-manifold mesh; a two-manifold
+    /// mesh never produces that, so we emit at most one.)
+    ///
+    /// Adjacency is computed within the mesh by shared unordered vertex-index
+    /// pairs. Two faces share an edge; if the shared pair appears in OPPOSITE
+    /// directions the windings agree (flipped = 1), and in the same direction
+    /// they do not (flipped = 2).
+    ///
+    /// Computed for the whole mesh in one pass because the caller caches it:
+    /// per-face rebuilds are O(faces²), and a navmesh reads every face's
+    /// neighbours while building its A* graph.
+    fn build_mesh_neighbors(
+        faces: &[[u32; 3]],
+        mesh_idx: usize,
+    ) -> Vec<[Option<(u32, u32, u32, u8)>; 3]> {
+        use std::collections::HashMap;
+        // edge (min,max) -> the faces using it, with the direction each traverses it
+        let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+        for (fi, f) in faces.iter().enumerate() {
+            for &(a, b) in &[(f[0], f[1]), (f[1], f[2]), (f[2], f[0])] {
+                let key = if a <= b { (a, b) } else { (b, a) };
+                edge_map.entry(key).or_default().push((fi, a, b));
+            }
+        }
+
+        let mut out = Vec::with_capacity(faces.len());
+        for (face_idx, f) in faces.iter().enumerate() {
+            // Entry i is opposite corner i: corner 1 faces edge (v2,v3), corner 2
+            // faces (v3,v1), corner 3 faces (v1,v2).
+            let opposite_edges = [(f[1], f[2]), (f[2], f[0]), (f[0], f[1])];
+            let mut entry: [Option<(u32, u32, u32, u8)>; 3] = [None, None, None];
+            for (slot, (a, b)) in opposite_edges.into_iter().enumerate() {
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let Some(users) = edge_map.get(&key) else { continue };
+                for &(other_fi, oa, ob) in users {
+                    if other_fi == face_idx { continue; }
+                    let other = faces[other_fi];
+                    // The neighbour's non-shared corner, 1-based within it.
+                    let vertex_index = (0..3)
+                        .find(|&k| other[k] != a && other[k] != b)
+                        .map(|k| k + 1)
+                        .unwrap_or(1);
+                    // Shared edge traversed the other way => consistent winding.
+                    let flipped = if oa == b && ob == a { 1u8 } else { 2 };
+                    entry[slot] = Some((
+                        mesh_idx as u32 + 1,
+                        other_fi as u32 + 1,
+                        vertex_index as u32,
+                        flipped,
+                    ));
+                    break; // two-manifold: one neighbour per edge
+                }
+            }
+            out.push(entry);
+        }
+        out
+    }
+
+    /// One face's neighbours, from the mesh-wide adjacency cache — built on the
+    /// first read of any face in that mesh. Keyed by "modelname:meshindex"
+    /// alongside the face count, so a mesh rebuilt under the same name
+    /// recomputes instead of serving stale links.
+    ///
+    /// Only the requested face is copied out: a navmesh reads `.neighbor` four
+    /// times per face, and handing back the whole table each time would put the
+    /// O(faces²) copying straight back that the cache exists to remove.
+    pub(crate) fn face_neighbors_cached(
+        player: &mut crate::player::DirPlayer,
+        member_ref: &CastMemberRef,
+        model_name: Symbol,
+        mesh_idx: usize,
+        face_idx: usize,
+    ) -> Option<[Option<(u32, u32, u32, u8)>; 3]> {
+        let key = Symbol::from_str(
+            &format!("{}:{}", model_name, mesh_idx).to_ascii_lowercase(),
+        );
+        let face_count = Self::mesh_face_count(player, member_ref, model_name, mesh_idx);
+        if face_count == 0 {
+            return None;
+        }
+        let cached = player.movie.cast_manager.find_member_by_ref(member_ref)
+            .and_then(|m| m.member_type.as_shockwave3d())
+            .and_then(|w3d| w3d.runtime_state.meshdeform_face_neighbors.get(&key))
+            .filter(|(count, _)| *count == face_count)
+            .map(|(_, adj)| adj.get(face_idx).copied());
+        if let Some(entry) = cached {
+            return entry;
+        }
+        let faces = Self::mesh_faces(player, member_ref, model_name, mesh_idx)?;
+        let adj = Self::build_mesh_neighbors(&faces, mesh_idx);
+        let entry = adj.get(face_idx).copied();
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                w3d.runtime_state.meshdeform_face_neighbors
+                    .insert(key, (faces.len(), adj));
+            }
+        }
+        entry
+    }
+
+    /// One face's `neighbor` value as the Lingo list-of-lists described above.
+    pub(crate) fn neighbor_datum(
+        player: &mut crate::player::DirPlayer,
+        entry: &[Option<(u32, u32, u32, u8)>; 3],
+    ) -> Datum {
+        use crate::director::lingo::datum::DatumType;
+        let mut entries: VecDeque<DatumRef> = VecDeque::new();
+        for slot in entry {
+            let mut inner: VecDeque<DatumRef> = VecDeque::new();
+            if let Some((mesh, face, vertex, flipped)) = *slot {
+                let quad = VecDeque::from(vec![
+                    player.alloc_datum(Datum::Int(mesh as i32)),
+                    player.alloc_datum(Datum::Int(face as i32)),
+                    player.alloc_datum(Datum::Int(vertex as i32)),
+                    player.alloc_datum(Datum::Int(flipped as i32)),
+                ]);
+                inner.push_back(player.alloc_datum(Datum::List(DatumType::List, quad, false)));
+            }
+            entries.push_back(player.alloc_datum(Datum::List(DatumType::List, inner, false)));
+        }
+        Datum::List(DatumType::List, entries, false)
+    }
+
+    /// Split a `meshDeformFace` ref's name back into (model, mesh index, face
+    /// index). Both indices are 0-based, as they are stored.
+    fn split_face_ref_name(name: Symbol) -> Option<(Symbol, usize, usize)> {
+        let s = name.to_string();
+        let (rest, face) = s.rsplit_once(':')?;
+        let (model, mesh) = rest.rsplit_once(':')?;
+        Some((
+            Symbol::from_str(model),
+            mesh.parse().ok()?,
+            face.parse().ok()?,
+        ))
+    }
+
     pub fn get_prop(obj_ref: &DatumRef, prop_name: &str) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let s3d_ref = match player.get_datum(obj_ref) {
@@ -673,6 +966,46 @@ impl Shockwave3dObjectDatumHandlers {
                     _ => {
                         Ok(player.alloc_datum(Datum::Void))
                     },
+                })
+            },
+            BuiltInSymbol::MeshDeformFace => {
+                // mesh[m].face[f] — name format is "modelName:meshIndex:faceIndex",
+                // both indices 0-based. The face doubles as its own vertex-index
+                // list; see the `face` collection case in `call` for why it is an
+                // object at all, and `getAt`/`count` there for the list half.
+                let Some((model_name, mesh_idx, face_idx)) = Self::split_face_ref_name(s3d_ref.name) else {
+                    return Ok(player.alloc_datum(Datum::Void));
+                };
+                match_ci!(prop_name, {
+                    "neighbor" => {
+                        let entry = Self::face_neighbors_cached(
+                            player, member_ref, model_name, mesh_idx, face_idx);
+                        match entry {
+                            Some(entry) => {
+                                let datum = Self::neighbor_datum(player, &entry);
+                                Ok(player.alloc_datum(datum))
+                            }
+                            None => Ok(player.alloc_datum(Datum::Void)),
+                        }
+                    },
+                    // The list half: a face IS its three 1-based vertex indices.
+                    "count" | "length" => Ok(player.alloc_datum(Datum::Int(3))),
+                    "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("list")))),
+                    "vertices" | "vertexList" => {
+                        match Self::mesh_face(player, member_ref, model_name, mesh_idx, face_idx) {
+                            Some(f) => {
+                                let items = VecDeque::from(vec![
+                                    player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
+                                    player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
+                                    player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
+                                ]);
+                                Ok(player.alloc_datum(Datum::List(
+                                    crate::director::lingo::datum::DatumType::List, items, false)))
+                            }
+                            None => Ok(player.alloc_datum(Datum::Void)),
+                        }
+                    },
+                    _ => Ok(player.alloc_datum(Datum::Void)),
                 })
             },
             BuiltInSymbol::MeshDeformTexLayer => {
@@ -1733,7 +2066,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         "blend" => ov.blend = value.to_float().unwrap_or(100.0),
                                         "scale" => ov.scale = value.to_float().unwrap_or(1.0),
                                         "rotation" => ov.rotation = value.to_float().unwrap_or(0.0),
-                                        "regPoint" => { if let Some(v) = reg_vals { ov.reg_point = v; } },
+                                        "regPoint" => { if let Some(v) = reg_vals { ov.reg_point = v; ov.reg_point_explicit = true; } },
                                         _ => {},
                                     })
                                 }
@@ -1859,8 +2192,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&rgba);
-                                        scene.texture_images.insert(s3d_ref.name.clone(), tex_data);
-                                        scene.texture_content_version += 1;
+                                        scene.put_texture_image(s3d_ref.name.clone(), tex_data);
                                     }
                                 }
                             }
@@ -1929,8 +2261,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         tex_data.extend_from_slice(&(w as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&rgba);
-                                        scene.texture_images.insert(s3d_ref.name.clone(), tex_data);
-                                        scene.texture_content_version += 1;
+                                        scene.put_texture_image(s3d_ref.name.clone(), tex_data);
                                     }
                                 }
                             }
@@ -3182,13 +3513,23 @@ impl Shockwave3dObjectDatumHandlers {
                         let start_time_ms = args.get(2).map(|a| player.get_datum(a).to_float().unwrap_or(0.0)).unwrap_or(0.0);
                         let end_time_ms = args.get(3).map(|a| player.get_datum(a).to_float().unwrap_or(-1.0)).unwrap_or(-1.0);
                         let scale = args.get(4).map(|a| player.get_datum(a).to_float().unwrap_or(1.0)).unwrap_or(1.0);
+                        // Absent offset must stay DISTINCT from an explicit 0, exactly as
+                        // in `play` above — the promotion in events.rs treats any offset
+                        // >= 0 as "start here" and falls back to startTime otherwise.
+                        // Defaulting to 0.0 made every queued entry restart at time 0 of
+                        // the clip instead of at its own startTime. Rifleman ends each
+                        // animation with `queue(motion, 1, endTime, endTime, 0.0)` to HOLD
+                        // the final frame; that promoted to t=0 — frame 0 of one long
+                        // combined clip, i.e. the T-pose — and since the entry loops, the
+                        // soldier stayed there (slightly sunk, the authored root height)
+                        // until the next state change played a new clip.
                         let offset_ms = args.get(5).map(|a| {
                             let d = player.get_datum(a);
                             match d {
                                 Datum::Symbol(s) if *s == "synchronized" => -1.0f64,
                                 _ => d.to_float().unwrap_or(0.0),
                             }
-                        }).unwrap_or(0.0);
+                        }).unwrap_or(f64::NEG_INFINITY);
                         let queued = crate::player::cast_member::QueuedMotion {
                             name: motion_name,
                             looped: is_loop,
@@ -3441,6 +3782,9 @@ impl Shockwave3dObjectDatumHandlers {
                         //    shader overrides + visibility). Read under an immutable borrow.
                         type ClonedNode = (crate::director::chunks::w3d::types::W3dNode, [f32; 16], Option<std::collections::HashMap<usize, Symbol>>, Option<u8>, bool);
                         let mut planned: Vec<ClonedNode> = Vec::with_capacity(descendants.len() + 1);
+                        // (source node name, clone name) so the biped-COM record can be
+                        // carried across below — see the note at the commit step.
+                        let mut com_pairs: Vec<(Symbol, Symbol)> = Vec::with_capacity(descendants.len() + 1);
                         // (orig_node, new_name, new_parent): root keeps the source's parent
                         // ("clone shares the parent"); descendants map their parent through
                         // the complete name_map built in pass 1.
@@ -3480,6 +3824,7 @@ impl Shockwave3dObjectDatumHandlers {
                             node.name = new_name;
                             node.parent_name = new_parent;
                             node.transform = transform;
+                            com_pairs.push((orig.name, new_name));
                             planned.push((node, transform, shaders, visibility, indexed));
                         }
 
@@ -3499,6 +3844,39 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                 }
                                 if let Some(scene) = w3d.scene_mut() {
+                                    // Carry the biped COM the parser folded into each
+                                    // SOURCE node. `node.transform` is the source's live
+                                    // transform, so the clone inherits the fold; the
+                                    // renderer only strips it back out of the skin when it
+                                    // finds the recorded matrix under THIS node's name.
+                                    // Without it the clone aims correctly and draws 90 deg
+                                    // out — measured on Rifleman, whose soldier nodes
+                                    // carry exactly (0, 0, -90) about Z. Per commit
+                                    // 7b1ed02 the fold and the strip are a matched pair
+                                    // keyed by the recorded matrix, so every path that
+                                    // copies a node must copy the record with it.
+                                    // DISABLED pending measurement. Carrying the record so
+                                    // the renderer strips took Rifleman's soldiers from 90
+                                    // deg wrong to 180 deg wrong, i.e. the strip pushed the
+                                    // WRONG WAY, even though the node provably holds
+                                    // (0,0,-90) and `affine_inv(r0)` is the same operation
+                                    // AreaZero's robots need. So an assumption about how a
+                                    // skinned draw composes is wrong — most likely whether
+                                    // the model node transform reaches skinned vertices at
+                                    // all. Instrument the renderer (r0, root_relinv, and
+                                    // whether the node matrix is applied) before touching
+                                    // the sign: two data points are not a derivation, and
+                                    // guessing here is what put AFR2's rider across his
+                                    // jetski.
+                                    // NO biped-COM carry. Three attempts to correct a
+                                    // cloned rig's fold here each regressed a working movie
+                                    // (AFR2's rider twice, AreaZero's weapon, Rifleman's own
+                                    // rifle). The r0-vs-inv(r0) asymmetry that Rifleman's
+                                    // soldiers measure out to is real but NOT understood, and
+                                    // "was it cloned" / "did a script reposition it" are both
+                                    // the wrong discriminator. Leave the fold alone until the
+                                    // composition is actually derived rather than curve-fitted.
+                                    let _ = &com_pairs;
                                     for (node, _, _, _, _) in planned {
                                         scene.nodes.push(node);
                                     }
@@ -3906,6 +4284,10 @@ impl Shockwave3dObjectDatumHandlers {
                             if let Some(hit) = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, 1,
                                 Some(&runtime_state.node_transforms), None, None,
+                                // Bind-pose geometry: this is a picking path, not
+                                // gameplay hit detection. Wire the anim closure in if a
+                                // movie ever needs to click a posed character.
+                                None,
                             ).into_iter().next() {
                                 debug!(
                                     "[modelUnderLoc] MESH HIT '{}'", hit.model_name
@@ -4035,6 +4417,8 @@ impl Shockwave3dObjectDatumHandlers {
                             let mut hits = raycast::raycast_scene_multi(
                                 &ray, &scene, 1.0e9, max_models,
                                 Some(&node_transforms), Some(&excluded), None,
+                                // As above — picking, so bind-pose geometry is accepted.
+                                None,
                             );
 
                             // #sphere (and other) primitives are generated at RUNTIME in the
@@ -5004,55 +5388,53 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                                 Some(player.alloc_datum(Datum::Void))
                             }
-                            // meshDeformMesh.face[j] — return the j-th face's 1-based vertex
-                            // indices [v1,v2,v3] (Director's meshDeform face[] convention; the
-                            // Director message-window shows e.g. [1,2,3],[4,5,6],…). Lets us diff
-                            // dirplayer's decoded triangulation against Director's.
+                            // meshDeformMesh.face[j] — a `meshDeformFace` ref.
+                            //
+                            // In Director this is two things at once: the face's three 1-based
+                            // vertex indices (`face[j][1]`, and `lVerticesIdx = face[j]` then
+                            // `lVerticesIdx[1]`) AND an object carrying `.neighbor`. A plain
+                            // list cannot be both — list subscripting does not preserve datum
+                            // identity, so a `.neighbor` read on an element cannot be traced
+                            // back to the face it came from. So the element is an object, and
+                            // `getAt`/`count`/`ilk` below make it read as the 3-element list it
+                            // also has to be. Rifleman's navmesh needs both halves: it reads
+                            // `face[j][1..3]` for the triangle and `face[j].neighbor` for the
+                            // A* links.
                             "face" if s3d_ref.object_type == "meshdeformmesh" => {
                                 let parts: Vec<&str> = s3d_ref.name.splitn(2, ':').collect();
-                                let model_name = parts.get(0).unwrap_or(&"").to_string();
+                                let model_name = Symbol::from_str(parts.get(0).unwrap_or(&""));
                                 let mesh_idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                                let node = scene.nodes.iter().find(|n| n.name == *model_name);
-                                let model_res = node.map(|n| n.model_resource_name).unwrap_or_default();
-                                let res = node.map(|n| n.resource_name).unwrap_or_default();
-                                let keys: Vec<Symbol> = [model_res, res].iter()
-                                    .filter(|k| !k.as_str().is_empty() && **k != ".")
-                                    .copied().collect();
-                                for key in &keys {
-                                    if let Some(meshes) = scene.clod_meshes.get(key) {
-                                        if let Some(mesh) = meshes.get(mesh_idx) {
-                                            if idx < mesh.faces.len() {
-                                                let f = mesh.faces[idx];
-                                                let items = VecDeque::from(vec![
-                                                    player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
-                                                    player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
-                                                    player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
-                                                ]);
-                                                return Ok(player.alloc_datum(Datum::List(
-                                                    crate::director::lingo::datum::DatumType::List, items, false)));
-                                            }
-                                        }
+                                // A VALUE, not a reference. Director hands back the three
+                                // 1-based vertex indices, and movies keep them: Splat
+                                // harvests a sphere's faces into `pipF`, DELETES the model
+                                // and resource, and only then builds its pac-dots from
+                                // `pipF[b][1..3]`. A lazy ref that re-resolves through the
+                                // model read VOID after the delete and the dots vanished.
+                                //
+                                // `.neighbor` is recovered without giving that up: the
+                                // exact DatumRef handed out here is registered below, and
+                                // a property read on THAT ref resolves the adjacency. That
+                                // works because Director's own callers read it off the
+                                // immediate chain (`...face[f].neighbor`), so identity
+                                // survives — unlike indexing into a cached face LIST, which
+                                // was tried before and cannot preserve identity.
+                                match Self::mesh_face(player, &member_ref, model_name, mesh_idx, idx) {
+                                    Some(f) => {
+                                        let verts = [f[0] + 1, f[1] + 1, f[2] + 1];
+                                        let items = VecDeque::from(vec![
+                                            player.alloc_datum(Datum::Int(verts[0] as i32)),
+                                            player.alloc_datum(Datum::Int(verts[1] as i32)),
+                                            player.alloc_datum(Datum::Int(verts[2] as i32)),
+                                        ]);
+                                        let list_ref = player.alloc_datum(Datum::List(
+                                            crate::director::lingo::datum::DatumType::List, items, false));
+                                        register_face_origin(
+                                            &list_ref, member_ref.clone(), model_name, mesh_idx, idx, verts,
+                                        );
+                                        Some(list_ref)
                                     }
+                                    None => Some(player.alloc_datum(Datum::Void)),
                                 }
-                                for key in &keys {
-                                    for raw in &scene.raw_meshes {
-                                        if raw.name == *key && raw.chain_index as usize == mesh_idx {
-                                            if idx < raw.faces.len() {
-                                                let f = raw.faces[idx];
-                                                let items = VecDeque::from(vec![
-                                                    player.alloc_datum(Datum::Int(f[0] as i32 + 1)),
-                                                    player.alloc_datum(Datum::Int(f[1] as i32 + 1)),
-                                                    player.alloc_datum(Datum::Int(f[2] as i32 + 1)),
-                                                ]);
-                                                return Ok(player.alloc_datum(Datum::List(
-                                                    crate::director::lingo::datum::DatumType::List, items, false)));
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                Some(player.alloc_datum(Datum::Void))
                             }
                             // camera.overlay[n] / camera.backdrop[n] — indexed overlay access.
                             // camera_overlays is keyed by lowercased camera name (see
@@ -5165,6 +5547,24 @@ impl Shockwave3dObjectDatumHandlers {
                             }
                             Datum::Symbol(ref s) => {
                                 Self::get_prop(datum, s.as_str())
+                            }
+                            // `face[j][i]` and `lVerticesIdx[i]` — a meshDeformFace
+                            // stands in for the 3-element vertex-index list Director
+                            // returns here, so an integer subscript yields the i-th
+                            // 1-based vertex index.
+                            _ if s3d_ref.object_type == BuiltInSymbol::MeshDeformFace => {
+                                let i = arg.int_value().unwrap_or(0);
+                                let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                                let vertex = Self::split_face_ref_name(s3d_ref.name)
+                                    .filter(|_| (1..=3).contains(&i))
+                                    .and_then(|(model_name, mesh_idx, face_idx)| {
+                                        Self::mesh_face(player, &member_ref, model_name, mesh_idx, face_idx)
+                                    })
+                                    .map(|f| f[(i - 1) as usize] as i32 + 1);
+                                match vertex {
+                                    Some(v) => Ok(player.alloc_datum(Datum::Int(v))),
+                                    None => Ok(player.alloc_datum(Datum::Void)),
+                                }
                             }
                             _ => Ok(player.alloc_datum(Datum::Void)),
                         }
@@ -8466,8 +8866,33 @@ fn apply_point_at(
             .copied()
     };
 
-    // Ensure the node has a runtime transform entry (side effect of get_or_init).
-    let _ = get_or_init_node_transform(player, member_ref, node_name);
+    // The node's CURRENT local transform. pointAt only rotates — the Scripting
+    // Dictionary entry for `pointAt` documents a workaround for combining
+    // non-uniform scale with a custom pointAtOrientation ("remove your scale
+    // prior to using pointAt, and then reapply it afterwards"), which only makes
+    // sense because pointAt otherwise LEAVES SCALE ALONE. We used to rebuild the
+    // matrix from unit basis vectors, silently resetting scale to 1: Rifleman
+    // sets `root.transform.scale = vector(f,f,f)` and then `root.pointAt(...)`
+    // on its soldiers every single frame, so the scale never survived to render.
+    let current_local = get_or_init_node_transform(player, member_ref, node_name);
+    // Per-axis scale = column lengths of the local 3x3. Re-applied to the
+    // look-at basis below so the rotation replaces only the rotation.
+    let local_scale = {
+        let col = |c: usize| -> f32 {
+            (current_local[c * 4] * current_local[c * 4]
+                + current_local[c * 4 + 1] * current_local[c * 4 + 1]
+                + current_local[c * 4 + 2] * current_local[c * 4 + 2])
+                .sqrt()
+        };
+        let s = [col(0), col(1), col(2)];
+        // A degenerate column carries no recoverable scale; treat it as unit so
+        // pointAt can never collapse a node to zero size.
+        [
+            if s[0] > 1e-6 { s[0] } else { 1.0 },
+            if s[1] > 1e-6 { s[1] } else { 1.0 },
+            if s[2] > 1e-6 { s[2] } else { 1.0 },
+        ]
+    };
     // Use WORLD position for direction computation (target is in world coordinates)
     let world_pos = get_world_position(player, member_ref, node_name);
     let pos_w = [world_pos[0] as f32, world_pos[1] as f32, world_pos[2] as f32];
@@ -8533,12 +8958,21 @@ fn apply_point_at(
     // world_mat carries the look-at rotation + the node's WORLD position; converting
     // by inverse(parent) yields the LOCAL transform (and restores the local position,
     // since inverse(parent)·pos_w == local_pos), so pointAt never moves the node.
+    // ...then re-apply the node's own scale to the resulting LOCAL basis. Scale
+    // is a local property, so it must go on after the parent conversion — doing
+    // it to the world matrix instead would double-count a scaled parent.
     let to_local = |world_mat: [f32; 16]| -> [f32; 16] {
-        if inv_parent.iter().all(|v| v.is_finite()) {
+        let mut m = if inv_parent.iter().all(|v| v.is_finite()) {
             mat4_mul_f32(&inv_parent, &world_mat)
         } else {
             world_mat
+        };
+        for c in 0..3 {
+            m[c * 4] *= local_scale[c];
+            m[c * 4 + 1] *= local_scale[c];
+            m[c * 4 + 2] *= local_scale[c];
         }
+        m
     };
 
     if let Some((front_axis, up_axis)) = custom_orientation {
