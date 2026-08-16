@@ -60,6 +60,7 @@ pub enum DatumType {
     HavokObjectRef,
     PhysXObjectRef,
     VectorVertexRef,
+    JsObjectRef,
 }
 
 #[derive(Clone, PartialEq, FromPrimitive)]
@@ -309,6 +310,7 @@ pub enum Datum {
     /// `.vertex` reads and writes resolve straight back into the member's
     /// vertex list (Director 11.5 Scripting Dictionary, `vertex`).
     VectorVertexRef(CastMemberRef, usize),
+    JsObjectRef(u32),
 }
 
 impl DatumType {
@@ -363,6 +365,7 @@ impl DatumType {
             DatumType::HavokObjectRef => "havok_object_ref",
             DatumType::PhysXObjectRef => "physx_object_ref",
             DatumType::VectorVertexRef => "vector_vertex_ref",
+            DatumType::JsObjectRef => "js_object",
         }
     }
 }
@@ -415,6 +418,7 @@ impl Datum {
             Datum::HavokObjectRef(_) => DatumType::HavokObjectRef,
             Datum::PhysXObjectRef(_) => DatumType::PhysXObjectRef,
             Datum::VectorVertexRef(..) => DatumType::VectorVertexRef,
+            Datum::JsObjectRef(_) => DatumType::JsObjectRef,
         }
     }
 

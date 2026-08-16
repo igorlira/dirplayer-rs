@@ -581,6 +581,11 @@ pub async fn player_set_obj_prop(
         Datum::XmlRef(_) => reserve_player_mut(|player| {
             XmlDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
+        Datum::JsObjectRef(_) => reserve_player_mut(|player| {
+            crate::player::handlers::datum_handlers::js_object::JsObjectDatumHandlers::set_prop(
+                player, obj_ref, prop_name, value_ref,
+            )
+        }),
         Datum::DateRef(_) => reserve_player_mut(|player| {
             DateDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
@@ -1177,6 +1182,11 @@ pub fn get_obj_prop(
         Datum::PlayerRef => player.get_player_prop(prop_name),
         Datum::MouseRef => player.get_mouse_prop(prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, obj_ref, prop_name),
+        Datum::JsObjectRef(_) => {
+            crate::player::handlers::datum_handlers::js_object::JsObjectDatumHandlers::get_prop(
+                player, obj_ref, prop_name,
+            )
+        }
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, obj_ref, prop_name),
         Datum::Vector(_) => {

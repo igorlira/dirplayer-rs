@@ -25,7 +25,7 @@ use crate::player::cast_lib::CastMemberRef;
 use crate::player::allocator::DatumAllocatorTrait;
 use crate::player::datum_ref::DatumRef;
 use crate::player::js_lingo::host_bridge::{JsHostBridge, StubBridge};
-use crate::player::js_lingo::value::{JsError, JsValue};
+use crate::player::js_lingo::value::{JsError, JsObjectRef, JsValue};
 use crate::player::js_lingo::{decode_script, disasm::disassemble, JsScriptIR};
 use crate::player::js_lingo::interpreter::JsRuntime;
 use crate::player::reserve_player_mut;
@@ -35,6 +35,147 @@ use crate::player::symbols::symbol::Symbol;
 thread_local! {
     /// JS runtime per script (one per JS-Lingo cast member).
     static JS_RUNTIMES: RefCell<HashMap<CastMemberRef, Rc<RefCell<JsRuntime>>>> = RefCell::new(HashMap::new());
+
+    /// Live JS objects handed to the Lingo side as `Datum::JsObjectRef(id)`.
+    /// Each entry keeps the object alive together with the runtime that owns
+    /// it
+    static JS_OBJECTS: RefCell<HashMap<u32, (Rc<RefCell<JsRuntime>>, JsObjectRef)>> = RefCell::new(HashMap::new());
+    static NEXT_JS_OBJECT_ID: RefCell<u32> = RefCell::new(1);
+
+    /// Runtime whose code is currently executing. `js_value_to_datum_ref`
+    /// needs to know which interpreter a returned object belongs to, and the
+    /// conversion happens deep inside the bridge where the script ref isn't
+    /// threaded through. Pushed/popped around every `invoke`, so it behaves
+    /// correctly when one JS script calls into another.
+    static CURRENT_RUNTIME: RefCell<Vec<Rc<RefCell<JsRuntime>>>> = RefCell::new(Vec::new());
+}
+
+/// Run `f` with `runtime` marked as the executing runtime.
+fn with_current_runtime<T>(runtime: &Rc<RefCell<JsRuntime>>, f: impl FnOnce() -> T) -> T {
+    CURRENT_RUNTIME.with(|s| s.borrow_mut().push(runtime.clone()));
+    let result = f();
+    CURRENT_RUNTIME.with(|s| { s.borrow_mut().pop(); });
+    result
+}
+
+/// Register a JS object for Lingo-side use and return its handle. Objects
+/// are de-duplicated by pointer identity
+fn register_js_object(runtime: &Rc<RefCell<JsRuntime>>, obj: &JsObjectRef) -> u32 {
+    JS_OBJECTS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some((id, _)) = m.iter().find(|(_, (_, o))| Rc::ptr_eq(o, obj)) {
+            return *id;
+        }
+        let id = NEXT_JS_OBJECT_ID.with(|n| {
+            let mut n = n.borrow_mut();
+            let id = *n;
+            *n += 1;
+            id
+        });
+        m.insert(id, (runtime.clone(), obj.clone()));
+        id
+    })
+}
+
+/// Resolve a `Datum::JsObjectRef` handle back to its runtime and object.
+pub fn get_js_object(id: u32) -> Option<(Rc<RefCell<JsRuntime>>, JsObjectRef)> {
+    JS_OBJECTS.with(|m| m.borrow().get(&id).cloned())
+}
+
+/// Whether an object must cross the bridge as a live handle rather than a
+/// `PropList` copy: it does as soon as anything on it is callable, since a
+/// copy would flatten those methods into strings. Plain data objects keep
+/// the historical PropList conversion so existing JS→Lingo records (and the
+/// Lingo code that walks them with `getAt`/`getPropAt`) are unaffected.
+fn object_has_callable(obj: &JsObjectRef) -> bool {
+    let mut current = Some(obj.clone());
+    // Bounded walk: a malformed proto cycle must not hang the player.
+    for _ in 0..32 {
+        let Some(o) = current else { return false };
+        let b = o.borrow();
+        if b.props.iter().any(|(_, v)| matches!(v, JsValue::Function(_) | JsValue::Native(_))) {
+            return true;
+        }
+        current = b.proto.clone();
+    }
+    false
+}
+
+/// Invoke a method on a live JS object on behalf of Lingo. `name` is matched
+/// case-sensitively first, then case-insensitively — Lingo symbols don't
+/// preserve the case JS declared the property with.
+///
+/// Returns `None` when the object has no callable property of that name, so
+/// the caller can raise Lingo's own "no handler" error.
+pub fn invoke_js_object_method(
+    id: u32,
+    name: &str,
+    args: &[DatumRef],
+) -> Option<Result<DatumRef, String>> {
+    let (runtime, obj) = get_js_object(id)?;
+    let callee = resolve_js_object_prop(&obj, name)?;
+    if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
+        return None;
+    }
+    let js_args: Vec<JsValue> = reserve_player_mut(|player| {
+        args.iter().map(|d| datum_ref_to_js_value(player, d)).collect()
+    });
+    // `this` is the object itself: a JS-Lingo method reached through the
+    // object (rather than through the script's global scope) is a genuine
+    // method call, so `this.foo` must see the instance's own properties.
+    let this_value = JsValue::Object(obj.clone());
+    // Convert inside the scope — see `try_invoke_js_handler`.
+    Some(with_current_runtime(&runtime, || {
+        let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
+        match result {
+            Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
+            Err(e) => Err(e.message),
+        }
+    }))
+}
+
+/// Read a property off a live JS object for Lingo. `None` = absent, so the
+/// caller can decide what a missing property means.
+pub fn get_js_object_prop(id: u32, name: &str) -> Option<DatumRef> {
+    let (runtime, obj) = get_js_object(id)?;
+    let value = resolve_js_object_prop(&obj, name)?;
+    // Scoped, so a nested object with methods of its own also crosses as a
+    // live handle rather than being flattened.
+    Some(with_current_runtime(&runtime, || {
+        reserve_player_mut(|player| js_value_to_datum_ref(player, &value))
+    }))
+}
+
+/// Look a property up on a live JS object, walking the proto chain, with the
+/// case-insensitive fallback Lingo callers need. `None` = absent.
+fn resolve_js_object_prop(obj: &JsObjectRef, name: &str) -> Option<JsValue> {
+    let mut current = Some(obj.clone());
+    for _ in 0..32 {
+        let o = current?;
+        let b = o.borrow();
+        if let Some(v) = b.get_own(name) {
+            return Some(v.clone());
+        }
+        if let Some((_, v)) = b.props.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            return Some(v.clone());
+        }
+        current = b.proto.clone();
+    }
+    None
+}
+
+/// Write a property on a live JS object, reusing the existing key's casing
+/// when one matches case-insensitively so Lingo writes don't shadow the
+/// property JS declared.
+pub fn set_js_object_prop(obj: &JsObjectRef, name: &str, value: JsValue) {
+    let mut b = obj.borrow_mut();
+    let key = b
+        .props
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(k, _)| k.clone())
+        .unwrap_or_else(|| name.to_string());
+    b.set_own(&key, value);
 }
 
 /// Public entry called from cast_lib::insert_member at script-load time.
@@ -136,6 +277,10 @@ fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
 /// movie's scripts load.
 pub fn clear_all_runtimes() {
     JS_RUNTIMES.with(|m| m.borrow_mut().clear());
+    // Object handles keep their runtime alive, so they must go too — otherwise
+    // clearing JS_RUNTIMES wouldn't actually free the previous movie's
+    // interpreters.
+    JS_OBJECTS.with(|m| m.borrow_mut().clear());
 }
 
 /// Hook called from `player_call_script_handler_raw_args` before the
@@ -222,11 +367,17 @@ pub fn try_invoke_js_handler(
     // (Habbo's BigInt port relies on this pattern heavily).
     let this_value = JsValue::Object(runtime.borrow().global.clone());
 
-    let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
-    Some(match result {
-        Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
-        Err(e) => Err(e.message),
-    })
+    // The return-value conversion must run INSIDE the current-runtime scope:
+    // that's where a returned object gets attributed to the interpreter that
+    // owns it. Converting after the scope pops would leave the registry with
+    // no runtime to attach and silently fall back to a PropList copy.
+    Some(with_current_runtime(&runtime, || {
+        let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
+        match result {
+            Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
+            Err(e) => Err(e.message),
+        }
+    }))
 }
 
 // ===== Bridge implementation that routes JS calls through Director runtime =====
@@ -311,6 +462,12 @@ pub fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &Datum
             JsValue::Object(Rc::new(RefCell::new(obj)))
         }
         Datum::ScriptRef(member_ref) => script_ref_to_js_proxy(member_ref),
+        // Round-trip a live handle back to the very same JS object, so
+        // identity survives a Lingo→JS→Lingo hop
+        Datum::JsObjectRef(id) => match get_js_object(id) {
+            Some((_, obj)) => JsValue::Object(obj),
+            None => JsValue::Undefined,
+        },
         // Live Director-owned references. Property reads/writes round-trip
         // through datum_handlers via get_property / set_property in the
         // interpreter, so `sprite(3).locH = 100` actually moves the sprite
@@ -437,6 +594,15 @@ pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue)
             Datum::List(crate::director::lingo::datum::DatumType::List, items, false)
         }
         JsValue::Object(o) => {
+            // Objects carrying methods stay live (see `object_has_callable`).
+            // Without a runtime in scope there's nothing to invoke against
+            // later, so those fall through to the copy below.
+            if object_has_callable(o) {
+                if let Some(runtime) = CURRENT_RUNTIME.with(|s| s.borrow().last().cloned()) {
+                    let id = register_js_object(&runtime, o);
+                    return player.allocator.alloc_datum(Datum::JsObjectRef(id)).unwrap();
+                }
+            }
             let pairs: std::collections::VecDeque<crate::director::lingo::datum::PropListPair> = o
                 .borrow()
                 .props

@@ -157,6 +157,10 @@ pub fn format_concrete_datum_with_depth(datum: &Datum, player: &DirPlayer, depth
         Datum::XmlRef(id) => {
             format!("<xml:{}>", id)
         }
+        Datum::JsObjectRef(_) => {
+            // Matches what Director's JS syntax prints for a plain object.
+            format!("[object Object]")
+        }
         Datum::MathRef(_) => {
             format!("<math>")
         }

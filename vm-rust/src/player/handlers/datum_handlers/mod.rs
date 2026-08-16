@@ -5,6 +5,7 @@ pub mod cast_member_ref;
 pub mod color;
 pub mod date;
 pub mod int;
+pub mod js_object;
 pub mod list_handlers;
 pub mod math;
 pub mod player;
@@ -179,6 +180,9 @@ pub async fn player_call_datum_handler(
         DatumType::ColorRef => color::ColorDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::PlayerRef => PlayerDatumHandlers::call(handler_name, args),
         DatumType::XmlRef => XmlDatumHandlers::call(obj_ref, handler_name, args),
+        DatumType::JsObjectRef => {
+            js_object::JsObjectDatumHandlers::call(obj_ref, handler_name, args)
+        }
         DatumType::DateRef => DateDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::MathRef => MathDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Vector => VectorDatumHandlers::call(obj_ref, handler_name, args),

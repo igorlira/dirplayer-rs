@@ -74,6 +74,7 @@ impl TypeUtils {
             Datum::MovieRef => Ok(vec![BuiltInSymbol::Movie]),
             Datum::MouseRef => Ok(vec![BuiltInSymbol::Mouse]),
             Datum::XmlRef(..) => Ok(vec![BuiltInSymbol::Xml]),
+            Datum::JsObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::DateRef(..) => Ok(vec![BuiltInSymbol::Date]),
             Datum::MathRef(..) => Ok(vec![BuiltInSymbol::Math]),
             Datum::VarRef(..) => Ok(vec![BuiltInSymbol::Void]), // VarRef should be dereferenced before checking ilk

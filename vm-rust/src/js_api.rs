@@ -2376,6 +2376,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("xmlRef"));
             map.str_set("id", &JsValue::from_f64(*id as f64));
         }
+        Datum::JsObjectRef(id) => {
+            map.str_set("type", &safe_js_string("jsObjectRef"));
+            map.str_set("id", &JsValue::from_f64(*id as f64));
+        }
         Datum::DateRef(_) => {
             map.str_set("type", &safe_js_string("date"));
         }

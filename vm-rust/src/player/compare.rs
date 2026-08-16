@@ -301,6 +301,13 @@ pub fn datum_equals(
             _ => false
         }),
 
+        // Handles are de-duplicated by object identity when they're minted,
+        // so equal ids mean the same JS object
+        (JsObjectRef(a), o) | (o, JsObjectRef(a)) => Ok(match o {
+            JsObjectRef(b) => a == b,
+            _ => false
+        }),
+
         (Vector(v), o) | (o, Vector(v)) => Ok(match o {
             Vector(other_v) => v == other_v,
             _ => false
