@@ -35,6 +35,43 @@ impl BitmapDatumHandlers {
                 if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
                     if player.stage_image == Some(*bref) {
                         player.stage_image_dirty = true;
+                        // Remember WHERE, so the renderer composites only the
+                        // touched region instead of pasting the whole opaque
+                        // framebuffer over every live sprite beneath it.
+                        // `None` from here means "could not tell", which keeps
+                        // the old full-stage behaviour for that op.
+                        let touched: Option<[i32; 4]> = match &*handler_name.as_lower_str() {
+                            // copyPixels(source, destRect, sourceRect {, params})
+                            "copypixels" => args.get(1)
+                                .map(|a| player.get_datum(a))
+                                .and_then(|d| d.to_rect_inline().ok())
+                                .map(|(v, _)| [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32]),
+                            // fill(rect, color) — the 4-coord spelling is
+                            // fill(l, t, r, b, color), handled by the same
+                            // rect parse failing and falling back to None.
+                            "fill" => args.first()
+                                .map(|a| player.get_datum(a))
+                                .and_then(|d| d.to_rect_inline().ok())
+                                .map(|(v, _)| [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32]),
+                            _ => None,
+                        };
+                        match touched {
+                            None => {
+                                player.stage_image_dirty_full = true;
+                                player.stage_image_dirty_rect = None;
+                            }
+                            Some(r) if !player.stage_image_dirty_full => {
+                                player.stage_image_dirty_rect =
+                                    Some(match player.stage_image_dirty_rect {
+                                        Some(c) => [
+                                            c[0].min(r[0]), c[1].min(r[1]),
+                                            c[2].max(r[2]), c[3].max(r[3]),
+                                        ],
+                                        None => r,
+                                    });
+                            }
+                            Some(_) => {}
+                        }
                     }
                 }
                 Ok::<(), ScriptError>(())

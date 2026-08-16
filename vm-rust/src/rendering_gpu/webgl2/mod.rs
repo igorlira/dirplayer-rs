@@ -561,7 +561,30 @@ impl WebGL2Renderer {
             return;
         }
 
+        // Composite ONLY the region a script actually drew into. The stage
+        // framebuffer is opaque, so blitting all of it pastes a frozen snapshot
+        // over every live 2D sprite beneath — Splat draws a lives strip and an
+        // ad banner into the bottom of the stage, and that was covering its
+        // score field a few pixels to the left, which then read 000000 forever
+        // while `member("thescore").text` was updating correctly.
+        // No recorded region (an op whose destination we could not determine)
+        // keeps the original full-stage behaviour.
         let (width, height) = self.size;
+        let (dl, dt, dr, db) = match player.stage_image_dirty_rect {
+            Some(r) if !player.stage_image_dirty_full => {
+                let l = r[0].clamp(0, sw as i32) as f32;
+                let t = r[1].clamp(0, sh as i32) as f32;
+                let rr = r[2].clamp(0, sw as i32) as f32;
+                let bb = r[3].clamp(0, sh as i32) as f32;
+                if rr <= l || bb <= t { return; }
+                (l, t, rr, bb)
+            }
+            _ => (0.0, 0.0, sw as f32, sh as f32),
+        };
+        // Stage pixels -> screen pixels; the stage image is authored at the
+        // movie's own resolution, which may be scaled to the canvas.
+        let sx = width as f32 / sw as f32;
+        let sy = height as f32 / sh as f32;
         let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
         let program = match self.shader_manager.get_program(effective_ink) {
             Some(p) => p,
@@ -577,10 +600,15 @@ impl WebGL2Renderer {
             gl.uniform1i(Some(loc), 0);
         }
         if let Some(ref loc) = program.u_sprite_rect {
-            gl.uniform4f(Some(loc), 0.0, 0.0, width as f32, height as f32);
+            gl.uniform4f(Some(loc), dl * sx, dt * sy, dr * sx, db * sy);
         }
         if let Some(ref loc) = program.u_tex_rect {
-            gl.uniform4f(Some(loc), 0.0, 0.0, 1.0, 1.0);
+            // Matching sub-rect of the stage bitmap, in normalised texture space.
+            gl.uniform4f(
+                Some(loc),
+                dl / sw as f32, dt / sh as f32,
+                dr / sw as f32, db / sh as f32,
+            );
         }
         if let Some(ref loc) = program.u_flip {
             gl.uniform2f(Some(loc), 0.0, 0.0);

@@ -296,6 +296,21 @@ pub struct DirPlayer {
     /// this keeps read-only camera-capture movies (which never draw) on the
     /// old per-call snapshot behavior.
     pub stage_image_dirty: bool,
+    /// Union, in stage pixels, of the regions a script has actually drawn into
+    /// `(the stage).image` — `[l, t, r, b]`.
+    ///
+    /// The overlay composites the stage framebuffer OVER the sprite output, and
+    /// that bitmap is opaque, so compositing the whole thing pastes a frozen
+    /// snapshot over every 2D sprite underneath. Splat draws only a lives strip
+    /// and an ad banner into it, yet its live score field — a text sprite a few
+    /// pixels to the left — was covered by the stale copy and appeared stuck on
+    /// 000000 while the member's text was updating correctly.
+    ///
+    /// `None` together with `stage_image_dirty_full` means the whole stage.
+    pub stage_image_dirty_rect: Option<[i32; 4]>,
+    /// Set when a draw's region could not be determined, so the overlay must
+    /// composite the entire stage. Sticky — once unknown, always unknown.
+    pub stage_image_dirty_full: bool,
     pub center_stage: bool,
     pub keyboard_focus_sprite: i16,
     pub text_selection_start: u16,
@@ -754,6 +769,8 @@ impl DirPlayer {
             stage_draw_rect: None,
             stage_image: None,
             stage_image_dirty: false,
+            stage_image_dirty_rect: None,
+            stage_image_dirty_full: false,
             center_stage: true,
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
@@ -1842,6 +1859,8 @@ impl DirPlayer {
         // stage image again.
         if prev_frame != next_frame {
             self.stage_image_dirty = false;
+            self.stage_image_dirty_rect = None;
+            self.stage_image_dirty_full = false;
 
             // A transition placed on the entered frame plays between the previous
             // stage and this frame's stage. Look up the transition member and hand
