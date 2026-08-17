@@ -3831,7 +3831,53 @@ impl Shockwave3dObjectDatumHandlers {
                         // 4. Commit — push cloned nodes and their runtime state.
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                for (node, transform, shaders, visibility, indexed) in &planned {
+                                // Director re-applies the biped-COM fold on EVERY clone hop.
+                                // Measured with `put` in Director 11.5 against Rifleman's own
+                                // spawn code: the source model reads (0,0,-90), after
+                                // cloneModelFromCastmember (0,0,-180), after .clone() (0,0,+90)
+                                // — one more r0 each time. See the matching note in
+                                // `cast_member/shockwave3d.rs`.
+                                //
+                                // Recording the COM for the clone keeps this a no-op for
+                                // one-hop rigs: the renderer strips `inv(r0)`, so
+                                // `(t * r0) * inv(r0) == t`. Only the second and later hops
+                                // move anything.
+                                // (hops so far, r0) for each source node. A first-generation
+                                // node has no hop record, so its r0 comes from the scene's
+                                // parsed table; a cloned one carries its own, because clones
+                                // are never in that table.
+                                let src_state: Vec<(u32, Option<[f32; 16]>)> = {
+                                    let sc = w3d.parsed_scene.as_deref();
+                                    com_pairs.iter()
+                                        .map(|(src, _)| match w3d.runtime_state.clone_hop_count.get(src) {
+                                            Some((n, r0)) => (*n, Some(*r0)),
+                                            None => (0, sc.and_then(|s| {
+                                                s.model_root_com.get(&src.to_ascii_lowercase()).copied()
+                                            })),
+                                        })
+                                        .collect()
+                                };
+                                // Only hops BEYOND the first re-fold; a node cloned straight
+                                // out of parsed data keeps its transform verbatim, exactly as
+                                // before this change.
+                                let hop_com: Vec<Option<[f32; 16]>> = src_state.iter()
+                                    .map(|(n, r0)| if *n >= 1 { *r0 } else { None })
+                                    .collect();
+                                for (i, (_, new_name)) in com_pairs.iter().enumerate() {
+                                    let (n, r0) = src_state[i];
+                                    if let Some(r0) = r0 {
+                                        w3d.runtime_state.clone_hop_count.insert(*new_name, (n + 1, r0));
+                                    }
+                                }
+                                for (i, (node, transform, shaders, visibility, indexed)) in planned.iter().enumerate() {
+                                    // Fold the RUNTIME transform too — the renderer prefers the
+                                    // runtime override over `node.transform`, and Lingo reads
+                                    // this value back (Director's `.transform.rotation` on the
+                                    // clone reports the folded +90), so the two must agree.
+                                    let transform = &match hop_com[i] {
+                                        Some(r0) => mat4_mul_f32(transform, &r0),
+                                        None => *transform,
+                                    };
                                     w3d.runtime_state.node_transforms.insert(node.name.clone(), *transform);
                                     if let Some(sh) = shaders {
                                         w3d.runtime_state.node_shaders.insert(node.name.clone(), sh.clone());
@@ -3868,16 +3914,16 @@ impl Shockwave3dObjectDatumHandlers {
                                     // the sign: two data points are not a derivation, and
                                     // guessing here is what put AFR2's rider across his
                                     // jetski.
-                                    // NO biped-COM carry. Three attempts to correct a
-                                    // cloned rig's fold here each regressed a working movie
-                                    // (AFR2's rider twice, AreaZero's weapon, Rifleman's own
-                                    // rifle). The r0-vs-inv(r0) asymmetry that Rifleman's
-                                    // soldiers measure out to is real but NOT understood, and
-                                    // "was it cloned" / "did a script reposition it" are both
-                                    // the wrong discriminator. Leave the fold alone until the
-                                    // composition is actually derived rather than curve-fitted.
-                                    let _ = &com_pairs;
-                                    for (node, _, _, _, _) in planned {
+                                    // Re-fold and record, per the measurement above. The
+                                    // earlier note here said the r0-vs-inv(r0) asymmetry was
+                                    // "real but NOT understood" and that clone provenance was
+                                    // the wrong discriminator — both correct. The discriminator
+                                    // is the HOP COUNT, and it only became visible by reading
+                                    // the transform out of real Director.
+                                    for (i, (mut node, _, _, _, _)) in planned.into_iter().enumerate() {
+                                        if let Some(r0) = hop_com[i] {
+                                            node.transform = mat4_mul_f32(&node.transform, &r0);
+                                        }
                                         scene.nodes.push(node);
                                     }
                                 }

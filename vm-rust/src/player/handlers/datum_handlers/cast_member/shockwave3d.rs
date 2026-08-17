@@ -1941,6 +1941,18 @@ impl Shockwave3dMemberHandlers {
                                 })
                         } else { None };
 
+                        // Hop 1 out of a parsed source copies the transform unchanged,
+                        // exactly as before; only hops beyond the first add an r0. Read
+                        // here, before the mutable member borrow below.
+                        let src_hops: u32 = source_member_ref.as_ref()
+                            .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                            .and_then(|sm| sm.member_type.as_shockwave3d())
+                            .and_then(|sw| sw.runtime_state.clone_hop_count
+                                .get(&Symbol::from_str(&source_model_name)).map(|(n, _)| *n))
+                            .unwrap_or(0);
+                        let hops = src_hops + 1;
+                        let mut record_hops: Option<(Symbol, u32, [f32; 16])> = None;
+
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
@@ -1953,6 +1965,33 @@ impl Shockwave3dMemberHandlers {
                                                 scene.motions.push(m.clone());
                                             }
                                         }
+                                        // Director RE-APPLIES the fold on every clone hop, and
+                                        // records it for the new node so the renderer strips it
+                                        // again. Measured in Director 11.5 with `put` on
+                                        // Rifleman's own spawn code (`MovieScript 18`):
+                                        //
+                                        //   src  (member "enemy")            = (0, 0,  -90)
+                                        //   hop1 (cloneModelFromCastmember)  = (0, 0, -180)
+                                        //   hop2 (.clone("soldier_1"))       = (0, 0,  +90)
+                                        //
+                                        // i.e. one more r0 per hop. Copying the transform
+                                        // verbatim, as this path did, left `soldier_1` at -90
+                                        // where Director has +90 — the 180 degrees that made the
+                                        // soldiers draw 90 out once the strip is accounted for.
+                                        //
+                                        // Recording `model_root_com` for the clone is what keeps
+                                        // this SAFE for everyone else: the renderer's strip is
+                                        // `inv(r0)`, so a one-hop clone composes to
+                                        // `(t * r0) * inv(r0) == t` — exactly what it drew
+                                        // before. Only hops BEYOND the first change anything,
+                                        // which is why the three attempts in the handoff's
+                                        // section 2.3 all regressed Agent Free Ride: each of them
+                                        // altered one-hop rigs too. Hop count is the
+                                        // discriminator, not the movie and not provenance.
+                                        let folded_transform = match src_root_com {
+                                            Some(r0) if hops > 1 => mat4_mul_col_major(&source_transform, &r0),
+                                            _ => source_transform,
+                                        };
                                         scene.nodes.push(W3dNode {
                                             name: Symbol::from_str(&obj_name), node_type: W3dNodeType::Model,
                                             parent_name: Symbol::builtin(BuiltInSymbol::World),
@@ -1962,10 +2001,11 @@ impl Shockwave3dMemberHandlers {
                                             visibility: 1,
                                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
-                                            transform: source_transform,
+                                            transform: folded_transform,
                                         });
-                                        // NO biped-COM carry — see the note in `clone`.
-                                        let _ = &src_root_com;
+                                        if let Some(r0) = src_root_com {
+                                            record_hops = Some((Symbol::from_str(&obj_name), hops, r0));
+                                        }
                                         // Namespace every descendant's name to avoid collisions
                                         // with prior clones from the same source.
                                         let mut node_name_map: std::collections::HashMap<Symbol, Symbol> =
@@ -2012,6 +2052,9 @@ impl Shockwave3dMemberHandlers {
                                             tracks: src_motion_tracks.clone(),
                                         });
                                     }
+                                }
+                                if let Some((name, n, r0)) = record_hops {
+                                    w3d.runtime_state.clone_hop_count.insert(name, (n, r0));
                                 }
                             }
                         }
@@ -3376,4 +3419,23 @@ fn render_3d_to_rgba(
     // Return pixels directly (no flip needed — Director bitmaps are top-to-bottom
     // which matches WebGL's bottom-to-top readPixels when used as a texture source)
     pixels
+}
+
+/// Column-major 4x4 multiply, matching `w3d::parser::mat4_mul` exactly.
+///
+/// The clone paths re-apply the biped-COM fold the parser composed, so this MUST
+/// use the same convention and order as the parser's fold
+/// (`node.transform = node.transform * r0`) or the fold and the renderer's strip
+/// stop being inverses and the two sides drift apart.
+fn mat4_mul_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut o = [0.0f32; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            o[c * 4 + r] = a[r] * b[c * 4]
+                + a[4 + r] * b[c * 4 + 1]
+                + a[8 + r] * b[c * 4 + 2]
+                + a[12 + r] * b[c * 4 + 3];
+        }
+    }
+    o
 }

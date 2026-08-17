@@ -1342,6 +1342,27 @@ pub struct Shockwave3dRuntimeState {
     // ─── Per-node overrides (keyed by node name) ───
     /// Transform overrides for nodes (set via Lingo) — used by renderer
     pub node_transforms: std::collections::HashMap<Symbol, [f32; 16]>,
+    /// How many clone hops produced this node. Absent/0 = an originally parsed node.
+    ///
+    /// Director re-applies the biped-COM fold on EVERY clone hop — measured with
+    /// `put` in Director 11.5 against Rifleman's spawn code, where the source model
+    /// reads `(0,0,-90)`, after `cloneModelFromCastmember` `(0,0,-180)`, and after
+    /// `.clone()` `(0,0,+90)`. Rifleman reaches its soldiers through TWO hops and so
+    /// carries one more `r0` than we ever applied, which is the 180 degrees that left
+    /// them drawing 90 out.
+    ///
+    /// Only hops BEYOND the first change the drawn result, so this counter is what
+    /// keeps the correction off every one-hop rig (Agent Free Ride's riders,
+    /// AreaZero's robots and its FPS weapon). Deliberately NOT expressed by recording
+    /// `model_root_com` for the clone and letting the renderer strip: the strip is
+    /// only valid while the node still holds the fold, and a script that assigns the
+    /// transform outright destroys it — that is what blanked AreaZero's weapon. Hop
+    /// count is a property of how the node was BUILT and nothing can invalidate it
+    /// afterwards.
+    /// Carries the rig's `r0` with the count: a cloned node is not in the scene's
+    /// `model_root_com` table (that only holds originally-parsed models), so the
+    /// matrix has to travel with the clone or the second hop has nothing to fold.
+    pub clone_hop_count: std::collections::HashMap<Symbol, (u32, [f32; 16])>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<Symbol, crate::player::DatumRef>,
