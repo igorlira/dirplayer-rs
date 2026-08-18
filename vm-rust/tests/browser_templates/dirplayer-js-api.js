@@ -19,7 +19,15 @@ export function onScopeListChanged() {}
 export function onBreakpointListChanged() {}
 export function onGlobalListChanged() {}
 export function onScriptErrorCleared() {}
-export function onDebugMessage() {}
+// Forward Lingo trace output (`put`, assert failures, the engine's own debug
+// lines) to the page console so E2E_CONSOLE can capture it. This was a no-op,
+// which meant every `put` a movie made vanished in the harness — including the
+// diagnostics movies emit on the exact failure paths you want to see, e.g. AI
+// Entity's `put "Invalid destination: " & kDest` when a navmesh lookup fails.
+// Prefixed so it can be filtered: E2E_CONSOLE=LINGO.
+export function onDebugMessage(message) {
+  console.log('[LINGO]', message);
+}
 export function onDebugContent() {}
 export function onMovieLoadFailed() {}
 
