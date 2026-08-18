@@ -64,6 +64,10 @@ struct MemberGpuData {
     texture_versions: HashMap<Symbol, u64>,
     /// Scene's texture_content_version at last check
     texture_content_version: u64,
+    /// Scene's texture_epoch at last build. A change means the per-texture write
+    /// counters were REWOUND (resetWorld / revertToWorldDefaults) and nothing
+    /// already on the GPU can be trusted.
+    texture_epoch: u64,
     /// Texture names (lowercase) that contain alpha < 250 (need alpha blending)
     alpha_textures: std::collections::HashSet<Symbol>,
     /// Subset of `alpha_textures` whose alpha is a smooth ramp rather than a
@@ -1478,11 +1482,23 @@ void main() {
             // the same size compared equal (Heatwave Daytona's selected car
             // rendered black off a stale texture), and a fixed-size HUD readout
             // never compared unequal at all (Rifleman's frozen clock).
+            // Reuse is decided PER TEXTURE, by its own write counter. It used to be
+            // gated on the scene-wide `texture_content_version` as well, which meant
+            // touching ONE texture re-decoded every JPEG in the member: Agent Free
+            // Ride's track build clones ~40 models, each copying a few textures in,
+            // so the whole texture set was decoded over and over and the level took
+            // ~50 s to load with `decode_and_upload_texture_impl` dominating the
+            // profile. The scene-wide counter is still what triggers the incremental
+            // pass in `ensure_member_data`; it just no longer vetoes carry-over.
+            //
+            // Safe because every write to `texture_images` now goes through
+            // `put_texture_image`, which bumps this per-texture counter — including
+            // `merge` (loadFile), which previously extended the map behind its back.
             let write_version = scene.texture_write_versions.get(tex_name).copied().unwrap_or(0);
-            let tex_content_same = old_gpu
+            let epoch_same = old_gpu
                 .as_ref()
-                .map_or(false, |o| o.texture_content_version == scene.texture_content_version);
-            if let Some(old) = old_gpu.as_mut().filter(|_| tex_content_same) {
+                .map_or(false, |o| o.texture_epoch == scene.texture_epoch);
+            if let Some(old) = old_gpu.as_mut().filter(|_| epoch_same) {
                 if old.texture_versions.get(tex_name) == Some(&write_version) {
                     if let Some(tex) = old.textures.remove(tex_name) {
                         if let Some(sz) = old.texture_sizes.get(tex_name) {
@@ -1558,6 +1574,7 @@ void main() {
             sds_version,
             texture_versions,
             texture_content_version: scene.texture_content_version,
+            texture_epoch: scene.texture_epoch,
             alpha_textures,
             soft_alpha_textures,
         });

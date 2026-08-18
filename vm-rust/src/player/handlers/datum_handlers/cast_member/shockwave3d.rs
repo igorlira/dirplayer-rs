@@ -1323,6 +1323,11 @@ impl Shockwave3dMemberHandlers {
                                 let reset_gen = RESET_GEN.fetch_add(1, Ordering::Relaxed);
                                 fresh.mesh_content_version = reset_gen;
                                 fresh.texture_content_version = reset_gen;
+                                // The restored scene REWINDS per-texture write
+                                // counters to the source's values, which the GPU
+                                // has already seen — so carry-over cannot be
+                                // decided by them here. Stamp the epoch instead.
+                                fresh.texture_epoch = reset_gen;
                                 w3d.parsed_scene = Some(std::rc::Rc::new(fresh));
                             }
                             w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
@@ -1330,6 +1335,8 @@ impl Shockwave3dMemberHandlers {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
                     if handler_name == BuiltInSymbol::RevertToWorldDefaults {
+                        static REVERT_GEN: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(2_000_000);
                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -1337,7 +1344,12 @@ impl Shockwave3dMemberHandlers {
                             // (re-parse from original W3D data)
                             if !w3d.w3d_data.is_empty() {
                                 match crate::director::chunks::w3d::parse_w3d(&w3d.w3d_data) {
-                                    Ok(scene) => {
+                                    Ok(mut scene) => {
+                                        // Same rewind problem as resetWorld: a fresh
+                                        // parse has EMPTY write counters, which compare
+                                        // equal to whatever the GPU recorded.
+                                        scene.texture_epoch = REVERT_GEN
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         w3d.parsed_scene = Some(std::rc::Rc::new(scene));
                                     }
                                     Err(_) => {
@@ -2907,6 +2919,7 @@ impl Shockwave3dMemberHandlers {
                             mesh_content_version: 0,
                             texture_content_version: 0,
                             texture_write_versions: HashMap::new(),
+                            texture_epoch: 0,
                             model_root_com: HashMap::new(),
                         };
                         empty_scene.nodes.push(W3dNode {

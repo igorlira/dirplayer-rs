@@ -510,6 +510,19 @@ pub struct W3dScene {
     /// forever and the GPU copy freezes at whatever was first uploaded. This
     /// counter changes on every write regardless of content or size.
     pub texture_write_versions: HashMap<Symbol, u64>,
+    /// Bumped ONLY when the whole texture set stops being comparable to what the
+    /// GPU holds — `resetWorld` and `revertToWorldDefaults`, which restore an
+    /// earlier scene and therefore REWIND `texture_write_versions` to values the
+    /// renderer has already seen.
+    ///
+    /// Kept separate from `texture_content_version` on purpose. That counter means
+    /// "some texture changed" and is bumped by every ordinary write, including the
+    /// few textures a `cloneModelFromCastmember` copies in; using it to veto GPU
+    /// carry-over made one cloned texture re-decode every JPEG in the member, which
+    /// is most of what made Agent Free Ride's level 2 slow to load and to run.
+    /// Per-texture write counters handle the ordinary case precisely; this epoch
+    /// covers the case they cannot express, where a counter goes BACKWARDS.
+    pub texture_epoch: u64,
     /// Per skinned model (lowercased node name): the biped COM that Director folds
     /// into the model node at import — the root bone's frame-0 pose from the model's
     /// reference motion. Recorded here so the renderer strips exactly the matrix the

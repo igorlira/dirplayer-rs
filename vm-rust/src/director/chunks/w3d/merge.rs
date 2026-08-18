@@ -246,7 +246,15 @@ impl W3dScene {
         merge_named(&mut self.skeletons, src.skeletons, |s| s.name.clone().to_string());
         merge_named(&mut self.motions, src.motions, |m| m.name.clone().to_string());
         merge_named(&mut self.raw_meshes, src.raw_meshes, |m| m.name.clone().to_string());
-        self.texture_images.extend(src.texture_images);
+        // Through `put_texture_image`, not `extend`: a merge REPLACES same-named
+        // textures, and the renderer decides what to re-upload from the PER-TEXTURE
+        // write counter. Extending the map directly left that counter untouched, so
+        // the only thing marking a merged texture dirty was the scene-wide
+        // `texture_content_version` — which forces every texture in the member to be
+        // re-decoded, not just the ones that changed.
+        for (name, data) in src.texture_images {
+            self.put_texture_image(name, data);
+        }
         self.model_resources.extend(src.model_resources);
         self.clod_meshes.extend(src.clod_meshes);
         self.clod_decoders.extend(src.clod_decoders);
