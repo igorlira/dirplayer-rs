@@ -1168,9 +1168,16 @@ impl BitmapDatumHandlers {
                         off_y = distance * rad.sin();
                     }
                     let color = filter_color.unwrap_or((0, 0, 0));
+                    // `#inner: TRUE` turns a glow inward (Flash GlowFilter.inner).
+                    let inner = props
+                        .get(&Symbol::from_str("inner"))
+                        .copied()
+                        .unwrap_or(0.0)
+                        != 0.0
+                        && kind.into_builtin() == Some(BuiltInSymbol::GlowFilter);
                     apply_glow_shadow_filter(
                         bitmap, color, blur_x, blur_y, quality, strength,
-                        off_x.round() as i32, off_y.round() as i32,
+                        off_x.round() as i32, off_y.round() as i32, inner,
                     );
                     bitmap.mark_dirty();
                 }
@@ -1340,6 +1347,10 @@ fn apply_glow_shadow_filter(
     strength: f64,
     offset_x: i32,
     offset_y: i32,
+    // `#inner: TRUE` — glow INWARD from the edge instead of outward.
+    // AreaZero's ScoreLevelLightInnerGlow depends on this: applying it as an
+    // outer glow stacked a second halo outside every HUD glyph.
+    inner: bool,
 ) {
     if bitmap.bit_depth != 32 {
         log::warn!(
@@ -1354,15 +1365,22 @@ fn apply_glow_shadow_filter(
         return;
     }
 
-    // Source alpha, normalised.
+    // Source alpha, normalised. An INNER glow blurs the inverse coverage —
+    // the glow grows inward from the silhouette edge.
     let mut a: Vec<f32> = (0..w * h)
-        .map(|i| bitmap.data[i * 4 + 3] as f32 / 255.0)
+        .map(|i| {
+            let v = bitmap.data[i * 4 + 3] as f32 / 255.0;
+            if inner { 1.0 - v } else { v }
+        })
         .collect();
 
-    // Separable box blur. Radius is half the Flash blur amount (blurX is the
-    // full extent of the kernel, not its radius).
-    let rx = (blur_x / 2.0).round().max(0.0) as usize;
-    let ry = (blur_y / 2.0).round().max(0.0) as usize;
+    // Separable box blur. blurX is the full WIDTH of the kernel, not its
+    // radius, so the radius is floor(blur/2) — blur 1 is a hard edge (no
+    // spread), blur 3 spreads 1px each side. Rounding UP here (blur 3 →
+    // radius 2) doubled the halo width of AreaZero's HUD glows and made every
+    // baked string look blurry next to a real projector capture.
+    let rx = (blur_x / 2.0).floor().max(0.0) as usize;
+    let ry = (blur_y / 2.0).floor().max(0.0) as usize;
     let mut tmp = vec![0.0f32; w * h];
     for _ in 0..quality.max(1) {
         if rx > 0 {
@@ -1395,9 +1413,34 @@ fn apply_glow_shadow_filter(
         }
     }
 
-    // Composite the tinted, offset blur under the original (dest-over).
     let (sr, sg, sb) = (color.0 as f32, color.1 as f32, color.2 as f32);
     let src = bitmap.data.clone();
+
+    if inner {
+        // Inner glow composites the tint INSIDE the glyph (source-atop): the
+        // pixel's own alpha is untouched, the colour blends toward the glow
+        // colour by the blurred inverse coverage. Offset does not apply.
+        for i in 0..w * h {
+            let di = i * 4;
+            let fa = src[di + 3] as f32 / 255.0;
+            if fa <= 0.0 {
+                continue;
+            }
+            let ga = (a[i] * strength as f32).clamp(0.0, 1.0);
+            if ga <= 0.0 {
+                continue;
+            }
+            for (c, sc) in [(0usize, sr), (1, sg), (2, sb)] {
+                let fc = src[di + c] as f32;
+                bitmap.data[di + c] =
+                    (fc * (1.0 - ga) + sc * ga).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        bitmap.use_alpha = true;
+        return;
+    }
+
+    // Composite the tinted, offset blur under the original (dest-over).
     for y in 0..h {
         for x in 0..w {
             let di = (y * w + x) * 4;
