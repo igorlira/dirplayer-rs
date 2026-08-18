@@ -8315,69 +8315,104 @@ fn model_bounding_sphere(
     model_name: &str,
     member_ref: &crate::player::cast_lib::CastMemberRef,
 ) -> ([f64; 3], f64) {
-    // The node plus every descendant (case-insensitive parent match, as elsewhere).
-    let mut names: Vec<String> = vec![model_name.to_string()];
-    let mut stack = vec![model_name.to_string()];
+    // Hot path: the culling manager bins ~1400 models by this, and vehicles ask
+    // for it every frame (`Vehicle Base.getBSRadius`). It used to walk the
+    // descendant list with a full O(nodes) scan per parent AND materialise two
+    // copies of every vertex in the subtree (`local`, then `points`) per call.
+    // Both are gone: children are indexed once, and the mesh positions already
+    // live in the scene, so they are read in place across two passes.
+    //
+    // The arithmetic is unchanged — same traversal order, same world transform,
+    // same AABB centre and same max-distance radius — so the values still match
+    // Director (verified on `l_t_d1_13`: 13714.9258 vs Director's 13714.9189).
+    static ORIGIN_ONLY: [[f32; 3]; 1] = [[0.0, 0.0, 0.0]];
+
+    let mut children_by_parent: std::collections::HashMap<Symbol, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, n) in scene.nodes.iter().enumerate() {
+        children_by_parent.entry(n.parent_name).or_default().push(i);
+    }
+
+    // The node plus every descendant. Symbols intern case-insensitively, so set
+    // membership already does the case folding the old string scan spelled out.
+    let root = Symbol::from_str(model_name);
+    let mut visited: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    visited.insert(root);
+    let mut names: Vec<Symbol> = vec![root];
+    let mut stack: Vec<Symbol> = vec![root];
     while let Some(parent) = stack.pop() {
-        for n in &scene.nodes {
-            if n.parent_name.eq_ignore_ascii_case(&parent)
-                && !names.iter().any(|e| e.eq_ignore_ascii_case(&n.name.as_str()))
-            {
-                names.push(n.name.clone().to_string());
-                stack.push(n.name.clone().to_string());
+        if let Some(kids) = children_by_parent.get(&parent) {
+            for &i in kids {
+                let n = &scene.nodes[i];
+                if visited.insert(n.name) {
+                    names.push(n.name);
+                    stack.push(n.name);
+                }
             }
         }
     }
 
-    let mut min = [f64::MAX; 3];
-    let mut max = [f64::MIN; 3];
-    let mut points: Vec<[f64; 3]> = Vec::new();
-
+    // (world matrix, positions) per contributing node — references, not copies.
+    let mut parts: Vec<([f32; 16], &[[f32; 3]])> = Vec::with_capacity(names.len());
     for name in &names {
-        let world = node_world_matrix(player, scene, member_ref, Symbol::from_str(&*name));
+        let world = node_world_matrix(player, scene, member_ref, *name);
         let node = scene.nodes.iter().find(|n| n.name == *name);
-
-        // Collect this node's local-space vertices.
-        let mut local: Vec<[f32; 3]> = Vec::new();
+        let mut pushed = false;
         if let Some(n) = node {
             let key = if !n.model_resource_name.is_empty() {
-                n.model_resource_name.clone()
+                n.model_resource_name
             } else {
-                n.resource_name.clone()
+                n.resource_name
             };
             if let Some(meshes) = scene.clod_meshes.get(&key) {
                 for mesh in meshes {
-                    local.extend_from_slice(&mesh.positions);
+                    if !mesh.positions.is_empty() {
+                        parts.push((world, mesh.positions.as_slice()));
+                        pushed = true;
+                    }
                 }
             }
-            if local.is_empty() {
-                if let Some(raw) = scene.raw_meshes.iter().find(|m| m.name.eq_ignore_ascii_case(&key.as_str())) {
-                    local.extend_from_slice(&raw.positions);
+            if !pushed {
+                if let Some(raw) = scene.raw_meshes.iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&key.as_str()))
+                {
+                    if !raw.positions.is_empty() {
+                        parts.push((world, raw.positions.as_slice()));
+                        pushed = true;
+                    }
                 }
             }
         }
         // No geometry: contribute the node's own origin so groups/lights still
         // report a sensible centre.
-        if local.is_empty() {
-            local.push([0.0, 0.0, 0.0]);
+        if !pushed {
+            parts.push((world, &ORIGIN_ONLY));
         }
+    }
 
-        for v in &local {
-            let (x, y, z) = (v[0] as f64, v[1] as f64, v[2] as f64);
-            let w = [
-                world[0] as f64 * x + world[4] as f64 * y + world[8] as f64 * z + world[12] as f64,
-                world[1] as f64 * x + world[5] as f64 * y + world[9] as f64 * z + world[13] as f64,
-                world[2] as f64 * x + world[6] as f64 * y + world[10] as f64 * z + world[14] as f64,
-            ];
+    let to_world = |w: &[f32; 16], v: &[f32; 3]| -> [f64; 3] {
+        let (x, y, z) = (v[0] as f64, v[1] as f64, v[2] as f64);
+        [
+            w[0] as f64 * x + w[4] as f64 * y + w[8] as f64 * z + w[12] as f64,
+            w[1] as f64 * x + w[5] as f64 * y + w[9] as f64 * z + w[13] as f64,
+            w[2] as f64 * x + w[6] as f64 * y + w[10] as f64 * z + w[14] as f64,
+        ]
+    };
+
+    let mut min = [f64::MAX; 3];
+    let mut max = [f64::MIN; 3];
+    let mut any = false;
+    for (world, positions) in &parts {
+        for v in positions.iter() {
+            let w = to_world(world, v);
             for i in 0..3 {
                 if w[i] < min[i] { min[i] = w[i]; }
                 if w[i] > max[i] { max[i] = w[i]; }
             }
-            points.push(w);
+            any = true;
         }
     }
-
-    if points.is_empty() {
+    if !any {
         return ([0.0, 0.0, 0.0], 0.0);
     }
 
@@ -8387,12 +8422,15 @@ fn model_bounding_sphere(
         (min[2] + max[2]) * 0.5,
     ];
     let mut radius_sq = 0.0f64;
-    for p in &points {
-        let d = (p[0] - center[0]).powi(2)
-            + (p[1] - center[1]).powi(2)
-            + (p[2] - center[2]).powi(2);
-        if d > radius_sq {
-            radius_sq = d;
+    for (world, positions) in &parts {
+        for v in positions.iter() {
+            let p = to_world(world, v);
+            let d = (p[0] - center[0]).powi(2)
+                + (p[1] - center[1]).powi(2)
+                + (p[2] - center[2]).powi(2);
+            if d > radius_sq {
+                radius_sq = d;
+            }
         }
     }
     (center, radius_sq.sqrt())
