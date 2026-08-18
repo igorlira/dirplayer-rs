@@ -5552,6 +5552,57 @@ void main() {
 /// even for fine foliage — so the gap between the two populations is wide.
 const SOFT_ALPHA_FRACTION: f32 = 0.20;
 
+/// Second, independent translucency test, for a texture that is mostly EMPTY.
+/// `SOFT_ALPHA_FRACTION` is measured over EVERY texel, so a small effect on a
+/// large transparent field can never reach it however faint the effect is.
+/// Judge those by the texels that are visible at all: an alpha-keyed cutout
+/// keeps a solid alpha-255 interior and spends only its outline on partial
+/// alpha, while a translucent effect is almost nothing but partial alpha.
+const TRANSLUCENT_OF_VISIBLE_FRACTION: f32 = 0.80;
+
+/// Floor on the partial-alpha texel COUNT for the test above, so a handful of
+/// stray anti-aliased texels in an otherwise binary mask cannot carry it.
+const TRANSLUCENT_MIN_SOFT_TEXELS: usize = 64;
+
+/// Classify a decoded RGBA buffer as `(has_alpha, soft_alpha)`.
+///
+/// * `has_alpha` — the texture carries alpha at all, so it must not be drawn as
+///   flat opaque geometry.
+/// * `soft_alpha` — the alpha is a genuine translucency RAMP rather than an
+///   alpha-keyed CUTOUT mask (foliage, decals, icon atlases, where only the
+///   anti-aliased outline sits between fully-on and fully-off). Director always
+///   alpha-blends; the alpha-tested cutout pass is our approximation and is only
+///   equivalent for a binary mask. Applied to a ramp it quantises every texel to
+///   fully-on/fully-off — AreaZero's MenuScanLines camera filter (55% mid-alpha)
+///   came out as solid black bars.
+///
+/// Two independent tests, because one measure cannot cover both shapes:
+///
+/// 1. Mid-alpha over the WHOLE texture (`SOFT_ALPHA_FRACTION`). Catches a filter
+///    or a haze that covers most of its own image.
+/// 2. Mid-alpha over just the VISIBLE texels (`TRANSLUCENT_OF_VISIBLE_FRACTION`).
+///    Catches a small, faint effect on a large empty field, which test 1 can
+///    never reach however translucent it is. Rasterwerks' pulse-gun muzzle flash
+///    (`Flarel~6`) is 77% fully transparent and only 6.7% mid-alpha overall, so
+///    it was alpha-tested — which discards the faint 95% of the flash and draws
+///    the rest as a hard, solid-white bar. Of the texels that are visible at
+///    all, 97% are partial alpha: it is translucent, not a mask.
+fn classify_texture_alpha(rgba_data: &[u8]) -> (bool, bool) {
+    let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
+
+    let total = rgba_data.len() / 4;
+    let soft = rgba_data.chunks(4).filter(|p| p[3] >= 16 && p[3] < 240).count();
+    let opaque = rgba_data.chunks(4).filter(|p| p[3] >= 240).count();
+    let visible = soft + opaque;
+    let mostly_translucent = soft >= TRANSLUCENT_MIN_SOFT_TEXELS
+        && visible > 0
+        && (soft as f32 / visible as f32) > TRANSLUCENT_OF_VISIBLE_FRACTION;
+    let soft_alpha = total > 0
+        && ((soft as f32 / total as f32) > SOFT_ALPHA_FRACTION || mostly_translucent);
+
+    (has_alpha, soft_alpha)
+}
+
 fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
     if data.len() < 4 { return None; }
 
@@ -5705,18 +5756,7 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     }
     gl.generate_mipmap(WebGl2RenderingContext::TEXTURE_2D);
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-    // Detect if texture has meaningful alpha (any pixel alpha < 250)
-    let has_alpha = rgba_data.chunks(4).any(|p| p[3] < 250);
-    // Distinguish a CUTOUT mask (alpha is essentially binary — foliage, decals,
-    // icon atlases; only anti-aliased edge texels sit in between) from a genuinely
-    // TRANSLUCENT texture (a broad spread of intermediate alpha). Director always
-    // alpha-blends; the alpha-tested cutout pass is our approximation and is only
-    // equivalent when the mask is binary. Applied to a soft texture it quantises
-    // every texel to fully-on/fully-off — AreaZero's MenuScanLines camera filter
-    // (55% of its texels are mid-alpha) came out as solid black bars.
-    let total = rgba_data.len() / 4;
-    let soft = rgba_data.chunks(4).filter(|p| p[3] >= 16 && p[3] < 240).count();
-    let soft_alpha = total > 0 && (soft as f32 / total as f32) > SOFT_ALPHA_FRACTION;
+    let (has_alpha, soft_alpha) = classify_texture_alpha(&rgba_data);
 
     Some((texture, width, height, has_alpha, soft_alpha))
 }
@@ -6150,3 +6190,76 @@ fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
+#[cfg(test)]
+mod alpha_classification_tests {
+    use super::classify_texture_alpha;
+
+    /// Build a 128x128 RGBA buffer from a per-texel alpha function.
+    fn tex(alpha_at: impl Fn(usize, usize) -> u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128 {
+            for x in 0..128 {
+                out.extend_from_slice(&[255, 255, 255, alpha_at(x, y)]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn opaque_texture_has_no_alpha() {
+        let (has_alpha, soft) = classify_texture_alpha(&tex(|_, _| 255));
+        assert!(!has_alpha);
+        assert!(!soft);
+    }
+
+    /// A binary cutout — a solid alpha-255 disc with a one-texel anti-aliased
+    /// rim — must stay in the alpha-TESTED pass so it keeps writing depth.
+    #[test]
+    fn binary_cutout_is_not_soft() {
+        let mask = tex(|x, y| {
+            let d = (((x as f32) - 64.0).powi(2) + ((y as f32) - 64.0).powi(2)).sqrt();
+            if d < 40.0 { 255 } else if d < 41.0 { 128 } else { 0 }
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&mask);
+        assert!(has_alpha);
+        assert!(!soft, "an anti-aliased disc is a cutout mask, not a translucency ramp");
+    }
+
+    /// A faint effect on a large empty field — the shape of every muzzle flash,
+    /// spark and blood decal. Its mid-alpha texels are a small share of the
+    /// TEXTURE but almost all of what is visible, so it must be BLENDED.
+    /// Alpha-testing it at 0.5 is what drew Rasterwerks' pulse-gun flash as a
+    /// solid white bar.
+    #[test]
+    fn faint_flare_on_empty_field_is_soft() {
+        // A horizontal streak across the middle 8 rows, alpha 8..64 — well under
+        // the 0.5 alpha test, and only 6% of the texture.
+        let flare = tex(|x, _y2| (8 + (x % 56)) as u8);
+        let flare = {
+            let mut v = flare;
+            for y in 0..128 {
+                for x in 0..128 {
+                    if !(60..68).contains(&y) {
+                        v[(y * 128 + x) * 4 + 3] = 0;
+                    }
+                }
+            }
+            v
+        };
+        let (has_alpha, soft) = classify_texture_alpha(&flare);
+        assert!(has_alpha);
+        assert!(soft, "a faint streak on a transparent field is translucent, not a mask");
+    }
+
+    /// The floor guards the visible-texel test against noise: a handful of
+    /// stray anti-aliased texels must not make an otherwise binary mask soft.
+    #[test]
+    fn a_few_stray_soft_texels_do_not_make_a_mask_soft() {
+        let mut data = tex(|_, _| 0);
+        for i in 0..16 {
+            data[i * 4 + 3] = 100;
+        }
+        let (_has_alpha, soft) = classify_texture_alpha(&data);
+        assert!(!soft);
+    }
+}
