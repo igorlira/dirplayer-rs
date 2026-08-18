@@ -1390,8 +1390,22 @@ impl Shockwave3dMemberHandlers {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
                                     if let Some(ref scene) = sw3d.parsed_scene {
                                         let node = scene.nodes.iter().find(|n| n.name == Symbol::from_str(&source_model_name));
+                                        // `node.transform` is only the placement the node was
+                                        // BORN with. Once the movie writes `model.transform`,
+                                        // the live value lives in `runtime_state.node_transforms`
+                                        // and the parsed node is never updated — so a source that
+                                        // the movie itself placed clones to the wrong spot.
+                                        // Agent Free Ride's `Scan3DWorld` clones every laser gate
+                                        // out of a track block the Track Builder had positioned,
+                                        // and all 32 gates landed at the origin: invisible, and
+                                        // the `Checkline` gates built from `pMdlTransform` could
+                                        // never fire, so the laser walls did nothing at all.
+                                        let live_transform = |name: Symbol| -> Option<[f32; 16]> {
+                                            sw3d.runtime_state.node_transforms.get(&name).copied()
+                                        };
                                         let (sn, st, sr, smr) = if let Some(n) = node {
-                                            (n.shader_name, n.transform, n.resource_name, n.model_resource_name)
+                                            (n.shader_name, live_transform(n.name).unwrap_or(n.transform),
+                                             n.resource_name, n.model_resource_name)
                                         } else {
                                             (Symbol::empty(), identity, Symbol::empty(), Symbol::empty())
                                         };
@@ -1464,7 +1478,12 @@ impl Shockwave3dMemberHandlers {
                                                 }
                                                 if let Some(kids) = children_by_parent.get(&key) {
                                                     for n in kids {
-                                                        descendants.push((*n).clone());
+                                                        let mut child = (*n).clone();
+                                                        // Same live-placement rule as the root.
+                                                        if let Some(t) = live_transform(child.name) {
+                                                            child.transform = t;
+                                                        }
+                                                        descendants.push(child);
                                                         stack.push(n.name.clone().to_string());
                                                     }
                                                 }
