@@ -1204,7 +1204,83 @@ fn apply_force_at(
 //  Linear-joint hard constraint (per-iteration row).
 // ==========================================================================
 
+/// The ANGULAR half of a linear joint. Per the Director 11.5 dictionary
+/// (`createLinearJoint()`): "A linear joint is free to move in the linear
+/// direction. It is constrained in the angular direction. The angles to be
+/// maintained as constrained is specified as the second parameter" — the
+/// `[axis, angleDegrees]` list, which `ConstraintDesc` documents as "the
+/// alignment of objectB with respect to object A".
+///
+/// So a linear joint pins the RELATIVE ORIENTATION of its two bodies to that
+/// axis-angle and leaves translation alone. The positional row below is a
+/// separate, two-body-only concern; this one is what the joint is actually
+/// for, and it also runs when body B is VOID — i.e. against the world, which
+/// is the ordinary way to keep an upright character proxy upright.
+///
+/// AreaZero's `[PS] FPS` is exactly that case:
+///   `ConstraintDesc("FPSPlayer1AngularConstraint…", tRB, VOID, …)` +
+///   `createLinearJoint(desc, [vector(0, 0, 1), 0])`
+/// = hold the player's collision proxy at zero rotation. Without it the
+/// convex proxy tumbled freely: it picked up ~10° of roll off a stair edge
+/// and drifted 90° in yaw with no input, and since `directionModel` (and
+/// therefore Player1_Camera and the fire ray) is parented to that proxy, the
+/// whole aim rolled and swung with it.
+fn solve_linear_joint_angular(state: &mut PhysXPhysicsState, dt: f64, baumgarte: f64) {
+    let constraint_count = state.constraints.len();
+    for ci in 0..constraint_count {
+        let c = &state.constraints[ci];
+        if !matches!(c.kind, PhysXConstraintKind::LinearJoint) { continue; }
+        let (body_a_id, body_b_id, target) = (c.body_a, c.body_b, c.orientation);
+
+        let Some(ia) = body_a_id.and_then(|id| state.bodies.iter().position(|b| b.id == id))
+            else { continue; };
+        let ib = body_b_id.and_then(|id| state.bodies.iter().position(|b| b.id == id));
+        if Some(ia) == ib { continue; }
+
+        // q_target is B's frame rotated into A's; with no B, B is the world.
+        let q_target = axisangle_to_quat(target);
+        let qa = axisangle_to_quat(state.bodies[ia].orientation);
+        let qb = ib.map(|i| axisangle_to_quat(state.bodies[i].orientation))
+            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        // Error rotation that would take A to where it should be, in world space.
+        let q_want = q_mul(qb, q_target);
+        let mut q_err = q_mul(q_want, q_inv(qa));
+        if q_err[3] < 0.0 { q_err = [-q_err[0], -q_err[1], -q_err[2], -q_err[3]]; }
+        let aa = quat_to_axisangle(q_err);
+        let theta_rad = aa[3] * std::f64::consts::PI / 180.0;
+        let theta = [aa[0] * theta_rad, aa[1] * theta_rad, aa[2] * theta_rad];
+
+        // Drive the relative angular velocity to the Baumgarte correction. The
+        // joint is a HARD constraint, so this is a velocity-level projection
+        // rather than a spring — stiffness/damping describe the spring form.
+        let w_target = v_mul(theta, baumgarte / dt.max(1e-9));
+        let w_rel = match ib {
+            Some(i) => v_sub(state.bodies[ia].angular_velocity, state.bodies[i].angular_velocity),
+            None => state.bodies[ia].angular_velocity,
+        };
+        let dw = v_sub(w_target, w_rel);
+        if v_len_sq(dw) < 1e-18 { continue; }
+
+        // Split the correction between the two bodies by inverse inertia along
+        // each component; with no B (the world) A takes all of it.
+        let inv_a = inverse_inertia_diag(&state.bodies[ia]);
+        let inv_b = ib.map(|i| inverse_inertia_diag(&state.bodies[i])).unwrap_or([0.0; 3]);
+        for k in 0..3 {
+            let sum = inv_a[k] + inv_b[k];
+            if sum <= 0.0 { continue; }
+            let share_a = inv_a[k] / sum;
+            state.bodies[ia].angular_velocity[k] += dw[k] * share_a;
+            if let Some(i) = ib {
+                state.bodies[i].angular_velocity[k] -= dw[k] * (1.0 - share_a);
+            }
+        }
+        state.bodies[ia].cached_is_sleeping = false;
+        if let Some(i) = ib { state.bodies[i].cached_is_sleeping = false; }
+    }
+}
+
 fn solve_linear_joints(state: &mut PhysXPhysicsState, dt: f64, baumgarte: f64) {
+    solve_linear_joint_angular(state, dt, baumgarte);
     let constraint_count = state.constraints.len();
     for ci in 0..constraint_count {
         let c = &state.constraints[ci];

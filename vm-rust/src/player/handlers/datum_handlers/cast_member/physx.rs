@@ -1264,7 +1264,34 @@ impl PhysXPhysicsMemberHandlers {
                 .ok_or_else(|| ScriptError::new("Invalid ConstraintDesc".to_string()))?
         };
         // For D6 args[1] is rb1, not a length.
-        let extra_length = if !is_d6 && args.len() > 1 {
+        //
+        // For a LINEAR joint args[1] is not a length either: the dictionary
+        // signature is `createLinearJoint(ConstraintDesc desc, list orientation)`
+        // and the list is `[axisVector, angleDegrees]` — "the angles to be
+        // maintained as constrained". `to_float()` on that list yields 0.0, so
+        // the orientation used to be discarded outright and the joint had no
+        // angular effect at all. Decode it into the constraint's axis-angle.
+        let is_linear = matches!(kind, PhysXConstraintKind::LinearJoint);
+        let mut orientation: Option<[f64; 4]> = None;
+        if is_linear && args.len() > 1 {
+            if let Datum::List(_, items, _) = player.get_datum(&args[1]) {
+                let items = items.clone();
+                if items.len() >= 2 {
+                    let axis = player.get_datum(&items[0]).to_vector().ok();
+                    let angle = player.get_datum(&items[1]).to_float().unwrap_or(0.0);
+                    if let Some(a) = axis {
+                        // Normalize; a zero axis means "no rotation".
+                        let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                        orientation = Some(if len > 1e-9 {
+                            [a[0] / len, a[1] / len, a[2] / len, angle]
+                        } else {
+                            [1.0, 0.0, 0.0, 0.0]
+                        });
+                    }
+                }
+            }
+        }
+        let extra_length = if !is_d6 && !is_linear && args.len() > 1 {
             player.get_datum(&args[1]).to_float().unwrap_or(0.0)
         } else {
             0.0
@@ -1297,6 +1324,7 @@ impl PhysXPhysicsMemberHandlers {
         c.stiffness = desc.stiffness;
         c.damping = desc.damping;
         c.rest_length = extra_length;
+        if let Some(o) = orientation { c.orientation = o; }
         physx.state.constraints.push(c);
 
         let object_type = match kind {
