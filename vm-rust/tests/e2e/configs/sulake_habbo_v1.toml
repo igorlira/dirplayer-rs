@@ -3,6 +3,7 @@ path = "dcr_sulake/habbo_v1/loader.dcr"
 
 [test]
 suite = "sulake"
+tags = ["2d"]
 
 [external_params]
 swText = "localhost:37121"

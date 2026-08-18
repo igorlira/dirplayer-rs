@@ -3,3 +3,4 @@ path = "dcr_misc/johnny.dcr"
 
 [test]
 suite = "misc"
+tags = ["2d"]

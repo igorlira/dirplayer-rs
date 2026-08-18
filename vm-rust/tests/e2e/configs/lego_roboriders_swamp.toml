@@ -3,3 +3,4 @@ path = "dcr_lego/ClubGames/RoboRiders/swamp.dcr"
 
 [test]
 suite = "lego"
+tags = ["2d"]

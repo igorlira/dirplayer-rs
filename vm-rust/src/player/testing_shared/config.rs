@@ -82,6 +82,20 @@ pub struct TestSection {
     pub suite: String,
     #[serde(default = "TestSection::default_timeout")]
     pub default_timeout: f64,
+    /// Subsystems this movie exercises, from the Type column of
+    /// `docs/github_wiki/Tested-Movies.md`: `2d`, `flash`, `3d`, `havok`,
+    /// `physx`, `groove3d`. A movie can carry several.
+    ///
+    /// `E2E_TAGS=3d,havok npm run e2e-test-browser` runs only the tests whose
+    /// movie carries at least one of the listed tags, so a change to (say) the
+    /// Havok port can be regression-checked without playing the entire suite --
+    /// which is both slow and, at full length, prone to exhausting the browser.
+    ///
+    /// The runner reads this at BUILD time (`scripts/run-browser-tests.mjs`
+    /// walks `tests/e2e/**` and pairs each test with the config its file
+    /// includes), so filtering costs nothing at runtime.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl Default for TestSection {
@@ -89,6 +103,7 @@ impl Default for TestSection {
         TestSection {
             suite: String::new(),
             default_timeout: DEFAULT_TIMEOUT_SECS,
+            tags: Vec::new(),
         }
     }
 }

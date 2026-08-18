@@ -3,3 +3,4 @@ path = "dcr_misc/Infestation.dcr"
 
 [test]
 suite = "misc"
+tags = ["2d"]

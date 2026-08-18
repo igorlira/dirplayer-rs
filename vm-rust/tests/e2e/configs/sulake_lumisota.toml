@@ -3,3 +3,4 @@ path = "dcr_sulake/lumisota/lumisota.dcr"
 
 [test]
 suite = "sulake"
+tags = ["2d"]

@@ -3,6 +3,7 @@ path = "dcr_sulake/habbo_v7/habbo.dcr"
 
 [test]
 suite = "sulake"
+tags = ["2d"]
 
 [params]
 username = "${HABBO_V7_USERNAME:testuser}"

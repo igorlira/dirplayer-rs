@@ -3,3 +3,4 @@ path = "dcr_nintendo/fish.dcr"
 
 [test]
 suite = "nintendo"
+tags = ["2d"]

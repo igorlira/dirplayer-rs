@@ -3,6 +3,7 @@ path = "dcr_sulake/habbo_v31/habbo.dcr"
 
 [test]
 suite = "sulake"
+tags = ["2d"]
 
 [external_params]
 sw1 = "connection.info.host=${HABBO_V31_INFO_HOST:127.0.0.1}"

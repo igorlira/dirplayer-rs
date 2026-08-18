@@ -3,3 +3,4 @@ path = "dcr_lego/ClubGames/SuperSonic_RC/game.dcr"
 
 [test]
 suite = "lego"
+tags = ["3d", "havok"]

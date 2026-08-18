@@ -3,3 +3,4 @@ path = "dcr_hotwheels/rw_flag.dcr"
 
 [test]
 suite = "hotwheels"
+tags = ["2d"]

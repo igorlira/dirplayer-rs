@@ -83,6 +83,13 @@
     window.__testDebug = $DEBUG_MODE;
     // Optional substring filter (E2E_FILTER env var) — run only matching test_* fns.
     window.__testFilter = "$TEST_FILTER";
+    // Optional SUBSYSTEM filter (E2E_TAGS env var), e.g. "3d,havok" — run only
+    // tests whose movie carries at least one of the listed tags. The map is
+    // resolved at build time from each movie's `[test] tags` (see
+    // scripts/run-browser-tests.mjs); a test missing from it is untagged and is
+    // therefore excluded whenever a tag filter is active.
+    window.__testTags = "$TEST_TAGS";
+    window.__testTagMap = $TEST_TAGS_JSON;
     // Interpreter opcode/escape counters — see E2E_INTERP_STATS in
     // scripts/run-browser-tests.mjs.
     window.__interpStatsEnabled = $INTERP_STATS;
@@ -233,9 +240,18 @@
 
       const testFilter = (window.__testFilter || '').trim().toLowerCase();
       const filterParts = testFilter ? testFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const tagFilter = (window.__testTags || '').trim().toLowerCase();
+      const wantedTags = tagFilter ? tagFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const tagMap = window.__testTagMap || {};
       const testFns = Object.keys(wasm)
         .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function')
-        .filter(k => filterParts.length === 0 || filterParts.some(f => k.toLowerCase().includes(f)));
+        .filter(k => filterParts.length === 0 || filterParts.some(f => k.toLowerCase().includes(f)))
+        // Tag filter is ANDed with the name filter, so the two compose.
+        .filter(k => wantedTags.length === 0
+          || (tagMap[k] || []).some(t => wantedTags.includes(t)));
+      if (wantedTags.length > 0) {
+        statusLine('E2E_TAGS=' + tagFilter + ' -> ' + testFns.length + ' test(s)');
+      }
 
       for (const name of testFns) {
         const group = startTest(name);

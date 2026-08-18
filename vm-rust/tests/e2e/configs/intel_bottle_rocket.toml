@@ -3,3 +3,4 @@ path = "dcr_intel/BottleRocket.dcr"
 
 [test]
 suite = "intel"
+tags = ["3d"]

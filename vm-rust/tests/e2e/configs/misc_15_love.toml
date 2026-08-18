@@ -3,3 +3,4 @@ path = "dcr_misc/15love_hs.dcr"
 
 [test]
 suite = "misc"
+tags = ["2d"]
