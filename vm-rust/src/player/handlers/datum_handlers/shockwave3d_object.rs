@@ -3397,13 +3397,30 @@ impl Shockwave3dObjectDatumHandlers {
                 "getWorldTransform" => {
                     // Return world-relative transform (accumulated through parent chain)
                     // Uses case-insensitive lookups throughout (Director is case-insensitive)
+                    //
+                    // Every level of the walk reads the LIVE persistent Transform3d
+                    // datum (get_node_transform_live), not the once-per-frame
+                    // node_transforms cache, because `model.transform.position = v`
+                    // mutates that datum in place and the cache only catches up at the
+                    // next sync_persistent_transforms. `worldPosition` already did
+                    // this; getWorldTransform did not, so a handler that placed a node
+                    // and then read its world transform got the PRE-WRITE pose.
+                    //
+                    // AreaZero's [M] FPS Weapon.setup_Elite is that pattern: it zeroes
+                    // the cloned weapon with `tmodel.transform.position = vector(0,0,0)`
+                    // and, still in the same handler, rebases the muzzle/shell/grenade
+                    // groups with `tmodel.getWorldTransform().inverse() * <authored>`.
+                    // Reading the stale pose left the source model's authored z of
+                    // 101.27 in that inverse, so at the weapon's 0.01 scale the muzzle
+                    // group ended up ~1.01 units off — the flash and the bullet spawned
+                    // near the player's waist instead of at the barrel.
                     let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                     let world_t = if let Some(m) = member {
                         if let Some(w3d) = m.member_type.as_shockwave3d() {
                             if let Some(ref scene) = w3d.parsed_scene {
                                 if let Some(node) = scene.nodes.iter().find(|n| n.name == s3d_ref.name) {
                                     // Get local transform (runtime override or static)
-                                    let local = get_node_transform(player, &member_ref, node.name);
+                                    let local = get_node_transform_live(player, &member_ref, node.name);
                                     // Walk parent chain
                                     let mut result = local;
                                     let mut current_parent = node.parent_name.clone();
@@ -3416,7 +3433,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     for _ in 0..20 {
                                         if current_parent.is_empty() || current_parent == world_sym { break; }
                                         if let Some(pn) = scene.nodes.iter().find(|n| n.name == current_parent) {
-                                            let pt = get_node_transform(player, &member_ref, pn.name);
+                                            let pt = get_node_transform_live(player, &member_ref, pn.name);
                                             result = mat4_mul_f32(&pt, &result);
                                             current_parent = pn.parent_name.clone();
                                             depth += 1;
@@ -3424,16 +3441,16 @@ impl Shockwave3dObjectDatumHandlers {
                                     }
                                     result
                                 } else {
-                                    get_node_transform(player, &member_ref, s3d_ref.name)
+                                    get_node_transform_live(player, &member_ref, s3d_ref.name)
                                 }
                             } else {
-                                get_node_transform(player, &member_ref, s3d_ref.name)
+                                get_node_transform_live(player, &member_ref, s3d_ref.name)
                             }
                         } else {
-                            get_node_transform(player, &member_ref, s3d_ref.name)
+                            get_node_transform_live(player, &member_ref, s3d_ref.name)
                         }
                     } else {
-                        get_node_transform(player, &member_ref, s3d_ref.name)
+                        get_node_transform_live(player, &member_ref, s3d_ref.name)
                     };
                     Ok(player.alloc_datum(Datum::transform3d(world_t.map(|v| v as f64))))
                 },
