@@ -72,6 +72,12 @@ impl Transform3dDatumHandlers {
                     false,
                 ))
             }
+            // `ilk` is a property of EVERY Lingo value, transforms included, and
+            // scripts use it to type-check arguments. AreaZero's [PS] HandGrenade.new
+            // opens with `if tDataList[#transform].ilk = #transform then ... else
+            // return 0`, so throwing a grenade ("g" / "e") aborted the whole handler
+            // with "Unknown transform property 'ilk'".
+            Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(BuiltInSymbol::Transform.into())),
             _ => Err(ScriptError::new(format!("Unknown transform property '{prop}'"))),
         }
     }
