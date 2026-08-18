@@ -3216,7 +3216,32 @@ impl Shockwave3dMemberHandlers {
                         } else {
                             max_dist
                         };
-                        let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
+                        // An explicit #modelList names the models to test, and the
+                        // dictionary describes it purely as a whitelist over what the
+                        // ray finds — it says nothing about world membership. Naming a
+                        // model that is not in the world is therefore a request to test
+                        // it anyway, so the detached-node exclusion does not apply.
+                        //
+                        // AreaZero depends on this for every robot's ground snap. The
+                        // level hides its collision floor with
+                        //   `SetVisible Level1 [#Model: "InvisibleFloor", #state: FALSE]`
+                        // and [M] 3D Misc.SETVISIBLE hides by `parent = VOID` — which the
+                        // dictionary equates to removeFromWorld. Each robot then heights
+                        // itself with
+                        //   modelsUnderRay(pos + (0,0,2), (0,0,-1),
+                        //       [#modelList: [member.model("InvisibleFloor")], #maxDistance: 10])
+                        // Excluded, that ray returned nothing every frame, so the robots
+                        // kept their spawn Z: they walked at one flat height and could
+                        // never climb the stairs to the upper level.
+                        //
+                        // The camera-side picking that motivated the exclusion
+                        // (modelsUnderLoc over the menu's detached screens) passes no
+                        // #modelList and is unaffected.
+                        let excluded_ref = if model_list_present || excluded_nodes.is_empty() {
+                            None
+                        } else {
+                            Some(&excluded_nodes)
+                        };
                         // Presence, not emptiness: a supplied-but-empty #modelList is a
                         // whitelist that includes nothing, which must yield no hits.
                         let included_ref = if model_list_present { Some(&model_whitelist) } else { None };
