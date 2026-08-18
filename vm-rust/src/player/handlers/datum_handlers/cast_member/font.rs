@@ -1489,6 +1489,15 @@ impl FontMemberHandlers {
         // already flips Y (m[3] < 0) the parsed coords are Y-down, so we use a
         // positive scale; otherwise flip.
         let glyph_scale_y = if matrix_sy < 0.0 { scale_y_mag } else { -scale_y_mag };
+        // NOTE: this is the font BOUNDING BOX top, not the font's real ascent
+        // (`physical.rs`: `metrics.ascender = record.y_max`, matching Fontinator).
+        // For AreaZero's embedded Arial it is ~1.0 em where Director lays out from
+        // ~0.905 em, which leaves the HUD strips ~1px low and inflates
+        // `line_natural` past the movie's fixedLineSpace. Finding the real layout
+        // ascent is still open — see docs/areazero/README.md 3.10. REFUTED: the
+        // type-5 private record's word36/word37 are NOT (descent, ascent) in
+        // 256ths of an em; using them put the Score baseline 4px too HIGH and
+        // clipped the cap off the top of the box.
         let baseline = (phys.metrics.ascender as f64 * scale).round();
 
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
@@ -1568,8 +1577,14 @@ impl FontMemberHandlers {
         let line_natural = (((phys.metrics.ascender - phys.metrics.descender) as f64) * scale)
             .round()
             .max(1.0);
+        // Paige (which IS Director's text engine — XMED is serialized Paige) treats
+        // `fixedLineSpace` as `par_info.leading_fixed`, and PGTEXT.C computes:
+        //     new_line_height = ascent + descent + leading;
+        //     if (leading_fixed > new_line_height) new_line_height = leading_fixed;
+        // i.e. fixedLineSpace is a MINIMUM line height. It never squeezes a line
+        // below what the font needs.
         let effective_line_h = if fixed_line_space > 0 {
-            fixed_line_space as f64
+            (fixed_line_space as f64).max(line_natural)
         } else {
             line_natural
         };
@@ -1580,27 +1595,25 @@ impl FontMemberHandlers {
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == BuiltInSymbol::Right);
 
-        // Director places a line by its baseline at `lineTop + fixedLineSpace`.
-        // For an ordinary member fixedLineSpace is at least the font's ascent, so
-        // that is just the natural ascender and nothing changes. But a
-        // fixedLineSpace SMALLER than the ascent is a deliberate squeeze — the
-        // line box cannot hold the glyph, and Director lets the glyph overflow
-        // UPWARD out of it rather than pushing it down by a full ascender.
+        // The baseline sits at `lineTop + ascent`, full stop — PGTEXT.C stores it as
+        // `starts->baseline = leading + descent` measured up from the line's BOTTOM,
+        // which is `ascent` from the top. fixedLineSpace grows the line box (above)
+        // but never moves the baseline.
         //
-        // AreaZero's `[M] Text Director` bakes every 3D UI string that way:
-        // `topSpacing = 10, fixedLineSpace = 1` on a 32px strip pulls the
-        // copyright line hard against the top, because the quad sampling it is
-        // authored hanging 13px off the bottom of the stage. Using the full
-        // ascender put the baseline at 22 and the ink at rows 13-24, so the
-        // stage edge cut the line in half; clamping it to fixedLineSpace puts
-        // the baseline at 11 and the ink at ~0-14, inside the visible band.
-        let baseline = if fixed_line_space > 0 {
-            baseline.min(fixed_line_space as f64)
-        } else {
-            baseline
-        };
+        // This replaces a `baseline.min(fixedLineSpace)` heuristic that read a small
+        // fixedLineSpace as "a deliberate squeeze, let the glyph overflow upward".
+        // It was compensating for the topSpacing bug below rather than for anything
+        // Director does: with both corrected, AreaZero's Score strip puts its ink at
+        // rows 4-18 of the 20-row bake, matching the projector capture exactly, and
+        // 18 is Arial's true hhea ascender (0.905 em at fontSize 20).
 
-        let mut y_top = top_spacing as f64;
+        // `topSpacing` is documented as a chunkExpression (paragraph) property whose
+        // effect is "more/less spacing BETWEEN paragraphs" — it does not indent the
+        // FIRST paragraph away from the top of the box. AreaZero's [M] Text Director
+        // sets `member.topSpacing = height/2` on every baked strip as its "alignV"
+        // idiom; applied to line one that pushed a fontSize-20 line 10px down a
+        // 20px-tall box and clipped its bottom rows off the quad.
+        let mut y_top = 0.0f64;
         for line in &lines {
             if y_top >= render_height as f64 { break; }
             let baseline_y = y_top + baseline;
