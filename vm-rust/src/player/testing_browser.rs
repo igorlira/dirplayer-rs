@@ -166,6 +166,12 @@ impl BrowserTestPlayer {
             crate::player::PLAYER_TX = Some(tx.clone());
             crate::player::PLAYER_EVENT_TX = Some(event_tx);
             PLAYER_OPT = Some(crate::player::DirPlayer::new(tx));
+            // FileIO is created here too: movies that read their config off
+            // disk (Rasterwerks reads base.ini / PHOSPHOR_BETA.ini through it)
+            // panicked on the `None` manager, because only `init_player()` —
+            // which the test harness deliberately skips — ever built one.
+            crate::player::xtra::fileio::FILEIO_XTRA_MANAGER_OPT =
+                Some(crate::player::xtra::fileio::FileIoXtraManager::new());
             crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
                 Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
             crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
