@@ -484,6 +484,32 @@ fn parse_private_records_from_aux_data(aux_data: &[u8], record: &mut PhysicalFon
 
     // Extract mode byte from type 2 record (byte offset 27 in payload)
     if let Some(t2) = private_records.get(&2) {
+        // The 32-byte type-2 payload is a TEXTMETRIC-style block in
+        // metrics-resolution units. Verified against the real shadowed fonts:
+        //   words[5..13] = tmAscent, tmDescent, tmHeight(=asc+desc),
+        //                  tmInternalLeading, tmExternalLeading(=lineGap),
+        //                  tmAveCharWidth, tmMaxCharWidth, tmWeight
+        //   Arial:            1854/434/2288/240/67/904/…/400
+        //   Courier New Bold: 1705/615/2320, aveCharWidth 1229, weight 700
+        //   HousePaint:       ascent 1083 > its bbox top 1049 (stored metric,
+        //                     not bbox-derived)
+        // (The pre-existing bytes-24-25 ">= 500" check below is words[12],
+        // the weight — i.e. a bold test — consistent with this layout.)
+        // Paige lays text out from THIS ascent (baseline = lineTop + ascent),
+        // not from the bounding box the rasterizer sizes glyph cells with.
+        if !t2.is_empty() && t2[0].len() >= 14 {
+            let d = &t2[0];
+            let asc = i16::from_be_bytes([d[10], d[11]]);
+            let desc = i16::from_be_bytes([d[12], d[13]]);
+            // Sanity: a real ascent is positive, descent non-negative, and the
+            // pair spans a plausible number of ems (guards garbage payloads).
+            let em = record.metrics_resolution.max(1) as i32;
+            if asc > 0 && desc >= 0 && (asc as i32 + desc as i32) <= em * 4 {
+                record.metrics.layout_ascender = Some(asc);
+                // Store negative to match the descender sign convention.
+                record.metrics.layout_descender = Some(-desc);
+            }
+        }
         if !t2.is_empty() && t2[0].len() >= 28 {
             let mut mode716 = t2[0][27];
             // If mode byte == 2 and two_byte_char_code flag is set, force to 0

@@ -163,6 +163,18 @@ pub struct FontMetrics {
     pub std_hw: i16,
     pub ascender: i16,
     pub descender: i16,
+    /// Real LAYOUT ascent/descent, from the type-2 aux (private) record's
+    /// TEXTMETRIC-style block (payload words 5/6 = tmAscent/tmDescent in
+    /// metrics-resolution units; verified: Arial 1854/434, Courier New Bold
+    /// 1705/615, Comic Sans MS 2257/597 — all the shadowed fonts' hhea/tm
+    /// values, and HousePaint's 1083 EXCEEDS its bbox top 1049, proving it is
+    /// a stored metric, not bbox-derived). `None` when the PFR carries no
+    /// type-2 aux record. Paige places a baseline at `lineTop + ascent` from
+    /// THESE, while the rasterizer's glyph cell keeps using the bounding-box
+    /// `ascender`/`descender` above (tallest-glyph extent).
+    /// Sign convention matches ascender/descender: descent stored NEGATIVE.
+    pub layout_ascender: Option<i16>,
+    pub layout_descender: Option<i16>,
     pub x_min: i16,
     pub y_min: i16,
     pub x_max: i16,
@@ -179,6 +191,8 @@ impl FontMetrics {
             std_hw: 0,
             ascender: 0,
             descender: 0,
+            layout_ascender: None,
+            layout_descender: None,
             x_min: 0,
             y_min: 0,
             x_max: 0,
@@ -186,6 +200,18 @@ impl FontMetrics {
             flip_x: false,
             flip_y: false,
         }
+    }
+
+    /// Ascent for text LAYOUT (baseline = lineTop + this): the type-2 aux
+    /// record's real ascent when present, else the bounding-box top.
+    pub fn layout_ascender(&self) -> i16 {
+        self.layout_ascender.unwrap_or(self.ascender)
+    }
+
+    /// Descent for text LAYOUT (negative, like `descender`): the type-2 aux
+    /// record's real descent when present, else the bounding-box bottom.
+    pub fn layout_descender(&self) -> i16 {
+        self.layout_descender.unwrap_or(self.descender)
     }
 }
 

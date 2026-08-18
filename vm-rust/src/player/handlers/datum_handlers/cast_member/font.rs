@@ -1489,16 +1489,34 @@ impl FontMemberHandlers {
         // already flips Y (m[3] < 0) the parsed coords are Y-down, so we use a
         // positive scale; otherwise flip.
         let glyph_scale_y = if matrix_sy < 0.0 { scale_y_mag } else { -scale_y_mag };
-        // NOTE: this is the font BOUNDING BOX top, not the font's real ascent
-        // (`physical.rs`: `metrics.ascender = record.y_max`, matching Fontinator).
-        // For AreaZero's embedded Arial it is ~1.0 em where Director lays out from
-        // ~0.905 em, which leaves the HUD strips ~1px low and inflates
-        // `line_natural` past the movie's fixedLineSpace. Finding the real layout
-        // ascent is still open — see docs/areazero/README.md 3.10. REFUTED: the
-        // type-5 private record's word36/word37 are NOT (descent, ascent) in
-        // 256ths of an em; using them put the Score baseline 4px too HIGH and
-        // clipped the cap off the top of the box.
-        let baseline = (phys.metrics.ascender as f64 * scale).round();
+        // LAYOUT ascent, not the bounding-box top: Paige places the baseline at
+        // `lineTop + ascent` from the font's real ascent. The PFR carries it in
+        // the type-2 aux record's TEXTMETRIC block (Arial 1854/2048 = 0.905 em
+        // where the bbox top is ~1.0 em); the rasterizer keeps sizing its glyph
+        // cell from the bbox `metrics.ascender`. Falls back to the bbox when no
+        // type-2 record exists. REFUTED: the type-5 private record's
+        // word36/word37 are NOT (descent, ascent) in 256ths of an em; using
+        // them put the Score baseline 4px too HIGH.
+        // Integer baseline rounds UP, like the metrics Director got from the OS:
+        // GDI's shipped (VDMX-backed) Arial cell at 20 ppem is ascent 19 /
+        // descent 5 where linear scaling gives 18.1 / 4.2. Measured on the
+        // AreaZero Score strip: baseline 19 puts ink at strip rows 4-18 exactly
+        // as the projector capture; round() gave 18 and sat the text 1px high.
+        let baseline = (phys.metrics.layout_ascender() as f64 * scale).ceil();
+        // When fixedLineSpace EXCEEDS the ascent, Director drops the baseline to
+        // lineTop + fixedLineSpace (fls is the baseline-to-baseline distance and
+        // the first baseline sits a full fls from the top; descenders then hang
+        // into the next line's box). Measured on AreaZero's controls block
+        // (Arial 12, fls 14): Director's line-1 core ink is rows 6..13 of the
+        // bake — baseline 14 — where lineTop + ascent(11) put ours at 2..10.
+        // A small fls never RAISES the baseline (Score: fls 11, ascent 19,
+        // baseline 19 — pixel-exact vs the projector), which is the §3
+        // "fixedLineSpace never squeezes" rule this max() preserves.
+        let baseline = if fixed_line_space > 0 {
+            baseline.max(fixed_line_space as f64)
+        } else {
+            baseline
+        };
 
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
         let advance_of = |code: u8| -> f64 {
@@ -1574,7 +1592,10 @@ impl FontMemberHandlers {
 
         let bold_off = (font_size as f64 * 0.04).max(0.5);
 
-        let line_natural = (((phys.metrics.ascender - phys.metrics.descender) as f64) * scale)
+        // Real layout ascent/descent (type-2 aux record), same pair the
+        // baseline above uses — the bbox pair over-reported Arial's natural
+        // line by ~0.1 em and beat the movie's fixedLineSpace in the max().
+        let line_natural = (((phys.metrics.layout_ascender() - phys.metrics.layout_descender()) as f64) * scale)
             .round()
             .max(1.0);
         // Paige (which IS Director's text engine — XMED is serialized Paige) treats

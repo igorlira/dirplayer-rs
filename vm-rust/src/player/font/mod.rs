@@ -1184,7 +1184,10 @@ pub fn pfr_outline_auto_line_height(
         return None;
     }
     let m = &parsed.physical_font.metrics;
-    let lh = (((m.ascender - m.descender) as f64) * (font_size as f64 / res)).round();
+    // Layout metrics (type-2 aux record's real ascent/descent, bbox fallback)
+    // — must be the SAME pair `render_pfr_outline_text_to_bitmap` steps its
+    // `line_natural` by, or measure and render drift and the last line clips.
+    let lh = (((m.layout_ascender() - m.layout_descender()) as f64) * (font_size as f64 / res)).round();
     if lh >= 1.0 { Some(lh as u16) } else { None }
 }
 
