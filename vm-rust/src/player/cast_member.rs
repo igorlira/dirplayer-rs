@@ -5155,6 +5155,7 @@ impl CastMember {
         let box_type = text_info.box_type_symbol();
         let word_wrap = text_info.word_wrap();
         let xmed_bg_color = styled_text.bg_color;
+        let xmed_fore_color = styled_text.default_fore_color;
         // Member-level fontStyle list: derived from the first styled span's
         // bold/italic/underline flags so `member.fontStyle` matches Director's
         // getter (which returns [#italic] for member 35 etc.). The XMED parse
@@ -5258,13 +5259,28 @@ impl CastMember {
 
         // Preserve XMED foreColor at the member level so it persists
         // even when Lingo sets member.text or member.html (which may clear styled span colors)
+        //
+        // A member authored EMPTY still gets ONE styled span, but it spans no
+        // characters and carries no authored colour — it is synthesised black
+        // (0xFF000000). Ignore the spans entirely in that case and take the
+        // authored style itself (`default_fore_color`, read from the Section 7
+        // style table), the same way `default_font_name` / `default_font_size`
+        // already override span[0] for empty members.
+        //
+        // Rasterwerks' `txtArialBold12_512` is exactly this: an empty 512x16
+        // scratch member the kill feed writes one line into and blits out
+        // through `member.image` into an overlay texture. Reading the placeholder
+        // span made every kill and chat line black on a dark panel instead of the
+        // authored light grey.
         let member_color = text_member.html_styled_spans.first()
+            .filter(|_| !text_member.text.is_empty())
             .and_then(|s| s.style.color)
             .map(|c| ColorRef::Rgb(
                 ((c >> 16) & 0xFF) as u8,
                 ((c >> 8) & 0xFF) as u8,
                 (c & 0xFF) as u8,
             ))
+            .or_else(|| xmed_fore_color.map(|(r, g, b)| ColorRef::Rgb(r, g, b)))
             .unwrap_or(ColorRef::PaletteIndex(255));
 
         // Extract XMED backColor from Section 0x0000 document header (indices 30-32).
