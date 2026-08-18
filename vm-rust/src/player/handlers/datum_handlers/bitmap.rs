@@ -362,10 +362,28 @@ impl BitmapDatumHandlers {
             let h = src.height;
             let is_32bit = src.bit_depth == 32;
 
-            // Create an 8-bit grayscale bitmap for the alpha channel
+            // Director 11.5 Scripting Dictionary, `extractAlpha()`: "The result is
+            // an 8-bit grayscale image representing the alpha channel." It has to
+            // be 8-bit, not a 32-bit grayscale stand-in: the documented companion
+            // `setAlpha(alphaImageObject)` states "If you specify an alpha image
+            // object, it must be 8-bit... If these conditions are not met,
+            // setAlpha() has no effect and returns FALSE", and that is exactly what
+            // our own set_alpha enforces. Returning 32-bit here made the
+            // dictionary's own idiom — `img.setAlpha(other.extractAlpha())` — a
+            // silent no-op. Agent Free Ride 2's energy bar is drawn that way
+            // (InGame.UpdateEnergyBar refills the alpha of a #fromImageObject
+            // texture and never touches its RGB), so the HUD bar stayed full at
+            // 100 no matter how much damage the player took.
+            //
+            // 1 byte per pixel, no row padding (Bitmap::new sizes 8-bit data as
+            // width*height), and the #grayscale palette so index N reads back as
+            // gray N — which keeps the value both a colour and the raw alpha that
+            // set_alpha's 8-bit branch copies straight into the alpha channel.
             let mut alpha_bitmap = crate::player::bitmap::bitmap::Bitmap::new(
-                w, h, 32, 32, 0,
-                src.palette_ref.clone(),
+                w, h, 8, 8, 0,
+                crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                    crate::player::bitmap::bitmap::BuiltInPalette::GrayScale,
+                ),
             );
 
             if is_32bit {
@@ -379,13 +397,9 @@ impl BitmapDatumHandlers {
                         } else {
                             255
                         };
-                        // Write grayscale: R=G=B=alpha, A=255
-                        let dst_idx = y * row_bytes + x * 4;
-                        if dst_idx + 3 < alpha_bitmap.data.len() {
+                        let dst_idx = y * w as usize + x;
+                        if dst_idx < alpha_bitmap.data.len() {
                             alpha_bitmap.data[dst_idx] = alpha;
-                            alpha_bitmap.data[dst_idx + 1] = alpha;
-                            alpha_bitmap.data[dst_idx + 2] = alpha;
-                            alpha_bitmap.data[dst_idx + 3] = 255;
                         }
                     }
                 }
