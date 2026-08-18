@@ -1536,15 +1536,31 @@ impl TextMemberHandlers {
                         } else {
                             measured
                         }
+                    } else if text_data.height > 0 {
+                        // #fixed/#scroll/#limit: the BOX is authoritative and content
+                        // that does not fit is simply not shown. Identical rule to the
+                        // `.rect` / `.height` getters above — which is the point: this
+                        // used to be `max(measured, height)`, so a box smaller than its
+                        // content reported one size through `.rect` and another through
+                        // `.image`, breaking the very invariant this block documents.
+                        //
+                        // AreaZero's HUD is the case that exposed it. [M] Text Director
+                        // sets `member("Text").height` to the QUAD's height (20 for the
+                        // Score/Level strips), bakes `.image`, then copyPixels that into
+                        // a power-of-two texture at `rect(0, 0, membersize)` and rescales
+                        // the quad's UVs by `membersize / textureSize`. All three steps
+                        // assume `.image` IS the member rect. Ours came out 128x34 for a
+                        // 128x20 member — topSpacing 10 + fixedLineSpace 11 plus the PFR
+                        // descender overflow — so the strip was laid out for a 34-tall
+                        // box, clipped to the 32-tall texture, and sampled through UVs
+                        // computed for 20: "Score" and "Level" lost their bottom row.
+                        text_data.height
+                    } else if let Some(h) = text_data.info.as_ref()
+                        .map(|i| i.height).filter(|h| *h > 0)
+                    {
+                        h as u16
                     } else {
-                        // #fixed/#scroll/#limit: still render the full content so list
-                        // members overflowing a fixed box can be captured whole.
-                        let mut h = measured;
-                        if text_data.height > 0 { h = h.max(text_data.height); }
-                        if let Some(ref info) = text_data.info {
-                            if info.height > 0 { h = h.max(info.height as u16); }
-                        }
-                        h
+                        measured
                     };
                 }
 
