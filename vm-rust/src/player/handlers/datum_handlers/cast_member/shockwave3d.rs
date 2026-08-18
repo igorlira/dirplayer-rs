@@ -3052,7 +3052,25 @@ impl Shockwave3dMemberHandlers {
                     use crate::player::handlers::datum_handlers::prop_list::PropListUtils;
                     let mut max_models: i32 = 100;
                     let mut detailed = false;
-                    let mut max_dist: f32 = 100000.0;
+                    // `maxDistance` is OPTIONAL and has no default: the Director 11.5
+                    // Scripting Dictionary describes it purely as an inclusion filter
+                    // ("If a model's bounding sphere is within the maximum distance
+                    // specified, that model is included"), never as a reach the ray
+                    // stops at. Measured in Director 11.5 against Agent Free Ride: a
+                    // ray cast from 500000 above the boarder with NO maxDistance
+                    // returns the chassis at #distance 499921.1563 — byte-identical to
+                    // the same call with #maxDistance: 1000000. So an omitted
+                    // maxDistance means unbounded.
+                    //
+                    // This used to default to 100000, which silently truncated long
+                    // rays. Agent Free Ride's `Vehicle Base.ResetToTrack` re-seats the
+                    // player by casting DOWN from 8000 above the track token — and the
+                    // token plan is flat at z=0 while the course descends past -125000
+                    // — so past roughly token 24 the ray could no longer reach the
+                    // ground. The reset then fell through to TokenToWorld's z of 0 and
+                    // dropped the boarder ~80000 units above the track, which is the
+                    // "teleported way up, falls for ages" respawn bug.
+                    let mut max_dist: f32 = f32::INFINITY;
                     // #modelList: a list of model REFERENCES to restrict the cast to.
                     // Per the Director 11.5 Scripting Dictionary entry for modelsUnderRay:
                     // "Model references not included in this list are ignored, even if they

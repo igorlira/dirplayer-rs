@@ -198,6 +198,17 @@ pub fn raycast_scene_multi(
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
+    // Progressive tightening. `modelsUnderRay` returns the NEAREST `max_hits`
+    // models, so once that many are in hand nothing beyond the current worst can
+    // survive — the bound can shrink to it and prune the rest of the scene.
+    //
+    // This matters because `maxDistance` is optional in Director and therefore
+    // UNBOUNDED by default (measured: a ray with no maxDistance returns a hit at
+    // distance 499921). Without tightening, an unbounded ray tests every triangle
+    // of every model in the member: level 2 of Agent Free Ride went from ~97 to
+    // ~198 ms/frame purely from that.
+    let mut work_max = max_dist;
+
     // Name -> node index, built once per call. The world transform of each model
     // is accumulated by walking its parent chain, and each level did
     // `scene.nodes.iter().find(|n| n.name == parent)` — a linear scan of every
@@ -293,6 +304,23 @@ pub fn raycast_scene_multi(
             origin: transform_point_4x4(&inv_transform, ray.origin[0], ray.origin[1], ray.origin[2]),
             direction: transform_dir_4x4(&inv_transform, ray.direction[0], ray.direction[1], ray.direction[2]),
         };
+        // `transform_dir_4x4` NORMALISES, so a scaled model's local parametric
+        // distance is not the world distance and a world-space bound cannot be
+        // handed to the local mesh test. Tighten only for unit-scale models —
+        // exact there — and leave scaled ones on the caller's original bound,
+        // exactly as before. The world-space filter below uses `work_max`
+        // unconditionally, which is always valid.
+        let unit_scale = {
+            let l = |a: usize, b: usize, c: usize| {
+                (world_transform[a] * world_transform[a]
+                    + world_transform[b] * world_transform[b]
+                    + world_transform[c] * world_transform[c]).sqrt()
+            };
+            (l(0, 1, 2) - 1.0).abs() < 1e-3
+                && (l(4, 5, 6) - 1.0).abs() < 1e-3
+                && (l(8, 9, 10) - 1.0).abs() < 1e-3
+        };
+        let node_max = if unit_scale { work_max } else { max_dist };
         // Skinned models are tested against their POSED geometry. `anim` supplies
         // the same (motion, time, rootLock) the renderer is drawing with, so the
         // hit volume tracks the body instead of the bind pose. `None` (no rig, or
@@ -428,7 +456,7 @@ pub fn raycast_scene_multi(
                     ))
                 });
                 let positions = posed.as_deref().unwrap_or(&mesh.positions);
-                if let Some(mut hit) = raycast_mesh(&local_ray, positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, node_max, cull_flip) {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
@@ -439,7 +467,7 @@ pub fn raycast_scene_multi(
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
                     hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
-                    if hit.distance <= max_dist {
+                    if hit.distance <= work_max {
                         all_hits.push(hit);
                     }
                 }
@@ -450,7 +478,7 @@ pub fn raycast_scene_multi(
         for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
                 let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, node_max, cull_flip) {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
                     for v in &mut hit.vertices {
@@ -460,10 +488,20 @@ pub fn raycast_scene_multi(
                     let dy = hit.position[1] - ray.origin[1];
                     let dz = hit.position[2] - ray.origin[2];
                     hit.distance = (dx*dx + dy*dy + dz*dz).sqrt();
-                    if hit.distance <= max_dist {
+                    if hit.distance <= work_max {
                         all_hits.push(hit);
                     }
                 }
+            }
+        }
+
+        // Enough hits in hand: shrink the bound to the current worst so the
+        // remaining models are pruned by distance instead of triangle-tested.
+        if max_hits > 0 && all_hits.len() >= max_hits {
+            all_hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+            all_hits.truncate(max_hits);
+            if let Some(worst) = all_hits.last() {
+                work_max = work_max.min(worst.distance);
             }
         }
     }
