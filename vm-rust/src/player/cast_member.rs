@@ -1728,8 +1728,19 @@ pub struct EmitterState {
     pub mode: String,       // "burst" or "stream"
     pub is_loop: bool,
     pub direction: [f64; 3],
-    pub region: [f64; 3],
-    pub has_region: bool, // true once a script assigns emitter.region (emit there, not at the model node)
+    /// `emitter.region` — one, two, or four vectors: a point, the endpoints of a
+    /// line, or the vertices of a quadrilateral that particles are born on
+    /// (Director 11.5 Scripting Dictionary, "region (emitter)"; default
+    /// `[vector(0,0,0)]`). Stored in full: only keeping the first vector threw
+    /// away the extent, so a 2-/4-vector region emitted from a single point.
+    ///
+    /// The vectors are in the particle model resource's own space — the MODEL's
+    /// transform then places the whole system. Rasterwerks' spawn burst is the
+    /// case that proves it: a 60x60 quad centred on the origin, with the model
+    /// moved to the spawning player. Treated as world coordinates it fired at
+    /// (-30, 0, -30) forever, nowhere near anyone.
+    pub region: Vec<[f64; 3]>,
+    pub has_region: bool, // true once a script assigns emitter.region
     pub distribution: String, // "linear", "gaussian"
     pub angle: f64,
     pub min_speed: f64,
@@ -1744,7 +1755,7 @@ impl Default for EmitterState {
             mode: "burst".to_string(),
             is_loop: true,
             direction: [0.0, 1.0, 0.0],
-            region: [0.0, 0.0, 0.0],
+            region: vec![[0.0, 0.0, 0.0]],
             has_region: false,
             distribution: "linear".to_string(),
             angle: 180.0,
@@ -1978,9 +1989,72 @@ impl ParticleSystemState {
         for i in 0..count {
             self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
             let r = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
-            self.ages[i] = if self.stream { r * self.lifetime } else { self.lifetime };
-            self.alive[i] = false;
+            if self.stream {
+                // A #stream emitter is CONTINUOUS: at any instant its particles
+                // are spread across every age from birth to death. Prime it that
+                // way instead of leaving the whole system dead and waiting for
+                // `age >= lifetime` to trip the recycle path — that made a stream
+                // invisible for one full particle lifetime after it started.
+                //
+                // Harmless where the lifetime is a few milliseconds (the missile
+                // trails warm up within a frame either way), decisive where it is
+                // not: Rasterwerks' spawn burst is a 1.2 s stream that only plays
+                // for 1.2 s, so the warm-up consumed the entire effect and nothing
+                // was ever drawn.
+                self.ages[i] = r * self.lifetime;
+                self.alive[i] = true;
+                self.emitted[i] = true;
+                self.respawn(i);
+                // Fast-forward to where a particle born that long ago would be.
+                let age = self.ages[i];
+                for k in 0..3 {
+                    self.positions[i][k] += self.velocities[i][k] * age;
+                }
+            } else {
+                // #burst emits ALL particles at the same time (Director 11.5
+                // Scripting Dictionary, "mode (emitter)"), so start them due at
+                // once and let the first update() birth them together.
+                self.ages[i] = self.lifetime;
+                self.alive[i] = false;
+            }
         }
+    }
+
+    /// Place particle `i` at a fresh birth: a random point in the emitter region
+    /// with a velocity along `direction`, spread by `angle_range` and scaled into
+    /// the emitter's min..max speed band.
+    fn respawn(&mut self, i: usize) {
+        // Evolve the RNG each respawn so particles don't all return to the
+        // same fixed per-index offset/velocity (that produced regular bands).
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let hash = self.seed;
+        let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
+        let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
+        let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
+        let offset = match self.emitter_shape {
+            1 => [r1 * self.emitter_size[0], 0.0, 0.0],              // line
+            2 => [r1 * self.emitter_size[0], 0.0, r2 * self.emitter_size[2]], // plane
+            3 => {                                                      // sphere
+                let len = (r1*r1 + r2*r2 + r3*r3).sqrt().max(0.01);
+                let s = self.emitter_size[0] * ((hash & 0xFF) as f32 / 255.0);
+                [r1/len * s, r2/len * s, r3/len * s]
+            }
+            4 => [r1 * self.emitter_size[0], r2 * self.emitter_size[1], r3 * self.emitter_size[2]], // cube
+            _ => [0.0, 0.0, 0.0],                                      // point
+        };
+        self.positions[i] = [
+            self.emitter_position[0] + offset[0],
+            self.emitter_position[1] + offset[1],
+            self.emitter_position[2] + offset[2],
+        ];
+        // Direction with angle spread
+        let spread = self.angle_range;
+        let speed = self.initial_speed + r1 * self.speed_range;
+        self.velocities[i] = [
+            (self.direction[0] + r1 * spread) * speed,
+            (self.direction[1] + r2 * spread) * speed,
+            (self.direction[2] + r3 * spread) * speed,
+        ];
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -2008,40 +2082,7 @@ impl ParticleSystemState {
                 // Recycle
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;
-                // Evolve the RNG each respawn so particles don't all return to the
-                // same fixed per-index offset/velocity (that produced regular bands).
-                self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                let hash = self.seed;
-                let r1 = (hash & 0xFF) as f32 / 255.0 - 0.5;
-                let r2 = ((hash >> 8) & 0xFF) as f32 / 255.0 - 0.5;
-                let r3 = ((hash >> 16) & 0xFF) as f32 / 255.0 - 0.5;
-                let offset = match self.emitter_shape {
-                    1 => [r1 * self.emitter_size[0], 0.0, 0.0],              // line
-                    2 => [r1 * self.emitter_size[0], 0.0, r2 * self.emitter_size[2]], // plane
-                    3 => {                                                      // sphere
-                        let len = (r1*r1 + r2*r2 + r3*r3).sqrt().max(0.01);
-                        let s = self.emitter_size[0] * ((hash & 0xFF) as f32 / 255.0);
-                        [r1/len * s, r2/len * s, r3/len * s]
-                    }
-                    4 => [r1 * self.emitter_size[0], r2 * self.emitter_size[1], r3 * self.emitter_size[2]], // cube
-                    _ => [0.0, 0.0, 0.0],                                      // point
-                };
-                self.positions[i] = [
-                    self.emitter_position[0] + offset[0],
-                    self.emitter_position[1] + offset[1],
-                    self.emitter_position[2] + offset[2],
-                ];
-                // Direction with angle spread
-                let spread = self.angle_range;
-                let jx = r1 * spread;
-                let jy = r2 * spread;
-                let jz = r3 * spread;
-                let speed = self.initial_speed + r1 * self.speed_range;
-                self.velocities[i] = [
-                    (self.direction[0] + jx) * speed,
-                    (self.direction[1] + jy) * speed,
-                    (self.direction[2] + jz) * speed,
-                ];
+                self.respawn(i);
             }
 
             if self.alive[i] {

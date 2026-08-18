@@ -488,7 +488,19 @@ impl Shockwave3dObjectDatumHandlers {
                     "mode" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&emitter.mode)))),
                     "numParticles" => Ok(player.alloc_datum(Datum::Int(emitter.num_particles))),
                     "direction" => Ok(player.alloc_datum(Datum::Vector(emitter.direction))),
-                    "region" => Ok(player.alloc_datum(Datum::Vector(emitter.region))),
+                    // Director returns the region as a LIST of vectors, matching what
+                    // the setter takes (11.5 Scripting Dictionary, "region (emitter)":
+                    // default `[vector(0,0,0)]`).
+                    "region" => {
+                        let items: Vec<_> = emitter.region.iter()
+                            .map(|v| player.alloc_datum(Datum::Vector(*v)))
+                            .collect();
+                        Ok(player.alloc_datum(Datum::List(
+                            crate::director::lingo::datum::DatumType::List,
+                            items.into(),
+                            false,
+                        )))
+                    },
                     "distribution" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&emitter.distribution)))),
                     "angle" => Ok(player.alloc_datum(Datum::Float(emitter.angle))),
                     "path" => Ok(player.alloc_datum(Datum::Void)),
@@ -1223,7 +1235,28 @@ impl Shockwave3dObjectDatumHandlers {
                             } else {
                                 match_ci!(prop_name, {
                                     // lifetime is in milliseconds (default 10000); store seconds.
-                                    "lifetime" => ps.lifetime = (value.float_value().unwrap_or(10000.0) as f32 / 1000.0).max(0.001),
+                                    "lifetime" => {
+                                        let new_life = (value.float_value().unwrap_or(10000.0) as f32 / 1000.0).max(0.001);
+                                        // Particle ages are staggered ACROSS the lifetime, so a
+                                        // changed lifetime invalidates the whole distribution:
+                                        // every age is now measured against a different scale.
+                                        // Re-stagger, which for a #stream also re-primes it to a
+                                        // running state.
+                                        //
+                                        // This is how a system is restarted: Rasterwerks' spawn
+                                        // burst parks itself with `lifeTime = 1` and fires with
+                                        // `lifeTime = 1200`. Without the re-stagger its ages stayed
+                                        // scaled to the 1 ms park, so no particle reached the new
+                                        // 1.2 s lifetime before the effect was over and the burst
+                                        // never appeared at all.
+                                        if (ps.lifetime - new_life).abs() > 1e-6 {
+                                            ps.lifetime = new_life;
+                                            let n = ps.max_particles;
+                                            if n > 0 { ps.initialize(n); }
+                                        } else {
+                                            ps.lifetime = new_life;
+                                        }
+                                    },
                                     "texture" => {
                                         let tn = match value {
                                             Datum::Shockwave3dObjectRef(r) if r.object_type == "texture" => r.name,
@@ -2749,13 +2782,24 @@ impl Shockwave3dObjectDatumHandlers {
                         // mutable member borrow. Without this the list silently failed to match
                         // `Datum::Vector`, region stayed (0,0,0), and the white exhaust particles
                         // piled up at the origin — right at the camera — whiting out the scene.
-                        let region_override: Option<[f64; 3]> = if prop_name.eq_ignore_ascii_case("region") {
+                        // Keep EVERY vector: one = a point, two = the endpoints of a
+                        // line, four = the vertices of a quadrilateral particles are
+                        // born on (Director 11.5 Scripting Dictionary, "region
+                        // (emitter)"). Taking only the first threw the extent away, so
+                        // Rasterwerks' 60x60 spawn quad emitted its whole burst from a
+                        // single point.
+                        let region_override: Option<Vec<[f64; 3]>> = if prop_name.eq_ignore_ascii_case("region") {
                             match value {
-                                Datum::Vector(v) => Some(*v),
-                                Datum::List(_, items, _) => items.front().and_then(|r| match player.get_datum(r) {
-                                    Datum::Vector(v) => Some(*v),
-                                    _ => None,
-                                }),
+                                Datum::Vector(v) => Some(vec![*v]),
+                                Datum::List(_, items, _) => {
+                                    let vecs: Vec<[f64; 3]> = items.iter()
+                                        .filter_map(|r| match player.get_datum(r) {
+                                            Datum::Vector(v) => Some(*v),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if vecs.is_empty() { None } else { Some(vecs) }
+                                }
                                 _ => None,
                             }
                         } else { None };

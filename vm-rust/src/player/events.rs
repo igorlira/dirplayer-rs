@@ -865,16 +865,59 @@ pub async fn tick_w3d_particles() {
                         }).unwrap_or([0.0, 0.0, 0.0]);
 
                         if let Some(ps) = w3d.runtime_state.particles.get_mut(&name) {
-                            // Emit from emitter.region when a script set it (e.g. the car demos
-                            // track the exhaust pipe via `emitter.region = [exhaust.worldPosition]`),
-                            // otherwise from the model node's world position (the faucet translates
-                            // its ColdWater model). Without this the car smoke emitted at the origin
-                            // and whited out the camera, blanking the whole 3D scene.
-                            ps.emitter_position = match &em {
-                                Some(e) if e.has_region =>
-                                    [e.region[0] as f32, e.region[1] as f32, e.region[2] as f32],
-                                _ => world_pos,
+                            // `emitter.region` is expressed in the particle model
+                            // resource's OWN space; the model's transform then places
+                            // the whole system. So the emit point is the model node's
+                            // world position PLUS the region's centre, and the region's
+                            // extent becomes the emitter's shape.
+                            //
+                            // Both callers this has to serve fall out of that one rule:
+                            //   * the car demos track the tailpipe with a single-vector
+                            //     region (`[exhaust.worldPosition]`) on a smoke model
+                            //     parked at the origin — world_pos is (0,0,0), so the
+                            //     sum is still the tailpipe;
+                            //   * Rasterwerks' spawn burst is a 60x60 quad centred on
+                            //     the origin with the MODEL moved to the spawning
+                            //     player — the centre is (0,0,0), so the sum is the
+                            //     player.
+                            // Reading the region as world coordinates served the first
+                            // and broke the second: the burst fired at (-30, 0, -30),
+                            // the quad's first corner, and was never seen.
+                            let (region_centre, region_extent) = match &em {
+                                Some(e) if e.has_region && !e.region.is_empty() => {
+                                    let n = e.region.len() as f64;
+                                    let mut c = [0.0f64; 3];
+                                    let mut lo = [f64::MAX; 3];
+                                    let mut hi = [f64::MIN; 3];
+                                    for v in &e.region {
+                                        for k in 0..3 {
+                                            c[k] += v[k] / n;
+                                            lo[k] = lo[k].min(v[k]);
+                                            hi[k] = hi[k].max(v[k]);
+                                        }
+                                    }
+                                    (c, [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]])
+                                }
+                                _ => ([0.0; 3], [0.0; 3]),
                             };
+                            ps.emitter_position = [
+                                world_pos[0] + region_centre[0] as f32,
+                                world_pos[1] + region_centre[1] as f32,
+                                world_pos[2] + region_centre[2] as f32,
+                            ];
+                            // A region with no extent stays a point emitter; a line or
+                            // quad spreads births across it. `emitter_shape` 1 = line,
+                            // 2 = plane, and `update()` jitters by ±size/2, so pass the
+                            // full span.
+                            let region_count = em.as_ref().map_or(0, |e| if e.has_region { e.region.len() } else { 0 });
+                            if region_count >= 2 && region_extent.iter().any(|d| *d > 1e-6) {
+                                ps.emitter_shape = if region_count >= 4 { 2 } else { 1 };
+                                ps.emitter_size = [
+                                    region_extent[0] as f32,
+                                    region_extent[1] as f32,
+                                    region_extent[2] as f32,
+                                ];
+                            }
                             if let Some(em) = &em {
                                 let d = em.direction;
                                 let len = (d[0]*d[0] + d[1]*d[1] + d[2]*d[2]).sqrt();
