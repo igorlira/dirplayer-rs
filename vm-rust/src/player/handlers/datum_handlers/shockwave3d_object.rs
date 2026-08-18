@@ -5594,6 +5594,43 @@ impl Shockwave3dObjectDatumHandlers {
                         Ok(player.alloc_datum(Datum::Void))
                     }
                 },
+                "getBoneID" => {
+                    // Director 11.5 Scripting Dictionary, `getBoneID`:
+                    // "returns the index number of the bone named boneName in the
+                    // model resource. This property returns 0 if no bone by that
+                    // name can be found." Indices are 1-based, matching `bone[i]`.
+                    //
+                    // Was missing entirely, so it returned VOID — and EVERY
+                    // attachment in Agent Free Ride is placed as
+                    // `bone[resource.getBoneId(name)].worldTransform`
+                    // (`Character Bones Anchor`, `Character.GetBoneWorldTransform`,
+                    // the particle manager's per-bone effects, the hook, and the
+                    // jetpack/flames). `bone[VOID]` indexes 0 and raises "List index
+                    // 0 out of bounds", so nothing bone-anchored could be positioned.
+                    let name = args.first()
+                        .map(|a| player.get_datum(a).string_value().unwrap_or_default())
+                        .unwrap_or_default();
+                    let member_ref = CastMemberRef {
+                        cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                    };
+                    let scene = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                            .ok_or_else(|| ScriptError::new("3D member not found".to_string()))?;
+                        let w3d = member.member_type.as_shockwave3d()
+                            .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
+                        match w3d.parsed_scene.clone() {
+                            Some(s) => s,
+                            None => return Ok(player.alloc_datum(Datum::Int(0))),
+                        }
+                    };
+                    // The ref may be the model OR its resource; `find_skeleton_for_model`
+                    // already resolves either.
+                    let id = find_skeleton_for_model(&scene, &s3d_ref.name.as_str())
+                        .and_then(|sk| sk.bones.iter().position(|b| b.name.eq_ignore_ascii_case(&name)))
+                        .map(|i| i as i32 + 1)
+                        .unwrap_or(0);
+                    Ok(player.alloc_datum(Datum::Int(id)))
+                },
                 "getAt" => {
                     // getAt on a 3D object
                     if !args.is_empty() {
