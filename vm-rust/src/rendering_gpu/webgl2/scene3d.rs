@@ -650,11 +650,21 @@ void main() {
         }
 
         // Apply third texture layer if present
-        if (u_layer2_blend == 5) {
-            // Reflection / environment map (#reflection): sphere-mapped sky blended
-            // over the textured surface at the #constant factor (u_layer2_intensity).
+        if (u_layer2_blend >= 5) {
+            // Reflection / environment map (#reflection): sphere-mapped, then
+            // composited by the layer's own blendFunctionList entry (Director 11.5
+            // Scripting Dictionary, `blendFunctionList`). 5 = #blend (ratio set by
+            // blendConstant), 6 = #add (clamped), 7 = #multiply, 8 = #replace.
             vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
-            final_color = mix(final_color, refl, u_layer2_intensity);
+            if (u_layer2_blend == 6) {
+                final_color = min(final_color + refl, vec3(1.0));
+            } else if (u_layer2_blend == 7) {
+                final_color *= refl;
+            } else if (u_layer2_blend == 8) {
+                final_color = refl;
+            } else {
+                final_color = mix(final_color, refl, u_layer2_intensity);
+            }
         } else if (u_layer2_blend > 0) {
             vec2 l2_uv = (u_has_texcoord2 > 0) ? v_texcoord2 : v_texcoord;
             vec4 l2_sample = texture(u_layer2_tex, l2_uv);
@@ -746,9 +756,17 @@ void main() {
     // Reflection / environment map on an untextured surface — e.g. tinted glass:
     // material diffuse colour with a sphere-mapped sky reflection mixed in at the
     // #constant blend factor (reflectionMap helper, u_layer2_blend == 5).
-    if (u_layer2_blend == 5) {
+    if (u_layer2_blend >= 5) {
         vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
-        result = mix(result, refl, u_layer2_intensity);
+        if (u_layer2_blend == 6) {
+            result = min(result + refl, vec3(1.0));
+        } else if (u_layer2_blend == 7) {
+            result *= refl;
+        } else if (u_layer2_blend == 8) {
+            result = refl;
+        } else {
+            result = mix(result, refl, u_layer2_intensity);
+        }
     }
 
     // Apply fog (shared with the textured path via apply_fog).
@@ -4275,8 +4293,20 @@ void main() {
         let refl = Self::find_shader_ci(&scene.shaders, shader_name)
             .and_then(|sh| sh.texture_layers.iter()
                 .find(|l| l.tex_mode == 4 && !l.name.is_empty())
-                .map(|l| (l.name.clone(), l.blend_const)));
-        let (tex_name, blend_const) = match refl { Some(x) => x, None => return };
+                .map(|l| (l.name.clone(), l.blend_const, l.blend_func)));
+        let (tex_name, blend_const, blend_func) = match refl { Some(x) => x, None => return };
+        // The layer's blendFunctionList entry decides how the reflection composites
+        // (Director 11.5 Scripting Dictionary, `blendFunctionList`). Treating every
+        // reflection as #blend put Agent Free Ride's coins — an #add gold env map
+        // over a lettered ring — at a 50/50 mix with the env map, which read as a
+        // featureless white blob instead of a coin.
+        // File encoding: 0 = #replace, 1 = #add, 2 = #multiply, 3 = #blend.
+        let blend_mode = match blend_func {
+            0 => 8, // #replace
+            1 => 6, // #add
+            2 => 7, // #multiply
+            _ => 5, // #blend — ratio from blendConstant
+        };
         let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
         let tex = match gpu_data.textures.get(&Symbol::from_str(&tex_name.to_lowercase())) {
             Some(t) => t,
@@ -4286,7 +4316,7 @@ void main() {
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
         gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
         gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
-        gl.uniform1i(shader.u_layer2_blend.as_ref(), 5);
+        gl.uniform1i(shader.u_layer2_blend.as_ref(), blend_mode);
         gl.uniform1f(shader.u_layer2_intensity.as_ref(), blend_const.clamp(0.0, 1.0));
     }
 
@@ -4511,10 +4541,26 @@ void main() {
     /// (defect 3.2). If ANY layer is `#add` (IFX blend func 1) the surface is
     /// additive.
     fn effective_blend_func(shader: &crate::director::chunks::w3d::types::W3dShader) -> u8 {
-        if shader.texture_layers.iter().any(|l| l.blend_func == 1) {
+        if shader.texture_layers.iter().any(Self::layer_forces_additive) {
             return 1;
         }
         shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0)
+    }
+
+    /// Whether a texture layer makes the whole SURFACE composite additively
+    /// against the frame buffer.
+    ///
+    /// An `#add` layer normally does — that is Director's additive-FX idiom, where
+    /// `shader.blend` is left at 0 and the `#add` sits on a later layer. But a
+    /// `#reflection` layer (tex_mode 4) is different: its blend function says how
+    /// the ENVIRONMENT MAP combines with the surface underneath it, not how the
+    /// surface combines with what is already on screen. Agent Free Ride's coins are
+    /// exactly that shape — an opaque lettered ring plus an `#add` gold env map —
+    /// and treating the model as additive drew each coin as a saturated white blob
+    /// over the bright sky instead of a coin. The reflection's own contribution is
+    /// applied per-fragment in `apply_reflection_map`.
+    fn layer_forces_additive(l: &crate::director::chunks::w3d::types::W3dTextureLayer) -> bool {
+        l.blend_func == 1 && l.tex_mode != 4
     }
 
     /// True when a model composites additively — its shader carries an `#add`
@@ -4547,7 +4593,7 @@ void main() {
         }
         names.iter().any(|n| {
             Self::find_shader_ci(&scene.shaders, *n)
-                .map(|s| s.texture_layers.iter().any(|l| l.blend_func == 1))
+                .map(|s| s.texture_layers.iter().any(Self::layer_forces_additive))
                 .unwrap_or(false)
         })
     }
