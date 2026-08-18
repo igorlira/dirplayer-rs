@@ -36,6 +36,43 @@ pub fn default_motion_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> 
         }))
 }
 
+/// The motion Director pre-loads into an OBJECT-animated model's
+/// `keyframePlayer.playList` — the counterpart of `default_motion_for_model` for
+/// models that carry their own keyframe track instead of a skeleton.
+///
+/// The exporter names an object keyframe clip after the node it drives, with a
+/// "-Key" suffix (3ds Max / the W3D exporter's convention: node "tree_c4" ->
+/// motion "tree_c4-Key"), and the clip's single track carries the node's name.
+/// Match on either, since only the track name is guaranteed.
+///
+/// Agent Free Ride's `KeyFramed Hierarched Object.InitKeyframeObj` reads
+/// `getProp(kObj.keyframePlayer.playList[1], #name)` at construction and plays
+/// THAT name for every later animation; falling through to the scene-global
+/// legacy motion handed the falling-tree trap the rider's "player" clip.
+pub fn keyframe_motion_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> Option<&'a W3dMotion> {
+    if skeleton_for_model(scene, model_name).is_some() {
+        return None;
+    }
+    let keyed = format!("{}-Key", model_name.as_str());
+    scene.motions.iter()
+        .find(|m| m.name.as_str().eq_ignore_ascii_case(&keyed))
+        .or_else(|| scene.motions.iter().find(|m| {
+            m.tracks.len() == 1 && m.tracks[0].bone_name == model_name
+        }))
+}
+
+/// The rig `model_name` owns, if any — the test for whether Director attaches a
+/// #bonesPlayer (skinned) or a #keyframePlayer (object keyframes) to the model.
+pub fn skeleton_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> Option<&'a W3dSkeleton> {
+    let node = scene.nodes.iter().find(|n| n.name == model_name)?;
+    scene.skeletons.iter().find(|s| {
+        s.bones.len() > 1
+            && (s.name == node.resource_name
+                || s.name == node.model_resource_name
+                || s.name == node.name)
+    })
+}
+
 /// True when `motion` was authored for `skeleton` — at least one of its tracks
 /// names a bone of this rig.
 ///

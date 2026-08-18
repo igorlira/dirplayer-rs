@@ -1524,6 +1524,20 @@ pub struct Shockwave3dRuntimeState {
     /// Per-model collision modifier state, keyed by model node name. Drives
     /// native W3D collision detection in `events::tick_w3d_collisions`.
     pub collision_modifiers: std::collections::HashMap<Symbol, W3dCollisionModifier>,
+
+    // ─── model.modifier list ───
+    /// Explicit `addModifier` / `removeModifier` results, keyed by model node
+    /// name then modifier symbol (true = added, false = removed). The `modifier`
+    /// getter starts from what the IMPORT attached — Director gives an animated
+    /// model its #bonesPlayer / #keyframePlayer without any script asking — and
+    /// then applies these overrides on top.
+    pub modifier_overrides: std::collections::HashMap<Symbol, std::collections::HashMap<Symbol, bool>>,
+
+    /// Clone node name -> the node it was cloned FROM. A clone is renamed
+    /// ("tree_c4" -> "trap_nT_0_tree_c4"), but motions stay scene-global and keep
+    /// naming the ORIGINAL node, so a clone's own animation can only be found
+    /// through its origin. See `motion_origin_name`.
+    pub clone_source: std::collections::HashMap<Symbol, Symbol>,
 }
 
 /// Native Shockwave3D #collision modifier state (Director 11.5 collision

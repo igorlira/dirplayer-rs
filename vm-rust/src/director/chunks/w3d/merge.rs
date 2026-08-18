@@ -172,6 +172,27 @@ impl W3dScene {
             for mesh in &mut src.raw_meshes {
                 remap(&mut mesh.name, &model_res_renames);
             }
+            // A renamed node has to take its OBJECT keyframe clip with it.
+            // Such a clip is a single track named after the node it drives,
+            // exported as "<node>-Key"; the node is what `keyframe_motion_for_model`
+            // matches on, so leaving the old name behind silently unbinds the
+            // animation from the node that just moved.
+            //
+            // Deliberately restricted to single-track motions: a SKELETAL clip's
+            // tracks name BONES, and a rig's bones also appear in the node table as
+            // groups ("Bip01 …"), so remapping those through `node_renames` would
+            // repoint a skeleton's tracks at renamed group nodes and break the rig.
+            for motion in &mut src.motions {
+                if motion.tracks.len() != 1 {
+                    continue;
+                }
+                let old = motion.tracks[0].bone_name;
+                remap(&mut motion.tracks[0].bone_name, &node_renames);
+                let new = motion.tracks[0].bone_name;
+                if new != old && motion.name.as_str().eq_ignore_ascii_case(&format!("{}-Key", old.as_str())) {
+                    motion.name = Symbol::from_str(&format!("{}-Key", new.as_str()));
+                }
+            }
             // Keyed collections have to be rebuilt under the new keys.
             src.model_resources = src
                 .model_resources

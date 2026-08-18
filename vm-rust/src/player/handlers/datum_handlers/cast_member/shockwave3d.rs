@@ -2056,6 +2056,22 @@ impl Shockwave3dMemberHandlers {
                                 if let Some((name, n, r0)) = record_hops {
                                     w3d.runtime_state.clone_hop_count.insert(name, (n, r0));
                                 }
+                                // Motions stay scene-global and keep naming the ORIGINAL
+                                // node, so record where each cloned node came from —
+                                // that is the only way a renamed clone can find its own
+                                // keyframe clip. See `motion_origin_name`.
+                                if obj_type == "model" {
+                                    w3d.runtime_state.clone_source.insert(
+                                        Symbol::from_str(&obj_name),
+                                        Symbol::from_str(&source_model_name),
+                                    );
+                                    for child in &src_child_nodes {
+                                        w3d.runtime_state.clone_source.insert(
+                                            Symbol::from_str(&format!("{}{}", ns, child.name)),
+                                            child.name,
+                                        );
+                                    }
+                                }
                             }
                         }
                         use crate::director::lingo::datum::Shockwave3dObjectRef;

@@ -3863,11 +3863,14 @@ impl Shockwave3dObjectDatumHandlers {
                                 let hop_com: Vec<Option<[f32; 16]>> = src_state.iter()
                                     .map(|(n, r0)| if *n >= 1 { *r0 } else { None })
                                     .collect();
-                                for (i, (_, new_name)) in com_pairs.iter().enumerate() {
+                                for (i, (src_name, new_name)) in com_pairs.iter().enumerate() {
                                     let (n, r0) = src_state[i];
                                     if let Some(r0) = r0 {
                                         w3d.runtime_state.clone_hop_count.insert(*new_name, (n + 1, r0));
                                     }
+                                    // Motions name the ORIGINAL node, so a clone can only
+                                    // find its own animation through its origin.
+                                    w3d.runtime_state.clone_source.insert(*new_name, *src_name);
                                 }
                                 for (i, (node, transform, shaders, visibility, indexed)) in planned.iter().enumerate() {
                                     // Fold the RUNTIME transform too — the renderer prefers the
@@ -4087,6 +4090,9 @@ impl Shockwave3dObjectDatumHandlers {
                             "[W3D-ADDMOD] model=\"{}\" modifier=\"{}\" member=({},{})",
                             s3d_ref.name, mod_name, s3d_ref.cast_lib, s3d_ref.cast_member
                         ));
+                        set_modifier_override(player, &CastMemberRef {
+                            cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                        }, s3d_ref.name, &mod_name, true);
                         if mod_name == "lod" {
                             let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
@@ -4153,7 +4159,15 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
-                "removeModifier" => Ok(player.alloc_datum(Datum::Void)),
+                "removeModifier" => {
+                    if !args.is_empty() {
+                        let mod_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
+                        set_modifier_override(player, &CastMemberRef {
+                            cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
+                        }, s3d_ref.name, &mod_name, false);
+                    }
+                    Ok(player.alloc_datum(Datum::Void))
+                },
                 "registerScript" | "registerForEvent" => Ok(player.alloc_datum(Datum::Void)),
                 "setCollisionCallback" => {
                     // model.collision.setCollisionCallback(#handler, scriptInstance):
@@ -5853,6 +5867,13 @@ impl Shockwave3dObjectDatumHandlers {
                             "child" => {
                                 scene.nodes.iter().filter(|n| n.parent_name == s3d_ref.name).count()
                             }
+                            // `model.modifier.count` compiles to the `count(obj, #modifier)`
+                            // builtin, so the property getter never sees it — falling through
+                            // to `_ => 0` made every `repeat with i = 1 to
+                            // model.modifier.count` loop body unreachable.
+                            "modifier" | "modifiers" => {
+                                model_modifier_list(player, &scene, &member_ref, s3d_ref.name).len()
+                            }
                             "texturelayer" => {
                                 // meshDeformMesh.count(#textureLayer) — read from persistent list
                                 let parts: Vec<&str> = s3d_ref.name.as_str().splitn(2, ':').collect();
@@ -6752,10 +6773,33 @@ impl Shockwave3dObjectDatumHandlers {
                     name: model_name,
                 })))
             },
+            // `modifier.count` arrives as one dotted property path, like
+            // `bone.count` above — without this case it fell through to the
+            // catch-all stub and returned VOID, so `repeat with i = 1 to
+            // model.modifier.count` never entered its body.
+            "modifier.count" | "modifiers.count" => {
+                let n = model_modifier_list(player, scene, member_ref, model_name).len();
+                Ok(player.alloc_datum(Datum::Int(n as i32)))
+            },
             "modifiers" | "modifier" => {
+                // Director 11.5 Scripting Dictionary, `modifier`: "returns a list
+                // of modifiers that are attached to the specified model", as
+                // symbols. The list is NOT only what a script added — the W3D
+                // import attaches #bonesPlayer to a skinned model and
+                // #keyframePlayer to an object-animated one, which is how movies
+                // DISCOVER which models animate. Agent Free Ride's
+                // `KeyFramed Hierarched Object.InitKeyframeObj` and its
+                // `Animation Manager.Initialize` both scan this list before
+                // calling addModifier, so an always-empty list left the falling-tree
+                // traps with no keyframe list at all: the tree played its explosion
+                // FX and then stood there instead of toppling.
+                let mods = model_modifier_list(player, scene, member_ref, model_name);
+                let items: VecDeque<DatumRef> = mods.into_iter()
+                    .map(|s| player.alloc_datum(Datum::Symbol(s)))
+                    .collect();
                 Ok(player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List,
-                    VecDeque::new(),
+                    items,
                     false,
                 )))
             },
@@ -6769,36 +6813,43 @@ impl Shockwave3dObjectDatumHandlers {
                     .and_then(|m| m.member_type.as_shockwave3d())
                     .map(|w3d| {
                         let rs = &w3d.runtime_state;
-                        // Prefer the per-model bonesPlayer state; fall back to legacy fields.
-                        let (cur, loop_, start, end, scale, time, queue) = match rs.bones_player(model_name).filter(|b| b.current_motion.is_some()) {
-                            Some(bp) => (bp.current_motion, bp.animation_loop, bp.animation_start_time,
-                                bp.animation_end_time, bp.animation_scale, bp.animation_time, bp.motion_queue.clone()),
-                            None => (rs.current_motion.clone(), rs.animation_loop, rs.animation_start_time,
-                                rs.animation_end_time, rs.animation_scale, rs.animation_time, rs.motion_queue.clone()),
-                        };
-                        let mut list: Vec<crate::player::cast_member::QueuedMotion> = Vec::new();
-                        // Nothing played yet: Director still reports the rig's own motion
-                        // here, because it seeds a skinned model's playList at load. Games
-                        // read playList[1].name before ever calling play() — see
-                        // `default_motion_for_model`. Values match Director's own report
-                        // for an untouched bonesPlayer: loop 1, 0..100000, scale 1.
-                        // Times are held in SECONDS here and reported in ms, so
-                        // Director's 100000 ms end time is 100.0 in this struct.
-                        let cur = cur.or_else(|| {
-                            w3d.parsed_scene.as_ref().and_then(|scene| {
-                                crate::director::chunks::w3d::skeleton::default_motion_for_model(
-                                    scene, model_name,
-                                ).map(|m| m.name.clone())
-                            })
+                        // Nothing played yet: Director still reports the model's OWN clip
+                        // here, because the import seeds an animated model's playList.
+                        // Games read playList[1].name before ever calling play() — see
+                        // `default_motion_for_model` (skinned) and
+                        // `keyframe_motion_for_model` (object keyframes). Values match
+                        // Director's own report for an untouched player: loop 1,
+                        // 0..100000, scale 1. Times are held in SECONDS here and reported
+                        // in ms, so Director's 100000 ms end time is 100.0 in this struct.
+                        let own_motion = w3d.parsed_scene.as_ref().and_then(|scene| {
+                            // A clone's clip is filed under the node it was cloned from.
+                            let origin = motion_origin_name(rs, scene, model_name);
+                            crate::director::chunks::w3d::skeleton::default_motion_for_model(
+                                scene, origin,
+                            ).or_else(|| {
+                                crate::director::chunks::w3d::skeleton::keyframe_motion_for_model(
+                                    scene, origin,
+                                )
+                            }).map(|m| m.name)
                         });
-                        let seeded = !matches!(
-                            rs.bones_player(model_name), Some(b) if b.current_motion.is_some()
-                        ) && rs.current_motion.is_none();
-                        let (loop_, start, end, scale, time) = if seeded {
-                            (true, 0.0, 100.0, 1.0, 0.0)
-                        } else {
-                            (loop_, start, end, scale, time)
-                        };
+                        // Prefer the per-model player; then this model's own seeded clip;
+                        // only then the scene-global legacy fields. Those legacy fields
+                        // belong to whichever model played LAST, so consulting them ahead
+                        // of a model's own clip reports another model's animation:
+                        // Agent Free Ride's falling-tree traps all read back the rider's
+                        // "player" motion and drove nothing.
+                        let (cur, loop_, start, end, scale, time, queue) =
+                            match rs.bones_player(model_name).filter(|b| b.current_motion.is_some()) {
+                                Some(bp) => (bp.current_motion, bp.animation_loop, bp.animation_start_time,
+                                    bp.animation_end_time, bp.animation_scale, bp.animation_time,
+                                    bp.motion_queue.clone()),
+                                None if own_motion.is_some() =>
+                                    (own_motion, true, 0.0, 100.0, 1.0, 0.0, Vec::new()),
+                                None => (rs.current_motion.clone(), rs.animation_loop, rs.animation_start_time,
+                                    rs.animation_end_time, rs.animation_scale, rs.animation_time,
+                                    rs.motion_queue.clone()),
+                            };
+                        let mut list: Vec<crate::player::cast_member::QueuedMotion> = Vec::new();
                         if let Some(name) = cur {
                             list.push(crate::player::cast_member::QueuedMotion {
                                 name,
@@ -7996,6 +8047,109 @@ fn camera_ortho_height_if_ortho(
         return None;
     }
     Some(w3d.runtime_state.camera_ortho_height.get(&cam_name).copied().unwrap_or(200.0))
+}
+
+/// The node name a model's own motions are filed under.
+///
+/// `clone()` renames every node it copies, but motions are scene-global and keep
+/// naming the node they were AUTHORED for, so a clone's animation is only
+/// findable through the chain of nodes it was cloned from. Director has the same
+/// behaviour by construction: it copies the modifier itself, playList and all.
+/// Depth-capped, so a corrupted chain cannot loop.
+fn motion_origin_name(
+    rs: &crate::player::cast_member::Shockwave3dRuntimeState,
+    scene: &crate::director::chunks::w3d::types::W3dScene,
+    name: Symbol,
+) -> Symbol {
+    use crate::director::chunks::w3d::skeleton::{keyframe_motion_for_model, skeleton_for_model};
+    let mut cur = name;
+    for _ in 0..16 {
+        if skeleton_for_model(scene, cur).is_some() || keyframe_motion_for_model(scene, cur).is_some() {
+            return cur;
+        }
+        match rs.clone_source.get(&cur) {
+            Some(src) if *src != cur => cur = *src,
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// Record an `addModifier` / `removeModifier` so `model.modifier` reflects it.
+fn set_modifier_override(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+    model_name: Symbol,
+    modifier: &str,
+    added: bool,
+) {
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+            w3d.runtime_state.modifier_overrides
+                .entry(model_name)
+                .or_default()
+                .insert(Symbol::from_str(modifier), added);
+        }
+    }
+}
+
+/// The modifiers attached to `model_name`, as `model.modifier` reports them.
+///
+/// Director 11.5 Scripting Dictionary (`modifier`): a list of symbols naming the
+/// attached modifiers. Two sources feed it — what the W3D IMPORT attached (a
+/// skinned model gets #bonesPlayer, an object-keyframed one #keyframePlayer;
+/// this is what lets a movie discover which models animate without asking), and
+/// what scripts added or removed afterwards.
+fn model_modifier_list(
+    player: &crate::player::DirPlayer,
+    scene: &crate::director::chunks::w3d::types::W3dScene,
+    member_ref: &CastMemberRef,
+    model_name: Symbol,
+) -> Vec<Symbol> {
+    use crate::director::chunks::w3d::skeleton::{keyframe_motion_for_model, skeleton_for_model};
+    let mut mods: Vec<Symbol> = Vec::new();
+    let rs = player.movie.cast_manager.find_member_by_ref(member_ref)
+        .and_then(|m| m.member_type.as_shockwave3d())
+        .map(|w| &w.runtime_state);
+    // A clone carries the modifiers of the node it came from.
+    let origin = rs.map(|rs| motion_origin_name(rs, scene, model_name)).unwrap_or(model_name);
+    if skeleton_for_model(scene, origin).is_some() {
+        mods.push(Symbol::from_str("bonesPlayer"));
+    } else if keyframe_motion_for_model(scene, origin).is_some() {
+        mods.push(Symbol::from_str("keyframePlayer"));
+    }
+    if let Some(rs) = rs {
+        // A player the movie drove but the import did not attach (a clone whose
+        // motion arrived later, say) still counts as attached.
+        if rs.bones_players.get(&model_name).map_or(false, |b| b.current_motion.is_some())
+            && !mods.iter().any(|m| *m == Symbol::from_str("bonesPlayer"))
+            && !mods.iter().any(|m| *m == Symbol::from_str("keyframePlayer"))
+        {
+            mods.push(Symbol::from_str("keyframePlayer"));
+        }
+        for (registered, name) in [
+            (rs.lod_state.contains_key(&model_name), "lod"),
+            (rs.sds_state.contains_key(&model_name), "sds"),
+            (rs.collision_modifiers.contains_key(&model_name), "collision"),
+            (rs.mesh_deform.contains_key(&model_name), "meshDeform"),
+        ] {
+            if registered {
+                mods.push(Symbol::from_str(name));
+            }
+        }
+        if let Some(overrides) = rs.modifier_overrides.get(&model_name) {
+            for (name, added) in overrides {
+                if *added {
+                    if !mods.contains(name) {
+                        mods.push(*name);
+                    }
+                } else {
+                    mods.retain(|m| m != name);
+                }
+            }
+        }
+    }
+    mods
 }
 
 fn keyframe_motion_matrix(
