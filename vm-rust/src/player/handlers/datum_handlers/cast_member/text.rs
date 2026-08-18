@@ -1746,6 +1746,19 @@ impl TextMemberHandlers {
                             .map(|s| s.style.char_spacing)
                             .unwrap_or(text_data.char_spacing);
                         let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
+                        // Director renders text ALIASED below the member's
+                        // antiAliasThreshold (default 14): AreaZero's fs-12 HUD
+                        // strips are hard-edged in a real projector while its
+                        // fs-20 "Score" is smoothed. `anti_alias == false`
+                        // members deliberately KEEP the smooth path here — the
+                        // CS-Verdana navigator (anti_alias=false, 10px) relies
+                        // on sub-pixel coverage to stay legible; see the
+                        // matching carve-out at the `!text_data.anti_alias`
+                        // binarization below (atlas path only).
+                        let aa_threshold = text_data.info.as_ref()
+                            .map(|i| i.anti_alias_threshold)
+                            .unwrap_or(14);
+                        let aliased = text_data.anti_alias && (osize as u32) < aa_threshold;
                         match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
                             &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
                             // start_y = 0: the renderer applies `top_spacing`
@@ -1755,7 +1768,7 @@ impl TextMemberHandlers {
                             0, 0, box_width as i32, box_height as i32,
                             text_alignment, box_width as i32, text_data.word_wrap,
                             text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                            cs_px, &text_data.tab_stops,
+                            cs_px, &text_data.tab_stops, aliased,
                         ) {
                             Ok(()) => rendered_via_outline = true,
                             Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),

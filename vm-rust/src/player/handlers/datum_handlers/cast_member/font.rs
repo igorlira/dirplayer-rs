@@ -1467,6 +1467,9 @@ impl FontMemberHandlers {
         bottom_spacing: i16,
         char_spacing: i32,
         tab_stops: &[crate::player::cast_member::TabStop],
+        // Render ALIASED (hard 1-bit coverage), Director's look for text whose
+        // fontSize is below the member's antiAliasThreshold (default 14).
+        aliased: bool,
     ) -> Result<(), ScriptError> {
         use crate::io::encoding::glyph_byte_for;
 
@@ -1780,7 +1783,13 @@ impl FontMemberHandlers {
                 // instead of the soft grey a plain box-average/gamma produces.
                 const LO: f32 = 45.0;
                 const HI: f32 = 135.0;
-                let out_a = if (avg_a as f32) <= LO {
+                let out_a = if aliased {
+                    // Director does NOT anti-alias text below the member's
+                    // antiAliasThreshold: a pixel is ink iff (approximately) its
+                    // center falls inside the outline. Majority coverage of the
+                    // 5×5 supersample is the closest equivalent.
+                    if avg_a >= 128 { 255 } else { 0 }
+                } else if (avg_a as f32) <= LO {
                     0
                 } else if (avg_a as f32) >= HI {
                     255
