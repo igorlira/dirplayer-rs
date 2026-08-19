@@ -897,6 +897,25 @@ impl W3dFileParser {
             let qz = r.read_f32()?;
             let bone_attrs = r.read_u32()?;
 
+            // Attribute-gated optional fields
+            // A bone record is NOT fixed-size:
+            //   0x40           -> bone links: numLinks (u32) + linkLength (f32)
+            //   0x80           -> joint front/back: 4 + 4 floats
+            //   (a & 0x09)==9  -> X rotation constraint: min/max (2 f32)
+            //   (a & 0x12)==18 -> Y rotation constraint: min/max (2 f32)
+            //   (a & 0x24)==36 -> Z rotation constraint: min/max (2 f32)
+            // Skipping these keeps the stream aligned; the values themselves are
+            // IK/constraint data the renderer does not use. Without this, any rig
+            // with a constrained bone (AreaZero's RobotFrog constrains 6) aborted
+            // mid-block and the member ended up with NO skeleton at all — the
+            // mesh had skin weights but nothing to pose them, so the model could
+            // never animate.
+            if bone_attrs & 0x40 != 0 { r.skip(8); }
+            if bone_attrs & 0x80 != 0 { r.skip(32); }
+            if bone_attrs & 0x09 == 0x09 { r.skip(8); }
+            if bone_attrs & 0x12 == 0x12 { r.skip(8); }
+            if bone_attrs & 0x24 == 0x24 { r.skip(8); }
+
             skeleton.bones.push(W3dBone {
                 name: bone_name,
                 parent_index: if parent_idx == 0xFFFFFFFF { -1 } else { parent_idx as i32 },
