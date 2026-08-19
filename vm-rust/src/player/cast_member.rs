@@ -2448,9 +2448,9 @@ impl HavokSpring {
             rigid_body_b: None,
             point_a: [0.0; 3],
             point_b: [0.0; 3],
-            rest_length: 0.0,
-            elasticity: 0.5,
-            damping: 0.1,
+            rest_length: 1.0,
+            elasticity: 1.0,
+            damping: 0.5,
             on_compression: true,
             on_extension: true,
         }
@@ -2476,7 +2476,7 @@ impl HavokLinearDashpot {
             rigid_body_b: None,
             point_a: [0.0; 3],
             point_b: [0.0; 3],
-            strength: 0.5,
+            strength: 1.0,
             damping: 0.1,
         }
     }
@@ -2499,9 +2499,9 @@ impl HavokAngularDashpot {
             name,
             rigid_body_a: None,
             rigid_body_b: None,
-            rotation_axis: [0.0, 1.0, 0.0],
+            rotation_axis: [0.0, 0.0, 1.0],
             rotation_angle: 0.0,
-            strength: 0.5,
+            strength: 1.0,
             damping: 0.1,
         }
     }
