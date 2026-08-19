@@ -1809,6 +1809,17 @@ pub struct ParticleSystemState {
     pub blend_end: f32,         // blendRange.end — opacity PERCENT (0..100) at death
     pub texture_name: String,   // particle billboard texture (lowercased gpu key)
     pub seed: u32,              // evolving RNG so respawns aren't a fixed per-index pattern
+    /// Set by a Lingo property write that invalidates the particle distribution
+    /// (currently `lifetime`, whose value every age is scaled against). It is
+    /// NOT acted on there: a script configures a system one property at a time
+    /// and `emitter.*` lives in a different map, so at the moment of the write
+    /// the mode / region / direction / speeds are still whatever they were.
+    /// `initialize()` reads all of those — a `#stream` even births and
+    /// fast-forwards every particle inside it — so running it early stamps the
+    /// whole system with default state. The per-frame tick clears this flag
+    /// after it has copied the emitter across, which is the only point where
+    /// the system is fully described.
+    pub needs_reinit: bool,
 }
 
 impl Shockwave3dRuntimeState {
@@ -1967,6 +1978,7 @@ impl Default for ParticleSystemState {
             blend_end: 100.0,
             texture_name: String::new(),
             seed: 0x9E3779B9,
+            needs_reinit: false,
         }
     }
 }

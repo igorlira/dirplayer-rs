@@ -1249,13 +1249,25 @@ impl Shockwave3dObjectDatumHandlers {
                                         // scaled to the 1 ms park, so no particle reached the new
                                         // 1.2 s lifetime before the effect was over and the burst
                                         // never appeared at all.
+                                        //
+                                        // Defer the re-stagger to the tick.
+                                        // Doing it here runs `initialize()`
+                                        // against emitter state that has not
+                                        // been written yet — `StartParticle`
+                                        // sets `lifeTime` BEFORE `emitter.mode`,
+                                        // `region`, `direction` and the speeds —
+                                        // so a system still carrying the default
+                                        // `stream = true` births and
+                                        // fast-forwards all 100 particles at the
+                                        // origin at speed 1, then never
+                                        // re-initialises because the COUNT never
+                                        // changes. That is why Rifleman's barrel
+                                        // vanished with no explosion: both its
+                                        // effects sat invisible at world zero.
                                         if (ps.lifetime - new_life).abs() > 1e-6 {
-                                            ps.lifetime = new_life;
-                                            let n = ps.max_particles;
-                                            if n > 0 { ps.initialize(n); }
-                                        } else {
-                                            ps.lifetime = new_life;
+                                            ps.needs_reinit = true;
                                         }
+                                        ps.lifetime = new_life;
                                     },
                                     "texture" => {
                                         let tn = match value {

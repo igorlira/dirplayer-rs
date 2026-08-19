@@ -938,13 +938,20 @@ pub async fn tick_w3d_particles() {
                                 // idle riders' powder jets sat at the world origin as
                                 // white blobs on the horizon.
                                 let n = (em.num_particles.max(0) as usize).min(10000);
-                                if ps.max_particles != n {
+                                // Re-initialise here, and ONLY here: this is the
+                                // first point at which the system is fully
+                                // described (mode, region, direction, speeds all
+                                // copied above). `needs_reinit` carries a pending
+                                // `lifetime` change over from the Lingo setter,
+                                // which fires while those are still defaults.
+                                if ps.max_particles != n || ps.needs_reinit {
                                     ps.initialize(n);
                                 }
                             }
                             if ps.positions.is_empty() && ps.max_particles > 0 {
                                 ps.initialize(ps.max_particles);
                             }
+                            ps.needs_reinit = false;
                             ps.update(dt);
                         }
                     }
