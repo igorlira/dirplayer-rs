@@ -4981,7 +4981,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 // Pointer lock is only activated when the game also sets _mouse.mouseLoc.
                 match &cr {
                     crate::player::sprite::CursorRef::System(id) => {
-                        if *id == 200 || *id == -1 {
+                        // Only 200 is Blank; -1 and 0 are the Arrow. See the
+                        // note on the global `cursor` command in types.rs.
+                        if *id == 200 {
                             reserve_player_mut(|p| { p.cursor_is_hidden = true; });
                         } else {
                             reserve_player_mut(|p| {

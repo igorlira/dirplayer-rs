@@ -903,7 +903,16 @@ impl TypeHandlers {
                 if arg.is_int() {
                     let cursor_val = arg.int_value()?;
                     player.cursor = CursorRef::System(cursor_val);
-                    if cursor_val == 200 || cursor_val == -1 {
+                    // Director 11.5 Scripting Dictionary, `cursor` property value
+                    // table: "-1, 0 Arrow" and "200 Blank (hides cursor)". ONLY
+                    // 200 hides. -1 is the documented way to put the ARROW BACK
+                    // ("To reset the cursor to the regular arrow cursor, specify
+                    // a cursor type of -1"), so treating it as hidden inverted
+                    // the meaning: AreaZero ends mouselook with `cursor -1`, and
+                    // reading that as "still hidden" left `wants_pointer_lock`
+                    // stuck on, so its death/summary and pause menus kept the
+                    // pointer captured and were unclickable.
+                    if cursor_val == 200 {
                         player.cursor_is_hidden = true;
                     } else {
                         player.cursor_is_hidden = false;
