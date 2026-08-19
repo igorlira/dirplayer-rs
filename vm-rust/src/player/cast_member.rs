@@ -5189,6 +5189,32 @@ impl CastMember {
         if box_w == 0 { box_w = 100; }
         if box_h == 0 { box_h = 20; }
 
+        // A single line can never be shorter than the member's own
+        // `fixedLineSpace`. Paige (which XMED serialises) computes
+        //     new_line_height = ascent + descent + leading;
+        //     if (par_style->leading_fixed > new_line_height)
+        //         new_line_height = par_style->leading_fixed;
+        // so `leading_fixed` is a MINIMUM line height, never a squeeze — the same
+        // rule the renderer already follows. A one-line box IS one line, so its
+        // height is bounded below by it.
+        //
+        // `page_height` (Paige's doc_bottom) does not always honour that: for a
+        // member authored EMPTY it holds the bare font extent. Rasterwerks'
+        // kill-feed scratch member `txtArialBold12_512` reads page_height 15
+        // against fixedLineSpace 16 and TextInfo height 16, and the multi-line
+        // reconciliation above cannot separate "info_h ballooned by 1" from
+        // "info_h is the authored box" — so it took 15 and `member.rect` came
+        // back 512x15 for a 512x16 member.
+        //
+        // C_MsgBox is what that broke: it copyPixels the member's `.image` into
+        // a 512x16 line image over `rect(0, 0, 512, 16)` to clear the alpha, then
+        // blits each kill/chat line in. One row short of the source left the last
+        // row of every line image untouched and opaque, drawing a white rule under
+        // each row of the kill feed, running the full width of the image.
+        if !box_type_is_adjust && line_count_for_box <= 1 && styled_text.fixed_line_space > 0 {
+            box_h = box_h.max(styled_text.fixed_line_space);
+        }
+
         // Keep synthesized TextInfo dimensions aligned with effective member box.
         text_info.width = box_w as u32;
         text_info.height = box_h as u32;
