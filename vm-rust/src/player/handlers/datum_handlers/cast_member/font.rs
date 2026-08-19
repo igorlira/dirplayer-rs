@@ -1506,20 +1506,20 @@ impl FontMemberHandlers {
         // AreaZero Score strip: baseline 19 puts ink at strip rows 4-18 exactly
         // as the projector capture; round() gave 18 and sat the text 1px high.
         let baseline = (phys.metrics.layout_ascender() as f64 * scale).ceil();
-        // When fixedLineSpace EXCEEDS the ascent, Director drops the baseline to
-        // lineTop + fixedLineSpace (fls is the baseline-to-baseline distance and
-        // the first baseline sits a full fls from the top; descenders then hang
-        // into the next line's box). Measured on AreaZero's controls block
-        // (Arial 12, fls 14): Director's line-1 core ink is rows 6..13 of the
-        // bake — baseline 14 — where lineTop + ascent(11) put ours at 2..10.
-        // A small fls never RAISES the baseline (Score: fls 11, ascent 19,
-        // baseline 19 — pixel-exact vs the projector), which is the §3
-        // "fixedLineSpace never squeezes" rule this max() preserves.
-        let baseline = if fixed_line_space > 0 {
-            baseline.max(fixed_line_space as f64)
-        } else {
-            baseline
-        };
+        // fixedLineSpace does NOT move the baseline. It grows the LINE BOX
+        // (see `effective_line_h` below, which is where the Paige minimum
+        // belongs); the baseline stays at `lineTop + ascent` and the slack
+        // lands under the descender. This used to read
+        // `baseline.max(fixed_line_space)`, which pinned the baseline to the
+        // bottom of the box whenever fls >= ascent + descent.
+        //
+        // Rifleman's HUD is the case that exposed it. `tfFoes` is Microgramma
+        // Condensed Bold 56 with fixedLineSpace 56 against ascent ~45, so the
+        // digits were baselined at 56 in a 56-tall `.image` — flush with the
+        // bottom edge, with any descender clipped outright. That image is
+        // blitted into the 64x64 HUD texture drawn at point(450, 12), so the
+        // "15" hung across the rule of the "FOES LEFT" plate at y=64 instead
+        // of sitting above it. Same for `tfTime` (fls 38, size 38).
 
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
         let advance_of = |code: u8| -> f64 {
