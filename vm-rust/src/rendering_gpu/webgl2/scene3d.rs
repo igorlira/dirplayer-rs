@@ -5040,7 +5040,17 @@ void main() {
         {
             return false;
         }
-        let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
+        // Sample clock: a per-model bonesPlayer owns its own clock. Without one,
+        // the ADVANCING legacy clock is only right when the legacy member fields
+        // hold an explicitly played motion; a rig that never had play() called
+        // stands in its seeded clip's FRAME 0 (Director pre-loads the playlist
+        // but does not run it — the Agent Free Ride note on `current_motion_name`
+        // above). Advancing the seeded clip animated Intel's DoNotPush "Barry"
+        // rig from the moment its skeleton first parsed, drifting it off the
+        // authored pose.
+        let time = bp.map(|b| b.animation_time)
+            .or_else(|| runtime_state.and_then(|rs| rs.current_motion.map(|_| self.animation_time)))
+            .unwrap_or(0.0);
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
         let end_time = bp.map(|b| b.animation_end_time)
             .or_else(|| runtime_state.map(|rs| rs.animation_end_time)).unwrap_or(-1.0);
