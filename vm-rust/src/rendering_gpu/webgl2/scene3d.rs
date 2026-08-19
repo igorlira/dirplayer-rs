@@ -5131,6 +5131,27 @@ void main() {
         let root_relinv = match (folded_com, &idle_root_mats) {
             (Some(r0), _) => affine_inv(r0),
             (None, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
+            // NO clone tier here. A 2026-08-18 attempt added a LAST tier that
+            // relativized any cloneModelFromCastmember model by its posed root
+            // (`world_matrices[0]`) to strip the biped COM from AreaZero's clip-less
+            // "Punch" blade rig. It is refuted: `clone_hop_count` holds EVERY cloned
+            // skinned model (hop >= 1), so the tier also fired on Agent Free Ride's
+            // rider/vehicle rigs and on all six Rifleman `soldier_N` clones — probe:
+            // `tier=clone_posed` for player/veh_player_1..5/soldier_1..6 — rotating
+            // each by inv(root) (a 3ds-Max biped root is Rz(-90) here) and displacing
+            // it by the root offset. That is the reported "AFR1/AFR2 player rotation"
+            // and "Rifleman soldier aiming"; with the tier gone the AFR riders stand
+            // on their boards again.
+            //
+            // It also contradicts a rule MEASURED in real Director 11.5 on Rifleman's
+            // own spawn code (memory [[w3d-clone-hop-refold]]): the fold is re-applied
+            // per clone HOP and a clone is deliberately never recorded in
+            // `model_root_com`, because "the renderer's strip is only valid while the
+            // node still holds the fold, and a script assigning `transform` destroys
+            // it" — which is exactly what AreaZero's FPS weapon script does
+            // (`transform.rotation = vector(-90,90,0)`). Any future fix for the blade
+            // must key off the hop COUNT and the r0 the hop carried, not off "is a
+            // clone at all".
             _ => IDENTITY_4X4,
         };
 
