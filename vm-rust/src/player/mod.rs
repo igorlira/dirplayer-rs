@@ -479,11 +479,24 @@ pub struct DirPlayer {
     /// The first request finds no cached frame and falls through to the getter's
     /// offscreen `render_3d_to_rgba` path, so nothing is ever served stale.
     pub w3d_image_requested: std::collections::HashSet<(i32, i32)>,
-    /// Set once any 3D member has rendered. Previously `!w3d_frame_buffers
-    /// .is_empty()` stood in for "3D content is active" when deciding whether to
-    /// request pointer lock; with the readback now lazy that map can legitimately
-    /// stay empty, which would have silently broken FPS mouselook.
+    /// Did a 3D member render in the frame just drawn? Previously
+    /// `!w3d_frame_buffers.is_empty()` stood in for "3D content is active" when
+    /// deciding whether to request pointer lock; with the readback now lazy that
+    /// map can legitimately stay empty, which would have silently broken FPS
+    /// mouselook.
+    ///
+    /// Per-frame, NOT a latch. It used to be set once and never cleared, which
+    /// stranded the pointer lock: Rifleman and AreaZero both leave the 3D sprite
+    /// behind for a 2D menu, and with the flag stuck true the mouselook warp kept
+    /// re-requesting the lock, so the cursor stayed captured and the menu could
+    /// not be clicked. `draw_frame` latches it at the END of a frame so the value
+    /// Lingo sees between frames describes a completed frame — clearing it at
+    /// frame start would leave it false while the movie's own frame handlers run,
+    /// and those are exactly where the mouselook warp happens.
     pub w3d_any_rendered: bool,
+    /// Scratch for the above: raised by the 3D render pass, folded into
+    /// `w3d_any_rendered` when the frame finishes.
+    pub w3d_rendered_this_frame: bool,
     pub in_enter_frame: bool,
     pub in_prepare_frame: bool,
     pub in_step_frame: bool,
@@ -830,6 +843,7 @@ impl DirPlayer {
             w3d_frame_buffers: HashMap::new(),
             w3d_image_requested: std::collections::HashSet::new(),
             w3d_any_rendered: false,
+            w3d_rendered_this_frame: false,
             in_enter_frame: false,
             in_prepare_frame: false,
             in_step_frame: false,

@@ -789,6 +789,9 @@ impl WebGL2Renderer {
 
     pub fn draw_frame(&mut self, player: &mut DirPlayer) {
         self.frame_count += 1;
+        // Cleared here, raised by the 3D pass in `render_sprite`, latched into
+        // `w3d_any_rendered` at the end of the frame.
+        player.w3d_rendered_this_frame = false;
         // Increment sprite debug frame counter
         let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1022,6 +1025,19 @@ impl WebGL2Renderer {
         // nested `#movie` sub-player is rendering into the host framebuffer.
         if unsafe { crate::player::ACTIVE_PLAYER_ID } == 0 {
             self.copy_framebuffer_to_prev();
+        }
+
+        // Latch "3D is on screen" for the frame that just finished. Losing the
+        // last 3D sprite also drops any mouselook pointer lock: a movie that
+        // cuts from the 3D world to a 2D menu (Rifleman's pause/level menus,
+        // AreaZero's) never asks for the cursor back, so without this the
+        // pointer stays captured and the menu is unclickable. The frontend
+        // releases the real lock the next time it sees `wants_pointer_lock()`
+        // go false.
+        let had_3d = player.w3d_any_rendered;
+        player.w3d_any_rendered = player.w3d_rendered_this_frame;
+        if had_3d && !player.w3d_any_rendered {
+            player.wants_pointer_lock = false;
         }
     }
 
@@ -4326,7 +4342,10 @@ impl WebGL2Renderer {
 
                 // "3D has rendered" — drives the pointer-lock heuristic, which used
                 // to infer this from `w3d_frame_buffers` being non-empty.
-                player.w3d_any_rendered = true;
+                // Per-frame: `draw_frame` folds this into `w3d_any_rendered` once
+                // the frame is complete, so leaving the 3D sprite for a 2D menu
+                // drops the flag and releases the mouselook pointer lock.
+                player.w3d_rendered_this_frame = true;
 
                 // Capture FBO pixels for world.image access — ONLY if a script has
                 // actually asked for this member's image. The readback is a
