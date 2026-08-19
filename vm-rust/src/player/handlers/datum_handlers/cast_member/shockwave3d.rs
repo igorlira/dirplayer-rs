@@ -3053,6 +3053,16 @@ impl Shockwave3dMemberHandlers {
                     let origin = player.get_datum(&args[0]).to_vector()?;
                     let direction = player.get_datum(&args[1]).to_vector()?;
 
+                    // NOTE: deliberately does NOT flush the persistent transform datums
+                    // the way the screen-picking handlers do. modelsUnderRay is the
+                    // engine-wide ray primitive — bot ground collision, missile flight
+                    // and nav-net building all call it many times per frame — and
+                    // Director evidently answers it from the same once-per-frame node
+                    // state. Flushing here changed what C_NavNet.InitSpecialNodes' pad
+                    // probe rays hit, leaving a hole in `plJumpPad2NavNode`, and the
+                    // first bot to launch off the unmapped pad indexed `plNavNode[0]`
+                    // and died with "Index out of bounds: -1".
+
                     // Director's modelsUnderRay accepts EITHER the positional form
                     //   (loc, dir, maxNumber, #detailed [, modelList])
                     // OR the documented options-list form (Director 11.5 dictionary)

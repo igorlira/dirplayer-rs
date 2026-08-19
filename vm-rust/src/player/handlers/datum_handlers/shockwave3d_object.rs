@@ -4261,6 +4261,8 @@ impl Shockwave3dObjectDatumHandlers {
                 "isInWorld" => Ok(player.alloc_datum(Datum::Int(1))),
                 // ─── Camera methods ───
                 "modelUnderLoc" => {
+                    // Same-frame freshness as modelsUnderLoc — see the note there.
+                    sync_persistent_transforms(player);
                     if !args.is_empty() {
                         // Get screen point from argument
                         let (sx, sy) = match player.get_datum(&args[0]) {
@@ -4426,6 +4428,18 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "modelsUnderLoc" => {
+                    // Picking reads the node transform CACHE, which only catches up
+                    // at the next `sync_persistent_transforms`. Lingo mutates
+                    // `camera.transform.position` / `.rotation` through the persistent
+                    // transform datum, so a script that aims and then picks in the SAME
+                    // frame picks through the PREVIOUS frame's camera.
+                    //
+                    // Rasterwerks is the case: `C_Camera.Step` writes the new view
+                    // rotation from the mouse and `C_Weapon.Step` fires through
+                    // `modelsUnderLoc(screenCentre)` later in that same frame, so every
+                    // shot was aimed one frame of mouse-look behind the crosshair.
+                    // Flush first, exactly as the PhysX body factories already do.
+                    sync_persistent_transforms(player);
                     // modelsUnderLoc(point {, maxModels, #simple|#detailed})
                     if !args.is_empty() {
                         let (sx, sy) = match player.get_datum(&args[0]) {
@@ -5998,6 +6012,8 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                 },
                 "worldSpaceToSpriteSpace" => {
+                    // Same-frame freshness as modelsUnderLoc — see the note there.
+                    sync_persistent_transforms(player);
                     // Project a world-space vector to 2D sprite-space point
                     if args.is_empty() {
                         return Ok(player.alloc_datum(Datum::Void));
@@ -6042,6 +6058,8 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Point([sx as f64, sy as f64], 0)))
                 },
                 "spriteSpaceToWorldSpace" => {
+                    // Same-frame freshness as modelsUnderLoc — see the note there.
+                    sync_persistent_transforms(player);
                     // Unproject a 2D sprite-space point to world-space position on projection plane
                     if args.is_empty() {
                         return Ok(player.alloc_datum(Datum::Void));
