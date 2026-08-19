@@ -342,7 +342,7 @@ uniform mat4 u_projection;
 
 // Skeletal skinning
 uniform int u_skinning_enabled;
-uniform mat4 u_bone_matrices[48];
+uniform mat4 u_bone_matrices[96];
 
 // Texture coordinate transform (post-projection UV-space tweak)
 uniform mat4 u_tex_transform;
@@ -5120,10 +5120,15 @@ void main() {
             .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.map(|s| s.as_str())));
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
-        let bone_count = skeleton.bones.len().min(48);
-        // Initialize ALL 48 uniform slots to identity — bone indices can reference
-        // any slot 0-47, even beyond the skeleton's actual bone count.
-        let uniform_slots = 48;
+        // 96 slots: Intel's own IFX sample rigs exceed the old 48-bone cap
+        // (DoNotPush's "Barry_delib" skeleton is 82 bones) — with the cap, every
+        // vertex weighted to a bone >= the cap rode a clamped wrong matrix and
+        // the character drew as scrambled chunks. 96 mat4 = 384 vec4 uniforms,
+        // well inside desktop WebGL2 vertex-uniform budgets.
+        let bone_count = skeleton.bones.len().min(96);
+        // Initialize ALL uniform slots to identity — bone indices can reference
+        // any slot, even beyond the skeleton's actual bone count.
+        let uniform_slots = 96;
         let mut skinning_matrices = vec![0.0f32; uniform_slots * 16];
         for i in 0..uniform_slots {
             skinning_matrices[i * 16]      = 1.0; // m[0][0]
@@ -5879,7 +5884,7 @@ fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (V
         let mut idx4 = [0.0f32; 4];
         let mut wgt4 = [0.0f32; 4];
         for (k, &(b, w)) in pairs.iter().enumerate() {
-            idx4[k] = (b as f32).min(47.0); // clamp to bone uniform array size
+            idx4[k] = (b as f32).min(95.0); // clamp to bone uniform array size
             wgt4[k] = w;
         }
         let sum: f32 = wgt4.iter().sum();
