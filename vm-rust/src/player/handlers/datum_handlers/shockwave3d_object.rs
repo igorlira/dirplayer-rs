@@ -9321,6 +9321,37 @@ fn apply_point_at(
         } else {
             world_mat
         };
+        // RE-NORMALIZE before re-applying the local scale. `world_mat`'s basis is
+        // built from unit vectors, so any length in this product came from
+        // `inv_parent` — a parent scaled by s contributes 1/s. Multiplying
+        // `local_scale` (the node's CURRENT column lengths) straight onto that made
+        // every call compound: new_scale = (1/s) * old_scale.
+        //
+        // Rasterwerks is the case that exposed it. `C_Weapon.fire()` runs
+        // `pAimUtil.pointAt(pvCrossHairPos, gvUP)` on EVERY shot, and pAimUtil is
+        // parented to the weapon model, which is scaled 0.3 — so the local scale grew
+        // 1/0.3 = 3.333x per round. About 45 rounds of sustained MachineGun fire
+        // saturated f32 (2.2e19), after which `rotate(pvAimError)` could no longer
+        // perturb the matrix: the gun sprayed nothing and hit the same spot every
+        // time, and because pAimUtil is ONE group shared by all five weapons and
+        // never reset, every other weapon then fired 70-80 degrees off. Measured
+        // scale by shot: 11.1 (=3.333^2) -> 7.7e8 -> 5.4e16 -> 2.2e19 (saturated).
+        //
+        // Stripping the length here makes the basis a pure rotation in the parent's
+        // frame, which is what pointAt should produce; the node's own scale is then
+        // applied once. For an unparented node (or an unscaled parent) inv_parent is
+        // unit and this is a strict no-op.
+        for c in 0..3 {
+            let l = (m[c * 4] * m[c * 4]
+                + m[c * 4 + 1] * m[c * 4 + 1]
+                + m[c * 4 + 2] * m[c * 4 + 2])
+                .sqrt();
+            if l > 1e-6 {
+                m[c * 4] /= l;
+                m[c * 4 + 1] /= l;
+                m[c * 4 + 2] /= l;
+            }
+        }
         for c in 0..3 {
             m[c * 4] *= local_scale[c];
             m[c * 4 + 1] *= local_scale[c];
