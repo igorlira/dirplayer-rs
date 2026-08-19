@@ -270,38 +270,59 @@ pub trait TestHarness {
 
     // --- Input simulation ---
 
+    /// Resolve a simulated event position the same way `lib.rs::mouse_event_loc`
+    /// does for real browser events: while the pointer is locked for mouselook the
+    /// cursor is frozen, so the event carries a meaningless absolute position and
+    /// `mouse_loc` must keep its delta-managed value. Writing the raw position
+    /// here made simulated clicks snap the view (measured in Rasterwerks: 8-19
+    /// degrees per click) — a harness artifact the shipping path does not have,
+    /// which is exactly the kind of thing an input test must not invent.
+    fn event_loc(x: i32, y: i32) -> (i32, i32) {
+        reserve_player_ref(|p| {
+            if p.pointer_locked || p.wants_pointer_lock { p.mouse_loc } else { (x, y) }
+        })
+    }
+
     async fn click(&mut self, x: i32, y: i32) {
         log_test_action(&format!("Click ({}, {})", x, y));
+        let (ex, ey) = Self::event_loc(x, y);
         reserve_player_mut(|player| {
-            player.mouse_loc = (x, y);
+            player.mouse_loc = (ex, ey);
             player.movie.mouse_down = true;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = run_player_command(PlayerVMCommand::MouseDown((ex, ey))).await;
         self.step_frame().await;
         reserve_player_mut(|player| {
-            player.mouse_loc = (x, y);
+            player.mouse_loc = (ex, ey);
             player.movie.mouse_down = false;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = run_player_command(PlayerVMCommand::MouseUp((ex, ey))).await;
     }
 
     async fn mouse_down(&mut self, x: i32, y: i32) {
+        let (ex, ey) = Self::event_loc(x, y);
         reserve_player_mut(|player| {
-            player.mouse_loc = (x, y);
+            player.mouse_loc = (ex, ey);
             player.movie.mouse_down = true;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = run_player_command(PlayerVMCommand::MouseDown((ex, ey))).await;
     }
 
     async fn mouse_up(&mut self, x: i32, y: i32) {
+        let (ex, ey) = Self::event_loc(x, y);
         reserve_player_mut(|player| {
-            player.mouse_loc = (x, y);
+            player.mouse_loc = (ex, ey);
             player.movie.mouse_down = false;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = run_player_command(PlayerVMCommand::MouseUp((ex, ey))).await;
     }
 
     async fn mouse_move(&mut self, x: i32, y: i32) {
+        // Real `mouse_move` ignores absolute moves entirely while mouselook owns
+        // the camera (lib.rs); the delta path drives it instead.
+        if reserve_player_ref(|p| p.pointer_locked || p.wants_pointer_lock) {
+            return;
+        }
         reserve_player_mut(|player| {
             player.mouse_loc = (x, y);
         });
