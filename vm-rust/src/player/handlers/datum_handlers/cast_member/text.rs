@@ -661,12 +661,33 @@ impl TextMemberHandlers {
                     // `pfr_auto_line_height`, which every other site
                     // (`.height`, `.image` measure + render) shares so the
                     // Text-Wrapper bake stays 1:1.
+                    // `fixedLineSpace` is a Paige MINIMUM, not the whole stride. PGTEXT.C:
+                    //     new_line_height = ascent + descent + leading;
+                    //     if (leading_fixed > new_line_height) new_line_height = leading_fixed;
+                    // so a fixedLineSpace SHORTER than the font's own leading never squeezes
+                    // the line. The outline renderer always advances by that natural leading,
+                    // so sizing the box from fixedLineSpace alone leaves it short by the
+                    // difference on every line and cuts the last one mid-glyph. Rifleman's
+                    // briefing popup is the case: `fpPop512x256_c` is Courier New Bold 32 with
+                    // fixedLineSpace 34 against a natural 36, so its 4-line `.image` came out
+                    // 136 where the glyphs need 144 - and utiCreateTextureFromText blits
+                    // exactly that image into the popup texture, so "minutes." was sliced in
+                    // half on screen.
+                    //
+                    // Only OUTLINE fonts get the floor. For PFR pixel fonts the atlas
+                    // `cell_h = char_h - 1` runs one pixel hotter than the authored stride
+                    // (fixedLineSpace=21 -> cell_h=22), and flooring by that inflates every
+                    // list by a pixel per row.
+                    let outline_natural = crate::player::font::outline_auto_line_height_for_font(
+                        player, &text_data.font, nominal,
+                    );
                     let line_h = if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space
+                        match outline_natural {
+                            Some(n) => text_data.fixed_line_space.max(n),
+                            None => text_data.fixed_line_space,
+                        }
                     } else {
-                        crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
+                        outline_natural.unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                             &font,
                             player.bitmap_manager.get_bitmap(font.bitmap_ref),
                             nominal,
@@ -681,11 +702,7 @@ impl TextMemberHandlers {
                     // — clipping rows 7-10 of a 10-row list. Folding both
                     // spacings into line_step keeps `.height` / `.image` aligned
                     // with what the renderer actually draws.
-                    let line_step = (if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space
-                    } else {
-                        line_h
-                    }) as i32
+                    let line_step = line_h as i32
                         + text_data.top_spacing as i32
                         + text_data.bottom_spacing as i32;
                     let h = (text_data.top_spacing as i32
@@ -872,12 +889,17 @@ impl TextMemberHandlers {
                         // fixed_line_space=21 → cell_h=22), inflating
                         // single-line height to fixed_line_space+1.
                         // Otherwise: shared Paige auto leading (see `.rect`).
+                        // Same Paige minimum rule as the `.rect` getter above.
+                        let outline_natural = crate::player::font::outline_auto_line_height_for_font(
+                            player, &text_data.font, nominal,
+                        );
                         let line_h = if text_data.fixed_line_space > 0 {
-                            text_data.fixed_line_space
+                            match outline_natural {
+                                Some(n) => text_data.fixed_line_space.max(n),
+                                None => text_data.fixed_line_space,
+                            }
                         } else {
-                            crate::player::font::outline_auto_line_height_for_font(
-                                player, &text_data.font, nominal,
-                            ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
+                            outline_natural.unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                                 &font,
                                 player.bitmap_manager.get_bitmap(font.bitmap_ref),
                                 nominal,
@@ -885,11 +907,7 @@ impl TextMemberHandlers {
                         };
                         // See `.rect` getter for rationale on folding
                         // top_spacing + bottom_spacing into line_step.
-                        let line_step = (if text_data.fixed_line_space > 0 {
-                            text_data.fixed_line_space
-                        } else {
-                            line_h
-                        }) as i32
+                        let line_step = line_h as i32
                             + text_data.top_spacing as i32
                             + text_data.bottom_spacing as i32;
                         (text_data.top_spacing as i32
@@ -1460,12 +1478,17 @@ impl TextMemberHandlers {
                     // guess, which disagreed with the renderer's own fallback
                     // (13 here vs 25 there) and sized the box for the wrong
                     // number of lines.
+                    // Same Paige minimum rule as the `.rect` getter above.
+                    let outline_natural = crate::player::font::outline_auto_line_height_for_font(
+                        player, &text_data.font, nominal,
+                    );
                     let line_h = if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space
+                        match outline_natural {
+                            Some(n) => text_data.fixed_line_space.max(n),
+                            None => text_data.fixed_line_space,
+                        }
                     } else {
-                        crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
+                        outline_natural.unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
                             &font,
                             player.bitmap_manager.get_bitmap(font.bitmap_ref),
                             nominal,
@@ -1473,11 +1496,7 @@ impl TextMemberHandlers {
                     };
                     // See `.rect` getter for rationale on folding
                     // top_spacing + bottom_spacing into line_step.
-                    let line_step = (if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space
-                    } else {
-                        line_h
-                    }) as i32
+                    let line_step = line_h as i32
                         + text_data.top_spacing as i32
                         + text_data.bottom_spacing as i32;
                     box_height = (text_data.top_spacing as i32
