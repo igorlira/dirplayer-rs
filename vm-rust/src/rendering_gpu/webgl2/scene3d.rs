@@ -3000,17 +3000,27 @@ void main() {
                     // second time for scripted movies like the dinosaur test.
                     gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
                 } else {
-                    // Passive W3D skinned content still needs the historical
-                    // Z-up -> render-basis correction.
-                    let mut m = world_matrix;
-                    for col in 0..3 {
-                        let o = col * 4;
-                        let r1 = m[o + 1];
-                        let r2 = m[o + 2];
-                        m[o + 1] = r2;
-                        m[o + 2] = -r1;
-                    }
-                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &m);
+                    // No basis rebase for passive skinned content. A historical
+                    // "Z-up -> render basis" column swap used to be applied here,
+                    // but IFX is right-handed with NO axis remap anywhere else in
+                    // this renderer (see the coordinate-conventions note: view =
+                    // plain camera inverse, never negate axes), and Intel's own
+                    // IFX sample DoNotPush.dcr is direct evidence against it: its
+                    // 82-bone "Barry_delib" rig parses and skins correctly and the
+                    // swap laid the character on its back, viewed from above.
+                    // Measured: with the swap restored, `intel_do_not_push`'s
+                    // start_game snapshot fails at 19.82% against its reference;
+                    // without it, it passes. A per-draw probe also showed this
+                    // branch is reached by only two things in the whole 3D suite
+                    // — `Barry_delib` and AreaZero's `RobotGunShadow` — because
+                    // every other skinned model is Lingo-driven and takes the
+                    // override branch above. In particular NOTHING in Rifleman
+                    // or Agent Free Ride reaches it, so this hunk cannot be
+                    // (and was not) the cause of their rider/soldier regression;
+                    // that was the clone tier below. Those two movies have no
+                    // committed reference snapshots at all, so do not read a
+                    // green run as rendering validation for them.
+                    gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
                 }
             } else {
                 gl.uniform_matrix4fv_with_f32_array(shader.u_model.as_ref(), false, &world_matrix);
