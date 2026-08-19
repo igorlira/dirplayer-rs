@@ -30,6 +30,7 @@ import {
   ime_composition_update,
   ime_composition_end,
   set_renderer_backend,
+  set_pointer_locked,
 } from "vm-rust";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
@@ -363,6 +364,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         if (!wants_pointer_lock()) {
           document.exitPointerLock();
           lockedElRef.current = null;
+          set_pointer_locked(false);
           return;
         }
         mouse_move_delta(e.movementX, e.movementY);
@@ -383,10 +385,22 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         key_up(e.key, e.keyCode);
       }
     };
+    // Tell the VM whether the browser REALLY holds the lock. While it does, the
+    // cursor is frozen at the lock-engage point, so every click carries that stale
+    // position; the VM must keep its delta-managed `mouse_loc` instead of taking
+    // it, or the movie's mouselook read turns the jump into a one-frame view snap
+    // and the shot fired on that frame goes with it. The VM cannot infer this from
+    // `wants_pointer_lock` alone — that is movie intent, and a sprite cursor
+    // assignment clears it.
+    const handleLockChange = () => {
+      set_pointer_locked(ownsPointerLock());
+    };
+    document.addEventListener("pointerlockchange", handleLockChange);
     document.addEventListener("mousemove", handleLockedMouseMove);
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
     return () => {
+      document.removeEventListener("pointerlockchange", handleLockChange);
       document.removeEventListener("mousemove", handleLockedMouseMove);
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);

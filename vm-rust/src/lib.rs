@@ -711,7 +711,10 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
 /// registers the button, not a phantom move.
 fn mouse_event_loc(x: f64, y: f64) -> (i32, i32) {
     reserve_player_ref(|p| {
-        if p.wants_pointer_lock {
+        // `pointer_locked` is the browser's real state; `wants_pointer_lock` is
+        // only the movie's intent and is cleared by any sprite cursor assignment
+        // other than Blank. Either one means the coordinates are meaningless.
+        if p.pointer_locked || p.wants_pointer_lock {
             p.mouse_loc
         } else {
             // Invert the stage auto-scale so mouseH/mouseV land in movie coordinates,
@@ -873,6 +876,16 @@ pub fn right_mouse_up(x: f64, y: f64) {
 }
 
 /// Check if the game wants pointer lock (for FPS mouse look)
+/// Report whether the browser currently holds the pointer lock for THIS player's
+/// canvas. The frontend calls this from its `pointerlockchange` handler with the
+/// result of `ownsPointerLock()`. See `DirPlayer::pointer_locked`.
+#[wasm_bindgen]
+pub fn set_pointer_locked(locked: bool) {
+    reserve_player_mut(|player| {
+        player.pointer_locked = locked;
+    });
+}
+
 #[wasm_bindgen]
 pub fn wants_pointer_lock() -> bool {
     reserve_player_ref(|player| player.wants_pointer_lock)

@@ -328,6 +328,18 @@ pub struct DirPlayer {
     pub ime_composition: Option<(i32, i32)>,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    /// Whether the BROWSER actually holds the pointer lock for this player's
+    /// canvas, as reported by the frontend's `pointerlockchange` handler.
+    ///
+    /// `wants_pointer_lock` is only the movie's INTENT, and it is cleared by any
+    /// sprite cursor assignment other than 200/Blank (see `score.rs`). While the
+    /// real lock is held the browser freezes the cursor, so every mouse event
+    /// carries the stale lock-engage position; letting one of those through
+    /// slams `mouse_loc` away from the movie's recentre point, and the movie's
+    /// next mouselook read turns that jump into a one-frame view snap. Measured
+    /// in Rasterwerks: a single click moved the view 8-19 degrees, which is
+    /// where the shot then went. Gate on the real lock, not the intent.
+    pub pointer_locked: bool,
     pub cursor_is_hidden: bool,
     /// Track parent DatumRef for chained property access (transform.position.z = value)
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
@@ -788,6 +800,7 @@ impl DirPlayer {
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            pointer_locked: false,
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
