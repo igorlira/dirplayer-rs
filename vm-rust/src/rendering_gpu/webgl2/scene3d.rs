@@ -2917,7 +2917,19 @@ void main() {
                 // node names aren't).
                 match runtime_override {
                     Some(rt) => mat4_multiply_col_major(&rt, km),
-                    None => mat4_multiply_col_major(km, &node.transform),
+                    // Base FIRST, keyframe applied in the node's own frame — the same
+                    // order as the runtime-override branch above, and the order the
+                    // clips are authored in: an object keyframe starts at IDENTITY
+                    // (pos 0, rot identity, scale 1) and is a delta from the node's
+                    // authored rest pose. Agent Free Ride's paraglider canopy is the
+                    // proof: `parachute`'s node is authored at ~1/100 scale and its
+                    // clip ramps scale ~100x as the canopy inflates, with translation
+                    // running to ~1e6 in that same 100x space. Composed the other way
+                    // round (`km * base`) the clip's raw translation is NOT divided by
+                    // the node's 1/100 scale, so the canopy was drawn ~1.4 MILLION
+                    // units away — off screen, which is why the end-of-level shot had
+                    // a boarder and no parachute.
+                    None => mat4_multiply_col_major(&node.transform, km),
                 }
             } else if let Some(motion_t) = self.motion_transforms.get(&node.name) {
                 match runtime_override {

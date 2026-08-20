@@ -8403,8 +8403,14 @@ fn get_node_transform(
             // Fall back to parsed scene (case-insensitive)
             if let Some(scene) = &w3d.parsed_scene {
                 if let Some(node) = scene.nodes.iter().find(|n| n.name == node_name) {
+                    // Base FIRST — see the matching note in
+                    // `scene3d::accumulate_transform_with_state`. An object keyframe
+                    // is a delta from the node's authored rest pose, so composing it
+                    // the other way round skips the node's own scale and throws a
+                    // model authored at 1/100 scale (Agent Free Ride's parachute
+                    // canopy) a million units off.
                     return match motion {
-                        Some(km) => mat4_mul_f32(&km, &node.transform),
+                        Some(km) => mat4_mul_f32(&node.transform, &km),
                         None => node.transform,
                     };
                 }
