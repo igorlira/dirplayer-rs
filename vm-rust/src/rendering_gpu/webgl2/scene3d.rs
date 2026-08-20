@@ -573,7 +573,11 @@ void main() {
     // Alpha-test cutout: opaque models whose texture carries alpha (e.g. frog01's
     // Flash bark/leaf textures) are drawn in the opaque pass; discard transparent
     // texels so they don't write depth and aren't sorted as translucent.
-    if (u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
+    // `u_has_texture > 0` guard: nothing unbinds texture unit 0 between draws, so
+    // on an untextured model `tex_sample` is whatever the PREVIOUS model left
+    // there. Only a model that actually has a diffuse texture may be alpha-tested
+    // against it.
+    if (u_has_texture > 0 && u_alpha_threshold > 0.0 && tex_sample.a < u_alpha_threshold) discard;
 
     // When textured: GL_MODULATE mode = texture * vertex_lighting
     // IFX default: UseDiffuse=OFF → material diffuse forced to white (1,1,1)
@@ -776,7 +780,15 @@ void main() {
     // Apply fog (shared with the textured path via apply_fog).
     result = apply_fog(result);
 
-    float alpha = u_opacity * tex_sample.a * u_diffuse_color.a;
+    // Untextured path only — the textured branch returned above with its own
+    // `u_opacity * tex_sample.a`. There is no diffuse texture bound for THIS draw,
+    // so `tex_sample` still holds a sample of the previously drawn model's texture
+    // and its alpha must not modulate this surface. Folding it in made every
+    // material-only translucent model as transparent as whatever happened to be
+    // drawn before it — AreaZero's enemy health bar (shader.blend 90, a flat red
+    // quad with no texture layers) came out as a washed-out pink smear that faded
+    // in and out with the draw order instead of a solid red bar.
+    float alpha = u_opacity * u_diffuse_color.a;
     frag_color = vec4(result, alpha);
 }
 "#;
