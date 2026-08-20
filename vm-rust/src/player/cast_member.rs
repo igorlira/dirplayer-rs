@@ -1752,9 +1752,16 @@ impl Default for EmitterState {
     fn default() -> Self {
         Self {
             num_particles: 1000, // Director #particle default
-            mode: "burst".to_string(),
+            // "#burst or #stream (default)" (Director 11.5 Scripting Dictionary,
+            // "mode (emitter)"). Defaulting to burst dumped every particle of a
+            // system that never sets the property into one clump at the emitter —
+            // Bottle Rocket's exhaust (`RcktRec` sets speed/angle but no mode) came
+            // out as a single opaque square instead of a jet.
+            mode: "stream".to_string(),
             is_loop: true,
-            direction: [0.0, 1.0, 0.0],
+            // "The default value of this property is vector(1,0,0)" (Director 11.5
+            // Scripting Dictionary, "direction").
+            direction: [1.0, 0.0, 0.0],
             region: vec![[0.0, 0.0, 0.0]],
             has_region: false,
             distribution: "linear".to_string(),
@@ -2059,14 +2066,80 @@ impl ParticleSystemState {
             self.emitter_position[1] + offset[1],
             self.emitter_position[2] + offset[2],
         ];
-        // Direction with angle spread
-        let spread = self.angle_range;
-        let speed = self.initial_speed + r1 * self.speed_range;
-        self.velocities[i] = [
-            (self.direction[0] + r1 * spread) * speed,
-            (self.direction[1] + r2 * spread) * speed,
-            (self.direction[2] + r3 * spread) * speed,
+        // "The direction of emission of a given particle will deviate from that
+        // vector by a random angle between 0 and the value of the emitter's angle
+        // property. The effective range of this property is 0.0 to 180.0"
+        // (Director 11.5 Scripting Dictionary, "angle (3D)"). So a birth direction
+        // is a unit vector inside a CONE of half-angle `angle_range` about
+        // `direction`, and 180 degrees is the whole sphere.
+        //
+        // Perturbing each axis independently (`direction + r * spread` per
+        // component) samples a BOX in velocity space instead, so a 180-degree
+        // burst came out as a cube: Bottle Rocket's firework filled the frame
+        // corner to corner in a square pattern rather than expanding as a ball.
+        //
+        // The polar angle is drawn uniformly in THETA, exactly as documented:
+        // each particle "will deviate from that vector by a random angle between 0
+        // and the value of the emitter's angle property". That concentrates
+        // particles toward the cone axis and thins them toward the rim, which is
+        // what makes a narrow emitter read as a bright jet with soft edges — the
+        // Intel Bottle Rocket capture shows its exhaust brightest ON the axis, and
+        // a threshold-measured width of only ~11 degrees for an authored angle of
+        // 20. Sampling uniformly per unit SOLID angle instead spread the same
+        // particles evenly across the full 20 degrees, leaving the jet too faint
+        // near the nozzle to see.
+        //
+        // It also keeps `angle = 180` (the default) a genuinely full sphere, which
+        // the same movie's firework depends on — halving the aperture to preserve
+        // a solid-angle-uniform distribution turned its explosion into a hemisphere
+        // bunched on one side.
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let u1 = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
+        self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let u2 = (self.seed >> 8) as f32 / 16_777_216.0; // 0..1
+
+        // `direction = vector(0,0,0)` means "emitted in all directions"
+        // (Director 11.5 Scripting Dictionary, "direction"), i.e. a full sphere.
+        let d_len = (self.direction[0] * self.direction[0]
+            + self.direction[1] * self.direction[1]
+            + self.direction[2] * self.direction[2])
+            .sqrt();
+        let (axis, theta_max) = if d_len > 1e-6 {
+            (
+                [self.direction[0] / d_len, self.direction[1] / d_len, self.direction[2] / d_len],
+                self.angle_range.clamp(0.0, std::f32::consts::PI),
+            )
+        } else {
+            // `direction = vector(0,0,0)` means all directions, i.e. a full sphere
+            // regardless of the angle.
+            ([0.0, 0.0, 1.0], std::f32::consts::PI)
+        };
+        // Orthonormal basis around the cone axis; pick the seed vector least
+        // parallel to it so the cross product never degenerates.
+        let seed_vec = if axis[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+        };
+        let mut t1 = cross(axis, seed_vec);
+        let t1_len = (t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2]).sqrt().max(1e-6);
+        t1 = [t1[0] / t1_len, t1[1] / t1_len, t1[2] / t1_len];
+        let t2 = cross(axis, t1);
+
+        let theta = u1 * theta_max;
+        let (sin_t, cos_t) = theta.sin_cos();
+        let phi = u2 * std::f32::consts::TAU;
+        let (sin_p, cos_p) = phi.sin_cos();
+        let dir = [
+            axis[0] * cos_t + t1[0] * sin_t * cos_p + t2[0] * sin_t * sin_p,
+            axis[1] * cos_t + t1[1] * sin_t * cos_p + t2[1] * sin_t * sin_p,
+            axis[2] * cos_t + t1[2] * sin_t * cos_p + t2[2] * sin_t * sin_p,
         ];
+
+        // "Particles are emitted at random speeds between a minimum and a maximum"
+        // (Director 11.5 Scripting Dictionary, emitter.minSpeed / maxSpeed) — the
+        // band is min..max, not min +/- range/2.
+        let speed = self.initial_speed + (r1 + 0.5) * self.speed_range;
+        self.velocities[i] = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
     }
 
     pub fn update(&mut self, dt: f32) {

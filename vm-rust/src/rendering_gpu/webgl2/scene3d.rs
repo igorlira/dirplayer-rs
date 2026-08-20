@@ -868,12 +868,10 @@ void main() {
     v_age_ratio = clamp(a_age / u_lifetime, 0.0, 1.0);
     v_uv = a_corner * 0.5 + 0.5;
 
-    // sizeRange is the world-unit sprite size (IFX builds a `size`-wide quad per
-    // particle); a_corner spans -1..1 so 0.5 == `size` wide. We use 0.25 (half
-    // that) so the stream is a thin jet matching Shockwave's water output, rather
-    // than a thick column — the visible blob of the particle texture is narrower
-    // than the full quad.
-    float size_factor = mix(u_size_start, u_size_end, v_age_ratio) * 0.25;
+    // sizeRange is the sprite size in WORLD UNITS ("Particles are measured in
+    // world units" — Director 11.5 Scripting Dictionary, "sizeRange"), so the quad
+    // is `size` across. a_corner spans -1..1, hence the 0.5 half-extent.
+    float size_factor = mix(u_size_start, u_size_end, v_age_ratio) * 0.5;
 
     // Cull particles that are behind the eye OR so close that the billboard balloons
     // across the screen. A chase camera following a car repeatedly passes through the

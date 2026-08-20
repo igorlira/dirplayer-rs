@@ -952,7 +952,15 @@ pub async fn tick_w3d_particles() {
                                 ps.initial_speed = em.min_speed as f32;
                                 ps.max_speed = em.max_speed.max(em.min_speed) as f32;
                                 ps.speed_range = (em.max_speed - em.min_speed).max(0.0) as f32;
-                                // emitter.angle is the cone half-angle in degrees.
+                                // "the direction of emission of a given particle will
+                                // deviate from that vector by a random angle between 0
+                                // and the value of the emitter's angle property. The
+                                // effective range of this property is 0.0 to 180.0"
+                                // (Director 11.5 Scripting Dictionary, "angle (3D)") —
+                                // so `angle` IS the maximum polar deviation, and 180
+                                // is a full sphere. See `respawn` for why the polar
+                                // angle is drawn uniformly in THETA, which is what
+                                // makes a 20-degree cone read as a narrow jet.
                                 ps.angle_range = (em.angle as f32).to_radians();
                                 ps.stream = em.mode.eq_ignore_ascii_case("stream");
                                 ps.loop_enabled = em.is_loop;
