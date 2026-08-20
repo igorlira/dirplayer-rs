@@ -62,6 +62,7 @@ pub enum LingoExpr {
     Le(Box<LingoExpr>, Box<LingoExpr>),
     Ge(Box<LingoExpr>, Box<LingoExpr>),
     Not(Box<LingoExpr>),
+    Negate(Box<LingoExpr>),
     PutBefore(Box<LingoExpr>, Box<LingoExpr>),
     PutAfter(Box<LingoExpr>, Box<LingoExpr>),
     PutInto(Box<LingoExpr>, Box<LingoExpr>),
@@ -81,6 +82,8 @@ pub enum LingoExpr {
     /// chain is being walked) it's effectively a no-op; we evaluate to
     /// Void.
     Pass,
+    LastChunkExpr(String, Box<LingoExpr>),        // "last char of X" → chunk_type, source
+    StringChunkCountExpr(String, Box<LingoExpr>), // "the number of chars in X" → chunk_type, source
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
@@ -773,6 +776,10 @@ fn parse_lingo_expr_runtime(
                     Box::new(LingoExpr::IntLiteral(-1)),
                 ))
             }
+            Rule::subtract => {
+                let right = rhs?;
+                Ok(LingoExpr::Negate(Box::new(right)))
+            }
             _ => Err(ScriptError::new(format!(
                 "Invalid prefix operator {:?}",
                 op.as_rule()
@@ -785,6 +792,27 @@ fn parse_lingo_expr_runtime(
                 let index_pairs = op.into_inner();
                 let index_expr = parse_lingo_expr_runtime(index_pairs, pratt)?;
                 Ok(LingoExpr::ListAccess(Box::new(list_expr), Box::new(index_expr)))
+            }
+            Rule::range_index => {
+                let lhs_expr = lhs?;
+                // range_index applies to obj.prop expressions: obj.prop[start..end]
+                // Decompose ObjProp(obj, prop) and build getProp call
+                let (obj, prop) = match lhs_expr {
+                    LingoExpr::ObjProp(obj, prop) => (*obj, prop),
+                    other => return Err(ScriptError::new(format!(
+                        "range_index requires obj.prop LHS, got {:?}", other
+                    ))),
+                };
+                let mut inner = op.into_inner();
+                let start_pairs = inner.next().ok_or_else(|| ScriptError::new("range_index missing start".to_string()))?.into_inner();
+                let start_expr = parse_lingo_expr_runtime(start_pairs, pratt)?;
+                let end_pairs = inner.next().ok_or_else(|| ScriptError::new("range_index missing end".to_string()))?.into_inner();
+                let end_expr = parse_lingo_expr_runtime(end_pairs, pratt)?;
+                Ok(LingoExpr::ObjHandlerCall(
+                    Box::new(obj),
+                    "getProp".to_string(),
+                    vec![LingoExpr::SymbolLiteral(prop), start_expr, end_expr],
+                ))
             }
             _ => Err(ScriptError::new(format!(
                 "Invalid postfix operator {:?}",
@@ -1055,6 +1083,14 @@ pub fn parse_lingo_rule_runtime(
             let str_val = str_inner.as_str();
             Ok(LingoExpr::ColorLiteral(ColorRef::from_hex(str_val)))
         }
+        Rule::rgb_expr_color => {
+            let mut inner = pair.into_inner();
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression in rgb()".to_string()))?;
+            let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
+            Ok(LingoExpr::HandlerCall("rgb".to_string(), vec![expr]))
+        }
         Rule::rgb_color => {
             let mut inner = pair.clone().into_inner();
             if let Some(inner_pair) = inner.next() {
@@ -1137,7 +1173,7 @@ pub fn parse_lingo_rule_runtime(
             Ok(LingoExpr::IfThen(Box::new(cond), Box::new(body)))
         }
         Rule::pass_stmt => Ok(LingoExpr::Pass),
-        Rule::handler_call | Rule::command_inline => {
+        Rule::handler_call | Rule::prop_handler_call | Rule::command_inline => {
             let mut inner = pair.into_inner();
             let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
             let handler_name = handler_name_pair.as_str();
@@ -1444,6 +1480,31 @@ pub fn parse_lingo_rule_runtime(
                 _ => parse_lingo_rule_runtime(source_pair, pratt)?,
             };
             Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), range_end_expr.map(Box::new), Box::new(source_expr)))
+        }
+        Rule::last_chunk_expr => {
+            let mut inner = pair.into_inner();
+            let _last_kw = inner.next(); // "last" keyword
+            let chunk_type_pair = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected chunk type in last_chunk_expr".to_string()))?;
+            let chunk_type = chunk_type_pair.as_str().to_lowercase();
+            let source_pair = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected source in last_chunk_expr".to_string()))?;
+            let source_expr = parse_lingo_rule_runtime(source_pair, pratt)?;
+            Ok(LingoExpr::LastChunkExpr(chunk_type, Box::new(source_expr)))
+        }
+        Rule::string_chunk_count_expr => {
+            let mut inner = pair.into_inner();
+            let _number_kw = inner.next(); // "number" keyword
+            let chunk_count_type_pair = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected chunk count type".to_string()))?;
+            let _in_kw = inner.next(); // "in" keyword
+            let source_pair = inner.next()
+                .ok_or_else(|| ScriptError::new("Expected source in string_chunk_count_expr".to_string()))?;
+            // "chars" -> "char", "words" -> "word", "items" -> "item", "lines" -> "line"
+            let type_str = chunk_count_type_pair.as_str().to_lowercase();
+            let chunk_type = type_str.trim_end_matches('s').to_string();
+            let source_expr = parse_lingo_rule_runtime(source_pair, pratt)?;
+            Ok(LingoExpr::StringChunkCountExpr(chunk_type, Box::new(source_expr)))
         }
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
@@ -2414,6 +2475,23 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(Datum::Int(result)))
             })
         }
+        LingoExpr::Negate(operand) => {
+            let value = Box::pin(eval_lingo_expr_ast_runtime(operand)).await?;
+            reserve_player_mut(|player| {
+                let value = player.get_datum(&value).clone();
+                let result = match value {
+                    Datum::Int(n) => Datum::Int(-n),
+                    Datum::Float(n) => Datum::Float(-n),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Cannot negate value of type {}",
+                            value.type_str()
+                        )))
+                    }
+                };
+                Ok(player.alloc_datum(result))
+            })
+        }
         LingoExpr::ChunkExpr(chunk_type, index_expr, range_end_expr, source_expr) => {
             // Evaluate the source expression to get a string
             let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source_expr)).await?;
@@ -2480,6 +2558,33 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                     None => player.alloc_datum(Datum::String(result_string)),
                 })
             })
+        }
+        LingoExpr::LastChunkExpr(chunk_type, source) => {
+            let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source)).await?;
+            let source_string = reserve_player_mut(|player| {
+                player.get_datum(&source_ref).string_value()
+            })?;
+            let chunk_type_enum = StringChunkType::from(Symbol::from_str(chunk_type.as_str()));
+            let item_delimiter = reserve_player_mut(|player| Ok(player.movie.item_delimiter))?;
+            let count = StringChunkUtils::resolve_chunk_count(&source_string, chunk_type_enum, item_delimiter)?;
+            let chunk_expr = StringChunkExpr {
+                chunk_type: StringChunkType::from(Symbol::from_str(chunk_type.as_str())),
+                start: count as i32,
+                end: count as i32,
+                item_delimiter,
+            };
+            let result = StringChunkUtils::resolve_chunk_expr_string(&source_string, &chunk_expr)?;
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(result))))
+        }
+        LingoExpr::StringChunkCountExpr(chunk_type, source) => {
+            let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source)).await?;
+            let source_string = reserve_player_mut(|player| {
+                player.get_datum(&source_ref).string_value()
+            })?;
+            let chunk_type_enum = StringChunkType::from(Symbol::from_str(chunk_type.as_str()));
+            let item_delimiter = reserve_player_mut(|player| Ok(player.movie.item_delimiter))?;
+            let count = StringChunkUtils::resolve_chunk_count(&source_string, chunk_type_enum, item_delimiter)?;
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(count as i32))))
         }
         LingoExpr::Eq(left, right) => {
             let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
@@ -2652,6 +2757,13 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
             let expr_pair = &parse_result.enumerate().next().unwrap();
             let mut ast = parse_lingo_rule_runtime(expr_pair.1.clone(), &pratt)?;
 
+            if rule == Rule::command_eval_expr
+                && matches!(&ast, LingoExpr::HandlerCall(name, args) if name.eq_ignore_ascii_case("put") && args.is_empty())
+                && expr.contains('(')
+            {
+                return Err(ScriptError::new("put() requires at least one argument".to_string()));
+            }
+
             // In command context, convert bare identifiers to handler calls
             if rule == Rule::command_eval_expr {
                 if let LingoExpr::Identifier(name) = ast {
@@ -2674,7 +2786,7 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
     PrattParser::new()
         .op(Op::infix(Rule::or_op, Assoc::Left))              // Lowest: or
         .op(Op::infix(Rule::and_op, Assoc::Left))             // and
-        .op(Op::prefix(Rule::not_op))                         // not (prefix)
+        .op(Op::prefix(Rule::not_op) | Op::prefix(Rule::subtract)) // prefix ops
         .op(Op::infix(Rule::eq_op, Assoc::Left)               // = comparison
             | Op::infix(Rule::ne_op, Assoc::Left)             // <>
             | Op::infix(Rule::lt_op, Assoc::Left)             // <
@@ -2692,7 +2804,8 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
             | Op::infix(Rule::mod_op, Assoc::Left))
         .op(Op::prefix(Rule::neg_op))                         // unary minus
         .op(Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
-            | Op::postfix(Rule::list_index))                  // and [index]
+            | Op::postfix(Rule::list_index)                   // and [index]
+            | Op::postfix(Rule::range_index))                 // and [start..end]
 }
 
 pub async fn eval_lingo_command(expr: String) -> Result<DatumRef, ScriptError> {
@@ -2746,7 +2859,9 @@ pub fn parse_to_lingo_expr(text: &str) -> Result<LingoExpr, String> {
     let mut pairs = LingoParser::parse(Rule::command_eval_expr, text)
         .map_err(|e| e.to_string())?;
     let pair = pairs.next().ok_or_else(|| "Empty parse result".to_string())?;
-    parse_lingo_rule_runtime(pair, &pratt).map_err(|e| e.to_string())
+    parse_lingo_rule_runtime(pair, &pratt)
+        .map(normalize_compiler_ast)
+        .map_err(|e| e.to_string())
 }
 
 /// Parse a Lingo expression (not a statement) to a LingoExpr AST.
@@ -2755,5 +2870,169 @@ pub fn parse_expr_to_lingo_expr(text: &str) -> Result<LingoExpr, String> {
     let mut pairs = LingoParser::parse(Rule::eval_expr, text)
         .map_err(|e| e.to_string())?;
     let pair = pairs.next().ok_or_else(|| "Empty parse result".to_string())?;
-    parse_lingo_rule_runtime(pair, &pratt).map_err(|e| e.to_string())
+    parse_lingo_rule_runtime(pair, &pratt)
+        .map(normalize_compiler_ast)
+        .map_err(|e| e.to_string())
+}
+
+fn normalize_compiler_ast(expr: LingoExpr) -> LingoExpr {
+    match expr {
+        LingoExpr::HandlerCall(name, args) => {
+            let args = args.into_iter().map(normalize_compiler_ast).collect::<Vec<_>>();
+
+            if let [LingoExpr::ObjHandlerCall(obj, method, method_args)] = args.as_slice() {
+                if let LingoExpr::ListLiteral(items) = obj.as_ref() {
+                    if let [index_expr] = items.as_slice() {
+                        return LingoExpr::ObjHandlerCall(
+                            Box::new(LingoExpr::ListAccess(
+                                Box::new(LingoExpr::Identifier(name)),
+                                Box::new(index_expr.clone()),
+                            )),
+                            method.clone(),
+                            method_args.clone(),
+                        );
+                    }
+                }
+            }
+
+            LingoExpr::HandlerCall(name, args)
+        }
+        LingoExpr::ObjHandlerCall(obj, method, args) => LingoExpr::ObjHandlerCall(
+            Box::new(normalize_compiler_ast(*obj)),
+            method,
+            args.into_iter().map(normalize_compiler_ast).collect(),
+        ),
+        LingoExpr::ObjProp(obj, prop) => {
+            LingoExpr::ObjProp(Box::new(normalize_compiler_ast(*obj)), prop)
+        }
+        LingoExpr::ListAccess(obj, idx) => LingoExpr::ListAccess(
+            Box::new(normalize_compiler_ast(*obj)),
+            Box::new(normalize_compiler_ast(*idx)),
+        ),
+        LingoExpr::Assignment(lhs, rhs) => LingoExpr::Assignment(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Add(lhs, rhs) => LingoExpr::Add(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Subtract(lhs, rhs) => LingoExpr::Subtract(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Multiply(lhs, rhs) => LingoExpr::Multiply(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Divide(lhs, rhs) => LingoExpr::Divide(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Modulo(lhs, rhs) => LingoExpr::Modulo(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Join(lhs, rhs) => LingoExpr::Join(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::JoinPad(lhs, rhs) => LingoExpr::JoinPad(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::And(lhs, rhs) => LingoExpr::And(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Or(lhs, rhs) => LingoExpr::Or(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Contains(lhs, rhs) => LingoExpr::Contains(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Starts(lhs, rhs) => LingoExpr::Starts(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Eq(lhs, rhs) => LingoExpr::Eq(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Ne(lhs, rhs) => LingoExpr::Ne(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Lt(lhs, rhs) => LingoExpr::Lt(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Gt(lhs, rhs) => LingoExpr::Gt(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Le(lhs, rhs) => LingoExpr::Le(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Ge(lhs, rhs) => LingoExpr::Ge(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::Not(inner) => LingoExpr::Not(Box::new(normalize_compiler_ast(*inner))),
+        LingoExpr::Negate(inner) => LingoExpr::Negate(Box::new(normalize_compiler_ast(*inner))),
+        LingoExpr::PutBefore(lhs, rhs) => LingoExpr::PutBefore(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::PutAfter(lhs, rhs) => LingoExpr::PutAfter(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::PutInto(lhs, rhs) => LingoExpr::PutInto(
+            Box::new(normalize_compiler_ast(*lhs)),
+            Box::new(normalize_compiler_ast(*rhs)),
+        ),
+        LingoExpr::PutDisplay(inner) => LingoExpr::PutDisplay(Box::new(normalize_compiler_ast(*inner))),
+        LingoExpr::ThePropOf(obj, prop) => {
+            LingoExpr::ThePropOf(Box::new(normalize_compiler_ast(*obj)), prop)
+        }
+        LingoExpr::ChunkExpr(kind, start, end, source) => LingoExpr::ChunkExpr(
+            kind,
+            Box::new(normalize_compiler_ast(*start)),
+            end.map(|value| Box::new(normalize_compiler_ast(*value))),
+            Box::new(normalize_compiler_ast(*source)),
+        ),
+        LingoExpr::DeleteChunk(inner) => LingoExpr::DeleteChunk(Box::new(normalize_compiler_ast(*inner))),
+        LingoExpr::ListLiteral(items) => {
+            LingoExpr::ListLiteral(items.into_iter().map(normalize_compiler_ast).collect())
+        }
+        LingoExpr::PropListLiteral(items) => LingoExpr::PropListLiteral(
+            items.into_iter()
+                .map(|(key, value)| (normalize_compiler_ast(key), normalize_compiler_ast(value)))
+                .collect(),
+        ),
+        LingoExpr::RectLiteral(items) => LingoExpr::RectLiteral(
+            items.into_iter()
+                .map(|(a, b, c, d)| (
+                    normalize_compiler_ast(a),
+                    normalize_compiler_ast(b),
+                    normalize_compiler_ast(c),
+                    normalize_compiler_ast(d),
+                ))
+                .collect(),
+        ),
+        LingoExpr::PointLiteral(items) => LingoExpr::PointLiteral(
+            items.into_iter()
+                .map(|(a, b)| (normalize_compiler_ast(a), normalize_compiler_ast(b)))
+                .collect(),
+        ),
+        LingoExpr::MemberRef(member, cast_lib) => LingoExpr::MemberRef(
+            Box::new(normalize_compiler_ast(*member)),
+            cast_lib.map(|value| Box::new(normalize_compiler_ast(*value))),
+        ),
+        other => other,
+    }
 }

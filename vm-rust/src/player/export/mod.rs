@@ -4,7 +4,7 @@ use itertools::Itertools;
 use crate::{
     director::{
         file::get_variable_multiplier,
-        lingo::decompiler::handler::decompile_handler, static_datum::{format_static_datum, static_datum_to_runtime},
+        lingo::{decompiler::handler::decompile_handler, opcode::OpCode}, static_datum::{format_static_datum, static_datum_to_runtime},
     },
     player::{
         DirPlayer, bitmap::bitmap::{Bitmap, BuiltInPalette}, cast_lib::CastLib, cast_member::{
@@ -391,7 +391,7 @@ fn build_shockwave3d_yml(header: &str, s: &Shockwave3dMember) -> String {
 
 // ── Script decompilation ───────────────────────────────────────────────────────
 
-fn decompile_script(script: &Script, cast: &CastLib) -> String {
+pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
     let lctx = match cast.lctx.as_ref() {
         Some(l) => l,
         None => return String::new(),
@@ -429,6 +429,42 @@ fn decompile_script(script: &Script, cast: &CastLib) -> String {
                 multiplier,
             );
 
+            let global_name_ids = if handler.global_name_ids.is_empty() {
+                let mut inferred = Vec::new();
+                for bytecode in &handler.bytecode_array {
+                    if matches!(
+                        bytecode.opcode,
+                        OpCode::GetGlobal | OpCode::SetGlobal | OpCode::GetGlobal2 | OpCode::SetGlobal2
+                    ) {
+                        let name_id = bytecode.obj as u16;
+                        if !inferred.contains(&name_id) {
+                            inferred.push(name_id);
+                        }
+                    }
+                }
+                inferred
+            } else {
+                handler.global_name_ids.clone()
+            };
+
+            let globals = if global_name_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "  global {}",
+                    global_name_ids
+                        .iter()
+                        .map(|id| {
+                            lctx.names
+                                .get(*id as usize)
+                                .map(|name| yaml_string(name))
+                                .unwrap_or_else(|| format!("global{}", id))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )]
+            };
+
             let args = handler.argument_name_ids.iter().map(|id| {
                 if let Some(name) = lctx.names.get(*id as usize) {
                     yaml_string(name)
@@ -437,12 +473,14 @@ fn decompile_script(script: &Script, cast: &CastLib) -> String {
                 }
             }).collect::<Vec<_>>().join(", ");
 
-            let lines = decompiled
+            let mut lines = globals;
+            lines.extend(decompiled
                 .lines
                 .iter()
                 .map(|line| format!("{}{}", "  ".repeat(line.indent as usize + 1), line.text))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>());
+
+            let lines = lines.join("\n");
 
             format!("on {} {}\n{}\nend", name, args, lines)
         })

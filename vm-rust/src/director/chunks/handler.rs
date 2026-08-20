@@ -29,6 +29,7 @@ pub struct Bytecode {
     pub obj: i64,
     pub pos: usize,
     owner_loop: u32,
+    pub size_hint: u8,
     pub translation: Option<String>,
     pub line_number: Option<u16>,
 }
@@ -40,6 +41,7 @@ impl Bytecode {
             obj,
             pos,
             owner_loop: u32::MAX,
+            size_hint: 0,
             translation: None,
             line_number: None,
         }
@@ -111,11 +113,11 @@ impl Bytecode {
         match self.opcode {
             OpCode::Jmp | OpCode::JmpIfZ => {
                 writer.push(' ');
-                writer.push_str(&Self::pos_to_str(self.pos + self.obj as usize));
+                writer.push_str(&Self::pos_to_str(Self::resolve_jump_pos(self.pos, self.obj)));
             }
             OpCode::EndRepeat => {
                 writer.push(' ');
-                writer.push_str(&Self::pos_to_str(self.pos - self.obj as usize));
+                writer.push_str(&Self::pos_to_str(Self::resolve_jump_pos(self.pos, -self.obj)));
             }
             OpCode::ObjCall
             | OpCode::ExtCall
@@ -162,6 +164,11 @@ impl Bytecode {
         // TODO lingo translation
 
         return writer;
+    }
+
+    fn resolve_jump_pos(pos: usize, offset: i64) -> usize {
+        let target = pos as i64 + offset as i64;
+        usize::try_from(target).unwrap_or(0)
     }
 }
 
@@ -288,6 +295,7 @@ impl HandlerRecord {
                 obj,
                 pos,
                 owner_loop: u32::MAX,
+                size_hint: 0,
                 translation: None,
                 line_number: None,
             };

@@ -14,8 +14,9 @@ void         =  { void_keyword }
 
 dotted_ident = @{ (lang_ident | number_int) ~ ("." ~ (lang_ident | number_int))+ }
 
+string_escape = { "\\" ~ ANY }
 string_interior =  {
-    (!("\"") ~ ANY)*
+  (string_escape | !("\"") ~ ANY)*
 }
 WHITESPACE      = _{ " " | "\t" | ("\\" ~ ("\r\n" | "\n" | "\r")) | "\r\n" | "\n" | "\r" }
 
@@ -64,7 +65,7 @@ number_sign    =  { "+" | "-" }
 float_exponent = ${ ^"e" ~ number_sign? ~ digit+ }
 number_int     = ${ (number_sign?) ~ (digit+) }
 number_float_a = ${ (number_sign?) ~ (digit*) ~ "." ~ (digit+) ~ (float_exponent?) }
-number_float_b = ${ (number_sign?) ~ (digit+) ~ "." ~ (digit*) ~ (float_exponent?) }
+number_float_b = ${ (number_sign?) ~ (digit+) ~ "." ~ !(".") ~ (digit*) ~ (float_exponent?) }
 number_float   = ${ number_float_a | number_float_b }
 number         = _{ number_float | number_int }
 
@@ -79,7 +80,8 @@ list = _{ empty_list | multi_list }
 rgb_num_arg   = { digit{,3} }
 rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
 rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
-rgb_color     = { rgb_num_color | rgb_str_color }
+rgb_expr_color = { ^"rgb" ~ "(" ~ expr ~ ")" }
+rgb_color     = { rgb_num_color | rgb_str_color | rgb_expr_color }
 rect          = { ^"rect" ~ "(" ~ expr ~ "," ~ expr ~ "," ~ expr ~ "," ~ expr ~ ")" }
 point         = { ^"point" ~ "(" ~ expr ~ "," ~ expr ~ ")" }
 
@@ -102,7 +104,26 @@ script_ref = { ^"script" ~ !(alpha | digit | "_") ~ term_arg }
 
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
 chunk_type = { &reserved_keyword ~ (^"char" | ^"word" | ^"line" | ^"item") }
-chunk_range = { ^"to" ~ expr }
+
+// Atomic keyword rules for last_chunk_expr / string_chunk_count_expr
+last_kw            = @{ ^"last"   ~ !(alpha | digit | "_") }
+number_kw          = @{ ^"number" ~ !(alpha | digit | "_") }
+in_kw              = @{ ^"in"     ~ !(alpha | digit | "_") }
+last_chunk_type_kw  = @{ (^"char" | ^"word" | ^"item" | ^"line")  ~ !(alpha | digit | "_") }
+chunk_count_type_kw = @{ (^"chars" | ^"words" | ^"items" | ^"lines") ~ !(alpha | digit | "_") }
+
+// "last char of X", "last word of X", etc.
+last_chunk_expr = { last_kw ~ last_chunk_type_kw ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+
+// "the number of chars in X", "the number of items in X", etc.
+string_chunk_count_expr = { ^"the" ~ number_kw ~ ^"of" ~ chunk_count_type_kw ~ in_kw ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+
+// Chunk range end expression: like expr but without prop_of_expr/castlib_of_expr/sprite_of_expr
+// so that "of <source>" after an obj-prop range end is not greedily consumed.
+chunk_range_prim = _{ last_chunk_expr | string_chunk_count_expr | put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | lang_ident }
+chunk_range_term = _{ not_op ~ chunk_range_term | chunk_range_prim | prop_handler_call | prop_name }
+chunk_range_expr = { chunk_range_term ~ (bin_op ~ chunk_range_term | postfix_op)* }
+chunk_range = { ^"to" ~ chunk_range_expr }
 chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
 // Director's legacy "the number of <chunk> in/of <expr>" — counts lines /
@@ -116,7 +137,9 @@ parens_list = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
 parens_empty = { "(" ~ ")" }
 
 // List indexing - postfix operator for accessing list elements
-list_index = { "[" ~ expr ~ "]" }
+// range_index must be tried before list_index to correctly parse [start..end]
+range_index = { "[" ~ expr ~ ".." ~ expr ~ "]" }
+list_index  = { "[" ~ expr ~ "]" }
 
 // Boolean operators
 and_op = { ^"and" }
@@ -140,7 +163,7 @@ ge_op = { ">=" }
 // Property name after dot - can be any identifier including reserved keywords
 prop_name  =  { ident }
 
-primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | script_ref | handler_call | the_chunk_count | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
+primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | script_ref | handler_call | the_chunk_count | last_chunk_expr | string_chunk_count_expr | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
@@ -153,6 +176,7 @@ command_inline_args              = _{ command_inline_args_comma | command_inline
 put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
 // Allow other handlers with parentheses to be called normally
 handler_call                     =  { lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+prop_handler_call                =  { prop_name ~ "(" ~ handler_call_args? ~ ")" }
 command_inline                   =  { lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ command_inline_args }
 
 // Put statement variations (order matters - most specific first!)
@@ -182,8 +206,9 @@ put_statement = {
 // This is syntactic sugar for assignment
 set_statement = { ^"set" ~ expr ~ ^"to" ~ expr }
 
-// Delete statement: "delete char 1 of s", "delete word 3 of myStr"
-delete_statement = { ^"delete" ~ chunk_expr }
+// Delete statement: "delete char 1 of s", "delete word 3 of myStr",
+// or "delete obj.prop[start..end]" (range deletion via setProp)
+delete_statement = { ^"delete" ~ (chunk_expr | expr) }
 
 // Lingo "go" command. "to", "frame", and "movie" are syntactic noise; only
 // the destination value (and optional movie path) need to reach the
@@ -239,7 +264,7 @@ sound_verb      =  { ident }
 sound_statement =  { sound_kw ~ sound_verb ~ command_inline_args? }
 
 command    = _{ if_inline | pass_stmt | set_statement | delete_statement | assignment | put_statement | go_inline | sound_statement | command_inline | expr }
-obj_prop   =  { "." }
+obj_prop   =  { "." ~ !(".") }
 add        =  { "+" }
 subtract   =  { "-" }
 multiply   =  { "*" }
@@ -254,12 +279,12 @@ bin_op     = _{
   | or_op
   | contains_op
   | starts_op
-  | eq_op
   | ne_op
-  | lt_op
-  | gt_op
   | le_op
   | ge_op
+  | eq_op
+  | lt_op
+  | gt_op
   | add
   | subtract
   | multiply
@@ -268,7 +293,7 @@ bin_op     = _{
   | join_pad
   | join
 }
-postfix_op = _{ list_index }
+postfix_op = _{ range_index | list_index }
 expr       =  { term ~ (bin_op ~ term | postfix_op)* }
 term       = _{ not_op ~ term | primitive | neg_op ~ term | prop_name }
 term_arg   =  { not_op ~ term_arg | primitive | neg_op ~ term_arg }

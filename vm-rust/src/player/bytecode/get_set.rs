@@ -239,7 +239,7 @@ impl GetSetBytecodeHandler {
             let property_type = player.get_ctx_current_bytecode(ctx).obj;
             match property_type {
                 0x00 => {
-                    if property_id <= 0x0b {
+                    if let Some(prop_name) = movie_prop_names().get(&(property_id as u16)) {
                         // movie prop
                         let prop_name = movie_prop_names().get(&(property_id as u16)).unwrap();
                         GetSetUtils::set_the_built_in_prop(player, ctx, Symbol::builtin(*prop_name), value)?;
@@ -916,8 +916,6 @@ impl GetSetBytecodeHandler {
             };
             let prop_id = player.get_datum(&prop_id).int_value()?;
             let prop_type = player.get_ctx_current_bytecode(ctx).obj;
-            let max_movie_prop_id = *movie_prop_names().keys().max().unwrap();
-
             let result = if prop_type == 0 && prop_id <= max_movie_prop_id as i32 {
                 // movie prop
                 let prop_name = movie_prop_names().get(&(prop_id as u16)).unwrap();

@@ -90,7 +90,7 @@ pub fn opcode_names() -> &'static HashMap<OpCode, Box<str>> {
     })
 }
 
-fn anim_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+pub fn anim_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
     static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
@@ -139,7 +139,7 @@ fn anim_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
     })
 }
 
-fn anim2_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
+pub fn anim2_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
     static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
         HashMap::from([
@@ -155,6 +155,7 @@ fn anim2_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
 pub fn movie_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
     static MAP: OnceLock<HashMap<u16, BuiltInSymbol>> = OnceLock::new();
     MAP.get_or_init(|| {
+        // IDs are 1-based, matching the Director runtime and decompiler convention.
         HashMap::from([
             (0x00, BuiltInSymbol::FloatPrecision),
             (0x01, BuiltInSymbol::MouseDownScript),

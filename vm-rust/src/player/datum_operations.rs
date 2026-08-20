@@ -1133,6 +1133,71 @@ pub fn divide_datums(
     Ok(result)
 }
 
+pub fn modulo_datums(left: Datum, right: Datum, player: &mut DirPlayer) -> Result<Datum, ScriptError> {
+    fn safe_mod_int(left: i32, right: i32) -> i32 {
+        if right == 0 { 0 } else { left % right }
+    }
+
+    fn safe_mod_float(left: f64, right: f64) -> f64 {
+        if right == 0.0 { 0.0 } else { left % right }
+    }
+
+    let left = match left {
+        Datum::Void => Datum::Int(0),
+        other => other,
+    };
+    let right = match right {
+        Datum::Void => Datum::Int(0),
+        other => other,
+    };
+
+    match (&left, &right) {
+        (Datum::Int(left), Datum::Int(right)) => Ok(Datum::Int(safe_mod_int(*left, *right))),
+        (Datum::Int(left), Datum::Float(right)) => Ok(Datum::Float(safe_mod_float(*left as f64, *right))),
+        (Datum::Float(left), Datum::Int(right)) => Ok(Datum::Float(safe_mod_float(*left, *right as f64))),
+        (Datum::Float(left), Datum::Float(right)) => Ok(Datum::Float(safe_mod_float(*left, *right))),
+        (Datum::List(_, list, _), Datum::Float(right)) => {
+            let mut result = VecDeque::with_capacity(list.len());
+            for item in list {
+                let result_datum = match player.get_datum(item) {
+                    Datum::Int(n) => Datum::Int(safe_mod_float(*n as f64, *right) as i32),
+                    Datum::Float(n) => Datum::Int(safe_mod_float(*n, *right) as i32),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Modulus operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
+                };
+                result.push_back(player.alloc_datum(result_datum));
+            }
+            Ok(Datum::List(DatumType::List, result, false))
+        }
+        (Datum::List(_, list, _), Datum::Int(right)) => {
+            let mut result = VecDeque::with_capacity(list.len());
+            for item in list {
+                let result_datum = match player.get_datum(item) {
+                    Datum::Int(n) => Datum::Int(safe_mod_int(*n, *right)),
+                    Datum::Float(n) => Datum::Int(safe_mod_float(*n, *right as f64) as i32),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Modulus operator in list only works with ints and floats. Given: {}",
+                            format_datum(item, player)
+                        )))
+                    }
+                };
+                result.push_back(player.alloc_datum(result_datum));
+            }
+            Ok(Datum::List(DatumType::List, result, false))
+        }
+        _ => Err(ScriptError::new(format!(
+            "Modulus operator only works with ints and floats (given {} and {})",
+            left.type_str(),
+            right.type_str()
+        ))),
+    }
+}
+
 pub fn concat_datums(
     left: Datum,
     right: Datum,
