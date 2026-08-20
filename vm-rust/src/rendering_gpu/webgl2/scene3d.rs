@@ -5092,8 +5092,18 @@ void main() {
             // is preserved for everything that was not asking for a hold.
             eff_start
         };
+        // Root motion goes to the model NODE, not into the skin — see
+        // `skeleton::motion_has_root_translation`. When the clock this draw uses
+        // is a per-model bonesPlayer (the only case `tick_w3d_animations` pushes
+        // clearance for) and the clip travels, strip the root translation here
+        // and let the tick carry it on the node. The two are exactly
+        // compensating, so the drawn mesh does not move.
+        let strips_root = !root_lock
+            && bp.is_some()
+            && motion.map(|m| crate::director::chunks::w3d::skeleton::motion_has_root_translation(skeleton, m))
+                .unwrap_or(false);
         let world_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
-            skeleton, motion, t, root_lock,
+            skeleton, motion, t, root_lock || strips_root,
             if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
         );
 
@@ -5194,7 +5204,7 @@ void main() {
         if blending {
             let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
-                skeleton, prev_motion, t, root_lock,
+                skeleton, prev_motion, t, root_lock || strips_root,
                 if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
             );
             for i in 0..bone_count {

@@ -513,3 +513,107 @@ fn invert_matrix(m: &[f32; 16]) -> [f32; 16] {
     for i in 0..16 { inv[i] *= inv_det; }
     inv
 }
+
+// ---------------------------------------------------------------------------
+// Root motion ("root clearance")
+// ---------------------------------------------------------------------------
+//
+// IFX always strips the root bone's local transform out of the posed hierarchy
+// and accumulates it into a persistent root transform held by the modifier.
+// `rootLock` then decides only whether the extracted TRANSLATION is added to
+// the model NODE's scene-graph transform: false → the model walks through the
+// scene, true → it animates in place (see docs/w3d-skeleton-motion-spec.md §1,
+// "Root handling").
+//
+// We used to keep the whole root track inside the skeleton, so a travelling
+// clip moved the drawn mesh but left `model.worldPosition` frozen at the spot
+// the clip started. Agent Free Ride's end-of-level paraglider is the visible
+// cost: `Snowboard Camera`'s #EndScene state re-aims the camera at
+// `player_fake.worldPosition` every frame, that node never moved, and the
+// boarder flew ~16000 units out of a camera still staring at the launch point.
+//
+// The two halves below MUST stay in lockstep: whenever `strips_root_translation`
+// says yes, `build_bone_matrices_ex` is called with the root translation zeroed
+// AND `root_motion_translation`'s value is pushed onto the node.
+
+/// Effective sample time for a bones clip, matching the renderer's clamp/wrap.
+pub fn effective_motion_time(
+    time: f32,
+    start_time: f32,
+    end_time: f32,
+    looping: bool,
+    duration: f32,
+) -> f32 {
+    let eff_end = if end_time >= 0.0 { end_time.min(duration) } else { duration };
+    let eff_start = start_time.min(eff_end);
+    let range = eff_end - eff_start;
+    if range > 0.0 {
+        if looping {
+            eff_start + ((time - eff_start) % range + range) % range
+        } else {
+            time.clamp(eff_start, eff_end)
+        }
+    } else {
+        eff_start
+    }
+}
+
+/// The root bone's local translation at `time` — the transform IFX hands back
+/// through `GetRootClearance`. `None` when the motion has no track for the root
+/// bone, i.e. there is no root motion to route anywhere.
+pub fn root_motion_translation(
+    skeleton: &W3dSkeleton,
+    motion: &W3dMotion,
+    time: f32,
+) -> Option<[f32; 3]> {
+    let root = skeleton.bones.first()?;
+    if root.parent_index >= 0 {
+        return None;
+    }
+    let track = motion.find_track_by_bone(root.name)?;
+    let kf = track.evaluate(time);
+    Some([kf.pos_x, kf.pos_y, kf.pos_z])
+}
+
+/// Does this clip actually travel? A root track that never leaves the origin
+/// (the usual in-place idle/trick) is left alone entirely, so nothing changes
+/// for the rigs that do not need this.
+pub fn motion_has_root_translation(skeleton: &W3dSkeleton, motion: &W3dMotion) -> bool {
+    let root = match skeleton.bones.first() {
+        Some(b) if b.parent_index < 0 => b,
+        _ => return false,
+    };
+    let track = match motion.find_track_by_bone(root.name) {
+        Some(t) => t,
+        None => return false,
+    };
+    let mut keys = track.keyframes.iter();
+    let first = match keys.next() {
+        Some(k) => k,
+        None => return false,
+    };
+    keys.any(|k| {
+        has_meaningful_translation(
+            k.pos_x - first.pos_x,
+            k.pos_y - first.pos_y,
+            k.pos_z - first.pos_z,
+        )
+    })
+}
+
+/// Where the extracted root translation lands on the model node.
+///
+/// The skinned draw is `node * inv(R0) * bone`, R0 being the biped COM fold the
+/// parser baked into the node (`apply_root_com_to_model_nodes`). Removing a
+/// root translation `p` from the bone side therefore has to come back as
+/// `inv(R0) * T(p) * R0` on the node side, and for R0 = T(t0)·R0r that product
+/// collapses to a pure translation by `R0r⁻¹ · p` — so the draw is unchanged and
+/// only the node's reported position moves.
+pub fn root_clearance_node_offset(root_relinv: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    // `root_relinv` is inv(R0); its rotation block is already R0r⁻¹.
+    [
+        root_relinv[0] * p[0] + root_relinv[4] * p[1] + root_relinv[8] * p[2],
+        root_relinv[1] * p[0] + root_relinv[5] * p[1] + root_relinv[9] * p[2],
+        root_relinv[2] * p[0] + root_relinv[6] * p[1] + root_relinv[10] * p[2],
+    ]
+}

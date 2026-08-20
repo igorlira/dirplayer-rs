@@ -1285,6 +1285,13 @@ pub struct BonesPlayerState {
     pub blend_weight: f32,
     pub blend_duration: f32,
     pub blend_elapsed: f32,
+    /// Root motion already pushed onto the model NODE, in node-local units.
+    /// IFX strips the root bone's translation out of the posed skeleton and
+    /// adds it to the node's scene-graph transform unless `root_lock` is set
+    /// (docs/w3d-skeleton-motion-spec.md §1). `tick_w3d_animations` applies the
+    /// DELTA against this each frame, so a script assigning `model.transform`
+    /// mid-clip re-bases the walk instead of fighting it.
+    pub root_clearance: [f32; 3],
 }
 
 impl Default for BonesPlayerState {
@@ -1306,6 +1313,7 @@ impl Default for BonesPlayerState {
             blend_weight: 1.0,
             blend_duration: 0.0,
             blend_elapsed: 0.0,
+            root_clearance: [0.0; 3],
         }
     }
 }

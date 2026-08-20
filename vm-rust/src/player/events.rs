@@ -807,6 +807,75 @@ pub async fn tick_w3d_animations() {
                         }
                     }
 
+                    // ── Root motion onto the model node ──
+                    // IFX never leaves the root bone's translation in the skin: it
+                    // extracts it and, unless `rootLock` is set, adds it to the model
+                    // NODE's transform, so a travelling clip walks the model through
+                    // the scene (docs/w3d-skeleton-motion-spec.md §1, "Root handling").
+                    // The renderer strips exactly the same translation from the bones
+                    // (`strips_root` in `setup_skinning_for_resource`), so this moves
+                    // the node WITHOUT moving the drawn mesh — what changes is that
+                    // `model.worldPosition` finally follows the animation.
+                    //
+                    // Agent Free Ride's end-of-level paraglider is why: `Snowboard
+                    // Camera`'s #EndScene re-aims the camera at `player_fake`'s
+                    // worldPosition every frame, and with the root motion trapped in
+                    // the skeleton that node never moved — the boarder flew ~16000
+                    // units out of frame while the camera stared at the launch point.
+                    if let Some(scene) = w3d.parsed_scene.as_ref() {
+                        use crate::director::chunks::w3d::skeleton as skel;
+                        let rs = &mut w3d.runtime_state;
+                        let model_names: Vec<Symbol> = rs.bones_players.keys().copied().collect();
+                        for model_name in model_names {
+                            let (motion_name, time, start, end, looping, root_lock, applied) = {
+                                let bp = match rs.bones_players.get(&model_name) { Some(b) => b, None => continue };
+                                match bp.current_motion {
+                                    Some(m) => (m, bp.animation_time, bp.animation_start_time,
+                                                bp.animation_end_time, bp.animation_loop,
+                                                bp.root_lock, bp.root_clearance),
+                                    None => continue,
+                                }
+                            };
+                            let skeleton = match skel::skeleton_for_model(scene, model_name) {
+                                Some(s) => s, None => continue,
+                            };
+                            let motion = match scene.motions.iter().find(|m| m.name == motion_name) {
+                                Some(m) => m, None => continue,
+                            };
+                            // rootLock keeps the model in place; leave whatever it has
+                            // already walked alone rather than snapping it back.
+                            let want = if root_lock || !skel::motion_has_root_translation(skeleton, motion) {
+                                [0.0f32; 3]
+                            } else {
+                                let t = skel::effective_motion_time(
+                                    time, start, end, looping, motion.duration());
+                                let p = match skel::root_motion_translation(skeleton, motion, t) {
+                                    Some(p) => p, None => [0.0; 3],
+                                };
+                                let node = scene.nodes.iter().find(|n| n.name == model_name);
+                                let resource_name = node.map(|n| n.resource_name).unwrap_or(model_name);
+                                let relinv = skel::root_relativizer(scene, skeleton, model_name, resource_name);
+                                skel::root_clearance_node_offset(&relinv, p)
+                            };
+                            let delta = [want[0] - applied[0], want[1] - applied[1], want[2] - applied[2]];
+                            if delta[0] == 0.0 && delta[1] == 0.0 && delta[2] == 0.0 { continue; }
+                            // Seed from the authored local transform when Lingo has not
+                            // written one, then translate IN THE NODE'S OWN FRAME — the
+                            // bone matrices the delta compensates live in that same frame.
+                            let base = rs.node_transforms.get(&model_name).copied()
+                                .or_else(|| scene.nodes.iter().find(|n| n.name == model_name).map(|n| n.transform));
+                            if let Some(mut m) = base {
+                                m[12] += m[0] * delta[0] + m[4] * delta[1] + m[8] * delta[2];
+                                m[13] += m[1] * delta[0] + m[5] * delta[1] + m[9] * delta[2];
+                                m[14] += m[2] * delta[0] + m[6] * delta[1] + m[10] * delta[2];
+                                rs.node_transforms.insert(model_name, m);
+                                if let Some(bp) = rs.bones_players.get_mut(&model_name) {
+                                    bp.root_clearance = want;
+                                }
+                            }
+                        }
+                    }
+
                     // ── Legacy member clock (keyframe / motion_transforms path) ──
                     if w3d.runtime_state.animation_playing {
                         let rate = w3d.runtime_state.play_rate;
