@@ -145,7 +145,12 @@ pub fn export_cast(player: &DirPlayer, cast_number: u32) -> Option<(String, Vec<
             CastMemberType::Font(_) => {
                 files.push(text_file(format!("{stem}.yml"), format!("{header}type: font\n")));
             }
-            CastMemberType::HavokPhysics(_) | CastMemberType::Unknown => {}
+            CastMemberType::HavokPhysics(_)
+            | CastMemberType::Movie(_)
+            | CastMemberType::PhysXPhysics(_)
+            | CastMemberType::Groove3gm(_)
+            | CastMemberType::Transition(_)
+            | CastMemberType::Unknown => {}
         }
     }
 
@@ -203,7 +208,7 @@ fn build_text_yml(header: &str, tm: &TextMember) -> String {
 
     let mut font = Section::new("font");
     font.push(format!("name: {}", yaml_string(&tm.font)));
-    font.push(format!("style: [{}]", tm.font_style.join(", ")));
+    font.push(format!("style: [{}]", tm.font_style.iter().join(", ")));
     font.push(format!("size: {}", tm.font_size));
     font.push(format!("anti_alias: {}", tm.anti_alias));
     font.push(format!("anti_alias_type: {}", tm.anti_alias_type));
@@ -243,7 +248,7 @@ fn build_field_yml(header: &str, fm: &FieldMember) -> String {
 fn build_button_yml(header: &str, bm: &ButtonMember) -> String {
     let fm = &bm.field;
     let mut button = Section::new("button");
-    button.push(format!("button_type: {}", bm.button_type.symbol_string()));
+    button.push(format!("button_type: {}", bm.button_type.symbol()));
     button.push(format!("width: {}", fm.width));
     button.push(format!("height: {}", fm.height));
     button.push(format!("alignment: {}", fm.alignment));
@@ -419,7 +424,7 @@ pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
     let handlers = script
         .handler_names
         .iter()
-        .filter_map(|name| script.get_own_handler(&name.to_lowercase()).map(|h| (name, h)))
+        .filter_map(|name| script.get_own_handler(*name).map(|h| (name, h)))
         .map(|(name, handler)| {
             let decompiled = decompile_handler(
                 handler,
@@ -556,7 +561,7 @@ fn rgb_hex(c: (u8, u8, u8)) -> String {
 fn palette_name(palette_id: i16, cast: &CastLib) -> String {
     if palette_id < 0 {
         if let Some(built_in) = <BuiltInPalette as num::FromPrimitive>::from_i16(palette_id) {
-            return built_in.symbol_string();
+            return built_in.symbol().to_string();
         }
     }
     if palette_id > 0 {

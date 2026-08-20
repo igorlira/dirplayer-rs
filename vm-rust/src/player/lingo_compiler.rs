@@ -13,6 +13,7 @@ use crate::{
     player::{
         eval::{parse_expr_to_lingo_expr, parse_to_lingo_expr, LingoExpr},
         sprite::ColorRef,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     },
 };
 
@@ -882,6 +883,7 @@ impl ScriptCompiler {
             argument_name_ids,
             local_name_ids,
             global_name_ids,
+            compiled_ir: std::cell::RefCell::new(None),
         })
     }
 }
@@ -1755,12 +1757,12 @@ impl<'a> HandlerCompiler<'a> {
                     LingoExpr::ChunkExpr(chunk_type, first, range_end, source) => {
                         if let LingoExpr::Identifier(source_name) = source.as_ref() {
                             let source_name = source_name.clone();
-                            let chunk_type = chunk_type.clone();
+                            let chunk_type = *chunk_type;
                             let last = range_end.as_deref().unwrap_or(first);
                             let last = last.clone();
                             let first = first.clone();
-                            for ct in &["char", "word", "item", "line"] {
-                                if *ct == chunk_type.as_str() {
+                            for builtin in [BuiltInSymbol::Char, BuiltInSymbol::Word, BuiltInSymbol::Item, BuiltInSymbol::Line] {
+                                if chunk_type == builtin {
                                     self.emit_chunk_index_val(&first)?;
                                     self.emit_chunk_index_val(&last)?;
                                 } else {
@@ -2193,7 +2195,7 @@ impl<'a> HandlerCompiler<'a> {
 
     fn compile_chunk_read(
         &mut self,
-        chunk_type: &str,
+        chunk_type: &Symbol,
         first: &LingoExpr,
         range_end: Option<&LingoExpr>,
         source: &LingoExpr,
@@ -2203,12 +2205,12 @@ impl<'a> HandlerCompiler<'a> {
         // Collect all chunk layers by traversing nested ChunkExprs.
         // We clone to avoid lifetime issues when reassigning the cursor.
         struct Layer {
-            chunk_type: String,
+            chunk_type: Symbol,
             first: LingoExpr,
             last: LingoExpr,
         }
         let mut layers: Vec<Layer> = vec![Layer {
-            chunk_type: chunk_type.to_string(),
+            chunk_type: *chunk_type,
             first: first.clone(),
             last: last.clone(),
         }];
@@ -2217,7 +2219,7 @@ impl<'a> HandlerCompiler<'a> {
         while let LingoExpr::ChunkExpr(inner_type, inner_first, inner_range_end, inner_source) = cur {
             let inner_last = inner_range_end.as_deref().unwrap_or(inner_first.as_ref());
             layers.push(Layer {
-                chunk_type: inner_type.clone(),
+                chunk_type: *inner_type,
                 first: inner_first.as_ref().clone(),
                 last: inner_last.clone(),
             });
@@ -2229,12 +2231,14 @@ impl<'a> HandlerCompiler<'a> {
         let mut item_range: Option<(LingoExpr, LingoExpr)> = None;
         let mut line_range: Option<(LingoExpr, LingoExpr)> = None;
         for layer in layers {
-            match layer.chunk_type.as_str() {
-                "char" if char_range.is_none() => char_range = Some((layer.first, layer.last)),
-                "word" if word_range.is_none() => word_range = Some((layer.first, layer.last)),
-                "item" if item_range.is_none() => item_range = Some((layer.first, layer.last)),
-                "line" if line_range.is_none() => line_range = Some((layer.first, layer.last)),
-                _ => {}
+            if layer.chunk_type == BuiltInSymbol::Char && char_range.is_none() {
+                char_range = Some((layer.first, layer.last));
+            } else if layer.chunk_type == BuiltInSymbol::Word && word_range.is_none() {
+                word_range = Some((layer.first, layer.last));
+            } else if layer.chunk_type == BuiltInSymbol::Item && item_range.is_none() {
+                item_range = Some((layer.first, layer.last));
+            } else if layer.chunk_type == BuiltInSymbol::Line && line_range.is_none() {
+                line_range = Some((layer.first, layer.last));
             }
         }
 
@@ -2279,7 +2283,7 @@ impl<'a> HandlerCompiler<'a> {
 
     fn compile_chunk_write(
         &mut self,
-        chunk_type: &str,
+        chunk_type: &Symbol,
         first: &LingoExpr,
         range_end: Option<&LingoExpr>,
         source_name: &str,
@@ -2289,8 +2293,8 @@ impl<'a> HandlerCompiler<'a> {
         let last = range_end.unwrap_or(first);
 
         // Push 8 chunk indices: char, word, item, line (each as first+last pair)
-        for ct in &["char", "word", "item", "line"] {
-            if *ct == chunk_type {
+        for builtin in [BuiltInSymbol::Char, BuiltInSymbol::Word, BuiltInSymbol::Item, BuiltInSymbol::Line] {
+            if *chunk_type == builtin {
                 self.compile_expr_val(first)?;
                 self.compile_expr_val(last)?;
             } else {
@@ -2582,14 +2586,14 @@ fn legacy_movie_get_prop(name: &str) -> Option<(u16, u16)> {
     }
 
     movie_prop_names().iter().find_map(|(id, prop_name)| {
-        (prop_name.as_ref().eq_ignore_ascii_case(&needle)).then_some((0x00, *id))
+        prop_name.eq_ignore_ascii_case(&needle).then_some((0x00, *id))
     }).or_else(|| {
         anim_prop_names().iter().find_map(|(id, prop_name)| {
-            (prop_name.as_ref().eq_ignore_ascii_case(&needle)).then_some((0x07, *id))
+            prop_name.eq_ignore_ascii_case(&needle).then_some((0x07, *id))
         })
     }).or_else(|| {
         anim2_prop_names().iter().find_map(|(id, prop_name)| {
-            (prop_name.as_ref().eq_ignore_ascii_case(&needle)).then_some((0x08, *id))
+            prop_name.eq_ignore_ascii_case(&needle).then_some((0x08, *id))
         })
     })
 }

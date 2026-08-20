@@ -25,6 +25,7 @@ use crate::{
         },
         lingo_compiler::{compile_lingo, inject_into_lctx},
         sprite::ColorRef,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
         DirPlayer,
     },
 };
@@ -346,11 +347,13 @@ fn build_field(
     let font_sec = doc.get("font");
     let mut fm = FieldMember::default();
     fm.text = text;
-    fm.box_type = field_sec
-        .and_then(|s| s.get("box_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("adjust")
-        .to_string();
+    fm.box_type = parse_builtin_symbol(
+        field_sec
+            .and_then(|s| s.get("box_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("adjust"),
+        BuiltInSymbol::Adjust,
+    );
     fm.word_wrap = field_sec
         .and_then(|s| s.get("word_wrap"))
         .and_then(|v| v.as_bool())
@@ -413,11 +416,13 @@ fn build_field(
         .and_then(|s| s.get("size"))
         .and_then(|v| v.as_u64())
         .unwrap_or(12) as u16;
-    fm.alignment = font_sec
-        .and_then(|s| s.get("alignment"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("left")
-        .to_string();
+    fm.alignment = parse_builtin_symbol(
+        font_sec
+            .and_then(|s| s.get("alignment"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("left"),
+        BuiltInSymbol::Left,
+    );
     fm.fixed_line_space = font_sec
         .and_then(|s| s.get("fixed_line_space"))
         .and_then(|v| v.as_u64())
@@ -451,11 +456,13 @@ fn build_button(
         .and_then(|s| s.get("height"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u16;
-    fm.alignment = btn_sec
-        .and_then(|s| s.get("alignment"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("left")
-        .to_string();
+    fm.alignment = parse_builtin_symbol(
+        btn_sec
+            .and_then(|s| s.get("alignment"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("left"),
+        BuiltInSymbol::Left,
+    );
     fm.word_wrap = btn_sec
         .and_then(|s| s.get("word_wrap"))
         .and_then(|v| v.as_bool())
@@ -548,7 +555,12 @@ fn build_sound(
         (SoundChunk::new(vec![]), info)
     };
 
-    Ok(CastMemberType::Sound(SoundMember { info, sound }))
+    Ok(CastMemberType::Sound(SoundMember {
+        info,
+        sound,
+        cue_point_times: Vec::new(),
+        cue_point_names: Vec::new(),
+    }))
 }
 
 fn build_text(
@@ -561,44 +573,63 @@ fn build_text(
 
     let text_sec = doc.get("text");
     let font_sec = doc.get("font");
+    let font_style = font_sec
+        .and_then(|s| s.get("style"))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| parse_builtin_symbol(s, BuiltInSymbol::Plain))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut tm = TextMember {
         text: plain_text,
         rtf_source,
         html_source: String::new(),
-        alignment: String::new(),
-        box_type: String::new(),
+        alignment: BuiltInSymbol::Left,
+        box_type: BuiltInSymbol::Adjust,
         word_wrap: false,
         anti_alias: false,
         font: String::new(),
-        font_style: Vec::new(),
+        font_style,
         font_size: 12,
         fixed_line_space: 0,
         top_spacing: 0,
         bottom_spacing: 0,
         width: 0,
         height: 0,
+        rect_set_at_runtime: false,
+        text_set_at_runtime: false,
         char_spacing: 0,
         tab_stops: Vec::new(),
         html_styled_spans: Vec::new(),
         par_infos: Vec::new(),
         par_runs: Vec::new(),
+        hyperlinks: Vec::new(),
         info: None,
         w3d: None,
-        anti_alias_type: String::new(),
+        anti_alias_type: BuiltInSymbol::AutoAlias,
         sel_start: 0,
         sel_end: 0,
         sel_anchor: 0,
+        script_id: 0,
+        member_script_ref: None,
     };
-    tm.alignment = text_sec
-        .and_then(|s| s.get("alignment"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("left")
-        .to_string();
-    tm.box_type = text_sec
-        .and_then(|s| s.get("box_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("adjust")
-        .to_string();
+    tm.alignment = parse_builtin_symbol(
+        text_sec
+            .and_then(|s| s.get("alignment"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("left"),
+        BuiltInSymbol::Left,
+    );
+    tm.box_type = parse_builtin_symbol(
+        text_sec
+            .and_then(|s| s.get("box_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("adjust"),
+        BuiltInSymbol::Adjust,
+    );
     tm.word_wrap = text_sec
         .and_then(|s| s.get("word_wrap"))
         .and_then(|v| v.as_bool())
@@ -679,11 +710,13 @@ fn build_vector_shape(doc: &Value) -> Result<CastMemberType, String> {
             .and_then(|v| v.as_str())
             .unwrap_or("#000000"),
     );
-    let gradient_type = fill_sec
-        .and_then(|s| s.get("gradient_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("linear")
-        .to_string();
+    let gradient_type = parse_builtin_symbol(
+        fill_sec
+            .and_then(|s| s.get("gradient_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("linear"),
+        BuiltInSymbol::Linear,
+    );
     let fill_scale = fill_sec
         .and_then(|s| s.get("scale"))
         .and_then(|v| v.as_f64())
@@ -726,16 +759,20 @@ fn build_vector_shape(doc: &Value) -> Result<CastMemberType, String> {
         .and_then(|s| s.get("direct_to_stage"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let origin_mode = shape_sec
-        .and_then(|s| s.get("origin_mode"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("center")
-        .to_string();
-    let scale_mode = shape_sec
-        .and_then(|s| s.get("scale_mode"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("autoSize")
-        .to_string();
+    let origin_mode = parse_builtin_symbol(
+        shape_sec
+            .and_then(|s| s.get("origin_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("center"),
+        BuiltInSymbol::Center,
+    );
+    let scale_mode = parse_builtin_symbol(
+        shape_sec
+            .and_then(|s| s.get("scale_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("autoSize"),
+        BuiltInSymbol::AutoSize,
+    );
     let scale = shape_sec
         .and_then(|s| s.get("scale"))
         .and_then(|v| v.as_f64())
@@ -795,6 +832,7 @@ fn build_vector_shape(doc: &Value) -> Result<CastMemberType, String> {
         reg_point_vertex,
         direct_to_stage,
         origin_mode,
+        new_curve_count: 0,
     }))
 }
 
@@ -926,11 +964,17 @@ fn decode_png_to_bitmap(data: &[u8], palette_ref: PaletteRef) -> Result<Bitmap, 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
 fn parse_palette_ref(name: &str) -> PaletteRef {
-    if let Some(built_in) = BuiltInPalette::from_symbol_string(name) {
+    if let Some(built_in) = BuiltInPalette::from_symbol(Symbol::from_str(name)) {
         PaletteRef::BuiltIn(built_in)
     } else {
         PaletteRef::BuiltIn(BuiltInPalette::SystemMac)
     }
+}
+
+/// Resolves a YAML-authored style keyword (e.g. "adjust", "left") to its
+/// built-in symbol, falling back to `default` for unrecognized values.
+fn parse_builtin_symbol(s: &str, default: BuiltInSymbol) -> BuiltInSymbol {
+    Symbol::from_str(s).into_builtin().unwrap_or(default)
 }
 
 fn palette_ref_to_id(pr: &PaletteRef) -> i16 {
