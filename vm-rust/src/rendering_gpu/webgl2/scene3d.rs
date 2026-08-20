@@ -1999,7 +1999,15 @@ void main() {
             // background set it via Lingo (`member.bgColor = ...`) which feeds
             // back into runtime_state.background_color.
             if clear_fbo {
-                let (r, g, b) = rs.background_color.unwrap_or((0, 0, 0));
+                // `camera.colorBuffer.clearValue` overrides the member's bgColor for
+                // the camera this pass renders (Director 11.5 Scripting Dictionary,
+                // "clearValue").
+                let cam_clear = scene.nodes.iter()
+                    .find(|n| n.node_type == W3dNodeType::View)
+                    .and_then(|n| rs.camera_clear_values.get(&n.name).copied());
+                let (r, g, b) = cam_clear
+                    .or(rs.background_color)
+                    .unwrap_or((0, 0, 0));
                 gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
                 gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
             }

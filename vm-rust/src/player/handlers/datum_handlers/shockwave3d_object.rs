@@ -385,6 +385,18 @@ impl Shockwave3dObjectDatumHandlers {
                 // colorBuffer.clearAtRender property
                 let cam_name = s3d_ref.name.clone();
                 match_ci!(prop_name, {
+                    "clearValue" => {
+                        // Defaults to the member's bgColor (what the buffer is
+                        // actually cleared to when the script never set one).
+                        let rgb = {
+                            let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .and_then(|w3d| w3d.runtime_state.camera_clear_values.get(&cam_name).copied()
+                                    .or(w3d.runtime_state.background_color))
+                                .unwrap_or((0, 0, 0))
+                        };
+                        Ok(player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(rgb.0, rgb.1, rgb.2))))
+                    },
                     "clearAtRender" => {
                         let val = {
                             let member = player.movie.cast_manager.find_member_by_ref(member_ref);
@@ -2049,6 +2061,27 @@ impl Shockwave3dObjectDatumHandlers {
                                 w3d.runtime_state.camera_root_nodes.insert(cam_key, name);
                             } else {
                                 w3d.runtime_state.camera_root_nodes.remove(&cam_key);
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                "clearValue" => {
+                    // "The color used to clear out the color buffer if
+                    // colorBuffer.clearAtRender is set to TRUE" (Director 11.5
+                    // Scripting Dictionary, "clearValue"). Bottle Rocket strobes it
+                    // during the explosion to light up the sky.
+                    if s3d_ref.object_type != BuiltInSymbol::ColorBuffer { return Ok(()); }
+                    let cam_key = s3d_ref.name;
+                    let rgb = match value {
+                        Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => Some((*r, *g, *b)),
+                        _ => None,
+                    };
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            match rgb {
+                                Some(v) => { w3d.runtime_state.camera_clear_values.insert(cam_key, v); }
+                                None => { w3d.runtime_state.camera_clear_values.remove(&cam_key); }
                             }
                         }
                     }

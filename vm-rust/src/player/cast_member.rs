@@ -1490,6 +1490,11 @@ pub struct Shockwave3dRuntimeState {
     pub camera_root_nodes: std::collections::HashMap<Symbol, Symbol>,
     /// Per-camera colorBuffer.clearAtRender: camera_name -> bool
     pub camera_clear_at_render: std::collections::HashMap<Symbol, bool>,
+    /// Per-camera colorBuffer.clearValue: camera_name -> RGB. "The color used to
+    /// clear out the color buffer if colorBuffer.clearAtRender is set to TRUE"
+    /// (Director 11.5 Scripting Dictionary, "clearValue"). Unset falls back to the
+    /// member's bgColor.
+    pub camera_clear_values: std::collections::HashMap<Symbol, (u8, u8, u8)>,
 
     // ─── Camera overlays/backdrops ───
     /// Per-camera overlay list: camera_name -> Vec<CameraOverlay>
