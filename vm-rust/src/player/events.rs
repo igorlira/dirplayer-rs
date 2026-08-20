@@ -853,14 +853,39 @@ pub async fn tick_w3d_particles() {
                         // node that references this resource — gathered before the
                         // mutable particle borrow to avoid overlapping borrows.
                         let em = w3d.runtime_state.emitters.get(&name).cloned();
+                        // `node_transforms` holds each node's LOCAL transform, so a
+                        // particle model parented to a moving model (Bottle Rocket's
+                        // `RocketFlame.parent = rocket`) must be composed with its
+                        // ancestors — reading the local matrix alone left the exhaust
+                        // parked at its parent-relative offset near the world origin,
+                        // i.e. inside the cola can, and the rocket flew with no flame.
                         let world_pos = scene.as_ref().and_then(|sc| {
                             sc.nodes.iter()
                                 .find(|n| n.model_resource_name == name || n.resource_name == name)
                                 .map(|n| {
-                                    let t = w3d.runtime_state.node_transforms.get(&n.name)
-                                        .copied()
-                                        .unwrap_or(n.transform);
-                                    [t[12], t[13], t[14]]
+                                    let local = |nd: &crate::director::chunks::w3d::types::W3dNode| {
+                                        w3d.runtime_state.node_transforms.get(&nd.name)
+                                            .copied()
+                                            .unwrap_or(nd.transform)
+                                    };
+                                    let mut m = local(n);
+                                    let mut parent = n.parent_name;
+                                    for _ in 0..20 {
+                                        if parent.as_str().is_empty()
+                                            || parent.as_str().eq_ignore_ascii_case("world") {
+                                            break;
+                                        }
+                                        match sc.nodes.iter()
+                                            .find(|pn| pn.name.as_str().eq_ignore_ascii_case(parent.as_str()))
+                                        {
+                                            Some(pn) => {
+                                                m = w3d_col_mat_mul(&local(pn), &m);
+                                                parent = pn.parent_name;
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                    [m[12], m[13], m[14]]
                                 })
                         }).unwrap_or([0.0, 0.0, 0.0]);
 
