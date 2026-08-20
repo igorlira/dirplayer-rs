@@ -142,11 +142,23 @@ pub fn screen_to_ray_shockwave(
     // viewport pixels — mixing the two scales produces wrong ray angles.
     let half_fov_rad = (fov_degrees * 0.5).to_radians();
     let dist_to_proj = (height * 0.5) / half_fov_rad.tan();
-    // Pixel aspect corrects for non-square pixels when viewport aspect ≠ original aspect
-    let orig_aspect = if original_height > 0.0 { original_width / original_height } else { 1.0 };
-    let pixel_aspect = if orig_aspect > 0.0 { (width / height) / orig_aspect } else { 1.0 };
 
-    let film_x = (screen_x - (width - 1.0) * 0.5) * pixel_aspect;
+    // NO pixel-aspect correction — the same correction the orthographic path
+    // above had to drop, for the same reason. The renderer builds the frustum as
+    // `perspective(fov_y, sprite_width / sprite_height)`, i.e. the camera's
+    // fieldOfView is VERTICAL and the horizontal extent follows the viewport
+    // aspect; the member's original (default_rect) aspect never enters it.
+    // Scaling film_x by `(width/height) / original_aspect` therefore skewed the
+    // pick ray horizontally by exactly that ratio whenever a member's authored
+    // rect and its sprite disagreed. Bottle Rocket is a 320x240 member on a
+    // 750x405 sprite, so picking ran at 0.72x the rendered width: its fuse is
+    // drawn at x=392..396 but was pickable only at x=388..390 — no overlap at
+    // all, so clicking the fuse could never launch the rocket.
+    //
+    // With this gone the ray is the exact inverse of the render projection:
+    // film_x / dist_to_proj == x_ndc * (width/height) * tan(fov/2).
+    let _ = (original_width, original_height);
+    let film_x = screen_x - (width - 1.0) * 0.5;
     let film_y = (height - 1.0) * 0.5 - screen_y;
     let film_z = -dist_to_proj;
 
