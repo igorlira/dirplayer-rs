@@ -152,9 +152,75 @@ pub fn export_cast(player: &DirPlayer, cast_number: u32) -> Option<(String, Vec<
             | CastMemberType::Transition(_)
             | CastMemberType::Unknown => {}
         }
+
+        // A non-script member may carry its own behaviour (Director calls it a
+        // cast member script). It is registered under the member's own slot, so
+        // export it alongside the member and note what it is attached to —
+        // otherwise the behaviour is silently lost on the way out.
+        if !matches!(member.member_type, CastMemberType::Script(_)) {
+            if let Some(script) = cast.scripts.get(&number) {
+                let script_type = script_type_name(&script.script_type);
+                let member_kind = member_type_name(&member.member_type);
+                if let Some(yml) = files
+                    .iter_mut()
+                    .find(|f| f.path == format!("{stem}.yml"))
+                {
+                    if let FileContent::Text(text) = &mut yml.content {
+                        if !text.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        // `slot:` at the top of this file already names the
+                        // member; `script_id` is the script's own id, which is
+                        // not always the same number and may be shared with
+                        // another member.
+                        let script_id = member.get_script_id().unwrap_or(number);
+                        text.push_str(&format!(
+                            "\nmember_script:\n  script_type: {script_type}\n  attached_to: {member_kind}\n  script_id: {script_id}\n"
+                        ));
+                    }
+                }
+                files.push(text_file(
+                    format!("{stem}.ls"),
+                    decompile_script(script, cast),
+                ));
+            }
+        }
     }
 
     Some((cast.name.clone(), files))
+}
+
+/// The `script_type` name written in a member's yml.
+fn script_type_name(t: &crate::director::enums::ScriptType) -> &'static str {
+    use crate::director::enums::ScriptType;
+    match t {
+        ScriptType::Movie => "movie",
+        ScriptType::Score => "score",
+        ScriptType::Member => "behavior",
+        ScriptType::Parent => "parent",
+        _ => "unknown",
+    }
+}
+
+/// The `type:` name a member is written under, used to record what a cast
+/// member script is attached to.
+fn member_type_name(member_type: &CastMemberType) -> &'static str {
+    match member_type {
+        CastMemberType::Bitmap(_) => "bitmap",
+        CastMemberType::Sound(_) => "sound",
+        CastMemberType::Script(_) => "script",
+        CastMemberType::Text(_) => "text",
+        CastMemberType::Field(_) => "field",
+        CastMemberType::Button(_) => "button",
+        CastMemberType::Shape(_) => "shape",
+        CastMemberType::VectorShape(_) => "vector_shape",
+        CastMemberType::Palette(_) => "palette",
+        CastMemberType::Flash(_) => "flash",
+        CastMemberType::FilmLoop(_) => "film_loop",
+        CastMemberType::Shockwave3d(_) => "shockwave3d",
+        CastMemberType::Font(_) => "font",
+        _ => "unknown",
+    }
 }
 
 // ── YAML builders ─────────────────────────────────────────────────────────────
@@ -177,14 +243,7 @@ fn build_sound_yml(header: &str, sm: &SoundMember) -> String {
 }
 
 fn build_script_yml(header: &str, sm: &ScriptMember) -> String {
-    use crate::director::enums::ScriptType;
-    let type_str = match sm.script_type {
-        ScriptType::Movie => "movie",
-        ScriptType::Score => "score",
-        ScriptType::Member => "behavior",
-        ScriptType::Parent => "parent",
-        _ => "unknown",
-    };
+    let type_str = script_type_name(&sm.script_type);
     let mut script = Section::new("script");
     script.push(format!("script_type: {type_str}"));
     format!("{header}type: script\n\n{}", script.build())
@@ -396,6 +455,26 @@ fn build_shockwave3d_yml(header: &str, s: &Shockwave3dMember) -> String {
 
 // ── Script decompilation ───────────────────────────────────────────────────────
 
+/// Decompile a JavaScript-authored script. Director MX 2004+ compiles
+/// JavaScript-syntax scripts to SpiderMonkey bytecode and stores it in the
+/// Lscr literal area, so reading it as Lingo bytecode produces nothing but
+/// `unk` comments. The JS decompiler already exists for the debugger view.
+fn decompile_js_script(js_payload: &[u8]) -> Option<String> {
+    use crate::player::js_lingo::{decode_script, decompiler};
+
+    // The top-level program already contains its nested function definitions,
+    // so rendering the functions separately as well would duplicate them.
+    let ir = decode_script(js_payload).ok()?;
+    let decomp = decompiler::decompile(&ir, &[]);
+    let mut out = String::new();
+    for line in &decomp.lines {
+        out.push_str(&"  ".repeat(line.indent as usize));
+        out.push_str(&line.text);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
     let lctx = match cast.lctx.as_ref() {
         Some(l) => l,
@@ -403,23 +482,54 @@ pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
     };
     let multiplier = get_variable_multiplier(cast.capital_x, cast.dir_version);
 
-    let properties = script.chunk.property_name_ids.iter()
-        .map(|prop_name_id| {
-            let default_value = script.chunk.property_defaults.get(prop_name_id).map(|v| {
-                format_static_datum(v)
-            });
-            let name = if let Some(name) = lctx.names.get(*prop_name_id as usize) {
-                yaml_string(name)
-            } else {
-                format!("prop{}", prop_name_id)
-            };
-            if let Some(value) = default_value {
-                format!("property {} = {}", name, value)
-            } else {
-                format!("property {}", name)
-            }
-        })
+    // Properties are declared on a single line, as Director writes them, and
+    // never carry an initializer — every property starts out VOID.
+    let property_names = script.chunk.property_name_ids.iter()
+        .filter_map(|prop_name_id| lctx.names.get(*prop_name_id as usize).cloned())
         .collect_vec();
+    let properties = if property_names.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("property {}", property_names.join(", "))]
+    };
+
+    // Globals are declared once at script level, the way Director writes them,
+    // rather than repeated inside every handler that touches them.
+    // Names the script itself declares. A handler may use globals beyond these,
+    // and those keep their own declaration — dropping them would turn them into
+    // locals on the way back in.
+    let hoisted_names: Vec<String> = script
+        .chunk
+        .global_name_ids
+        .iter()
+        .filter_map(|id| lctx.names.get(*id as usize).cloned())
+        .collect();
+
+    // A JavaScript-syntax script keeps its compiled form in the literal area,
+    // and its top-level `var` declarations and initialisers live inside that
+    // program -- so the JS source is the whole script. The Lingo handler table
+    // holds only one bridging stub per JS function, which the JS body already
+    // covers. Director's JS scripts have no `property`/`global` lists, but if
+    // one ever does, surface it as a comment rather than emitting Lingo
+    // keywords into a JavaScript file.
+    if let Some(js) = script.chunk.literals.iter().find_map(|l| match l {
+        crate::director::lingo::datum::Datum::JavaScript(bytes) => Some(bytes.as_slice()),
+        _ => None,
+    }) {
+        if let Some(source) = decompile_js_script(js) {
+            let mut out = String::new();
+            if !property_names.is_empty() {
+                out.push_str(&format!("// property {}
+", property_names.join(", ")));
+            }
+            if !hoisted_names.is_empty() {
+                out.push_str(&format!("// global {}
+", hoisted_names.join(", ")));
+            }
+            out.push_str(&source);
+            return out;
+        }
+    }
 
     let handlers = script
         .handler_names
@@ -434,6 +544,7 @@ pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
                 multiplier,
             );
 
+            let globals_were_inferred = handler.global_name_ids.is_empty();
             let global_name_ids = if handler.global_name_ids.is_empty() {
                 let mut inferred = Vec::new();
                 for bytecode in &handler.bytecode_array {
@@ -452,29 +563,34 @@ pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
                 handler.global_name_ids.clone()
             };
 
-            let globals = if global_name_ids.is_empty() {
+            // An id with no entry in the name table is not a real name — it is
+            // the "no name" sentinel. Inventing `global65535` for it puts a
+            // variable in the declaration that the script never had.
+            let handler_global_names: Vec<String> = global_name_ids
+                .iter()
+                .filter_map(|id| lctx.names.get(*id as usize).cloned())
+                .collect();
+            // A handler that recorded its own globals declares them verbatim,
+            // exactly as Director stored them, even where the script-level line
+            // repeats a name. Names merely inferred from the bytecode are only
+            // written out when nothing declares them at script level — otherwise
+            // they would add declarations the original never had.
+            let globals: Vec<String> = if handler_global_names.is_empty()
+                || (globals_were_inferred && !hoisted_names.is_empty())
+            {
                 Vec::new()
             } else {
-                vec![format!(
-                    "  global {}",
-                    global_name_ids
-                        .iter()
-                        .map(|id| {
-                            lctx.names
-                                .get(*id as usize)
-                                .map(|name| yaml_string(name))
-                                .unwrap_or_else(|| format!("global{}", id))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )]
+                vec![format!("  global {}", handler_global_names.join(", "))]
             };
 
+            // Argument names are Lingo identifiers, not YAML values. Running
+            // them through `yaml_string` quoted anything YAML treats as a
+            // boolean, so a handler taking an argument named `yes` came out as
+            // `on vote player, "yes"` — which is not valid Lingo.
             let args = handler.argument_name_ids.iter().map(|id| {
-                if let Some(name) = lctx.names.get(*id as usize) {
-                    yaml_string(name)
-                } else {
-                    format!("arg{}", id)
+                match lctx.names.get(*id as usize) {
+                    Some(name) => name.clone(),
+                    None => format!("arg{}", id),
                 }
             }).collect::<Vec<_>>().join(", ");
 
@@ -487,17 +603,49 @@ pub fn decompile_script(script: &Script, cast: &CastLib) -> String {
 
             let lines = lines.join("\n");
 
-            format!("on {} {}\n{}\nend", name, args, lines)
+            // Take the name from the name table rather than the interned symbol,
+            // which is lowercased: `on Activate` must not come back as
+            // `on activate` or the handler no longer matches what it replaces.
+            let name = lctx
+                .names
+                .get(handler.name_id as usize)
+                .cloned()
+                .unwrap_or_else(|| name.to_string());
+
+            if args.is_empty() {
+                format!("on {}\n{}\nend", name, lines)
+            } else {
+                format!("on {} {}\n{}\nend", name, args, lines)
+            }
         })
         .collect_vec();
 
     let mut result = String::new();
+    // Prefer the script's own globals table: it is what Director stored, in the
+    // order it stored it. The names gathered from the handlers are a fallback
+    // for scripts whose table is empty.
+    // Only the script's own globals table is hoisted. A script whose table is
+    // empty declared its globals inside the handlers, and that is where they
+    // belong on the way back out.
+    let script_globals: Vec<String> = hoisted_names;
+    // Declarations come first as one block — properties, then globals — with a
+    // single blank line separating them from the handlers.
+    let mut declarations = String::new();
     if !properties.is_empty() {
-        result.push_str(&properties.join("\n"));
-        result.push_str("\n\n");
+        declarations.push_str(&properties.join("\n"));
+        declarations.push('\n');
+    }
+    if !script_globals.is_empty() {
+        declarations.push_str(&format!("global {}\n", script_globals.join(", ")));
+    }
+    if !declarations.is_empty() {
+        result.push_str(&declarations);
+        result.push('\n');
     }
     if !handlers.is_empty() {
         result.push_str(&handlers.join("\n\n"));
+        // Text files end with a newline.
+        result.push('\n');
     }
     result
 }

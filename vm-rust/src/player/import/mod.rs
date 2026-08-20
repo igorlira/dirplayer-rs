@@ -114,7 +114,7 @@ pub fn import_cast_pack(
             _ => continue,
         };
 
-        members.push((slot, CastMember {
+        let mut member = CastMember {
             number: slot,
             name,
             comments,
@@ -122,7 +122,22 @@ pub fn import_cast_pack(
             color: ColorRef::PaletteIndex(255),
             bg_color: ColorRef::PaletteIndex(0),
             reg_point: (0, 0),
-        }));
+        };
+
+        // A non-script member may carry its own behaviour, exported as a `.ls`
+        // beside it with a `member_script:` section naming it. Compile it under
+        // the member's own slot and point the member at it, so the behaviour
+        // survives the round trip.
+        if doc.get("member_script").is_some() {
+            if let Some(ls_bytes) = ext_map.get("ls") {
+                if let Ok(src) = std::str::from_utf8(ls_bytes) {
+                    pending_scripts.push((slot, src.to_string()));
+                    member.set_script_id(slot);
+                }
+            }
+        }
+
+        members.push((slot, member));
     }
 
     // Compile all pending scripts and inject into the cast's lctx

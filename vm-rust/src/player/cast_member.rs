@@ -5313,6 +5313,20 @@ impl CastMember {
         (FontInfo::minimal(default_name), None, None, None, None, None, None, None, None, None)
     }
 
+    /// Attach a script to a non-script member. Director lets a bitmap, button,
+    /// shape, field or text member carry its own behaviour, referenced by the
+    /// script id in its member info.
+    pub fn set_script_id(&mut self, id: u32) {
+        match &mut self.member_type {
+            CastMemberType::Bitmap(bitmap) => bitmap.script_id = id,
+            CastMemberType::Button(button) => button.script_id = id,
+            CastMemberType::Shape(shape) => shape.script_id = id,
+            CastMemberType::Field(field) => field.script_id = id,
+            CastMemberType::Text(text) => text.script_id = id,
+            _ => {}
+        }
+    }
+
     pub fn get_script_id(&self) -> Option<u32> {
         match &self.member_type {
             CastMemberType::Bitmap(bitmap) => {
@@ -5607,7 +5621,9 @@ impl CastMember {
                         name: member_info.name.clone(),
                     })
                 } else {
-                    web_sys::console::warn_1(&format!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id).into());
+                    // Via the logging facade, not web_sys: this path is reached
+                    // from native builds too, where a browser call aborts.
+                    warn!("Script member {}: script_id {} not found in Lctx, skipping", number, script_id);
                     CastMemberType::Unknown
                 }
             }
