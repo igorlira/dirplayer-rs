@@ -3717,21 +3717,52 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
-                "pause" => {
+                "pause" | "resume" => {
+                    // `pause()` / `resume()` operate on the motion the player is
+                    // ALREADY carrying. Director seeds that at load from the model's
+                    // own clip — the same seeding `playList` already reports here (see
+                    // its `own_motion` fallback) and the same one the skinned path
+                    // applies when nothing has played. Without it a movie that only
+                    // ever pauses and resumes its imported animation, never calling
+                    // play(), had no `current_motion` at all and nothing moved:
+                    // Bottle Rocket's can and rocket never performed their launch
+                    // shake, and sat at their authored node transform instead of the
+                    // clip's frame 0.
+                    let playing = handler_name.eq_ignore_ascii_case("resume");
                     let model_name = s3d_ref.name.clone();
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.bones_player_mut(model_name).animation_playing = false;
-                            w3d.runtime_state.sync_legacy_from_bones_player(model_name);
+                    let seed = {
+                        let already = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                            .and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w| w.runtime_state.bones_player(model_name))
+                            .map_or(false, |bp| bp.current_motion.is_some());
+                        if already { None } else {
+                            player.movie.cast_manager.find_member_by_ref(&member_ref)
+                                .and_then(|m| m.member_type.as_shockwave3d())
+                                .and_then(|w| w.parsed_scene.as_ref())
+                                .and_then(|scene| {
+                                    crate::director::chunks::w3d::skeleton::default_motion_for_model(scene, model_name)
+                                        .or_else(|| crate::director::chunks::w3d::skeleton::keyframe_motion_for_model(scene, model_name))
+                                        .map(|m| m.name)
+                                })
                         }
-                    }
-                    Ok(player.alloc_datum(Datum::Void))
-                },
-                "resume" => {
-                    let model_name = s3d_ref.name.clone();
+                    };
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.bones_player_mut(model_name).animation_playing = true;
+                            let bp = w3d.runtime_state.bones_player_mut(model_name);
+                            if let Some(name) = seed {
+                                // Match the seeded entry `playList` reports: looping,
+                                // whole clip, normal rate, starting at frame 0.
+                                bp.current_motion = Some(name);
+                                bp.animation_time = 0.0;
+                                bp.animation_loop = true;
+                                bp.animation_start_time = 0.0;
+                                // Director reports the seeded entry as 0..100000 ms;
+                                // held in SECONDS here (see the `playList` getter).
+                                bp.animation_end_time = 100.0;
+                                bp.animation_scale = 1.0;
+                                bp.motion_ended = false;
+                            }
+                            bp.animation_playing = playing;
                             w3d.runtime_state.sync_legacy_from_bones_player(model_name);
                         }
                     }

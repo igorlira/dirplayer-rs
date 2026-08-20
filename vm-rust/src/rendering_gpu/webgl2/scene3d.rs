@@ -2161,7 +2161,14 @@ void main() {
                 // a multi-track skeletal motion applies each track to its named bone.
                 if let Some(rs) = runtime_state {
                     for (model_name, bp) in &rs.bones_players {
-                        if !bp.animation_playing { continue; }
+                        // A PAUSED player still holds its pose — that is what pause
+                        // means. The clock only advances while playing (see
+                        // events::tick_w3d_animations), so applying the motion here
+                        // unconditionally freezes the model on its current frame
+                        // rather than snapping it back to the authored node
+                        // transform. Bottle Rocket pauses its can and rocket at load
+                        // and expects them to stand in the clip's frame 0 until the
+                        // launch resumes them.
                         let motion_name = match &bp.current_motion { Some(m) => m, None => continue };
                         let motion = match scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name.as_str())) {
                             Some(m) => m, None => continue,
