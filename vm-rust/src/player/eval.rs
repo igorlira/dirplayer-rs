@@ -55,6 +55,8 @@ pub enum LingoExpr {
     Or(Box<LingoExpr>, Box<LingoExpr>),
     Contains(Box<LingoExpr>, Box<LingoExpr>),
     Starts(Box<LingoExpr>, Box<LingoExpr>),
+    /// `new <type>(<args>)` — compiles to the `newobj` opcode.
+    NewObj(String, Vec<LingoExpr>),
     Eq(Box<LingoExpr>, Box<LingoExpr>),
     Ne(Box<LingoExpr>, Box<LingoExpr>),
     Lt(Box<LingoExpr>, Box<LingoExpr>),
@@ -312,8 +314,21 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         Rule::string_empty => {
             reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("".to_owned()))))
         }
+        // Director's RETURN is a single carriage return, not CRLF.
         Rule::return_const => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("\r\n".to_owned()))))
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("\r".to_owned()))))
+        }
+        Rule::tab_const => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("\t".to_owned()))))
+        }
+        Rule::quote_const => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("\"".to_owned()))))
+        }
+        Rule::space_const => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(" ".to_owned()))))
+        }
+        Rule::pi_const => {
+            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))))
         }
         Rule::nohash_symbol => reserve_player_mut(|player| {
             Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(pair.as_str()))))
@@ -360,7 +375,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 Ok(player.alloc_datum(Datum::SpriteRef(n as i16)))
             })
         }
-        Rule::member_ref => {
+        Rule::member_ref | Rule::cast_ref => {
             let mut inner = pair.into_inner();
 
             // First expression is the member name or number
@@ -764,17 +779,14 @@ fn parse_lingo_expr_runtime(
                 let right = rhs?;
                 Ok(LingoExpr::Not(Box::new(right)))
             }
-            // Unary minus. Expressed as `x * -1` rather than `0 - x` so it
-            // negates every type Director allows it on: `multiply` already
-            // recurses into vectors, points and lists, whereas `0 - vector`
-            // has no defined arm. Agent Free Ride's vehicle code is full of
-            // `-pWorldUp` / `-pLocalDown`.
+            // Unary minus compiles to the `inv` opcode, so it must be a Negate
+            // rather than a `* -1` multiply — the latter emits two extra
+            // instructions Director never wrote. Negate evaluates via multiply
+            // anyway, so vectors, points and lists still negate elementwise
+            // (Agent Free Ride's vehicle code is full of `-pWorldUp`).
             Rule::neg_op => {
                 let right = rhs?;
-                Ok(LingoExpr::Multiply(
-                    Box::new(right),
-                    Box::new(LingoExpr::IntLiteral(-1)),
-                ))
+                Ok(LingoExpr::Negate(Box::new(right)))
             }
             Rule::subtract => {
                 let right = rhs?;
@@ -1010,7 +1022,7 @@ pub fn parse_lingo_rule_runtime(
             
             Ok(LingoExpr::PointLiteral(vec![(x_expr, y_expr)]))
         }
-        Rule::member_ref => {
+        Rule::member_ref | Rule::cast_ref => {
             let mut inner = pair.into_inner();
             
             // First expression is the member number
@@ -1091,6 +1103,28 @@ pub fn parse_lingo_rule_runtime(
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
             Ok(LingoExpr::HandlerCall("rgb".to_string(), vec![expr]))
         }
+        Rule::new_obj_expr => {
+            let mut inner = pair.into_inner();
+            let ty = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected type after `new`".to_string()))?
+                .as_str()
+                .to_string();
+            let mut args = Vec::new();
+            if let Some(arg_pairs) = inner.next() {
+                for arg in arg_pairs.into_inner() {
+                    args.push(parse_lingo_expr_runtime(arg.into_inner(), pratt)?);
+                }
+            }
+            Ok(LingoExpr::NewObj(ty, args))
+        }
+        Rule::rgb_expr3_color => {
+            let mut args = Vec::with_capacity(3);
+            for component in pair.into_inner() {
+                args.push(parse_lingo_expr_runtime(component.into_inner(), pratt)?);
+            }
+            Ok(LingoExpr::HandlerCall("rgb".to_string(), args))
+        }
         Rule::rgb_color => {
             let mut inner = pair.clone().into_inner();
             if let Some(inner_pair) = inner.next() {
@@ -1108,7 +1142,15 @@ pub fn parse_lingo_rule_runtime(
         Rule::bool_false => Ok(LingoExpr::BoolLiteral(false)),
         Rule::void => Ok(LingoExpr::VoidLiteral),
         Rule::string_empty => Ok(LingoExpr::StringLiteral("".to_owned())),
-        Rule::return_const => Ok(LingoExpr::StringLiteral("\r\n".to_owned())),
+        // Director's RETURN is a single carriage return, not CRLF.
+        Rule::return_const => Ok(LingoExpr::StringLiteral("\r".to_owned())),
+        Rule::tab_const => Ok(LingoExpr::StringLiteral("\t".to_owned())),
+        Rule::quote_const => Ok(LingoExpr::StringLiteral("\"".to_owned())),
+        // SPACE and PI compile to zero-argument builtin calls, not to constants
+        // in the literal pool — writing them as literals adds a pool entry
+        // Director never had and shifts every later `pushcons` index.
+        Rule::space_const => Ok(LingoExpr::HandlerCall("space".to_owned(), vec![])),
+        Rule::pi_const => Ok(LingoExpr::HandlerCall("pi".to_owned(), vec![])),
         Rule::nohash_symbol => Ok(LingoExpr::SymbolLiteral(pair.as_str().to_owned())),
         Rule::empty_list => Ok(LingoExpr::ListLiteral(vec![])),
         Rule::put_handler_call => {
@@ -1369,10 +1411,14 @@ pub fn parse_lingo_rule_runtime(
             let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
             let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
-            let target_name = target_pair.as_str().to_string();
+            // The destination may be a member reference (`field "x"`), not just a name.
+            let target = match target_pair.as_rule() {
+                Rule::ident => LingoExpr::Identifier(target_pair.as_str().to_string()),
+                _ => parse_lingo_rule_runtime(target_pair, pratt)?,
+            };
             Ok(LingoExpr::PutInto(
-                Box::new(expr), 
-                Box::new(LingoExpr::Identifier(target_name))
+                Box::new(expr),
+                Box::new(target)
             ))
         }
         Rule::put_before => {
@@ -1481,8 +1527,12 @@ pub fn parse_lingo_rule_runtime(
             };
             Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), range_end_expr.map(Box::new), Box::new(source_expr)))
         }
-        Rule::last_chunk_expr => {
-            let mut inner = pair.into_inner();
+        Rule::last_chunk_expr | Rule::the_last_chunk_expr => {
+            // `in` is a named rule and so appears as a child, while `of` is an
+            // anonymous literal and does not — skip it to reach the source.
+            let mut inner = pair
+                .into_inner()
+                .filter(|child| child.as_rule() != Rule::in_kw);
             let _last_kw = inner.next(); // "last" keyword
             let chunk_type_pair = inner.next()
                 .ok_or_else(|| ScriptError::new("Expected chunk type in last_chunk_expr".to_string()))?;
@@ -1512,6 +1562,39 @@ pub fn parse_lingo_rule_runtime(
             let full_text = pair.as_str();
             // Return an identifier that will be resolved at runtime
             Ok(LingoExpr::Identifier(full_text.to_string()))
+        }
+        Rule::the_count_prop => {
+            // `the number of castLibs` and friends are movie-level properties;
+            // spell them the way `legacy_movie_get_prop` expects.
+            let noun = pair
+                .into_inner()
+                .find(|inner| inner.as_rule() == Rule::count_noun)
+                .ok_or_else(|| ScriptError::new("Expected count noun".to_string()))?;
+            Ok(LingoExpr::Identifier(format!("the number of {}", noun.as_str())))
+        }
+        Rule::the_count_of_castlib => {
+            // `the number of castMembers of castLib <expr>`
+            let mut inner = pair
+                .into_inner()
+                .skip_while(|inner| inner.as_rule() != Rule::count_noun);
+            let noun = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected count noun".to_string()))?;
+            let noun = noun.as_str().to_string();
+            let target = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected castLib after 'of'".to_string()))?;
+            // The property takes the cast library's *value* as its operand —
+            // `castLib X` is syntax here, not a call to be evaluated.
+            let target = target
+                .into_inner()
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected castLib operand".to_string()))?;
+            let target_expr = parse_lingo_rule_runtime(target, pratt)?;
+            Ok(LingoExpr::ThePropOf(
+                Box::new(target_expr),
+                format!("number of {}", noun),
+            ))
         }
         Rule::the_chunk_count => {
             // `the number of <chunk_kind> in/of <expr>` — Director's legacy
@@ -2476,19 +2559,17 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             })
         }
         LingoExpr::Negate(operand) => {
+            // Negate via `* -1` so every type Director allows it on works:
+            // `multiply` recurses into vectors, points and lists, matching the
+            // `inv` opcode this compiles to.
             let value = Box::pin(eval_lingo_expr_ast_runtime(operand)).await?;
             reserve_player_mut(|player| {
-                let value = player.get_datum(&value).clone();
-                let result = match value {
-                    Datum::Int(n) => Datum::Int(-n),
-                    Datum::Float(n) => Datum::Float(-n),
-                    _ => {
-                        return Err(ScriptError::new(format!(
-                            "Cannot negate value of type {}",
-                            value.type_str()
-                        )))
-                    }
-                };
+                let minus_one = player.alloc_datum(Datum::Int(-1));
+                let result = crate::player::datum_operations::multiply_datums(
+                    value.clone(),
+                    minus_one,
+                    player,
+                )?;
                 Ok(player.alloc_datum(result))
             })
         }
@@ -2706,6 +2787,17 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
                 Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
             })
         },
+        LingoExpr::NewObj(obj_type, args) => {
+            // Evaluated as `new` called on the named type, which is how the
+            // runtime resolves xtra/script constructors.
+            let mut arg_exprs = vec![LingoExpr::Identifier(obj_type.clone())];
+            arg_exprs.extend(args.iter().cloned());
+            Box::pin(eval_lingo_expr_ast_runtime(&LingoExpr::HandlerCall(
+                "new".to_string(),
+                arg_exprs,
+            )))
+            .await
+        }
         LingoExpr::Starts(lhs, rhs) => {
             let left = Box::pin(eval_lingo_expr_ast_runtime(lhs)).await?;
             let right = Box::pin(eval_lingo_expr_ast_runtime(rhs)).await?;

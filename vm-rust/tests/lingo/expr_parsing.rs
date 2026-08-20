@@ -41,6 +41,9 @@ fn debug_replace_chunks_source() {
         lctx: cast_def.lctx.clone(), members: FxHashMap::default(), scripts: FxHashMap::default(),
         preload_mode: 0, capital_x: cast_def.capital_x, dir_version: cast_def.dir_version,
         palette_id_offset: cast_def.palette_id_offset,
+        name_symbols: Vec::new(),
+        name_index: std::cell::RefCell::new(None),
+        font_table: std::collections::HashMap::new(),
     };
     let mut bitmap_manager = BitmapManager::new();
     for (member_number, member_def) in &cast_def.members {
@@ -90,13 +93,17 @@ fn test_int() {
     assert_eq!(ast, LingoExpr::IntLiteral(42));
 }
 
+/// The grammar folds a leading sign into the numeric literal, so a negative
+/// number parses as one literal rather than a negation of a positive one. The
+/// compiler still emits `push <magnitude>; inv` for it, matching how Director
+/// encodes negative numbers (see `compile_expr_val`).
 #[test]
 fn test_neg_int() {
     let result = parse_lingo_expr_ast_runtime(Rule::eval_expr, "-42".to_string());
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(ast, LingoExpr::Negate(Box::new(LingoExpr::IntLiteral(42))));
+    assert_eq!(ast, LingoExpr::IntLiteral(-42));
 }
 
 #[test]
@@ -117,13 +124,14 @@ fn test_float_ending_with_dot() {
     assert_eq!(ast, LingoExpr::FloatLiteral(42.0));
 }
 
+/// See [`test_neg_int`] — the sign belongs to the literal.
 #[test]
 fn test_neg_float() {
     let result = parse_lingo_expr_ast_runtime(Rule::eval_expr, "-42.5".to_string());
     assert!(result.is_ok());
 
     let ast = result.unwrap();
-    assert_eq!(ast, LingoExpr::Negate(Box::new(LingoExpr::FloatLiteral(42.5))));
+    assert_eq!(ast, LingoExpr::FloatLiteral(-42.5));
 }
 
 #[test]

@@ -156,6 +156,11 @@ fn parse_script_block(source: &str) -> ScriptNode {
     let mut idx = 0;
     let mut properties = Vec::new();
     let mut handlers = Vec::new();
+    // Globals declared at script level apply to every handler. Director and
+    // ProjectorRays both write them here rather than repeating the declaration
+    // inside each handler; skipping them would silently compile those names as
+    // locals.
+    let mut script_globals: Vec<String> = Vec::new();
 
     while idx < lines.len() {
         let line = lines[idx].trim();
@@ -169,6 +174,10 @@ fn parse_script_block(source: &str) -> ScriptNode {
                 properties.extend(split_names(&line["property".len()..].trim_start()));
                 idx += 1;
             }
+            "global" => {
+                script_globals.extend(split_names(line["global".len()..].trim_start()));
+                idx += 1;
+            }
             "on" => {
                 let (h, ni) = parse_handler_block(&lines, idx);
                 handlers.push(h);
@@ -179,6 +188,14 @@ fn parse_script_block(source: &str) -> ScriptNode {
             }
         }
     }
+    if !script_globals.is_empty() {
+        for handler in &mut handlers {
+            handler
+                .body
+                .insert(0, StmtNode::GlobalDecl(script_globals.clone()));
+        }
+    }
+
     ScriptNode { properties, handlers }
 }
 
@@ -829,7 +846,7 @@ impl ScriptCompiler {
             literals,
             handlers,
             property_name_ids,
-            property_defaults: HashMap::new(),
+            global_name_ids: Vec::new(),
         };
 
         Ok(CompileResult { names: self.names.clone(), chunk })
@@ -945,18 +962,13 @@ impl<'a> HandlerCompiler<'a> {
                 LingoExpr::IntLiteral(n) => Some(-(*n as i64)),
                 _ => None,
             },
+            // The grammar folds a leading `-` into the literal, so a sentinel
+            // arrives here already negative rather than wrapped in a Negate.
+            LingoExpr::IntLiteral(n) if *n < 0 => Some(*n as i64),
             _ => None,
         };
         if let Some(n) = neg_val {
-            if n == 0 {
-                self.emit_val(OpCode::PushZero, 0);
-            } else if (-128..=127).contains(&n) {
-                self.emit_val(OpCode::PushInt8, n);
-            } else if (-32768..=32767).contains(&n) {
-                self.emit_val(OpCode::PushInt16, n);
-            } else {
-                self.emit_val(OpCode::PushInt32, n);
-            }
+            self.emit_push_int(n);
             return Ok(());
         }
         self.compile_expr_val(expr)
@@ -968,6 +980,19 @@ impl<'a> HandlerCompiler<'a> {
 
     fn is_local_handler(&self, name: &str) -> bool {
         self.handler_names.iter().any(|h| h.eq_ignore_ascii_case(name))
+    }
+
+    /// Push an integer using the narrowest opcode that fits it.
+    fn emit_push_int(&mut self, n: i64) {
+        if n == 0 {
+            self.emit_val(OpCode::PushZero, 0);
+        } else if (-128..=127).contains(&n) {
+            self.emit_val(OpCode::PushInt8, n);
+        } else if (-32768..=32767).contains(&n) {
+            self.emit_val(OpCode::PushInt16, n);
+        } else {
+            self.emit_val(OpCode::PushInt32, n);
+        }
     }
 
     fn emit_call(&mut self, name: &str, arg_count: i64, no_ret: bool) {
@@ -1738,6 +1763,11 @@ impl<'a> HandlerCompiler<'a> {
                 }
                 Ok(())
             }
+            LingoExpr::Pass => {
+                // `pass` is a zero-argument builtin command, not a value.
+                self.emit_call("pass", 0, true);
+                Ok(())
+            }
             LingoExpr::PutAfter(val, target) => {
                 if let LingoExpr::ChunkExpr(chunk_type, first, range_end, source) = target.as_ref() {
                     if let LingoExpr::Identifier(source_name) = source.as_ref() {
@@ -1758,8 +1788,11 @@ impl<'a> HandlerCompiler<'a> {
                         if let LingoExpr::Identifier(source_name) = source.as_ref() {
                             let source_name = source_name.clone();
                             let chunk_type = *chunk_type;
-                            let last = range_end.as_deref().unwrap_or(first);
-                            let last = last.clone();
+                            // As elsewhere, an absent range end is encoded as 0.
+                            let last = range_end
+                                .as_deref()
+                                .cloned()
+                                .unwrap_or(LingoExpr::IntLiteral(0));
                             let first = first.clone();
                             for builtin in [BuiltInSymbol::Char, BuiltInSymbol::Word, BuiltInSymbol::Item, BuiltInSymbol::Line] {
                                 if chunk_type == builtin {
@@ -1869,21 +1902,30 @@ impl<'a> HandlerCompiler<'a> {
     fn compile_expr_val(&mut self, expr: &LingoExpr) -> Result<(), String> {
         match expr {
             LingoExpr::IntLiteral(n) => {
+                // The grammar folds a leading `-` into the literal, but Director
+                // pushes the magnitude and negates it, so emit `push n; inv` to
+                // keep recompiled bytecode identical to the original.
                 let n = *n as i64;
-                if n == 0 {
-                    self.emit_val(OpCode::PushZero, 0);
-                } else if (-128..=127).contains(&n) {
-                    self.emit_val(OpCode::PushInt8, n);
-                } else if (-32768..=32767).contains(&n) {
-                    self.emit_val(OpCode::PushInt16, n);
+                if n < 0 {
+                    self.emit_push_int(-n);
+                    self.emit_val(OpCode::Inv, 0);
                 } else {
-                    self.emit_val(OpCode::PushInt32, n);
+                    self.emit_push_int(n);
                 }
             }
             LingoExpr::FloatLiteral(f) => {
-                let f32val = *f as f32;
-                let bits = f32val.to_bits() as i64;
-                self.emit_val(OpCode::PushFloat32, bits);
+                // `pushfloat32` carries the value inline as a 32-bit float, so
+                // Director only uses it where that is lossless — every such
+                // literal observed in real movies is f32-exact. Anything else
+                // lives in the literal pool as a full double; pushing it as f32
+                // regardless silently rounded the value (0.8 -> 0.800000011920929).
+                let as_f32 = *f as f32;
+                if (as_f32 as f64).to_bits() == f.to_bits() {
+                    self.emit_val(OpCode::PushFloat32, as_f32.to_bits() as i64);
+                } else {
+                    let lit_idx = self.add_literal(Datum::Float(*f));
+                    self.emit_val(OpCode::PushCons, lit_idx as i64);
+                }
             }
             LingoExpr::StringLiteral(s) => {
                 let lit_idx = self.add_literal(Datum::String(s.clone()));
@@ -1901,7 +1943,9 @@ impl<'a> HandlerCompiler<'a> {
                 }
             }
             LingoExpr::VoidLiteral => {
-                self.emit_val(OpCode::PushZero, 0);
+                // Director compiles VOID as a call to the zero-argument `void`
+                // builtin, not as a pushed constant.
+                self.emit_call("void", 0, false);
             }
             LingoExpr::Identifier(name) => {
                 if !self.compile_the_identifier_read(name) {
@@ -1930,6 +1974,15 @@ impl<'a> HandlerCompiler<'a> {
                         [LingoExpr::ListLiteral(items)] if items.len() == 2 => {
                             self.compile_expr_val(&items[0])?;
                             self.compile_expr_val(&items[1])?;
+                            self.emit_val(OpCode::GetField, 0);
+                            return Ok(());
+                        }
+                        // `field(x)` names no cast library, which Director
+                        // encodes as a cast ID of zero — same opcode, not a
+                        // generic call.
+                        [only] => {
+                            self.compile_expr_val(only)?;
+                            self.emit_val(OpCode::PushZero, 0);
                             self.emit_val(OpCode::GetField, 0);
                             return Ok(());
                         }
@@ -2002,6 +2055,16 @@ impl<'a> HandlerCompiler<'a> {
                 self.compile_expr_val(r)?;
                 self.emit_val(OpCode::ContainsStr, 0);
             }
+            LingoExpr::NewObj(obj_type, args) => {
+                // `new xtra("fileio")` is the dedicated `newobj` opcode: the
+                // arguments are pushed, then the type name identifies the class.
+                for arg in args {
+                    self.compile_expr_val(arg)?;
+                }
+                self.emit_val(OpCode::PushArgList, args.len() as i64);
+                let type_id = self.sc.get_name_id(obj_type) as i64;
+                self.emit_val(OpCode::NewObj, type_id);
+            }
             LingoExpr::Starts(l, r) => {
                 self.compile_expr_val(l)?;
                 self.compile_expr_val(r)?;
@@ -2063,6 +2126,16 @@ impl<'a> HandlerCompiler<'a> {
                 if matches!(obj.as_ref(), LingoExpr::Identifier(target) if target.eq_ignore_ascii_case("_movie") || target.eq_ignore_ascii_case("movie")) {
                     let prop_id = self.sc.get_name_id(prop) as i64;
                     self.emit_val(OpCode::GetMovieProp, prop_id);
+                } else if let Some(prop_id) = legacy_chunk_count_prop(prop) {
+                    // `the number of lines in X` — a chunk count, encoded as the
+                    // string operand followed by the chunk kind's id.
+                    self.compile_expr_val(obj)?;
+                    self.emit_legacy_get_prop(0x01, prop_id);
+                } else if let Some((prop_type, prop_id)) = legacy_movie_get_prop(prop) {
+                    // `the number of castMembers of castLib X` — a legacy
+                    // property whose operand is pushed before its id.
+                    self.compile_expr_val(obj)?;
+                    self.emit_legacy_get_prop(prop_type, prop_id);
                 } else if prop.eq_ignore_ascii_case("number") {
                     // "the number of <chunk_prop> of castLib(X)" → look up the combined
                     // prop name in anim2_prop_names and emit as get 8 with cast_lib arg.
@@ -2200,7 +2273,11 @@ impl<'a> HandlerCompiler<'a> {
         range_end: Option<&LingoExpr>,
         source: &LingoExpr,
     ) -> Result<(), String> {
-        let last = range_end.unwrap_or(first);
+        // A chunk reference with no `to` end is encoded with a range end of 0,
+        // meaning "the same chunk as `first`". Repeating `first` instead would
+        // compile to different bytecode than Director emits.
+        let single = LingoExpr::IntLiteral(0);
+        let last = range_end.unwrap_or(&single);
 
         // Collect all chunk layers by traversing nested ChunkExprs.
         // We clone to avoid lifetime issues when reassigning the cursor.
@@ -2217,7 +2294,7 @@ impl<'a> HandlerCompiler<'a> {
 
         let mut cur: &LingoExpr = source;
         while let LingoExpr::ChunkExpr(inner_type, inner_first, inner_range_end, inner_source) = cur {
-            let inner_last = inner_range_end.as_deref().unwrap_or(inner_first.as_ref());
+            let inner_last = inner_range_end.as_deref().unwrap_or(&single);
             layers.push(Layer {
                 chunk_type: *inner_type,
                 first: inner_first.as_ref().clone(),
@@ -2290,7 +2367,9 @@ impl<'a> HandlerCompiler<'a> {
         put_type: i64,
     ) -> Result<(), String> {
         // Value is already on stack (pushed before this call).
-        let last = range_end.unwrap_or(first);
+        // As in `compile_chunk_read`, an absent range end is encoded as 0.
+        let single = LingoExpr::IntLiteral(0);
+        let last = range_end.unwrap_or(&single);
 
         // Push 8 chunk indices: char, word, item, line (each as first+last pair)
         for builtin in [BuiltInSymbol::Char, BuiltInSymbol::Word, BuiltInSymbol::Item, BuiltInSymbol::Line] {
@@ -2571,6 +2650,18 @@ fn is_the_builtin_name(name: &str) -> bool {
         | "stageleft" | "stageright" | "stagetop" | "stagebottom"
         | "date"
     )
+}
+
+/// `the number of <chunk kind> in <string>` compiles to a dedicated opcode
+/// rather than a property read; the kind is identified by these ids.
+fn legacy_chunk_count_prop(name: &str) -> Option<u16> {
+    match name.to_ascii_lowercase().as_str() {
+        "number of chars" | "number of characters" => Some(1),
+        "number of words" => Some(2),
+        "number of items" => Some(3),
+        "number of lines" => Some(4),
+        _ => None,
+    }
 }
 
 fn legacy_movie_get_prop(name: &str) -> Option<(u16, u16)> {

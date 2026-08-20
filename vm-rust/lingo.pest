@@ -6,7 +6,7 @@ ident = @{ !digit ~ (alpha | digit | "_")+ }
 lang_ident = { !reserved_keyword ~ ident }
 
 reserved_keyword = @{
-    ("sprite" | "castLib" | "member" | "put" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete" | "field") ~ !(alpha | digit | "_")
+    ("sprite" | "castLib" | "member" | "put" | "set" | "to" | "into" | "before" | "after" | "and" | "or" | "not" | "true" | "TRUE" | "True" | "false" | "FALSE" | "False" | "EMPTY" | "RETURN" | "TAB" | "QUOTE" | "SPACE" | "PI" | "rgb" | "rect" | "point" | "of" | "the" | "char" | "word" | "line" | "item" | "delete" | "field") ~ !(alpha | digit | "_")
 }
 
 void_keyword = _{ ("void" | "VOID" | "Void") ~ !(alpha | digit | "_") }
@@ -34,6 +34,10 @@ quote          = _{ "\"" }
 string         = ${ quote ~ (string_interior) ~ quote }
 string_empty   =  { "EMPTY" }
 return_const   =  { "RETURN" }
+tab_const      =  { "TAB" }
+space_const    =  { "SPACE" }
+pi_const       =  { "PI" }
+quote_const    =  { "QUOTE" }
 
 // Multi-word properties that need special handling
 the_long_time        = { ^"the" ~ ^"long" ~ ^"time" }
@@ -81,7 +85,11 @@ rgb_num_arg   = { digit{,3} }
 rgb_num_color = { ^"rgb" ~ "(" ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ "," ~ (rgb_num_arg) ~ ")" }
 rgb_str_color = { ^"rgb" ~ "(" ~ (string) ~ ")" }
 rgb_expr_color = { ^"rgb" ~ "(" ~ expr ~ ")" }
-rgb_color     = { rgb_num_color | rgb_str_color | rgb_expr_color }
+// Three computed components, e.g. `rgb(tColor[1], tColor[2], tColor[3])`.
+// `rgb_num_color` only accepts literal digits, so without this the comma after
+// the first argument has nothing to match.
+rgb_expr3_color = { ^"rgb" ~ "(" ~ expr ~ "," ~ expr ~ "," ~ expr ~ ")" }
+rgb_color     = { rgb_num_color | rgb_expr3_color | rgb_str_color | rgb_expr_color }
 rect          = { ^"rect" ~ "(" ~ expr ~ "," ~ expr ~ "," ~ expr ~ "," ~ expr ~ ")" }
 point         = { ^"point" ~ "(" ~ expr ~ "," ~ expr ~ ")" }
 
@@ -101,6 +109,8 @@ field_ref = { &reserved_keyword ~ ^"field" ~ term_arg }
 // child-object idiom `new(script "parentScriptName", ...)`. The parenthesised
 // `script("name")` also matches here, because term_arg accepts a parens_expr.
 script_ref = { ^"script" ~ !(alpha | digit | "_") ~ term_arg }
+// `cast "name"` — how Director referred to members before `member`.
+cast_ref   = { ^"cast" ~ !(alpha | digit | "_") ~ term_arg ~ (^"of" ~ castlib_ref)? }
 
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
 chunk_type = { &reserved_keyword ~ (^"char" | ^"word" | ^"line" | ^"item") }
@@ -113,23 +123,37 @@ last_chunk_type_kw  = @{ (^"char" | ^"word" | ^"item" | ^"line")  ~ !(alpha | di
 chunk_count_type_kw = @{ (^"chars" | ^"words" | ^"items" | ^"lines") ~ !(alpha | digit | "_") }
 
 // "last char of X", "last word of X", etc.
-last_chunk_expr = { last_kw ~ last_chunk_type_kw ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+// `the last char in X` / `the last char of X`. Without the leading-`the` form,
+// `the_prop_of` claims it as a property named "last char", which only works for
+// `of` and silently reinterprets the construct.
+the_last_chunk_expr = { ^"the" ~ last_kw ~ last_chunk_type_kw ~ (^"of" | in_kw) ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+last_chunk_expr = { last_kw ~ last_chunk_type_kw ~ (^"of" | in_kw) ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
 // "the number of chars in X", "the number of items in X", etc.
 string_chunk_count_expr = { ^"the" ~ number_kw ~ ^"of" ~ chunk_count_type_kw ~ in_kw ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
 // Chunk range end expression: like expr but without prop_of_expr/castlib_of_expr/sprite_of_expr
 // so that "of <source>" after an obj-prop range end is not greedily consumed.
-chunk_range_prim = _{ last_chunk_expr | string_chunk_count_expr | put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | lang_ident }
+chunk_range_prim = _{ the_last_chunk_expr | last_chunk_expr | string_chunk_count_expr | put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | cast_ref | handler_call | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | tab_const | quote_const | space_const | pi_const | parens_list | parens_expr | chunk_expr | lang_ident }
 chunk_range_term = _{ not_op ~ chunk_range_term | chunk_range_prim | prop_handler_call | prop_name }
 chunk_range_expr = { chunk_range_term ~ (bin_op ~ chunk_range_term | postfix_op)* }
 chunk_range = { ^"to" ~ chunk_range_expr }
-chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+// The index uses `chunk_range_expr`, not `expr`: a plain `expr` matches
+// `prop_of_expr`, so `char pos of tString` has its `of tString` swallowed by
+// the index and the chunk expression is then left without its source.
+chunk_expr  = { chunk_type ~ chunk_range_expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
 
 // Director's legacy "the number of <chunk> in/of <expr>" — counts lines /
 // words / items / chars in a string. Used by classic behavior scripts:
 //     numMarkers = the number of lines in the labelList
 chunk_count_kind = { ^"chars" | ^"characters" | ^"words" | ^"lines" | ^"items" }
+
+// Movie-level counts (`the number of castLibs`). These are legacy "anim2"
+// properties, not chunk counts, and without their own rule `the_prop_of` claims
+// them and compiles `castLibs` as an ordinary operand.
+count_noun           = @{ (^"castMembers" | ^"castLibs" | ^"menus" | ^"xtras") ~ !(alpha | digit | "_") }
+the_count_of_castlib =  { ^"the" ~ number_kw ~ ^"of" ~ count_noun ~ ^"of" ~ castlib_ref }
+the_count_prop       =  { ^"the" ~ number_kw ~ ^"of" ~ count_noun ~ !(^"of") }
 the_chunk_count  = { ^"the" ~ ^"number" ~ ^"of" ~ chunk_count_kind ~ (^"of" | ^"in") ~ expr }
 
 parens_expr = _{ "(" ~ expr ~ ")" }
@@ -144,7 +168,9 @@ list_index  = { "[" ~ expr ~ "]" }
 // Boolean operators
 and_op = { ^"and" }
 or_op  = { ^"or" }
-not_op = { ^"not" }
+// Must not swallow the start of an identifier — `nothing` is a command,
+// not `not` applied to `hing`.
+not_op = @{ ^"not" ~ !(alpha | digit | "_") }
 // Unary minus on an EXPRESSION (`-pWorldUp`). Ordered after `primitive` in
 // `term` so a signed literal (`-5`) still parses as one `number_int` rather
 // than a negation of 5; only a `-` followed by something non-numeric gets here.
@@ -163,7 +189,7 @@ ge_op = { ">=" }
 // Property name after dot - can be any identifier including reserved keywords
 prop_name  =  { ident }
 
-primitive       = _{ put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | script_ref | handler_call | the_chunk_count | last_chunk_expr | string_chunk_count_expr | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
+primitive       = _{ new_obj_expr | put_handler_call | sprite_ref | castlib_ref | member_ref | field_ref | script_ref | cast_ref | handler_call | the_chunk_count | the_last_chunk_expr | last_chunk_expr | string_chunk_count_expr | the_count_of_castlib | the_count_prop | the_prop_of | the_prop | symbol | list | string | prop_list | number_float | number_int | rgb_color | rect | void | bool_true | bool_false | string_empty | point | return_const | tab_const | quote_const | space_const | pi_const | parens_list | parens_expr | chunk_expr | castlib_of_expr | sprite_of_expr | prop_of_expr | lang_ident }
 eval_expr       = _{ SOI ~ expr ~ EOI }
 ident_list      = _{ !digit ~ ident ~ (" " ~ ident)+ }
 
@@ -176,6 +202,11 @@ command_inline_args              = _{ command_inline_args_comma | command_inline
 put_handler_call                 =  { ^"put" ~ "(" ~ handler_call_args ~ ")" }
 // Allow other handlers with parentheses to be called normally
 handler_call                     =  { lang_ident ~ "(" ~ handler_call_args? ~ ")" }
+// `new xtra("fileio")` / `new script("foo")` — Director's object constructor,
+// which compiles to the dedicated `newobj` opcode rather than a call to `new`.
+new_kw                           = @{ ^"new" ~ !(alpha | digit | "_") }
+new_obj_type                     = @{ (alpha | "_") ~ (alpha | digit | "_")* }
+new_obj_expr                     =  { new_kw ~ new_obj_type ~ "(" ~ handler_call_args? ~ ")" }
 prop_handler_call                =  { prop_name ~ "(" ~ handler_call_args? ~ ")" }
 command_inline                   =  { lang_ident ~ !(WHITESPACE* ~ ("(" | "." | "=")) ~ command_inline_args }
 
@@ -183,9 +214,12 @@ command_inline                   =  { lang_ident ~ !(WHITESPACE* ~ ("(" | "." | 
 put_into_chunk   = { ^"put" ~ expr ~ ^"into" ~ chunk_expr }
 put_before_chunk = { ^"put" ~ expr ~ ^"before" ~ chunk_expr }
 put_after_chunk  = { ^"put" ~ expr ~ ^"after" ~ chunk_expr }
-put_into         = { ^"put" ~ expr ~ ^"into" ~ ident }
-put_before       = { ^"put" ~ expr ~ ^"before" ~ ident }
-put_after        = { ^"put" ~ expr ~ ^"after" ~ ident }
+// A put destination may be a member reference written verbosely, as Director
+// writes it: `put EMPTY into field "x"`.
+put_target       = _{ field_ref | member_ref | ident }
+put_into         = { ^"put" ~ expr ~ ^"into" ~ put_target }
+put_before       = { ^"put" ~ expr ~ ^"before" ~ put_target }
+put_after        = { ^"put" ~ expr ~ ^"after" ~ put_target }
 // put_display_multi handles "put 1, 2, 3" as a handler call with multiple args
 put_display_multi = { ^"put" ~ expr ~ ("," ~ expr)+ }
 // put_display handles single expressions (excluding direct parenthesized calls)
@@ -251,7 +285,8 @@ if_inline   =  { if_kw ~ expr ~ then_kw ~ command }
 // chain". In a text-eval context (where there's no handler chain being
 // walked) it's a no-op; the evaluator returns Void.
 pass_kw     = @{ ^"pass" ~ !(alpha | digit | "_") }
-pass_stmt   =  { pass_kw }
+// `pass` and `pass()` are the same statement.
+pass_stmt   =  { pass_kw ~ ("(" ~ ")")? }
 
 // Legacy `sound <verb> <args>` command form, e.g. `sound fadeIn 2, 60`,
 // `sound stop 3`, `sound playFile 1, "snd"`. Director treats the word after
@@ -295,7 +330,11 @@ bin_op     = _{
 }
 postfix_op = _{ range_index | list_index }
 expr       =  { term ~ (bin_op ~ term | postfix_op)* }
-term       = _{ not_op ~ term | primitive | neg_op ~ term | prop_name }
+// `prop_handler_call` catches a method whose name is a reserved keyword, as in
+// `tSession.set("k", v)`: `handler_call` inside `primitive` needs a
+// `lang_ident`, which excludes reserved words, so without this arm the `set`
+// matches as a bare property name and the argument list fails to parse.
+term       = _{ not_op ~ term | primitive | neg_op ~ term | prop_handler_call | prop_name }
 term_arg   =  { not_op ~ term_arg | primitive | neg_op ~ term_arg }
 
 command_eval_expr = _{ SOI ~ command ~ EOI }
