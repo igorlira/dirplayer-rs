@@ -4,6 +4,7 @@ import classNames from "classnames"
 import styles from './styles.module.css'
 import { subscribe_to_cast_member_list, unsubscribe_from_cast_member_list } from 'vm-rust'
 import _ from "lodash"
+import { exportCastToZip } from "../../utils/exportCast"
 
 function getMemberTypeIcon(memberType?: string, scriptType?: string): string | null {
   if (!memberType) return null;
@@ -82,11 +83,19 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
   }, [members, filterText]);
 
   return <div className={styles.castItem} key={castNumber}>
-    <button
-      onClick={() => setExpanded(!isExpanded)}
-      className={styles.castName}>
-      {showExpanded ? "[-]" : "[+]"} {name} ({castNumber})
-    </button>
+    <div className={styles.castHeader}>
+      <button
+        onClick={() => setExpanded(!isExpanded)}
+        className={styles.castName}>
+        {showExpanded ? "[-]" : "[+]"} {name} ({castNumber})
+      </button>
+      <button
+        className={styles.exportButton}
+        title={`Export cast "${name}" as Cast Pack zip`}
+        onClick={() => exportCastToZip(castNumber)}>
+        Export
+      </button>
+    </div>
     {showExpanded && <ul className={styles.castMemberList}>
       {filteredMembers.map(([memberNumberStr, member]) => {
         const memberNumber = parseInt(memberNumberStr)

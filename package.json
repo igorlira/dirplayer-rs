@@ -23,6 +23,7 @@
     "classnames": "^2.3.2",
     "dirplayer-js-api": "file:dirplayer-js-api",
     "electron-is-dev": "^3.0.1",
+    "fflate": "^0.8.3",
     "flexlayout-react": "^0.8.17",
     "lodash": "^4.17.21",
     "pako": "^2.1.0",

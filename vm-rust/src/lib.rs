@@ -2419,6 +2419,43 @@ pub fn get_pfr_font_enabled() -> bool {
     reserve_player_ref(|player| player.font_manager.pfr_enabled)
 }
 
+/// Export a cast library as a Cast Pack.
+///
+/// Returns a JS object: `{ name: string, files: Array<{ path: string, text?: string, binary?: Uint8Array }> }`
+/// Returns `undefined` if the cast number is invalid.
+#[wasm_bindgen]
+pub fn export_cast(cast_lib: u32) -> JsValue {
+    use player::export::{export_cast as do_export, FileContent};
+    use js_sys::{Array, Object, Uint8Array};
+
+    let result = reserve_player_ref(|player| do_export(player, cast_lib));
+    let (cast_name, files) = match result {
+        Some(r) => r,
+        None => return JsValue::UNDEFINED,
+    };
+
+    let file_array = Array::new();
+    for file in files {
+        let entry = Object::new();
+        js_sys::Reflect::set(&entry, &"path".into(), &file.path.into()).unwrap();
+        match file.content {
+            FileContent::Text(text) => {
+                js_sys::Reflect::set(&entry, &"text".into(), &text.into()).unwrap();
+            }
+            FileContent::Binary(data) => {
+                let arr = Uint8Array::from(data.as_slice());
+                js_sys::Reflect::set(&entry, &"binary".into(), &arr.into()).unwrap();
+            }
+        }
+        file_array.push(&entry);
+    }
+
+    let result_obj = Object::new();
+    js_sys::Reflect::set(&result_obj, &"name".into(), &cast_name.into()).unwrap();
+    js_sys::Reflect::set(&result_obj, &"files".into(), &file_array.into()).unwrap();
+    result_obj.into()
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     set_panic_hook();

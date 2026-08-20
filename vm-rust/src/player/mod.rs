@@ -50,6 +50,7 @@ pub mod score_keyframes;
 pub mod stream_status;
 pub mod virtual_scripts;
 pub mod console;
+pub mod export;
 pub mod testing_shared;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testing;
