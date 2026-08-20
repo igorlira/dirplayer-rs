@@ -2390,6 +2390,11 @@ pub fn mcp_list_breakpoints() -> String {
     reserve_player_ref(|player| player::mcp::mcp_list_breakpoints(player))
 }
 
+#[wasm_bindgen]
+pub fn mcp_compile_lingo(source: String) -> String {
+    player::mcp::mcp_compile_lingo(&source)
+}
+
 /// Evaluate a Lingo expression and return the result as JSON.
 /// Unlike eval_command, this waits for completion and returns the result.
 #[wasm_bindgen]

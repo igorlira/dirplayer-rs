@@ -204,6 +204,9 @@ export class McpServer {
           args.handler_name as string
         );
 
+      case 'compile_lingo':
+        return this.wasm.mcp_compile_lingo(args.source as string);
+
       // Execution tools
       case 'get_console_output':
         return this.wasm.mcp_get_console_output(

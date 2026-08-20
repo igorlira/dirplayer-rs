@@ -233,6 +233,18 @@ export const mcpTools: McpTool[] = [
     }
   },
 
+  {
+    name: 'compile_lingo',
+    description: 'Compile a Lingo source string and return bytecode disassembly for each handler. Useful for testing the compiler output without loading a full cast.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', description: 'Lingo source code to compile (may contain one or more handler definitions)' }
+      },
+      required: ['source']
+    }
+  },
+
   // Breakpoint tools
   {
     name: 'set_breakpoint',
@@ -277,6 +289,7 @@ export type McpToolName =
   | 'get_script'
   | 'disassemble_handler'
   | 'decompile_handler'
+  | 'compile_lingo'
   | 'get_console_output'
   | 'get_call_stack'
   | 'get_context'

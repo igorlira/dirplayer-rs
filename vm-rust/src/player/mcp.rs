@@ -11,7 +11,7 @@ use crate::{director::{
     enums::ScriptType,
     file::get_variable_multiplier,
     lingo::{decompiler::handler::decompile_handler, script::ScriptContext as LingoScriptContext},
-}, player::{datum_formatting::format_concrete_datum_with_depth, symbols::symbol::Symbol}};
+}, player::{datum_formatting::format_concrete_datum_with_depth, symbols::symbol::Symbol, lingo_compiler::compile_lingo}};
 
 use super::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
@@ -962,6 +962,49 @@ pub fn mcp_list_breakpoints(player: &DirPlayer) -> String {
             })
             .collect(),
     })
+}
+
+#[derive(Serialize)]
+pub struct McpCompileHandlerResult {
+    pub name: String,
+    pub arguments: Vec<String>,
+    pub bytecode: String,
+}
+
+#[derive(Serialize)]
+pub struct McpCompileResult {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handlers: Option<Vec<McpCompileHandlerResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Compile Lingo source and return bytecode disassembly for each handler
+pub fn mcp_compile_lingo(source: &str) -> String {
+    match compile_lingo(source, 1) {
+        Err(e) => to_json(&McpCompileResult { success: false, handlers: None, error: Some(e) }),
+        Ok(result) => {
+            let lctx = LingoScriptContext {
+                names: result.names,
+                scripts: std::collections::HashMap::new(),
+            };
+            let handlers = result.chunk.handlers.iter().map(|handler| {
+                let name = lctx.names.get(handler.name_id as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("handler_{}", handler.name_id));
+                let arguments = handler.argument_name_ids.iter()
+                    .map(|&id| lctx.names.get(id as usize).cloned().unwrap_or_else(|| format!("arg_{}", id)))
+                    .collect();
+                let bytecode = handler.bytecode_array.iter()
+                    .map(|bc| bc.to_bytecode_text(&lctx, handler, 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                McpCompileHandlerResult { name, arguments, bytecode }
+            }).collect();
+            to_json(&McpCompileResult { success: true, handlers: Some(handlers), error: None })
+        }
+    }
 }
 
 /// Format eval result as JSON
