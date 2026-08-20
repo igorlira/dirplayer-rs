@@ -7477,7 +7477,7 @@ fn bench_minimal_script() -> crate::player::script::Script {
             literals: vec![],
             handlers: vec![],
             property_name_ids: vec![],
-            property_defaults: HashMap::new(),
+            global_name_ids: Vec::new(),
         },
         script_type: ScriptType::Movie,
         handlers: fxhash::FxHashMap::default(),

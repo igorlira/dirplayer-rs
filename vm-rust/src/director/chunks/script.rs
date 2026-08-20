@@ -13,7 +13,9 @@ pub struct ScriptChunk {
     pub literals: Vec<Datum>,
     pub handlers: Vec<HandlerDef>,
     pub property_name_ids: Vec<u16>,
-    pub property_defaults: HashMap<u16, StaticDatum>,
+    /// The script's own global declarations, in the order Director stored them.
+    /// This is what `global a, b, c` at the top of the script was written as.
+    pub global_name_ids: Vec<u16>,
 }
 
 impl ScriptChunk {
@@ -90,24 +92,15 @@ impl ScriptChunk {
                 .collect_vec()
         };
 
-        // === Map property IDs to real parameter names ===
-        let mut property_defaults = HashMap::new();
-        for (i, prop_id) in property_name_ids.iter().enumerate() {
-            if let Some(literal) = literals.get(i) {
-                // Property has a default value from the literal
-                if let Entry::Vacant(entry) = property_defaults.entry(*prop_id) {
-                    entry.insert(StaticDatum::from(literal));
-                }
-            }
-            // Properties without literals will be initialized to Void in ScriptInstance::new()
-        }
-
+        // Properties carry no compiled defaults: Director initializes every one
+        // to VOID (see `ScriptInstance::new`). The literal pool sitting next to
+        // them is the script's constant table, unrelated to property order.
         Ok(ScriptChunk {
             script_number,
             literals,
             handlers,
             property_name_ids,
-            property_defaults,
+            global_name_ids,
         })
     }
 }
