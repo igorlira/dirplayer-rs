@@ -49,7 +49,7 @@ what the directory name encodes (e.g., due to sanitization), set `name:` in
 
 ```yaml
 name: "My Cast"         # optional; overrides directory name as canonical cast name
-default_palette: system-mac
+default_palette: systemMac
 ```
 
 `_cast.yml` is reserved and must not be used as a member name. Any file whose
@@ -182,7 +182,7 @@ slot: 1
 
 image:
   depth: 8                  # bit depth: 1, 2, 4, 8, 16, 32
-  palette: system-mac       # system palette name or member name
+  palette: systemMac       # system palette name or member name
   reg_point: [0, 0]         # [x, y] registration point
   alpha: false
   center_reg_point: false
@@ -194,7 +194,7 @@ image:
 | Field             | Type    | Default      | Description                                 |
 |-------------------|---------|--------------|---------------------------------------------|
 | `depth`           | integer | `8`          | Bit depth of the original bitmap            |
-| `palette`         | string  | `system-mac` | Palette: system name or member name         |
+| `palette`         | string  | `systemMac` | Palette: system name or member name         |
 | `reg_point`       | [x, y]  | `[0, 0]`     | Registration point relative to image origin |
 | `alpha`           | boolean | `false`      | Whether the image has an alpha channel      |
 | `center_reg_point`| boolean | `false`      | If true, reg point is image center          |
@@ -602,17 +602,19 @@ precedence.
 
 **System palette names** (used in `image: palette:` cross-references):
 
-| Name           | Description                  |
-|----------------|------------------------------|
-| `system-mac`   | Macintosh system palette     |
-| `system-win`   | Windows system palette       |
-| `rainbow`      | Director rainbow palette     |
-| `grayscale`    | 256-step grayscale           |
-| `pastels`      | Director pastels palette     |
-| `vivid`        | Director vivid palette       |
-| `ntsc`         | NTSC-safe palette            |
-| `metallic`     | Director metallic palette    |
-| `vga`          | Standard VGA palette         |
+| Name             | Description                  |
+|------------------|------------------------------|
+| `systemMac`      | Macintosh system palette     |
+| `systemWin`      | Windows system palette       |
+| `systemWinDir4`  | Windows Director 4 palette   |
+| `rainbow`        | Director rainbow palette     |
+| `grayscale`      | 256-step grayscale           |
+| `pastels`        | Director pastels palette     |
+| `vivid`          | Director vivid palette       |
+| `ntsc`           | NTSC-safe palette            |
+| `metallic`       | Director metallic palette    |
+| `vga`            | Standard VGA palette         |
+| `web216`         | Web-safe 216-color palette   |
 
 ---
 

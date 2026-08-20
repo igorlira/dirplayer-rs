@@ -147,6 +147,61 @@ impl SoundChunk {
         }
     }
 
+    pub fn from_wav(bytes: &[u8]) -> Result<SoundChunk, String> {
+        if bytes.len() < 12 { return Err("WAV too short".into()); }
+        if &bytes[0..4] != b"RIFF" { return Err("not a RIFF file".into()); }
+        if &bytes[8..12] != b"WAVE" { return Err("not a WAVE file".into()); }
+
+        let mut pos = 12usize;
+        let mut channels = 1u16;
+        let mut sample_rate = 44100u32;
+        let mut bits_per_sample = 16u16;
+        let mut pcm_data: &[u8] = &[];
+        let mut found_fmt = false;
+        let mut found_data = false;
+
+        while pos + 8 <= bytes.len() {
+            let chunk_id = &bytes[pos..pos + 4];
+            let chunk_size =
+                u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            pos += 8;
+            let chunk_end = (pos + chunk_size).min(bytes.len());
+
+            if chunk_id == b"fmt " && chunk_size >= 16 && pos + 16 <= bytes.len() {
+                channels = u16::from_le_bytes(bytes[pos + 2..pos + 4].try_into().unwrap());
+                sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap());
+                bits_per_sample =
+                    u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().unwrap());
+                found_fmt = true;
+            } else if chunk_id == b"data" {
+                pcm_data = &bytes[pos..chunk_end];
+                found_data = true;
+            }
+
+            pos = chunk_end;
+            if chunk_size % 2 != 0 { pos += 1; }
+        }
+
+        if !found_fmt || !found_data {
+            return Err("WAV missing fmt or data chunk".into());
+        }
+
+        let bytes_per_sample = (bits_per_sample / 8).max(1) as usize;
+        let frame_size = bytes_per_sample * channels as usize;
+        let sample_count = if frame_size > 0 { pcm_data.len() / frame_size } else { 0 } as u32;
+
+        Ok(SoundChunk {
+            channels,
+            sample_rate,
+            bits_per_sample,
+            sample_count,
+            codec: "raw_pcm".into(),
+            data: pcm_data.to_vec(),
+            version: 0,
+            big_endian_data: false,
+        })
+    }
+
     pub fn channels(&self) -> u16 {
         self.channels
     }

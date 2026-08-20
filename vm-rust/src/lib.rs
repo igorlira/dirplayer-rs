@@ -2456,6 +2456,44 @@ pub fn export_cast(cast_lib: u32) -> JsValue {
     result_obj.into()
 }
 
+/// Import a Cast Pack zip (already decompressed by the JS side) into the given cast library.
+///
+/// `files` is a JS `Array<{ path: string, content: Uint8Array }>`.
+/// Returns `{ ok: true, count: number }` or `{ ok: false, error: string }`.
+#[wasm_bindgen]
+pub fn import_cast_pack(cast_lib: u32, files: JsValue) -> JsValue {
+    use player::import::{import_cast_pack as do_import, ImportFile};
+    use js_sys::{Array, Object, Uint8Array};
+
+    let files_arr = Array::from(&files);
+    let mut import_files: Vec<ImportFile> = Vec::with_capacity(files_arr.length() as usize);
+    for item in files_arr.iter() {
+        let path = js_sys::Reflect::get(&item, &"path".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let content = js_sys::Reflect::get(&item, &"content".into())
+            .ok()
+            .map(|v| Uint8Array::from(v).to_vec())
+            .unwrap_or_default();
+        import_files.push(ImportFile { path, content });
+    }
+
+    let result = reserve_player_mut(|player| do_import(player, cast_lib, import_files));
+    let obj = Object::new();
+    match result {
+        Ok(count) => {
+            js_sys::Reflect::set(&obj, &"ok".into(), &true.into()).unwrap();
+            js_sys::Reflect::set(&obj, &"count".into(), &(count as u32).into()).unwrap();
+        }
+        Err(e) => {
+            js_sys::Reflect::set(&obj, &"ok".into(), &false.into()).unwrap();
+            js_sys::Reflect::set(&obj, &"error".into(), &e.into()).unwrap();
+        }
+    }
+    obj.into()
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     set_panic_hook();

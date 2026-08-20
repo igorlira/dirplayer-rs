@@ -1,10 +1,11 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useRef } from "react"
 import { ICastMemberIdentifier, castMemberIdentifier, CastSnapshot, CastMemberRecord } from "../../vm"
 import classNames from "classnames"
 import styles from './styles.module.css'
 import { subscribe_to_cast_member_list, unsubscribe_from_cast_member_list } from 'vm-rust'
 import _ from "lodash"
 import { exportCastToZip } from "../../utils/exportCast"
+import { importCastFromZip } from "../../utils/importCast"
 
 function getMemberTypeIcon(memberType?: string, scriptType?: string): string | null {
   if (!memberType) return null;
@@ -64,6 +65,16 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
   const [isExpanded, setExpanded] = useState(false);
   const castNumber = number;
   const showExpanded = forceExpanded || isExpanded;
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importCastFromZip(castNumber, file)
+      .then(count => console.log(`Imported ${count} member(s) into cast ${castNumber}`))
+      .catch(err => console.error('Import failed:', err))
+      .finally(() => { if (importInputRef.current) importInputRef.current.value = ''; });
+  }
 
   // The VM only serializes a cast's member list while someone is showing it.
   // Collapsed libraries cost nothing, which matters: a movie's full member set
@@ -95,6 +106,19 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
         onClick={() => exportCastToZip(castNumber)}>
         Export
       </button>
+      <button
+        className={styles.exportButton}
+        title={`Import Cast Pack zip into cast "${name}"`}
+        onClick={() => importInputRef.current?.click()}>
+        Import
+      </button>
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".zip"
+        style={{ display: 'none' }}
+        onChange={handleImport}
+      />
     </div>
     {showExpanded && <ul className={styles.castMemberList}>
       {filteredMembers.map(([memberNumberStr, member]) => {
