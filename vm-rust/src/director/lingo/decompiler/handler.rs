@@ -52,7 +52,7 @@ enum BlockContext {
     Root,
     IfBlock1(Rc<AstNode>),
     IfBlock2,
-    CaseLabel,
+    CaseLabel(Rc<AstNode>),
     CaseOtherwise,
     Loop { start_index: u32 },
     Tell,
@@ -521,7 +521,7 @@ impl<'a> DecompilerState<'a> {
                             }
                         }
                     }
-                    Some(BlockContext::CaseLabel) => {
+                    Some(BlockContext::CaseLabel(case_stmt)) => {
                         // Check if case label expects otherwise
                         let case_label = self.current_block.borrow().current_case_label.clone();
                         if let Some(label) = case_label {
@@ -529,23 +529,29 @@ impl<'a> DecompilerState<'a> {
                             match expect {
                                 CaseExpect::Otherwise => {
                                     self.current_block.borrow_mut().current_case_label = None;
-                                    // Find the ancestor case statement and add otherwise
-                                    // We need to find the case statement in the current block's children
-                                    let children = self.current_block.borrow().children.clone();
-                                    for child in children.iter().rev() {
-                                        if let AstNode::Case { otherwise, potential_otherwise_pos, .. } = child.node.as_ref() {
-                                            let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
-                                            otherwise.borrow_mut().replace(ow.clone());
-                                            // Tag the otherwise position
-                                            let ow_pos = potential_otherwise_pos.get();
-                                            if ow_pos >= 0 {
-                                                if let Some(&ow_index) = self.bytecode_pos_map.get(&(ow_pos as usize)) {
-                                                    self.bytecode_tags[ow_index].tag = BytecodeTag::EndCase;
-                                                }
-                                            }
-                                            self.enter_block(ow.borrow().block.clone(), BlockContext::CaseOtherwise);
-                                            break;
+                                    // The exited block names the case that owns it, so a
+                                    // nested case attaches its otherwise to itself rather
+                                    // than to whichever case was added last.
+                                    if let AstNode::Case { otherwise, potential_otherwise_pos, end_pos, .. } =
+                                        case_stmt.as_ref()
+                                    {
+                                        let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                                        // The otherwise branch ends where the case does;
+                                        // without this it keeps the default end position
+                                        // and swallows every statement that follows
+                                        // `end case`.
+                                        let case_end = end_pos.get();
+                                        if case_end >= 0 {
+                                            ow.borrow().block.borrow_mut().end_pos = case_end as u32;
                                         }
+                                        otherwise.borrow_mut().replace(ow.clone());
+                                        let ow_pos = potential_otherwise_pos.get();
+                                        if ow_pos >= 0 {
+                                            if let Some(&ow_index) = self.bytecode_pos_map.get(&(ow_pos as usize)) {
+                                                self.bytecode_tags[ow_index].tag = BytecodeTag::EndCase;
+                                            }
+                                        }
+                                        self.enter_block(ow.borrow().block.clone(), BlockContext::CaseOtherwise);
                                     }
                                 }
                                 CaseExpect::End => {
@@ -578,6 +584,7 @@ impl<'a> DecompilerState<'a> {
         let obj = bytecode.obj;
 
         let mut next_block: Option<(Rc<RefCell<BlockNode>>, BlockContext)> = None;
+        let mut return_sound_cmd: Option<(String, Rc<AstNode>)> = None;
         let mut collected_indices: Vec<usize> = vec![index];
 
         let translation: Option<Rc<AstNode>> = match opcode {
@@ -823,12 +830,66 @@ impl<'a> DecompilerState<'a> {
             OpCode::ExtCall | OpCode::TellCall => {
                 let name = self.get_name(obj);
                 let arg_list = self.pop_with_indices(&mut collected_indices);
-                Some(Rc::new(AstNode::Call { name, args: arg_list }))
+                // `sound` and `play` have their own statement syntax rather
+                // than reading as ordinary calls: `sound stop 1`, `play frame "x"`.
+                let is_statement = matches!(
+                    arg_list.as_ref(),
+                    AstNode::Literal(d) if d.datum_type == DatumType::ArgListNoRet
+                );
+                let arg_count = match arg_list.as_ref() {
+                    AstNode::Literal(d) => d.list_value.len(),
+                    _ => 0,
+                };
+                if is_statement && name == "sound" && arg_count > 0 {
+                    if let AstNode::Literal(list) = arg_list.as_ref() {
+                        if let AstNode::Literal(first) = list.list_value[0].as_ref() {
+                            if first.datum_type == DatumType::Symbol {
+                                let cmd = first.string_value.clone();
+                                let mut rest = list.clone();
+                                rest.list_value.remove(0);
+                                return_sound_cmd = Some((cmd, Rc::new(AstNode::Literal(rest))));
+                            }
+                        }
+                    }
+                }
+                if let Some((cmd, args)) = return_sound_cmd {
+                    Some(Rc::new(AstNode::SoundCmd { cmd, args }))
+                } else if is_statement && name == "play" && arg_count <= 2 {
+                    Some(Rc::new(AstNode::PlayCmd { args: arg_list }))
+                } else {
+                    Some(Rc::new(AstNode::Call { name, args: arg_list }))
+                }
             }
 
             OpCode::ObjCallV4 => {
-                let arg_list = self.pop_with_indices(&mut collected_indices);
+                // The object is read first: `read_var` consumes the stack for
+                // some variable types, and the object sits above the argument
+                // list. Taking them the other way round swapped the two, which
+                // left the node looking like an expression rather than a
+                // statement — and the call was dropped from the output.
                 let object = self.read_var_with_indices(obj, &mut collected_indices);
+                let arg_list = self.pop_with_indices(&mut collected_indices);
+                // The first argument is stored as a symbol but names a variable.
+                let arg_list = match arg_list.as_ref() {
+                    AstNode::Literal(datum) if !datum.list_value.is_empty() => {
+                        if let AstNode::Literal(first) = datum.list_value[0].as_ref() {
+                            if first.datum_type == DatumType::Symbol {
+                                let mut items = datum.list_value.clone();
+                                items[0] = Rc::new(AstNode::Literal(
+                                    Datum::var_ref(first.string_value.clone()),
+                                ));
+                                let mut replaced = datum.clone();
+                                replaced.list_value = items;
+                                Rc::new(AstNode::Literal(replaced))
+                            } else {
+                                arg_list.clone()
+                            }
+                        } else {
+                            arg_list.clone()
+                        }
+                    }
+                    _ => arg_list.clone(),
+                };
                 Some(Rc::new(AstNode::ObjCallV4 { obj: object, args: arg_list }))
             }
 
@@ -956,13 +1017,11 @@ impl<'a> DecompilerState<'a> {
             }
 
             _ => {
-                // Unknown opcode
+                // An opcode we do not decompile. Named the way Director's own
+                // tooling names it, so the comment can be matched against a
+                // reference disassembly.
                 let op_id = num::ToPrimitive::to_u16(&opcode).unwrap_or(0);
-                let comment = if op_id > 0x40 {
-                    format!("Unknown opcode {:02x} {}", op_id, obj)
-                } else {
-                    format!("Unknown opcode {:02x}", op_id)
-                };
+                let comment = format!("unk{:02X}", op_id);
                 self.stack.clear();
                 Some(Rc::new(AstNode::Comment(comment)))
             }
@@ -1026,20 +1085,18 @@ impl<'a> DecompilerState<'a> {
                             }
                             return None; // if statement amended, nothing to push
                         }
-                        BlockContext::CaseLabel => {
-                            // Case statement jmp - find ancestor case to set end position
-                            // The case statement is in the grandparent block (block_stack[-2])
-                            if self.block_stack.len() >= 2 {
-                                let grandparent = &self.block_stack[self.block_stack.len() - 2];
-                                let children = grandparent.borrow().children.clone();
-                                for child in children.iter().rev() {
-                                    if let AstNode::Case { end_pos, potential_otherwise_pos, .. } = child.node.as_ref() {
-                                        potential_otherwise_pos.set(bytecode.pos as i32);
-                                        end_pos.set(target_pos as i32);
-                                        self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
-                                        return None;
-                                    }
-                                }
+                        BlockContext::CaseLabel(case_stmt) => {
+                            // The block records which case owns it, so the end
+                            // position lands on that case even when cases nest.
+                            // Scanning sibling children instead picked whichever
+                            // case was added last, which is the wrong one inside
+                            // a nested case.
+                            if let AstNode::Case { end_pos, potential_otherwise_pos, .. } =
+                                case_stmt.as_ref()
+                            {
+                                potential_otherwise_pos.set(bytecode.pos as i32);
+                                end_pos.set(target_pos as i32);
+                                self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
                             }
                             return None;
                         }
@@ -1064,6 +1121,11 @@ impl<'a> DecompilerState<'a> {
                 self.bytecode_tags[target_index].tag = BytecodeTag::EndCase;
                 // Add otherwise
                 let ow = Rc::new(RefCell::new(OtherwiseNode::new()));
+                // The branch ends where the case does. Leaving the default here
+                // let an otherwise-only case run to the end of the handler and
+                // swallow whatever followed `end case` — visible on a nested
+                // case, whose `return` ended up inside the branch.
+                ow.borrow().block.borrow_mut().end_pos = target_pos as u32;
                 if let AstNode::Case { otherwise, .. } = case_stmt.as_ref() {
                     otherwise.borrow_mut().replace(ow.clone());
                 }
@@ -1238,6 +1300,7 @@ impl<'a> DecompilerState<'a> {
                 end_pos: Cell::new(-1),
                 potential_otherwise_pos: Cell::new(-1),
             });
+            self.current_block.borrow_mut().current_case_stmt = Some(case_stmt.clone());
             self.add_statement(case_stmt, vec![index]);
         } else if let Some(ref prev) = prev_label {
             let prev_expect = prev.borrow().expect;
@@ -1253,7 +1316,13 @@ impl<'a> DecompilerState<'a> {
             let block = Rc::new(RefCell::new(BlockNode::new()));
             block.borrow_mut().end_pos = jmp_pos as u32;
             curr_label.borrow_mut().block = block.clone();
-            self.enter_block(block, BlockContext::CaseLabel);
+            // The block records the case that owns it, the way an if block
+            // records its if statement.
+            let owner = self.current_block.borrow().current_case_stmt.clone();
+            match owner {
+                Some(case_stmt) => self.enter_block(block, BlockContext::CaseLabel(case_stmt)),
+                None => self.enter_block(block, BlockContext::Root),
+            }
         }
 
         curr_index - index + 1
@@ -1665,7 +1734,11 @@ impl<'a> DecompilerState<'a> {
             .filter_map(|&id| self.lctx.names.get(id as usize).cloned())
             .collect();
 
-        let dot = self.version >= 500;
+        // Dot syntax arrived in Director 7; before that a movie's own source
+        // could only have been written verbosely (`set x to 1`, `the loc of
+        // sprite 1`). Emitting `x = 1` for a D5 movie produces source the
+        // authoring version could not have compiled.
+        let dot = self.version >= 700;
         let mut lines = Vec::new();
         let mut bytecode_to_line = HashMap::new();
 
@@ -1726,7 +1799,7 @@ impl<'a> DecompilerState<'a> {
                 Self::collect_block_lines(&block1.borrow(), dot, indent + 1, lines, bytecode_to_line);
 
                 // Else
-                if has_else.get() && !block2.borrow().children.is_empty() {
+                if has_else.get() {
                     Self::push_line("else".to_string(), vec![], indent, lines, bytecode_to_line);
                     Self::collect_block_lines(&block2.borrow(), dot, indent + 1, lines, bytecode_to_line);
                 }
@@ -1789,12 +1862,10 @@ impl<'a> DecompilerState<'a> {
                 code.write(" of");
                 Self::push_line(code.into_string(), indices.to_vec(), indent, lines, bytecode_to_line);
 
-                // Case labels
-                let mut current_label = first_label.borrow().clone();
-                while let Some(label) = current_label {
-                    let label_ref = label.borrow();
-                    Self::collect_case_label_lines(&label_ref, dot, indent + 1, lines, bytecode_to_line);
-                    current_label = label_ref.next_label.clone();
+                // Case labels. The chain is walked by collect_case_label_lines
+                // itself, since only the tail of an `or` chain links onward.
+                if let Some(label) = first_label.borrow().clone() {
+                    Self::collect_case_label_lines(&label.borrow(), dot, indent + 1, lines, bytecode_to_line);
                 }
 
                 // Otherwise
@@ -1815,25 +1886,56 @@ impl<'a> DecompilerState<'a> {
         }
     }
 
-    /// Collect lines for a case label
+    /// Collect lines for a case label, its equivalent (`or`) values, its body,
+    /// and every label that follows it.
+    ///
+    /// Equivalent cases share one body: in `case1, case2: statement` only the
+    /// *last* label of the `or` chain owns the block (the earlier ones never
+    /// get one), and that same label carries the link to the next case. Reading
+    /// either off the first label yields an empty body and drops the rest of
+    /// the statement.
     fn collect_case_label_lines(label: &CaseLabelNode, dot: bool, indent: u32, lines: &mut Vec<DecompiledLine>, bytecode_to_line: &mut HashMap<usize, usize>) {
-        // Render the label value(s)
         let mut code = CodeWriter::new();
-        label.value.write_script(&mut code, dot, false);
+        write_case_value(&mut code, &label.value, dot);
 
-        // Chained "or" values
+        // Walk the "or" chain, collecting values; the tail owns body and successor.
+        let mut tail: Option<Rc<RefCell<CaseLabelNode>>> = None;
         let mut current_or = label.next_or.clone();
         while let Some(or_label) = current_or {
             code.write(", ");
-            or_label.borrow().value.write_script(&mut code, dot, false);
+            write_case_value(&mut code, &or_label.borrow().value, dot);
             current_or = or_label.borrow().next_or.clone();
+            tail = Some(or_label);
         }
 
         code.write(":");
         Self::push_line(code.into_string(), vec![], indent, lines, bytecode_to_line);
 
-        // Case label block contents
-        Self::collect_block_lines(&label.block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+        let (block, next_label) = match &tail {
+            Some(tail) => (tail.borrow().block.clone(), tail.borrow().next_label.clone()),
+            None => (label.block.clone(), label.next_label.clone()),
+        };
+        Self::collect_block_lines(&block.borrow(), dot, indent + 1, lines, bytecode_to_line);
+
+        if let Some(next) = next_label {
+            Self::collect_case_label_lines(&next.borrow(), dot, indent, lines, bytecode_to_line);
+        }
+    }
+}
+
+/// Case labels parenthesize any value that is not a plain literal or variable —
+/// `(-1):` and `((a >= 0) and (a <= 100)):` — so the label reads unambiguously.
+fn write_case_value(code: &mut CodeWriter, value: &Rc<AstNode>, dot: bool) {
+    let paren = matches!(
+        value.as_ref(),
+        AstNode::InverseOp(_) | AstNode::BinaryOp { .. } | AstNode::NotOp(_)
+    );
+    if paren {
+        code.write("(");
+    }
+    value.write_script(code, dot, false);
+    if paren {
+        code.write(")");
     }
 }
 
@@ -1846,29 +1948,32 @@ fn is_zero(node: &Rc<AstNode>) -> bool {
 }
 
 fn get_movie_property_name(id: i32) -> String {
+    // IDs are 0-based, matching `constants::movie_prop_names` and Director itself.
     match id {
-        0x01 => "floatPrecision".to_string(),
-        0x02 => "mouseDownScript".to_string(),
-        0x03 => "mouseUpScript".to_string(),
-        0x04 => "keyDownScript".to_string(),
-        0x05 => "keyUpScript".to_string(),
-        0x06 => "timeoutScript".to_string(),
-        0x07 => "short time".to_string(),
-        0x08 => "abbr time".to_string(),
-        0x09 => "long time".to_string(),
-        0x0a => "short date".to_string(),
-        0x0b => "abbr date".to_string(),
+        0x00 => "floatPrecision".to_string(),
+        0x01 => "mouseDownScript".to_string(),
+        0x02 => "mouseUpScript".to_string(),
+        0x03 => "keyDownScript".to_string(),
+        0x04 => "keyUpScript".to_string(),
+        0x05 => "timeoutScript".to_string(),
+        0x06 => "short time".to_string(),
+        0x07 => "abbr time".to_string(),
+        0x08 => "long time".to_string(),
+        0x09 => "short date".to_string(),
+        0x0a => "abbr date".to_string(),
+        0x0b => "long date".to_string(),
         _ => format!("movieProp_{}", id),
     }
 }
 
 fn get_animation_property_name(id: i32) -> String {
+    // 0x1c indicates dontPassEvent was called; it has no Lingo-accessible name.
     match id {
         0x01 => "beepOn".to_string(),
         0x02 => "buttonStyle".to_string(),
         0x03 => "centerStage".to_string(),
         0x04 => "checkBoxAccess".to_string(),
-        0x05 => "checkBoxType".to_string(),
+        0x05 => "checkboxType".to_string(),
         0x06 => "colorDepth".to_string(),
         0x07 => "colorQD".to_string(),
         0x08 => "exitLock".to_string(),
@@ -1876,15 +1981,45 @@ fn get_animation_property_name(id: i32) -> String {
         0x0a => "fullColorPermit".to_string(),
         0x0b => "imageDirect".to_string(),
         0x0c => "doubleClick".to_string(),
+        0x0d => "key".to_string(),
+        0x0e => "lastClick".to_string(),
+        0x0f => "lastEvent".to_string(),
+        0x10 => "keyCode".to_string(),
+        0x11 => "lastKey".to_string(),
+        0x12 => "lastRoll".to_string(),
+        0x13 => "timeoutLapsed".to_string(),
+        0x14 => "multiSound".to_string(),
+        0x15 => "pauseState".to_string(),
+        0x16 => "quickTimePresent".to_string(),
+        0x17 => "selEnd".to_string(),
+        0x18 => "selStart".to_string(),
+        0x19 => "soundEnabled".to_string(),
+        0x1a => "soundLevel".to_string(),
+        0x1b => "stageColor".to_string(),
+        0x1d => "switchColorDepth".to_string(),
+        0x1e => "timeoutKeyDown".to_string(),
+        0x1f => "timeoutLength".to_string(),
+        0x20 => "timeoutMouse".to_string(),
+        0x21 => "timeoutPlay".to_string(),
+        0x22 => "timer".to_string(),
+        0x23 => "preLoadRAM".to_string(),
+        0x24 => "videoForWindowsPresent".to_string(),
+        0x25 => "netPresent".to_string(),
+        0x26 => "safePlayer".to_string(),
+        0x27 => "soundKeepDevice".to_string(),
+        0x28 => "soundMixMedia".to_string(),
         _ => format!("animProp_{}", id),
     }
 }
 
 fn get_animation2_property_name(id: i32) -> String {
+    // Callers wrap these in `the ...`, so the names must not carry it themselves.
     match id {
-        0x01 => "the number of castMembers".to_string(),
-        0x02 => "the number of castMembers".to_string(),
-        0x03 => "the number of menus".to_string(),
+        0x01 => "perFrameHook".to_string(),
+        0x02 => "number of castMembers".to_string(),
+        0x03 => "number of menus".to_string(),
+        0x04 => "number of castLibs".to_string(),
+        0x05 => "number of xtras".to_string(),
         _ => format!("anim2Prop_{}", id),
     }
 }

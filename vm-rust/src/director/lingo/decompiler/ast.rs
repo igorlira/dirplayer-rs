@@ -7,8 +7,11 @@ use crate::director::lingo::opcode::OpCode;
 use super::enums::{ChunkExprType, PutType, DatumType, CaseExpect};
 use super::code_writer::CodeWriter;
 
-/// Maximum recursion depth for write_script to prevent stack overflow
-const MAX_WRITE_DEPTH: usize = 100;
+/// Bound on write_script recursion, to stop a malformed tree overflowing the
+/// stack. It has to clear real scripts: a string built from a chain of `&`
+/// nests one level per concatenation, and a 102-part chain was being truncated
+/// to `/* MAX DEPTH */`, losing 3KB of text.
+const MAX_WRITE_DEPTH: usize = 2000;
 
 /// Datum represents values in the decompiler
 #[derive(Clone, Debug)]
@@ -142,16 +145,17 @@ impl Datum {
             DatumType::Void => code.write("VOID"),
             DatumType::Int => code.write(&self.int_value.to_string()),
             DatumType::Float => {
-                let s = format!("{:.4}", self.float_value);
-                // Remove trailing zeros but keep at least one decimal place
-                let s = s.trim_end_matches('0');
-                let s = if s.ends_with('.') { format!("{}0", s) } else { s.to_string() };
+                // Shortest representation that reparses to the same double. A
+                // fixed 4-decimal format silently truncates: 0.00001 would come
+                // back as 0.0, and 1.23456 as 1.2346.
+                let mut s = format!("{}", self.float_value);
+                if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("NaN") {
+                    s.push_str(".0");
+                }
                 code.write(&s);
             }
             DatumType::String => {
-                code.write("\"");
-                code.write(&escape_string(&self.string_value));
-                code.write("\"");
+                code.write(&write_string_literal(&self.string_value));
             }
             DatumType::Symbol => {
                 code.write("#");
@@ -199,19 +203,122 @@ impl Datum {
     }
 }
 
-fn escape_string(s: &str) -> String {
-    let mut result = String::new();
-    for c in s.chars() {
-        match c {
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            _ => result.push(c),
+/// Whether a node renders as something containing spaces, which must be
+/// parenthesized before a `.property` access. Mirrors ProjectorRays'
+/// `hasSpaces`: literals, variables, calls and index expressions are compact;
+/// `the ...` forms, chunk expressions and operators are not.
+fn renders_with_spaces(node: &Rc<AstNode>, dot: bool) -> bool {
+    // Mirrors ProjectorRays' `hasSpaces`, which is a blacklist: compact forms
+    // (literals, variables, calls, index expressions) need no parentheses and
+    // everything else — `the ...` forms, chunk expressions, sprite and menu
+    // properties, operators — does.
+    match node.as_ref() {
+        AstNode::Literal(_) | AstNode::Var(_) => false,
+        AstNode::Call { name, args } => {
+            // `(member "x").line[1]` — verbose member syntax needs wrapping.
+            let arg_count = match args.as_ref() {
+                AstNode::Literal(list) => list.list_value.len(),
+                _ => 0,
+            };
+            !dot && is_member_expr_call(name, arg_count)
+        }
+        AstNode::ObjCall { .. } | AstNode::ObjCallV4 { .. } => false,
+        AstNode::ObjBracket { .. } | AstNode::ObjPropIndex { .. } => false,
+        AstNode::ObjProp { .. } | AstNode::Member { .. } => !dot,
+        AstNode::Comment(_) => false,
+        _ => true,
+    }
+}
+
+/// The string a chunk expression reads from is always written verbosely and
+/// without parentheses — `char 1 of the platform`, not `char 1 of (the
+/// platform)`.
+fn write_chunk_source(
+    code: &mut CodeWriter,
+    string: &Rc<AstNode>,
+    _chunk_type: ChunkExprType,
+    _dot: bool,
+    sum: bool,
+    depth: usize,
+) {
+    string.write_script_with_depth(code, false, sum, depth + 1);
+}
+
+/// Whether a call is really a member expression — `member(1, 1)` for
+/// `member 1 of castLib 1`. These are rewritten to their real syntax in verbose
+/// mode, which makes them render with spaces.
+fn is_member_expr_call(name: &str, arg_count: usize) -> bool {
+    match name {
+        "cast" | "member" | "script" => arg_count == 1 || arg_count == 2,
+        "castLib" | "window" => arg_count == 1,
+        _ => false,
+    }
+}
+
+/// Director encodes "no value given" for an optional numeric operand as the
+/// literal 0 — a cast library that was never named, or a chunk range that
+/// covers a single chunk.
+fn is_literal_zero(node: &Rc<AstNode>) -> bool {
+    match node.as_ref() {
+        AstNode::Literal(datum) => {
+            datum.datum_type == DatumType::Int && datum.int_value == 0
+        }
+        _ => false,
+    }
+}
+
+/// The Lingo constant naming a character that cannot appear inside a string
+/// literal. Lingo has no escape sequences — these are spelled as constants and
+/// concatenated, so `"a" & RETURN & "b"` is the only way to write a line break.
+fn string_constant_for(c: char) -> Option<&'static str> {
+    match c {
+        '\x03' => Some("ENTER"),
+        '\x08' => Some("BACKSPACE"),
+        '\t' => Some("TAB"),
+        '\r' | '\n' => Some("RETURN"),
+        '"' => Some("QUOTE"),
+        _ => None,
+    }
+}
+
+/// Render a string literal as Lingo source.
+///
+/// An empty string is `EMPTY`, a lone special character is its constant, and a
+/// string mixing text with special characters becomes a `&` concatenation.
+fn write_string_literal(s: &str) -> String {
+    if s.is_empty() {
+        return "EMPTY".to_string();
+    }
+
+    let mut chars = s.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if let Some(name) = string_constant_for(c) {
+            return name.to_string();
         }
     }
-    result
+
+    if !s.chars().any(|c| string_constant_for(c).is_some()) {
+        return format!("\"{}\"", s);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut literal = String::new();
+    for c in s.chars() {
+        match string_constant_for(c) {
+            Some(name) => {
+                if !literal.is_empty() {
+                    parts.push(format!("\"{}\"", literal));
+                    literal.clear();
+                }
+                parts.push(name.to_string());
+            }
+            None => literal.push(c),
+        }
+    }
+    if !literal.is_empty() {
+        parts.push(format!("\"{}\"", literal));
+    }
+    parts.join(" & ")
 }
 
 /// A child statement within a block, pairing the AST node with its bytecode indices
@@ -227,6 +334,11 @@ pub struct BlockNode {
     pub children: Vec<BlockChild>,
     pub end_pos: u32,
     pub current_case_label: Option<Rc<RefCell<CaseLabelNode>>>,
+    /// The case statement being built in this block, so a label block entered
+    /// from here knows which case owns it. Without this the owning case has to
+    /// be guessed by scanning siblings, which picks the wrong one when cases
+    /// are nested.
+    pub current_case_stmt: Option<Rc<AstNode>>,
 }
 
 impl BlockNode {
@@ -235,6 +347,7 @@ impl BlockNode {
             children: Vec::new(),
             end_pos: u32::MAX,
             current_case_label: None,
+            current_case_stmt: None,
         }
     }
 
@@ -440,8 +553,11 @@ impl AstNode {
                     code.write(" = ");
                     value.write_script_with_depth(code, dot, sum, depth + 1);
                 } else {
+                    // The destination of a `set` is always written verbosely,
+                    // so `set the blend of sprite the spriteNum of me to 0`
+                    // rather than mixing in dot syntax for the sprite id.
                     code.write("set ");
-                    variable.write_script_with_depth(code, dot, sum, depth + 1);
+                    variable.write_script_with_depth(code, false, sum, depth + 1);
                     code.write(" to ");
                     value.write_script_with_depth(code, dot, sum, depth + 1);
                 }
@@ -451,33 +567,33 @@ impl AstNode {
             }
             AstNode::InverseOp(operand) => {
                 code.write("-");
-                let needs_parens = matches!(operand.as_ref(), AstNode::BinaryOp { .. });
+                // `-(the maxInteger) / 2` — negating a `the ...` form needs the
+                // parentheses or the `/ 2` binds to the wrong thing.
+                let needs_parens = matches!(operand.as_ref(), AstNode::BinaryOp { .. })
+                    || renders_with_spaces(operand, dot);
                 if needs_parens { code.write("("); }
                 operand.write_script_with_depth(code, dot, sum, depth + 1);
                 if needs_parens { code.write(")"); }
             }
             AstNode::NotOp(operand) => {
                 code.write("not ");
-                let needs_parens = matches!(operand.as_ref(), AstNode::BinaryOp { .. });
+                let needs_parens = matches!(operand.as_ref(), AstNode::BinaryOp { .. })
+                    || renders_with_spaces(operand, dot);
                 if needs_parens { code.write("("); }
                 operand.write_script_with_depth(code, dot, sum, depth + 1);
                 if needs_parens { code.write(")"); }
             }
             AstNode::ChunkExpr { chunk_type, first, last, string } => {
                 let chunk_name = chunk_type.name();
-                // Check if first == last for single chunk reference
-                let is_single = match (first.as_ref(), last.as_ref()) {
-                    (AstNode::Literal(d1), AstNode::Literal(d2)) => {
-                        d1.datum_type == DatumType::Int && d2.datum_type == DatumType::Int && d1.int_value == d2.int_value
-                    }
-                    _ => false,
-                };
+                // A `last` of literal 0 means "same chunk as `first`" — the
+                // reference is to a single chunk, whatever `first` evaluates to.
+                let is_single = is_literal_zero(last);
                 if is_single {
                     code.write(chunk_name);
                     code.write(" ");
                     first.write_script_with_depth(code, dot, sum, depth + 1);
                     code.write(" of ");
-                    string.write_script_with_depth(code, dot, sum, depth + 1);
+                    write_chunk_source(code, string, *chunk_type, dot, sum, depth);
                 } else {
                     code.write(chunk_name);
                     code.write(" ");
@@ -485,7 +601,7 @@ impl AstNode {
                     code.write(" to ");
                     last.write_script_with_depth(code, dot, sum, depth + 1);
                     code.write(" of ");
-                    string.write_script_with_depth(code, dot, sum, depth + 1);
+                    write_chunk_source(code, string, *chunk_type, dot, sum, depth);
                 }
             }
             AstNode::ChunkHilite(chunk) => {
@@ -497,18 +613,38 @@ impl AstNode {
                 chunk.write_script_with_depth(code, dot, sum, depth + 1);
             }
             AstNode::SpriteIntersects { first, second } => {
+                // Either sprite id may be an operator expression, which needs
+                // parentheses: `sprite a intersects (b + i)`.
                 code.write("sprite ");
+                let paren = matches!(first.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
                 first.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
                 code.write(" intersects ");
+                let paren = matches!(second.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
                 second.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
             }
             AstNode::SpriteWithin { first, second } => {
+                // Either sprite id may be an operator expression, which needs
+                // parentheses: `sprite a intersects (b + i)`.
                 code.write("sprite ");
+                let paren = matches!(first.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
                 first.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
                 code.write(" within ");
+                let paren = matches!(second.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
                 second.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
             }
             AstNode::Member { member_type, member_id, cast_id } => {
+                // A cast ID of literal 0 means "unspecified" — `field("x", 0)`
+                // is how `field("x")` compiles, and writing the 0 back changes
+                // which cast library the expression names.
+                let cast_id = cast_id.as_ref().filter(|cast| !is_literal_zero(cast));
                 if dot {
                     code.write(member_type);
                     code.write("(");
@@ -521,10 +657,18 @@ impl AstNode {
                 } else {
                     code.write(member_type);
                     code.write(" ");
+                    // `field ("name" & n)` — an operator expression as the id
+                    // needs parentheses or it swallows what follows.
+                    let paren = matches!(member_id.as_ref(), AstNode::BinaryOp { .. });
+                    if paren { code.write("("); }
                     member_id.write_script_with_depth(code, dot, sum, depth + 1);
+                    if paren { code.write(")"); }
                     if let Some(cast) = cast_id {
                         code.write(" of castLib ");
+                        let paren = matches!(cast.as_ref(), AstNode::BinaryOp { .. });
+                        if paren { code.write("("); }
                         cast.write_script_with_depth(code, dot, sum, depth + 1);
+                        if paren { code.write(")"); }
                     }
                 }
             }
@@ -533,14 +677,22 @@ impl AstNode {
                 code.write(prop);
             }
             AstNode::TheProp { obj, prop } => {
+                // `the number of castMembers of castLib X` — the object of a
+                // verbose `the ... of ...` is spelled verbosely too, so a member
+                // reference reads `castLib X`, not `castLib(X)`.
                 code.write("the ");
                 code.write(prop);
                 code.write(" of ");
-                obj.write_script_with_depth(code, dot, sum, depth + 1);
+                obj.write_script_with_depth(code, false, sum, depth + 1);
             }
             AstNode::ObjProp { obj, prop } => {
                 if dot {
+                    // `the stage.rect` reads as `the (stage.rect)`; the object
+                    // needs parentheses whenever it renders with spaces.
+                    let paren = renders_with_spaces(obj, dot);
+                    if paren { code.write("("); }
                     obj.write_script_with_depth(code, true, sum, depth + 1);
+                    if paren { code.write(")"); }
                     code.write(".");
                     code.write(prop);
                 } else {
@@ -551,13 +703,21 @@ impl AstNode {
                 }
             }
             AstNode::ObjBracket { obj, prop } => {
+                // `(the desktopRectList)[1]` — an indexed object that renders
+                // with spaces needs parentheses to stay unambiguous.
+                let paren = renders_with_spaces(obj, dot);
+                if paren { code.write("("); }
                 obj.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
                 code.write("[");
                 prop.write_script_with_depth(code, dot, sum, depth + 1);
                 code.write("]");
             }
             AstNode::ObjPropIndex { obj, prop, index, index2 } => {
+                let paren = renders_with_spaces(obj, dot);
+                if paren { code.write("("); }
                 obj.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
                 code.write(".");
                 code.write(prop);
                 code.write("[");
@@ -569,16 +729,17 @@ impl AstNode {
                 code.write("]");
             }
             AstNode::LastStringChunk { chunk_type, obj } => {
+                // Director spells this `the last char in X`, not `of X`.
                 code.write("the last ");
                 code.write(chunk_type.name());
-                code.write(" of ");
-                obj.write_script_with_depth(code, dot, sum, depth + 1);
+                code.write(" in ");
+                obj.write_script_with_depth(code, false, sum, depth + 1);
             }
             AstNode::StringChunkCount { chunk_type, obj } => {
                 code.write("the number of ");
                 code.write(chunk_type.name());
                 code.write("s in ");
-                obj.write_script_with_depth(code, dot, sum, depth + 1);
+                obj.write_script_with_depth(code, false, sum, depth + 1);
             }
             AstNode::MenuProp { menu_id, prop } => {
                 code.write("the ");
@@ -604,7 +765,12 @@ impl AstNode {
                 code.write("the ");
                 code.write(&get_sprite_prop_name(*prop));
                 code.write(" of sprite ");
+                // `the locV of sprite (n + 1)` — without parentheses the `+ 1`
+                // reads as part of the enclosing expression.
+                let paren = matches!(sprite_id.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
                 sprite_id.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
             }
             AstNode::Call { name, args } => {
                 write_call_with_depth(code, name, args, dot, sum, depth);
@@ -614,7 +780,10 @@ impl AstNode {
                     if !arg_list.list_value.is_empty() {
                         let obj = &arg_list.list_value[0];
                         if dot {
+                            let paren = renders_with_spaces(obj, dot);
+                            if paren { code.write("("); }
                             obj.write_script_with_depth(code, true, sum, depth + 1);
+                            if paren { code.write(")"); }
                             code.write(".");
                             code.write(name);
                             code.write("(");
@@ -657,7 +826,8 @@ impl AstNode {
                 code.write(" ");
                 code.write(put_type.name());
                 code.write(" ");
-                variable.write_script_with_depth(code, dot, sum, depth + 1);
+                // The destination is always written verbosely: `into field "x"`.
+                variable.write_script_with_depth(code, false, sum, depth + 1);
             }
             AstNode::If { condition, block1, block2, has_else } => {
                 code.write("if ");
@@ -746,11 +916,13 @@ impl AstNode {
                 code.write("end case");
             }
             AstNode::NewObj { obj_type, args } => {
-                code.write("new(");
+                // `new xtra("fileio")`, not `new(xtra, "fileio")` — the latter
+                // reads as a call to `new` with the type as its first argument.
+                code.write("new ");
                 code.write(obj_type);
+                code.write("(");
                 if let AstNode::Literal(arg_list) = args.as_ref() {
                     if !arg_list.list_value.is_empty() {
-                        code.write(", ");
                         for (i, arg) in arg_list.list_value.iter().enumerate() {
                             if i > 0 { code.write(", "); }
                             arg.write_script_with_depth(code, dot, sum, depth + 1);
@@ -779,14 +951,29 @@ impl AstNode {
                 }
             }
             AstNode::PlayCmd { args } => {
+                // `play` has its own syntax: `play done`, `play frame X`,
+                // `play frame X of movie Y`.
                 code.write("play");
                 if let AstNode::Literal(arg_list) = args.as_ref() {
-                    if !arg_list.list_value.is_empty() {
-                        code.write(" ");
-                        for (i, arg) in arg_list.list_value.iter().enumerate() {
-                            if i > 0 { code.write(", "); }
-                            arg.write_script_with_depth(code, dot, sum, depth + 1);
+                    let items = &arg_list.list_value;
+                    if items.is_empty() {
+                        code.write(" done");
+                    } else if items.len() == 1 {
+                        code.write(" frame ");
+                        items[0].write_script_with_depth(code, dot, sum, depth + 1);
+                    } else {
+                        let frame_is_one = matches!(
+                            items[0].as_ref(),
+                            AstNode::Literal(d)
+                                if d.datum_type == DatumType::Int && d.int_value == 1
+                        );
+                        if !frame_is_one {
+                            code.write(" frame ");
+                            items[0].write_script_with_depth(code, dot, sum, depth + 1);
+                            code.write(" of");
                         }
+                        code.write(" movie ");
+                        items[1].write_script_with_depth(code, dot, sum, depth + 1);
                     }
                 }
             }
@@ -884,16 +1071,21 @@ fn write_binary_op_with_depth(code: &mut CodeWriter, opcode: OpCode, left: &Rc<A
         code.write("/* MAX DEPTH */");
         return;
     }
+    // Parenthesize the way Director's own decompiler does: a left operand only
+    // when it binds differently, a right operand whenever it is itself a binary
+    // operation (the AST is already correctly nested, but `a - (b - c)` must not
+    // reprint as `a - b - c`). Operators with no precedence entry never take
+    // parens, which keeps `a & b & c` flat.
     let precedence = get_precedence(opcode);
-
-    let left_needs_parens = match left.as_ref() {
-        AstNode::BinaryOp { opcode: left_op, .. } => get_precedence(*left_op) < precedence,
-        _ => false,
-    };
-
-    let right_needs_parens = match right.as_ref() {
-        AstNode::BinaryOp { opcode: right_op, .. } => get_precedence(*right_op) <= precedence,
-        _ => false,
+    let (left_needs_parens, right_needs_parens) = if precedence == 0 {
+        (false, false)
+    } else {
+        let left_parens = match left.as_ref() {
+            AstNode::BinaryOp { opcode: left_op, .. } => get_precedence(*left_op) != precedence,
+            _ => false,
+        };
+        let right_parens = matches!(right.as_ref(), AstNode::BinaryOp { .. });
+        (left_parens, right_parens)
     };
 
     if left_needs_parens { code.write("("); }
@@ -926,20 +1118,22 @@ fn get_op_string(opcode: OpCode) -> &'static str {
         OpCode::GtEq => ">=",
         OpCode::And => "and",
         OpCode::Or => "or",
-        OpCode::ContainsStr | OpCode::Contains0Str => "contains",
+        OpCode::ContainsStr => "contains",
+        // `contains0` is the `starts` operator, not another spelling of contains.
+        OpCode::Contains0Str => "starts",
         _ => "???",
     }
 }
 
+/// Tightest-binding operators score lowest; 0 means "no precedence", which
+/// suppresses parentheses entirely (string joins and `contains`).
 fn get_precedence(opcode: OpCode) -> u32 {
     match opcode {
-        OpCode::Or => 1,
-        OpCode::And => 2,
-        OpCode::ContainsStr | OpCode::Contains0Str => 3,
-        OpCode::Lt | OpCode::LtEq | OpCode::NtEq | OpCode::Eq | OpCode::Gt | OpCode::GtEq => 4,
-        OpCode::JoinStr | OpCode::JoinPadStr => 5,
-        OpCode::Add | OpCode::Sub => 6,
-        OpCode::Mul | OpCode::Div | OpCode::Mod => 7,
+        OpCode::Mul | OpCode::Div | OpCode::Mod => 1,
+        OpCode::Add | OpCode::Sub => 2,
+        OpCode::Lt | OpCode::LtEq | OpCode::NtEq | OpCode::Eq | OpCode::Gt | OpCode::GtEq => 3,
+        OpCode::And => 4,
+        OpCode::Or => 5,
         _ => 0,
     }
 }
@@ -949,16 +1143,49 @@ fn write_call_with_depth(code: &mut CodeWriter, name: &str, args: &Rc<AstNode>, 
         code.write("/* MAX DEPTH */");
         return;
     }
-    // Check if this is a special no-parens command (statement-style)
-    let no_parens = matches!(name.to_lowercase().as_str(),
-        "go" | "play" | "playaccelerator" | "pause" | "stop" | "halt" | "pass" | "continue" |
-        "alert" | "beep" | "updatestage" | "puppetsprite" | "puppetsound" | "puppetpalette" |
-        "puppettempo" | "puppettransition" | "sound" | "printwithout" | "tell" | "return" |
-        "nothing" | "put"
-    );
+    // Only `put` and `return` are written without parentheses, matching how
+    // Director itself renders these calls; everything else keeps them.
+    let no_parens = matches!(name.to_lowercase().as_str(), "put" | "return");
 
     if let AstNode::Literal(arg_list) = args.as_ref() {
         let is_statement = arg_list.datum_type == DatumType::ArgListNoRet;
+
+        // Member expressions such as `member 1 of castLib 1` compile to the call
+        // `member(1, 1)`, which pre-dot-syntax Director cannot parse. In verbose
+        // mode they are written back in their real syntax.
+        if !dot && !is_statement {
+            let nargs = arg_list.list_value.len();
+            let member_expr = is_member_expr_call(name, nargs);
+            if member_expr {
+                code.write(name);
+                code.write(" ");
+                let id = &arg_list.list_value[0];
+                let paren = matches!(id.as_ref(), AstNode::BinaryOp { .. });
+                if paren { code.write("("); }
+                id.write_script_with_depth(code, dot, sum, depth + 1);
+                if paren { code.write(")"); }
+                if nargs == 2 {
+                    code.write(" of castLib ");
+                    let cast_id = &arg_list.list_value[1];
+                    let paren = matches!(cast_id.as_ref(), AstNode::BinaryOp { .. });
+                    if paren { code.write("("); }
+                    cast_id.write_script_with_depth(code, dot, sum, depth + 1);
+                    if paren { code.write(")"); }
+                }
+                return;
+            }
+        }
+
+        // These constants compile to zero-argument calls; write them back as
+        // the constants they were, since `void()` and friends are not Lingo.
+        if arg_list.list_value.is_empty() && !is_statement {
+            match name {
+                "pi" => return code.write("PI"),
+                "space" => return code.write("SPACE"),
+                "void" => return code.write("VOID"),
+                _ => {}
+            }
+        }
 
         if arg_list.list_value.is_empty() {
             // Empty argument list - only omit parens for no-parens statement commands
@@ -1019,38 +1246,15 @@ fn get_sound_prop_name(prop: u32) -> String {
     }
 }
 
+/// Sprite property names come from `constants::sprite_prop_names`, the same
+/// table the compiler uses. A second hand-maintained copy here had drifted:
+/// it omitted movieRate, movieTime, startTime, stopTime and volume, so every
+/// id from 0x0f up resolved to the wrong property (`the width of sprite` read
+/// back as `the loc of sprite`).
 fn get_sprite_prop_name(prop: u32) -> String {
-    match prop {
-        0x01 => "type".to_string(),
-        0x02 => "backColor".to_string(),
-        0x03 => "bottom".to_string(),
-        0x04 => "castNum".to_string(),
-        0x05 => "constraint".to_string(),
-        0x06 => "cursor".to_string(),
-        0x07 => "foreColor".to_string(),
-        0x08 => "height".to_string(),
-        0x09 => "immediate".to_string(),
-        0x0a => "ink".to_string(),
-        0x0b => "left".to_string(),
-        0x0c => "lineSize".to_string(),
-        0x0d => "locH".to_string(),
-        0x0e => "locV".to_string(),
-        0x0f => "moveableSprite".to_string(),
-        0x10 => "pattern".to_string(),
-        0x11 => "puppet".to_string(),
-        0x12 => "right".to_string(),
-        0x13 => "scriptNum".to_string(),
-        0x14 => "stretch".to_string(),
-        0x15 => "top".to_string(),
-        0x16 => "trails".to_string(),
-        0x17 => "visible".to_string(),
-        0x18 => "width".to_string(),
-        0x19 => "blend".to_string(),
-        0x1a => "scriptInstanceList".to_string(),
-        0x1b => "loc".to_string(),
-        0x1c => "rect".to_string(),
-        0x1d => "member".to_string(),
-        _ => format!("spriteProp_{}", prop),
+    match crate::director::lingo::constants::sprite_prop_names().get(&(prop as u16)) {
+        Some(symbol) => symbol.as_str().to_string(),
+        None => format!("spriteProp_{}", prop),
     }
 }
 
