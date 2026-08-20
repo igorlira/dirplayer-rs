@@ -194,3 +194,29 @@ pub fn static_datum_to_runtime(param: &StaticDatum, allocator: &mut DatumAllocat
         }
     }
 }
+
+pub fn format_static_datum(datum: &StaticDatum) -> String {
+    match datum {
+        StaticDatum::Int(i) => i.to_string(),
+        StaticDatum::Float(f) => f.to_string(),
+        StaticDatum::String(s) => format!("\"{}\"", s),
+        StaticDatum::Symbol(s) => format!("#{}", s),
+        StaticDatum::List(items) => {
+            let item_strs: Vec<String> = items.iter().map(format_static_datum).collect();
+            format!("[{}]", item_strs.join(", "))
+        }
+        StaticDatum::PropList(items) => {
+            let pair_strs: Vec<String> = items
+                .iter()
+                .map(|(k, v)| format!("{}: {}", format_static_datum(k), format_static_datum(v)))
+                .collect();
+            format!("[{}]", pair_strs.join(", "))
+        }
+        StaticDatum::IntPoint(x, y) => format!("[{}, {}]", x, y),
+        StaticDatum::IntRect(left, top, right, bottom) => {
+            format!("[{}, {}, {}, {}]", left, top, right, bottom)
+        }
+        StaticDatum::Media(_) => "<media>".to_string(),
+        StaticDatum::Void => "void".to_string(),
+    }
+}

@@ -1,20 +1,15 @@
 use image::RgbaImage;
+use itertools::Itertools;
 
 use crate::{
     director::{
         file::get_variable_multiplier,
-        lingo::decompiler::handler::decompile_handler,
+        lingo::decompiler::handler::decompile_handler, static_datum::{format_static_datum, static_datum_to_runtime},
     },
     player::{
-        cast_lib::CastLib,
-        cast_member::{
-            BitmapMember, ButtonMember, CastMemberType, FieldMember, FilmLoopMember, FlashMember,
-            PaletteMember, ScriptMember, ShapeMember, SoundMember, TextMember, VectorShapeMember,
-            Shockwave3dMember,
-        },
-        bitmap::bitmap::{Bitmap, BuiltInPalette},
-        script::Script,
-        DirPlayer,
+        DirPlayer, bitmap::bitmap::{Bitmap, BuiltInPalette}, cast_lib::CastLib, cast_member::{
+            BitmapMember, ButtonMember, CastMemberType, FieldMember, FilmLoopMember, FlashMember, PaletteMember, ScriptMember, ShapeMember, Shockwave3dMember, SoundMember, TextMember, VectorShapeMember
+        }, script::Script
     },
 };
 
@@ -403,11 +398,29 @@ fn decompile_script(script: &Script, cast: &CastLib) -> String {
     };
     let multiplier = get_variable_multiplier(cast.capital_x, cast.dir_version);
 
-    script
+    let properties = script.chunk.property_name_ids.iter()
+        .map(|prop_name_id| {
+            let default_value = script.chunk.property_defaults.get(prop_name_id).map(|v| {
+                format_static_datum(v)
+            });
+            let name = if let Some(name) = lctx.names.get(*prop_name_id as usize) {
+                yaml_string(name)
+            } else {
+                format!("prop{}", prop_name_id)
+            };
+            if let Some(value) = default_value {
+                format!("property {} = {}", name, value)
+            } else {
+                format!("property {}", name)
+            }
+        })
+        .collect_vec();
+
+    let handlers = script
         .handler_names
         .iter()
         .filter_map(|name| script.get_own_handler(&name.to_lowercase()).map(|h| (name, h)))
-        .map(|(_, handler)| {
+        .map(|(name, handler)| {
             let decompiled = decompile_handler(
                 handler,
                 &script.chunk,
@@ -415,15 +428,35 @@ fn decompile_script(script: &Script, cast: &CastLib) -> String {
                 cast.dir_version,
                 multiplier,
             );
-            decompiled
+
+            let args = handler.argument_name_ids.iter().map(|id| {
+                if let Some(name) = lctx.names.get(*id as usize) {
+                    yaml_string(name)
+                } else {
+                    format!("arg{}", id)
+                }
+            }).collect::<Vec<_>>().join(", ");
+
+            let lines = decompiled
                 .lines
                 .iter()
-                .map(|line| format!("{}{}", "  ".repeat(line.indent as usize), line.text))
+                .map(|line| format!("{}{}", "  ".repeat(line.indent as usize + 1), line.text))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+
+            format!("on {} {}\n{}\nend", name, args, lines)
         })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .collect_vec();
+
+    let mut result = String::new();
+    if !properties.is_empty() {
+        result.push_str(&properties.join("\n"));
+        result.push_str("\n\n");
+    }
+    if !handlers.is_empty() {
+        result.push_str(&handlers.join("\n\n"));
+    }
+    result
 }
 
 // ── Media encoders ─────────────────────────────────────────────────────────────
