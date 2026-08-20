@@ -10,6 +10,7 @@ use crate::{
             BitmapInfo, ScriptType, ShapeInfo, ShapeType, Shockwave3dInfo, SoundInfo,
             VectorShapeVertex,
         },
+        lingo::script::ScriptContext,
     },
     js_api::JsApi,
     player::{
@@ -22,6 +23,7 @@ use crate::{
             FlashMember, PaletteMember, ScriptMember, ShapeMember, Shockwave3dMember,
             Shockwave3dRuntimeState, SoundMember, TextMember, VectorShapeMember,
         },
+        lingo_compiler::{compile_lingo, inject_into_lctx},
         sprite::ColorRef,
         DirPlayer,
     },
@@ -55,6 +57,7 @@ pub fn import_cast_pack(
     }
 
     let mut members: Vec<(u32, CastMember)> = Vec::new();
+    let mut pending_scripts: Vec<(u32, String)> = Vec::new(); // (slot, ls_source)
 
     for (stem, ext_map) in &grouped {
         if stem.starts_with('_') {
@@ -91,7 +94,15 @@ pub fn import_cast_pack(
             "bitmap" => build_bitmap(&doc, ext_map, &mut player.bitmap_manager)?,
             "palette" => build_palette(ext_map)?,
             "shape" => build_shape(&doc)?,
-            "script" => build_script(&doc)?,
+            "script" => {
+                // Collect .ls source for later compilation
+                if let Some(ls_bytes) = ext_map.get("ls") {
+                    if let Ok(src) = std::str::from_utf8(ls_bytes) {
+                        pending_scripts.push((slot, src.to_string()));
+                    }
+                }
+                build_script(&doc, slot)?
+            }
             "field" => build_field(&doc, ext_map)?,
             "button" => build_button(&doc, ext_map)?,
             "sound" => build_sound(&doc, ext_map)?,
@@ -111,6 +122,29 @@ pub fn import_cast_pack(
             bg_color: ColorRef::PaletteIndex(0),
             reg_point: (0, 0),
         }));
+    }
+
+    // Compile all pending scripts and inject into the cast's lctx
+    if !pending_scripts.is_empty() {
+        let cast = player.movie.cast_manager.get_cast_mut(cast_number);
+        cast.capital_x = true; // use variable multiplier = 1
+        if cast.lctx.is_none() {
+            cast.lctx = Some(ScriptContext {
+                names: Vec::new(),
+                scripts: HashMap::new(),
+            });
+        }
+        let lctx = cast.lctx.as_mut().unwrap();
+        for (slot, src) in pending_scripts {
+            match compile_lingo(&src, slot as u16) {
+                Ok(result) => inject_into_lctx(lctx, result, slot as u32),
+                Err(e) => {
+                    crate::utils::log_i(&format!(
+                        "Script compile error at slot {slot}: {e}"
+                    ));
+                }
+            }
+        }
     }
 
     let count = members.len();
@@ -279,7 +313,7 @@ fn build_shape(doc: &Value) -> Result<CastMemberType, String> {
     }))
 }
 
-fn build_script(doc: &Value) -> Result<CastMemberType, String> {
+fn build_script(doc: &Value, slot: u32) -> Result<CastMemberType, String> {
     let sec = doc.get("script");
     let script_type = match sec
         .and_then(|s| s.get("script_type"))
@@ -297,7 +331,7 @@ fn build_script(doc: &Value) -> Result<CastMemberType, String> {
         .unwrap_or("")
         .to_string();
     Ok(CastMemberType::Script(ScriptMember {
-        script_id: 0,
+        script_id: slot, // use slot as script_id so lctx lookup works
         script_type,
         name,
     }))

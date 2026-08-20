@@ -126,6 +126,8 @@ not_op = { ^"not" }
 // `term` so a signed literal (`-5`) still parses as one `number_int` rather
 // than a negation of 5; only a `-` followed by something non-numeric gets here.
 neg_op = { "-" }
+contains_op = { ^"contains" }
+starts_op   = { ^"starts" }
 
 // Comparison operators
 eq_op = { "=" }
@@ -250,6 +252,8 @@ bin_op     = _{
     obj_prop
   | and_op
   | or_op
+  | contains_op
+  | starts_op
   | eq_op
   | ne_op
   | lt_op

@@ -53,6 +53,8 @@ pub enum LingoExpr {
     JoinPad(Box<LingoExpr>, Box<LingoExpr>),
     And(Box<LingoExpr>, Box<LingoExpr>),
     Or(Box<LingoExpr>, Box<LingoExpr>),
+    Contains(Box<LingoExpr>, Box<LingoExpr>),
+    Starts(Box<LingoExpr>, Box<LingoExpr>),
     Eq(Box<LingoExpr>, Box<LingoExpr>),
     Ne(Box<LingoExpr>, Box<LingoExpr>),
     Lt(Box<LingoExpr>, Box<LingoExpr>),
@@ -834,6 +836,16 @@ fn parse_lingo_expr_runtime(
                 let left = lhs?;
                 let right = rhs?;
                 Ok(LingoExpr::Or(Box::new(left), Box::new(right)))
+            }
+            Rule::contains_op => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Contains(Box::new(left), Box::new(right)))
+            }
+            Rule::starts_op => {
+                let left = lhs?;
+                let right = rhs?;
+                Ok(LingoExpr::Starts(Box::new(left), Box::new(right)))
             }
             Rule::eq_op => {
                 let left = lhs?;
@@ -2579,6 +2591,26 @@ pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, S
             // forward to — treat as a successful no-op.
             Ok(DatumRef::Void)
         }
+        LingoExpr::Contains(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs)).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs)).await?;
+            reserve_player_mut(|player| {
+                let search_in = player.get_datum(&left).string_value()?;
+                let search_str = player.get_datum(&right).string_value()?;
+                let result = search_in.to_ascii_lowercase().contains(search_str.to_ascii_lowercase().as_str());
+                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+            })
+        },
+        LingoExpr::Starts(lhs, rhs) => {
+            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs)).await?;
+            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs)).await?;
+            reserve_player_mut(|player| {
+                let search_in = player.get_datum(&left).string_value()?;
+                let search_str = player.get_datum(&right).string_value()?;
+                let result = search_in.to_ascii_lowercase().starts_with(search_str.to_ascii_lowercase().as_str());
+                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
+            })
+        },
     }
 }
 
@@ -2645,10 +2677,12 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
         .op(Op::prefix(Rule::not_op))                         // not (prefix)
         .op(Op::infix(Rule::eq_op, Assoc::Left)               // = comparison
             | Op::infix(Rule::ne_op, Assoc::Left)             // <>
-            | Op::infix(Rule::lt_op, Assoc::Left)             // 
+            | Op::infix(Rule::lt_op, Assoc::Left)             // <
             | Op::infix(Rule::gt_op, Assoc::Left)             // >
             | Op::infix(Rule::le_op, Assoc::Left)             // <=
-            | Op::infix(Rule::ge_op, Assoc::Left))            // >=
+            | Op::infix(Rule::ge_op, Assoc::Left)             // >=
+            | Op::infix(Rule::contains_op, Assoc::Left)       // contains
+            | Op::infix(Rule::starts_op, Assoc::Left))        // starts
         .op(Op::infix(Rule::join, Assoc::Left)                // & concatenation
             | Op::infix(Rule::join_pad, Assoc::Left))         // && padded concat
         .op(Op::infix(Rule::add, Assoc::Left)                 // +, -
@@ -2705,5 +2739,21 @@ pub fn test_parse_config_key(key_str: &str) -> Result<(), String> {
         .map_err(|e| format!("{}", e))
 }
 
+/// Parse a single Lingo statement/command line to a LingoExpr AST.
+/// Used by the bytecode compiler to parse individual statement lines.
+pub fn parse_to_lingo_expr(text: &str) -> Result<LingoExpr, String> {
+    let pratt = create_lingo_pratt_parser();
+    let mut pairs = LingoParser::parse(Rule::command_eval_expr, text)
+        .map_err(|e| e.to_string())?;
+    let pair = pairs.next().ok_or_else(|| "Empty parse result".to_string())?;
+    parse_lingo_rule_runtime(pair, &pratt).map_err(|e| e.to_string())
+}
 
-
+/// Parse a Lingo expression (not a statement) to a LingoExpr AST.
+pub fn parse_expr_to_lingo_expr(text: &str) -> Result<LingoExpr, String> {
+    let pratt = create_lingo_pratt_parser();
+    let mut pairs = LingoParser::parse(Rule::eval_expr, text)
+        .map_err(|e| e.to_string())?;
+    let pair = pairs.next().ok_or_else(|| "Empty parse result".to_string())?;
+    parse_lingo_rule_runtime(pair, &pratt).map_err(|e| e.to_string())
+}
