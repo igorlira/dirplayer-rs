@@ -2147,6 +2147,10 @@ impl ParticleSystemState {
             if i >= self.ages.len() { break; }
 
             self.ages[i] += dt;
+            // How much of this step the particle actually existed for. A full `dt`
+            // for one that was already alive; only the post-birth remainder for one
+            // that respawns below.
+            let mut step = dt;
 
             if self.ages[i] >= self.lifetime {
                 // `emitter.loop = 0` means the particle DIES at the end of its
@@ -2168,26 +2172,54 @@ impl ParticleSystemState {
                 self.ages[i] -= self.lifetime;
                 self.alive[i] = true;
                 self.respawn(i);
+                // The particle was born PART WAY through this step — `ages[i]` is
+                // exactly how long ago — so it may only travel for that remainder,
+                // not for the whole `dt`.
+                //
+                // Integrating it over a full step instead put every particle one
+                // whole tick's travel past the emitter, so the head of a jet was
+                // missing: Bottle Rocket's exhaust (280 units/s at ~70 ms per tick)
+                // started 20 world units below the nozzle and looked detached from
+                // the rocket. Quantising it the other way — to whole steps only —
+                // collapses a continuous jet into concentric shells, which is what
+                // three hard rings in its 250 ms plume looked like.
+                step = self.ages[i];
             }
 
             if self.alive[i] {
                 // Apply gravity
-                self.velocities[i][0] += self.gravity[0] * dt;
-                self.velocities[i][1] += self.gravity[1] * dt;
-                self.velocities[i][2] += self.gravity[2] * dt;
+                self.velocities[i][0] += self.gravity[0] * step;
+                self.velocities[i][1] += self.gravity[1] * step;
+                self.velocities[i][2] += self.gravity[2] * step;
 
-                // Apply wind drag
+                // "drag ... indicates the percentage of each particle's velocity
+                // that is lost in each SIMULATION STEP. This property has a range
+                // of 0 (no velocity lost) to 100 (all velocity lost and the
+                // particle stops moving)" (Director 11.5 Scripting Dictionary,
+                // "drag"). `self.drag` already holds that percentage as a 0..1
+                // fraction, so it is applied once per step and must NOT be scaled
+                // by dt as well — doing so cut it to a sixtieth of its value and
+                // effectively disabled it. The particle velocity relaxes toward
+                // `wind` (the medium's own velocity) by that fraction each step.
+                //
+                // This is a per-step property in Director too, and this tick runs
+                // once per movie frame, so the decay tracks the movie's tempo the
+                // same way Director's did. Measured against the Intel demo capture:
+                // Bottle Rocket runs ~14 fps and its explosion (drag = 8) loses
+                // ~45% of its speed every half second — 0.92^7 = 0.56 — and its
+                // fireball converges to a fixed radius instead of expanding out of
+                // frame, which is exactly what the reference video shows.
                 if self.drag > 0.0 {
-                    let factor = 1.0 - self.drag * dt;
-                    self.velocities[i][0] = self.velocities[i][0] * factor + self.wind[0] * self.drag * dt;
-                    self.velocities[i][1] = self.velocities[i][1] * factor + self.wind[1] * self.drag * dt;
-                    self.velocities[i][2] = self.velocities[i][2] * factor + self.wind[2] * self.drag * dt;
+                    let factor = 1.0 - self.drag;
+                    self.velocities[i][0] = self.velocities[i][0] * factor + self.wind[0] * self.drag;
+                    self.velocities[i][1] = self.velocities[i][1] * factor + self.wind[1] * self.drag;
+                    self.velocities[i][2] = self.velocities[i][2] * factor + self.wind[2] * self.drag;
                 }
 
                 // Integrate position
-                self.positions[i][0] += self.velocities[i][0] * dt;
-                self.positions[i][1] += self.velocities[i][1] * dt;
-                self.positions[i][2] += self.velocities[i][2] * dt;
+                self.positions[i][0] += self.velocities[i][0] * step;
+                self.positions[i][1] += self.velocities[i][1] * step;
+                self.positions[i][2] += self.velocities[i][2] * step;
             }
         }
     }
