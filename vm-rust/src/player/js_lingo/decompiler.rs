@@ -1352,7 +1352,22 @@ impl<'a> DecompState<'a> {
                 }
                 i + 1
             }
-            JsOp::Popv | JsOp::Setrval => {
+            JsOp::Popv => {
+                // JSOP_POPV pops the value of an expression statement into the
+                // script's completion-value slot. SpiderMonkey emits it instead
+                // of JSOP_POP for expression statements at top level (program /
+                // eval scripts) -- it is *not* a return. Render it as the plain
+                // statement it came from.
+                if let Some(e) = self.stack.pop() {
+                    if !e.text.starts_with('<') {
+                        let mut bc = e.bc_idx.clone();
+                        bc.push(i);
+                        self.emit_line_with_idx(format!("{};", e.text), bc);
+                    }
+                }
+                i + 1
+            }
+            JsOp::Setrval => {
                 let e = self.pop_or_undef();
                 let mut bc = e.bc_idx.clone();
                 bc.push(i);

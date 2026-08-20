@@ -201,3 +201,35 @@ fn signed_jump_operand_reads_negative() {
     let v = read_i16_operand(&[0xff, 0xfb]).unwrap();
     assert_eq!(v, -5);
 }
+
+/// JSOP_POPV pops an expression statement's value into the script's
+/// completion-value slot; SpiderMonkey emits it instead of JSOP_POP for
+/// statements at top level (program / eval scripts). It is not a return, and
+/// rendering it as one turned `bpe >>= 1;` into `return bi_bpe = bi_bpe >> 1;`
+/// in real corpus scripts -- an implicit early exit that changes what the
+/// initialiser block appears to do. JSOP_SETRVAL *does* set a return value.
+#[test]
+fn popv_is_an_expression_statement_and_setrval_is_a_return() {
+    fn render(tail_op: JsOp) -> Vec<String> {
+        let ir = JsScriptIR {
+            magic: 0xdead_0003,
+            bytecode: vec![JsOp::One as u8, tail_op as u8],
+            prolog_length: 0,
+            version: 150,
+            atoms: Vec::new(),
+            source_notes: Vec::new(),
+            filename: None,
+            lineno: 1,
+            max_stack_depth: 1,
+            try_notes: Vec::new(),
+        };
+        super::decompiler::decompile(&ir, &[])
+            .lines
+            .iter()
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
+    assert_eq!(render(JsOp::Popv), vec!["1;".to_string()]);
+    assert_eq!(render(JsOp::Setrval), vec!["return 1;".to_string()]);
+}
