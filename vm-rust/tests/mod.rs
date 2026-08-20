@@ -1,7 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod lingo;
-#[cfg(not(target_arch = "wasm32"))]
-mod lingo_compiler_shared_cast_surface;
+// `lingo_compiler_shared_cast_surface.rs` is a test target in its own right, so
+// including it here ran every one of its tests a second time — in parallel with
+// the e2e tests. Both intern into the `static mut` symbol table, which produced
+// intermittent phantom failures in the roundtrip sweep.
 mod e2e;
 mod multiuser;
 
@@ -57,6 +59,9 @@ fn dump_fuse_client_info() {
         capital_x: cast_def.capital_x,
         dir_version: cast_def.dir_version,
         palette_id_offset: cast_def.palette_id_offset,
+        name_symbols: Vec::new(),
+        name_index: std::cell::RefCell::new(None),
+        font_table: std::collections::HashMap::new(),
     };
     let mut bitmap_manager = BitmapManager::new();
     for (member_number, member_def) in &cast_def.members {
@@ -68,7 +73,7 @@ fn dump_fuse_client_info() {
 
     for (_, script) in &cast.scripts {
         for handler_name in &script.handler_names {
-            if let Some(handler) = script.get_own_handler(handler_name) {
+            if let Some(handler) = script.get_own_handler(*handler_name) {
                 for bc in &handler.bytecode_array {
                     let name = lctx.names.get(bc.obj as usize).map(|s| s.as_str()).unwrap_or("?");
                     match bc.opcode {

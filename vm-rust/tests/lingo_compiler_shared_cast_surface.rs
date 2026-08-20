@@ -138,6 +138,7 @@ fn compiler_ready_source(source: &str) -> String {
 }
 
 fn load_fuse_client_cast() -> CastLib {
+    vm_rust::player::symbols::symbol_table::init_symbol_table();
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().expect("workspace root");
     let cast_path = workspace_root.join("public/dcr_woodpecker/fuse_client.cct");
@@ -170,6 +171,9 @@ fn load_fuse_client_cast() -> CastLib {
         capital_x: cast_def.capital_x,
         dir_version: cast_def.dir_version,
         palette_id_offset: cast_def.palette_id_offset,
+        name_symbols: Vec::new(),
+        name_index: std::cell::RefCell::new(None),
+        font_table: std::collections::HashMap::new(),
     };
 
     let mut bitmap_manager = BitmapManager::new();
@@ -196,7 +200,14 @@ fn load_fuse_client_cast() -> CastLib {
     cast
 }
 
+/// Serialized: the symbol interner behind `Symbol::from_str` is a `static mut`
+/// shared across the parallel test runner, and interning from several threads
+/// at once corrupts it. The VM itself is single-threaded, so this is a
+/// constraint of the harness rather than of the code under test.
 fn load_roundtrip_cases() -> Vec<RoundtripCase> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let cast = load_fuse_client_cast();
     let lctx = cast.lctx.as_ref().expect("fuse_client cast lctx");
     let multiplier = get_variable_multiplier(cast.capital_x, cast.dir_version);
@@ -210,9 +221,9 @@ fn load_roundtrip_cases() -> Vec<RoundtripCase> {
         let original_handlers = script
             .handler_names
             .iter()
-            .filter_map(|name| script.get_own_handler(name).map(|handler| (name, handler)))
+            .filter_map(|name| script.get_own_handler(*name).map(|handler| (name, handler)))
             .map(|(name, handler)| OriginalHandler {
-                name: name.clone(),
+                name: name.to_string(),
                 bytecodes: normalize_bytecodes(&handler.bytecode_array),
                 rendered: render_bytecodes(&handler.bytecode_array, lctx, handler, multiplier),
             })
@@ -352,8 +363,10 @@ fn compiler_matches_live_fuse_client_for_selected_scripts() {
     }
 }
 
+/// Every script in the live cast must decompile and recompile to byte-identical
+/// bytecode. No longer ignored: this now passes, so it guards the whole
+/// decompile/compile round trip rather than documenting a known failure.
 #[test]
-#[ignore = "broad live compiler roundtrip sweep for fuse_client.cct"]
 fn compiler_matches_live_fuse_client_for_all_scripts() {
     let cases = load_roundtrip_cases();
     let mut mismatches = Vec::new();
