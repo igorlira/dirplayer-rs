@@ -3307,17 +3307,36 @@ void main() {
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> f32 {
-        // 1. Check node-level shader override
+        // 1. Check node-level shader override.
+        //
+        // Only a TRANSLUCENT result may short-circuit here. The node's authored
+        // `shader_name` is `IFXModel::SetDefaultShaderID` — a FALLBACK for meshes
+        // that carry no binding of their own, not an override (see IFXModel.h, and
+        // the same note in docs/areazero/README.md §1). Every model node in
+        // AreaZero's Level1 carries `shader = "DefaultShader"` while the real
+        // material is bound PER MESH, so returning DefaultMaterial's opacity 1.0
+        // here made steps 2 and 3 dead code for the whole movie: the force fields
+        // in the three spawner gates, the god rays and every light glow are driven
+        // to `shader.blend = 0` by `[M] 3D Shaders.BlendShader` (Director's additive
+        // idiom — base contributes nothing, an `#add` layer 2 does the drawing), and
+        // with opacity stuck at 1.0 the `opacity < 0.999` gate on `is_additive`
+        // never opened. All of them fell into the OPAQUE pass and the gates showed
+        // the bare skybox instead of the dark, speckled force field.
+        //
+        // Taking the MINIMUM across the bound shaders is what steps 2 and 3 already
+        // do ("any transparent mesh -> whole model is transparent"); this only stops
+        // step 1 from pre-empting them with an opaque answer.
         let effective_shader_name = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
             .unwrap_or(model_node.shader_name);
         if !effective_shader_name.as_str().is_empty() {
             if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, effective_shader_name) {
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name) {
-                    return mat.opacity;
-                }
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.name) {
-                    return mat.opacity;
+                let mat = Self::find_material_ci(&scene.materials, w3d_shader.material_name)
+                    .or_else(|| Self::find_material_ci(&scene.materials, w3d_shader.name));
+                if let Some(mat) = mat {
+                    if mat.opacity < 0.999 {
+                        return mat.opacity;
+                    }
                 }
             }
         }
