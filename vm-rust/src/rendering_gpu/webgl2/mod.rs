@@ -1775,7 +1775,12 @@ impl WebGL2Renderer {
         struct Shockwave3dPass {
             member_key: (i32, i32),
             scene: std::rc::Rc<crate::director::chunks::w3d::types::W3dScene>,
-            runtime_state: crate::player::cast_member::Shockwave3dRuntimeState,
+            /// Shared, not owned. Every camera pass on the same member reads the
+            /// SAME state, and that struct is a couple of dozen HashMaps that grow
+            /// with everything the movie spawns — deep-copying it per pass per
+            /// frame was 11% of an AreaZero frame at higher waves
+            /// (`Shockwave3dRuntimeState::clone` plus `RawTable::clone`).
+            runtime_state: std::rc::Rc<crate::player::cast_member::Shockwave3dRuntimeState>,
             /// `None` = let the renderer pick its default view.
             camera: Option<Symbol>,
         }
@@ -3376,17 +3381,37 @@ impl WebGL2Renderer {
                         cam_list.extend(w3d_extra_cams.iter().cloned());
 
                         let mut passes: Vec<Shockwave3dPass> = Vec::new();
+                        // One clone of a member's runtime state per FRAME, shared by
+                        // every camera pass that reads it, instead of one per pass.
+                        let mut state_cache: Vec<((i32, i32), std::rc::Rc<crate::player::cast_member::Shockwave3dRuntimeState>)> = Vec::new();
                         for cam in &cam_list {
                             let key = cam.member.unwrap_or(own_key);
-                            let resolved = if key == own_key {
-                                Some((parsed_scene.clone(), w3d.runtime_state.clone()))
+                            let cached = state_cache.iter()
+                                .find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+                            let resolved = if let Some(state) = cached {
+                                let scene = if key == own_key {
+                                    Some(parsed_scene.clone())
+                                } else {
+                                    let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
+                                    player.movie.cast_manager.find_member_by_ref(&other)
+                                        .and_then(|m| m.member_type.as_shockwave3d())
+                                        .and_then(|o| o.parsed_scene.clone())
+                                };
+                                scene.map(|sc| (sc, state))
+                            } else if key == own_key {
+                                Some((parsed_scene.clone(), std::rc::Rc::new(w3d.runtime_state.clone())))
                             } else {
                                 let other = CastMemberRef { cast_lib: key.0, cast_member: key.1 };
                                 player.movie.cast_manager.find_member_by_ref(&other)
                                     .and_then(|m| m.member_type.as_shockwave3d())
                                     .and_then(|o| o.parsed_scene.as_ref()
-                                        .map(|sc| (sc.clone(), o.runtime_state.clone())))
+                                        .map(|sc| (sc.clone(), std::rc::Rc::new(o.runtime_state.clone()))))
                             };
+                            if let Some((_, ref st)) = resolved {
+                                if !state_cache.iter().any(|(k, _)| *k == key) {
+                                    state_cache.push((key, st.clone()));
+                                }
+                            }
                             let (pass_scene, pass_state) = match resolved {
                                 Some(v) => v,
                                 // Owning member isn't loaded (or isn't 3D) yet — skip
@@ -3413,7 +3438,7 @@ impl WebGL2Renderer {
                             passes.push(Shockwave3dPass {
                                 member_key: own_key,
                                 scene: parsed_scene.clone(),
-                                runtime_state: w3d.runtime_state.clone(),
+                                runtime_state: std::rc::Rc::new(w3d.runtime_state.clone()),
                                 camera: w3d_camera.as_ref().map(|c| Symbol::from_str(&c.name)),
                             });
                         }

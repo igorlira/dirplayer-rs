@@ -8969,6 +8969,14 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
                 for (node_name, datum_ref) in &w3d.runtime_state.node_transform_datums {
+                    // Filter HERE, not after collecting. `node_transform_datums`
+                    // holds an entry for every node a script has ever touched and
+                    // grows with everything the movie spawns, while the dirty set
+                    // is normally a handful — so collecting all of them cost a
+                    // DatumRef clone (and later drop) per node per frame for
+                    // nothing. `drop_in_place<DatumRef>` was 6.1% of an AreaZero
+                    // frame at higher waves.
+                    if !dirty_ids.contains(&datum_ref.unwrap()) { continue; }
                     entries.push((cast.number as i32, *member_num, *node_name, datum_ref.clone()));
                 }
             }
@@ -8976,8 +8984,6 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
     }
 
     for (cast_lib, cast_member, node_name, datum_ref) in entries {
-        let is_dirty = dirty_ids.contains(&datum_ref.unwrap());
-        if !is_dirty { continue; } // Only sync dirty datums
         if let Datum::Transform3d(m64) = player.get_datum(&datum_ref) {
             let m32: [f32; 16] = m64.map(|v| v as f32);
             if m32.iter().any(|v| !v.is_finite()) { continue; }
@@ -9030,11 +9036,15 @@ pub fn sync_shader_texture_lists(player: &mut crate::player::DirPlayer) {
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_mode_lists {
                     mode_entries.push((cast.number as i32, *member_num, *shader_name, list_ref.clone()));
                 }
+                // `shader_name` is ALREADY a Symbol; the old
+                // `Symbol::from_str(&shader_name.clone().to_string())` round-tripped
+                // it out of the interner into a fresh String and back in, once per
+                // entry per frame, to arrive at the same Symbol.
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_blend_constant_lists {
-                    blend_entries.push((cast.number as i32, *member_num, Symbol::from_str(&shader_name.clone().to_string()), list_ref.clone()));
+                    blend_entries.push((cast.number as i32, *member_num, *shader_name, list_ref.clone()));
                 }
                 for (shader_name, list_ref) in &w3d.runtime_state.shader_texture_transform_lists {
-                    transform_entries.push((cast.number as i32, *member_num, Symbol::from_str(&shader_name.clone().to_string()), list_ref.clone()));
+                    transform_entries.push((cast.number as i32, *member_num, *shader_name, list_ref.clone()));
                 }
             }
         }

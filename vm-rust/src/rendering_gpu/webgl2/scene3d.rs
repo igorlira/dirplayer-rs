@@ -6046,15 +6046,20 @@ fn keyframe_to_column_major_matrix(kf: &crate::director::chunks::w3d::types::W3d
 
 /// Case-insensitive lookup in node_transforms (Director is case-insensitive for node names).
 fn get_runtime_transform(rs: &crate::player::cast_member::Shockwave3dRuntimeState, name: Symbol) -> Option<[f32; 16]> {
-    if let Some(m) = rs.node_transforms.get(&name) {
-        return Some(*m);
-    }
-    for (key, val) in &rs.node_transforms {
-        if *key == name {
-            return Some(*val);
-        }
-    }
-    None
+    // No linear fallback. `Symbol` derives Hash/Eq over one interned `Spur`, so
+    // the hash lookup and `==` are the SAME comparison — a follow-up scan could
+    // never find anything `get` missed. (Symbol identity is already
+    // case-insensitive: `intern` lowercases.) The scan only ever ran to
+    // completion on a MISS, which is the common case since most nodes carry no
+    // runtime override, making every miss O(node_transforms).
+    //
+    // That is quadratic in the wrong place: this is called per node per parent-
+    // chain hop per frame, while `node_transforms` grows with everything the
+    // movie spawns. In an AreaZero profile at higher waves it was the single
+    // hottest pair in the whole frame — `get_runtime_transform` 14.7% self and
+    // `hashbrown::map::Iter::next` 13.3% self. `raycast.rs` had the same bug and
+    // the same fix; this copy was missed.
+    rs.node_transforms.get(&name).copied()
 }
 
 fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
