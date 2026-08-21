@@ -1234,7 +1234,30 @@ impl Shockwave3dMember {
                 .or_else(|| scene.motions.iter().find(|m| m.name == model_name))
                 .map(|m| m.name.clone())
         });
-        let motion = match resolved.or_else(|| self.runtime_state.current_motion.clone()) {
+        // The member-level fallback is for the LEGACY single-player member, where
+        // `runtime_state.current_motion` really is "this member's motion". Once
+        // another model already owns a bonesPlayer, that field is just whichever
+        // model acted last (`sync_legacy_from_bones_player`), and binding it here
+        // hands one model a completely unrelated model's clip — together with that
+        // clip's loop flag.
+        //
+        // AreaZero spawns every robot into one member and each robot's enterFrame
+        // opens with `p.model.bonesPlayer.playRate = gGame.TimeMP`, which lands
+        // here. A freshly spawned RobotTank (whose `new` deliberately empties its
+        // playlist with `play(spawn, 0); playNext()`) was therefore given the
+        // previous robot's LOOPING RobotGunCrouchFire1_Animation. `[PS] Robot Tank`
+        // leaves #Spawn only when `bonesPlayer.currentTime` stops advancing — the
+        // end of its non-looping spawn clip — so the looping intruder pinned it in
+        // #Spawn forever: a wave-5 tank that stands at the C spawner outside the
+        // hangar gate and never walks in.
+        let another_model_is_bound = self
+            .runtime_state
+            .bones_players
+            .iter()
+            .any(|(name, bp)| *name != model_name && bp.current_motion.is_some());
+        let motion = match resolved.or_else(|| {
+            if another_model_is_bound { None } else { self.runtime_state.current_motion.clone() }
+        }) {
             Some(m) => m,
             None => return,
         };

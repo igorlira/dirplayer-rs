@@ -1997,12 +1997,35 @@ impl WebGL2Renderer {
                                 .collect()
                         }).unwrap_or_default();
                         let any_skinned = !skinned.is_empty();
-                        for model in &skinned {
-                            let bp = w3d.runtime_state.bones_player_mut(Symbol::from_str(model));
-                            if bp.current_motion.is_none() && !bp.animation_playing {
-                                bp.current_motion = Some(Symbol::from_str(&motion_name.clone().to_string()));
-                                bp.animation_playing = true;
-                                bp.animation_loop = loops;
+                        // "The first motion in the member" only identifies THE member's
+                        // animation while there is one rig, or one clip, to talk about.
+                        // A game member that scripts fill at runtime has neither: AreaZero
+                        // clones every robot rig and all ~40 of their clips into Level1, so
+                        // `motions.first()` is RobotGunIdle1_Animation — and this loop was
+                        // handing that looping clip to every freshly spawned model
+                        // (RobotTank, its shadow, its hitbox, its muzzle flashes...).
+                        //
+                        // `[PS] Robot Tank.new` empties its playlist on purpose
+                        // (`play(spawn, 0); playNext()`) and leaves #Spawn only once
+                        // `bonesPlayer.currentTime` stops advancing at the end of its
+                        // non-looping spawn clip. With the intruder seeded underneath, the
+                        // spawn clip ended straight back into it (Director's play() keeps
+                        // the interrupted motion next in the playlist) and the clock never
+                        // settled — the wave-5 tank stood at the C spawner outside the
+                        // hangar gate forever, which reads exactly like "it is too big to
+                        // fit through the gate".
+                        //
+                        // Single rig (the dino test) or single clip: unambiguous, seed it.
+                        let unambiguous = skinned.len() == 1
+                            || w3d.parsed_scene.as_ref().map(|s| s.motions.len() == 1).unwrap_or(false);
+                        if unambiguous {
+                            for model in &skinned {
+                                let bp = w3d.runtime_state.bones_player_mut(Symbol::from_str(model));
+                                if bp.current_motion.is_none() && !bp.animation_playing {
+                                    bp.current_motion = Some(Symbol::from_str(&motion_name.clone().to_string()));
+                                    bp.animation_playing = true;
+                                    bp.animation_loop = loops;
+                                }
                             }
                         }
                         // Legacy member-level auto-play for non-skinned (keyframe) content.
