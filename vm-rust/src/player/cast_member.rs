@@ -1871,6 +1871,80 @@ pub struct ParticleSystemState {
 }
 
 impl Shockwave3dRuntimeState {
+    /// Drop every piece of per-node state for nodes that no longer exist.
+    ///
+    /// `deleteModel`/`deleteGroup`/`deleteCamera` used to remove the node from
+    /// `scene.nodes` and nothing else, so a movie that spawns and destroys nodes
+    /// grew these maps without bound for the life of the session. Two of them
+    /// (`node_transform_datums`, `user_data`) hold a `DatumRef`, so the datums
+    /// they point at could never be reclaimed either — the arena is refcounted,
+    /// and this was the reference that never went away.
+    ///
+    /// AreaZero is the case that exposed it: every robot spawns ~8 nodes and
+    /// every wave destroys them again, so by the later waves the maps hold tens
+    /// of thousands of dead entries. That is both a memory leak and a speed one —
+    /// `node_transforms` is walked on the render hot path.
+    pub fn purge_nodes(&mut self, doomed: &std::collections::HashSet<Symbol>) {
+        if doomed.is_empty() { return; }
+        self.bones_players.retain(|k, _| !doomed.contains(k));
+        self.node_transforms.retain(|k, _| !doomed.contains(k));
+        self.node_transform_datums.retain(|k, _| !doomed.contains(k));
+        self.node_rotation_hints.retain(|k, _| !doomed.contains(k));
+        self.node_visibility.retain(|k, _| !doomed.contains(k));
+        self.node_shaders.retain(|k, _| !doomed.contains(k));
+        self.node_shaders_indexed.retain(|k| !doomed.contains(k));
+        self.clone_hop_count.retain(|k, _| !doomed.contains(k));
+        self.mesh_deform.retain(|k, _| !doomed.contains(k));
+        self.detached_nodes.retain(|k| !doomed.contains(k));
+        self.point_at_orientations.retain(|k, _| !doomed.contains(k));
+        self.lod_state.retain(|k, _| !doomed.contains(k));
+        self.sds_state.retain(|k, _| !doomed.contains(k));
+        self.collision_modifiers.retain(|k, _| !doomed.contains(k));
+        self.user_data.retain(|k, _| !doomed.contains(k));
+        self.modifier_overrides.retain(|k, _| !doomed.contains(k));
+        // Camera-keyed state — camera names ARE node names, so deleting a camera
+        // must take these with it.
+        self.camera_projection_mode.retain(|k, _| !doomed.contains(k));
+        self.camera_ortho_height.retain(|k, _| !doomed.contains(k));
+        self.camera_root_nodes.retain(|k, _| !doomed.contains(k));
+        self.camera_clear_at_render.retain(|k, _| !doomed.contains(k));
+        self.camera_clear_values.retain(|k, _| !doomed.contains(k));
+        self.camera_overlays.retain(|k, _| !doomed.contains(k));
+        self.camera_backdrops.retain(|k, _| !doomed.contains(k));
+        self.render_targets.retain(|k, _| !doomed.contains(k));
+        // Compound keys: "<model>:<meshindex>" and "<model>:<boneindex>".
+        let doomed_prefixes: Vec<String> = doomed.iter()
+            .map(|s| format!("{}:", s.as_str().to_ascii_lowercase()))
+            .collect();
+        let is_doomed_compound = |k: &str| {
+            let kl = k.to_ascii_lowercase();
+            doomed_prefixes.iter().any(|p| kl.starts_with(p.as_str()))
+        };
+        self.meshdeform_face_neighbors.retain(|k, _| !is_doomed_compound(k.as_str()));
+        self.bone_transform_overrides.retain(|k, _| !is_doomed_compound(k));
+    }
+
+    /// Drop per-RESOURCE state for a model resource that has been deleted.
+    ///
+    /// `deleteModelResource` fell through to a no-op arm, so the resource stayed
+    /// in the scene AND kept its build data and its persistent face list — and
+    /// that face list is a `DatumRef` to a list of one PropList per face. AreaZero
+    /// builds a fresh `newMesh` trail resource for EVERY rocket fired
+    /// (`[PS] Rocket.CreateTrail`), so the rockets alone leaked a mesh plus 40+
+    /// proplists apiece, and the renderer kept carrying their GPU buffers forward
+    /// because the resource never left the scene.
+    pub fn purge_model_resource(&mut self, resource: Symbol) {
+        self.mesh_build_data.remove(&resource);
+        self.emitters.remove(&resource);
+        self.particles.remove(&resource);
+        self.lod_state.remove(&resource);
+        self.sds_state.remove(&resource);
+        // The face list is parked in shader_texture_lists under a "face:<name>"
+        // pseudo-key (see get_model_resource_prop).
+        let face_key = Symbol::from_str(&format!("face:{}", resource.as_str()));
+        self.shader_texture_lists.remove(&face_key);
+    }
+
     /// Per-model bonesPlayer state (read), case-insensitive by model node name.
     pub fn bones_player(&self, model: Symbol) -> Option<&BonesPlayerState> {
         self.bones_players.get(&model)

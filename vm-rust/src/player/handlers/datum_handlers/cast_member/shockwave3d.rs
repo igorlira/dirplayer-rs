@@ -2135,6 +2135,11 @@ impl Shockwave3dMemberHandlers {
                         };
 
                         if handler_name_str.starts_with("delete") {
+                            // Collected inside the scene borrow, applied to the
+                            // runtime state right after it ends.
+                            let mut purge_nodes: std::collections::HashSet<Symbol> =
+                                std::collections::HashSet::new();
+                            let mut purge_resource: Option<Symbol> = None;
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
@@ -2166,7 +2171,13 @@ impl Shockwave3dMemberHandlers {
                                                         }
                                                     }
                                                 }
+                                                let doomed_syms: std::collections::HashSet<Symbol> =
+                                                    scene.nodes.iter()
+                                                        .filter(|n| doomed.contains(&n.name.to_ascii_lowercase()))
+                                                        .map(|n| n.name)
+                                                        .collect();
                                                 scene.nodes.retain(|n| !doomed.contains(&n.name.to_ascii_lowercase()));
+                                                purge_nodes = doomed_syms;
                                             }
                                             BuiltInSymbol::Light => {
                                                 // Lights live in two places: the scene
@@ -2193,7 +2204,34 @@ impl Shockwave3dMemberHandlers {
                                                 scene.texture_images.remove(&obj_sym);
                                                 scene.texture_content_version += 1;
                                             }
+                                            BuiltInSymbol::ModelResource => {
+                                                // Was a no-op arm, so a deleted resource
+                                                // stayed in the scene forever — its decoded
+                                                // mesh with it, and the renderer kept
+                                                // carrying its GPU buffers across every
+                                                // rebuild because "still in the scene" is
+                                                // exactly how it decides what to keep.
+                                                scene.model_resources.remove(&obj_sym);
+                                                scene.clod_meshes.remove(&obj_sym);
+                                                scene.raw_meshes.retain(|m| m.name != obj_sym);
+                                                purge_resource = Some(obj_sym);
+                                            }
                                             _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            // Now that the scene borrow is done, drop the per-node
+                            // and per-resource runtime state the deleted objects
+                            // owned. Without this the maps (several of which hold
+                            // DatumRefs, pinning arena datums forever) only ever
+                            // grew — see Shockwave3dRuntimeState::purge_nodes.
+                            if !purge_nodes.is_empty() || purge_resource.is_some() {
+                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                        w3d.runtime_state.purge_nodes(&purge_nodes);
+                                        if let Some(res) = purge_resource {
+                                            w3d.runtime_state.purge_model_resource(res);
                                         }
                                     }
                                 }
