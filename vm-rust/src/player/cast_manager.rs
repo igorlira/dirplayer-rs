@@ -505,6 +505,21 @@ impl CastManager {
             None
         };
 
+        // A chunk expression IS a string in Director -- `member(a1.char[1..4])`
+        // names a member exactly like a String does. Without this the chunk fell
+        // through to the numeric catch-all below, where `int_value()` answers 0
+        // for a non-numeric string and the lookup silently became member 0, i.e.
+        // an invalid (-1, -1) ref. PHOSPHOR alpha 4's C_Object3D builds every
+        // sprite/texture name that way (`member(a1).useAlpha`).
+        let chunk_as_string;
+        let member_name_or_num: &Datum = match member_name_or_num {
+            Datum::StringChunk(_, _, s) => {
+                chunk_as_string = Datum::String(s.clone());
+                &chunk_as_string
+            }
+            other => other,
+        };
+
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
             (Datum::String(name), Some(cast_lib)) => {
                 cast_lib.find_member_by_name(name).map(|member| {
