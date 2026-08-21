@@ -3023,17 +3023,27 @@ impl DirPlayer {
             // backward-jump handler yields cooperatively (see input_polled).
             BuiltInSymbol::Ticks => { self.input_polled = true; Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time)))) },
             BuiltInSymbol::FrameLabel => {
+                // Director 11.5 Scripting Dictionary, `frameLabel`: "identifies
+                // the label assigned to the CURRENT frame [...] When the current
+                // frame has no label, the value of the frameLabel property is 0."
+                //
+                // So this is an exact match on the current frame, NOT a scan back
+                // to the nearest preceding marker -- that is what `label()` /
+                // `marker()` are for. Scanning backwards reported the section's
+                // label from every unlabelled frame inside it, which makes
+                // `the frameLabel` useless as a "have we arrived yet?" test.
+                // And the no-label value is the integer 0, not the string "0".
                 let frame_label = self
                     .movie
                     .score
                     .frame_labels
                     .iter()
-                    .filter(|&label| label.frame_num <= self.movie.current_frame as i32)
-                    .max_by_key(|label| label.frame_num)
+                    .find(|&label| label.frame_num == self.movie.current_frame as i32)
                     .map(|label| label.label.clone());
-                Ok(self.alloc_datum(Datum::String(
-                    frame_label.unwrap_or_else(|| "0".to_string()),
-                )))
+                Ok(match frame_label {
+                    Some(label) => self.alloc_datum(Datum::String(label)),
+                    None => self.alloc_datum(Datum::Int(0)),
+                })
             },
             BuiltInSymbol::CurrentSpriteNum => {
                 // TODO: this can also be called by a static script
