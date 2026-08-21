@@ -9446,7 +9446,11 @@ fn apply_point_at(
     // ...then re-apply the node's own scale to the resulting LOCAL basis. Scale
     // is a local property, so it must go on after the parent conversion — doing
     // it to the world matrix instead would double-count a scaled parent.
-    let to_local = |world_mat: [f32; 16]| -> [f32; 16] {
+    // `scale_cols[c]` says which of the node's CURRENT column lengths (i.e. which
+    // component of `transform.scale` as the script wrote it) is re-applied to
+    // column `c` of the freshly built look-at basis. The default is the identity
+    // mapping; a custom pointAtOrientation overrides it below.
+    let to_local_mapped = |world_mat: [f32; 16], scale_cols: [usize; 3]| -> [f32; 16] {
         let mut m = if inv_parent.iter().all(|v| v.is_finite()) {
             mat4_mul_f32(&inv_parent, &world_mat)
         } else {
@@ -9484,12 +9488,14 @@ fn apply_point_at(
             }
         }
         for c in 0..3 {
-            m[c * 4] *= local_scale[c];
-            m[c * 4 + 1] *= local_scale[c];
-            m[c * 4 + 2] *= local_scale[c];
+            let s = local_scale[scale_cols[c]];
+            m[c * 4] *= s;
+            m[c * 4 + 1] *= s;
+            m[c * 4 + 2] *= s;
         }
         m
     };
+    let to_local = |world_mat: [f32; 16]| -> [f32; 16] { to_local_mapped(world_mat, [0, 1, 2]) };
 
     if let Some((front_axis, up_axis)) = custom_orientation {
         // Custom pointAtOrientation: map the specified local axes to world directions.
@@ -9532,7 +9538,30 @@ fn apply_point_at(
         world_mat[right_col * 4 + 1] = right_world[1] * right_sign;
         world_mat[right_col * 4 + 2] = right_world[2] * right_sign;
         world_mat[12] = pos_w[0]; world_mat[13] = pos_w[1]; world_mat[14] = pos_w[2]; world_mat[15] = 1.0;
-        set_node_transform(player, member_ref, node_name, to_local(world_mat));
+        // Scale goes on in the CANONICAL frame (x = right, y = up, z = front),
+        // not on the node's own lettered axes. Director 11.5 Scripting Dictionary,
+        // `pointAt`: "If you use non-uniform scaling and a custom
+        // pointAtOrientation on the same node ... pointAt will likely cause
+        // unexpected non-uniform scaling. This is due to the order in which the
+        // non-uniform scaling and the rotation to properly orient the node are
+        // applied." The orient rotation is applied INSIDE the scale, so
+        // `transform.scale.z` grows whatever now points at the target, whichever
+        // lettered column that happens to be.
+        //
+        // AreaZero's tank laser is that case: `LaserBeamBig` is a tube along its
+        // own +Y, the script declares `pointAtOrientation = [vector(0,1,0),
+        // vector(0,0,1)]` and stretches the beam to the raycast distance with
+        // `transform.scale.z = d`. Applying that to literal column 2 grew the beam
+        // along the UP axis instead of along the aim — a beam standing vertically
+        // out of the cannon rather than reaching the player.
+        //
+        // For the default orientation this mapping is the identity, so nothing
+        // else changes; with a uniform scale it is a no-op either way.
+        let mut scale_cols = [0usize; 3];
+        scale_cols[right_col] = 0;
+        scale_cols[up_col] = 1;
+        scale_cols[front_col] = 2;
+        set_node_transform(player, member_ref, node_name, to_local_mapped(world_mat, scale_cols));
     } else {
         // Default orientation: -Z toward target, Y up (standard look-at convention).
         // This matches the working camera behavior where cameras look along -Z.
