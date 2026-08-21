@@ -2205,6 +2205,13 @@ impl Shockwave3dMemberHandlers {
                         let mesh_num_faces = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 2 {
                             player.get_datum(&args[1]).int_value().unwrap_or(0) as u32
                         } else { 0 };
+                        // newMesh(name, faces, vertices, normals, colors,
+                        // textureCoordinates, textureLayers) — the 7th argument.
+                        // Kept so `face[i].textureLayer[n]` can offer the right
+                        // number of layers (AreaZero's rocket trail asks for 2).
+                        let mesh_num_tex_layers = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 7 {
+                            player.get_datum(&args[6]).int_value().unwrap_or(1).max(1) as usize
+                        } else { 1 };
 
                         // Pre-read model resource name for newModel(name, modelResource)
                         let new_model_resource_name = if handler_name.eq_builtin(BuiltInSymbol::NewModel) && args.len() >= 2 {
@@ -2231,6 +2238,9 @@ impl Shockwave3dMemberHandlers {
                         } else { String::new() };
 
                         let obj_sym = Symbol::from_str(&obj_name);
+                        // Set inside the scene borrow below, applied to the runtime
+                        // state once it ends.
+                        let mut mesh_build_layer_count = 0usize;
                         // Add to parsed scene
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -2509,6 +2519,7 @@ impl Shockwave3dMemberHandlers {
 
                                             let total_faces: u32 = meshes.iter().map(|m| m.faces.len() as u32).sum();
                                             let num_faces = if total_faces > 0 { total_faces } else { mesh_num_faces };
+                                            mesh_build_layer_count = mesh_num_tex_layers;
                                             let mut mesh_info = ClodMeshInfo::default();
                                             mesh_info.num_faces = num_faces;
                                             // Store primitive type so dimension setters can regenerate
@@ -2569,6 +2580,19 @@ impl Shockwave3dMemberHandlers {
                                         }
                                         _ => {}
                                     }
+                                }
+                            }
+                        }
+
+                        // newMesh's texture-layer count has to outlive the scene
+                        // borrow to reach the resource's build data.
+                        if mesh_build_layer_count > 0 {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.mesh_build_data
+                                        .entry(obj_sym)
+                                        .or_default()
+                                        .texture_layer_count = mesh_build_layer_count;
                                 }
                             }
                         }

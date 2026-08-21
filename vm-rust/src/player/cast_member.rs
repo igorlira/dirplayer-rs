@@ -1670,6 +1670,11 @@ pub struct MeshBuildData {
     pub normal_list: Vec<[f32; 3]>,
     /// #flat = 0, #smooth = 1, None = not called
     pub generate_normals_style: Option<u8>,
+    /// `newMesh`'s 7th argument, the TEXTURE LAYER count (Director 11.5
+    /// Scripting Dictionary, `newMesh`). Each face exposes one
+    /// `face[i].textureLayer[n]` entry per layer, so the count has to survive
+    /// from newMesh() to the point the face list is materialised.
+    pub texture_layer_count: usize,
 }
 
 #[derive(Clone, Debug)]

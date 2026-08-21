@@ -6243,6 +6243,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 if let Datum::PropList(props, _) = face_datum {
                                     let mut verts = [0u32; 3];
                                     let mut tcs = [0u32; 3];
+                                    let mut tcs_set = false;
                                     let mut shader_name = Symbol::empty();
 
                                     for (k_ref, v_ref) in &props {
@@ -6279,11 +6280,25 @@ impl Shockwave3dObjectDatumHandlers {
                                                             let idx = player.get_datum(item).int_value().unwrap_or(1);
                                                             tcs[i] = (idx.max(1) - 1) as u32; // 1-based → 0-based
                                                         }
+                                                        tcs_set = true;
                                                     }
                                                 }
                                             }
                                             _ => {}
                                         }
+                                    }
+                                    // A face that never had per-corner texture
+                                    // coordinates assigned takes them from its VERTEX
+                                    // indices. That is the parallel-array layout every
+                                    // newMesh script here uses — `vertexList` and
+                                    // `textureCoordinateList` are built in lock-step
+                                    // (AreaZero's rocket trail pushes 42 of each) — and
+                                    // the previous default of index 0 for every corner
+                                    // collapsed all UVs onto one texel, which the GPU
+                                    // upload's all-same check then replaced with
+                                    // generated positional UVs.
+                                    if !tcs_set {
+                                        tcs = verts;
                                     }
                                     faces.push(FaceData { vertex_indices: verts, texcoord_indices: tcs, shader_name });
                                 }
@@ -7827,6 +7842,22 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(list_ref)
                 } else {
                     let count: u32 = res.map(|r| r.mesh_infos.iter().map(|m| m.num_faces).sum()).unwrap_or(0);
+                    // How many texture layers newMesh() asked for. Each face carries
+                    // one `textureLayer[n]` entry per layer, because Director exposes
+                    // per-layer face texture coordinates that way (`mesh (property)`:
+                    // "textureLayer[index] allows you get and set access to the
+                    // properties of the specified texture layer"). Without them,
+                    // AreaZero's `[PS] Rocket.CreateTrail` died on
+                    // `face[i].textureLayer[1].textureCoordinates[1] = ...` with
+                    // "Second argument to getPropRef requires first property to be a
+                    // list or propList", aborting before `build()` — so the rocket
+                    // never got a smoke trail at all.
+                    let layer_count = player.movie.cast_manager.find_member_by_ref(member_ref)
+                        .and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.mesh_build_data.get(&resource_name))
+                        .map(|b| b.texture_layer_count)
+                        .unwrap_or(1)
+                        .max(1);
                     let mut items = VecDeque::new();
                     for _ in 0..count {
                         let sk = player.alloc_datum(Datum::Symbol(Symbol::from_str("shader")));
@@ -7839,7 +7870,25 @@ impl Shockwave3dObjectDatumHandlers {
                         let cv = player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, VecDeque::new(), false));
                         let nk = player.alloc_datum(Datum::Symbol(Symbol::from_str("normals")));
                         let nv = player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, VecDeque::new(), false));
-                        items.push_back(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(sk, sv), (vk, vv), (tk, tv), (ck, cv), (nk, nv)]), false)));
+                        // One proplist per texture layer, each with a REAL 3-entry
+                        // textureCoordinates list — a face has three corners, and an
+                        // empty list would make the movie's `[1] = ...` write fail the
+                        // same way the missing accessor did.
+                        let mut layers = VecDeque::new();
+                        for _ in 0..layer_count {
+                            let ltk = player.alloc_datum(Datum::Symbol(Symbol::from_str("textureCoordinates")));
+                            let zeros: VecDeque<_> = (0..3)
+                                .map(|_| player.alloc_datum(Datum::Int(0)))
+                                .collect();
+                            let ltv = player.alloc_datum(Datum::List(
+                                crate::director::lingo::datum::DatumType::List, zeros, false));
+                            layers.push_back(player.alloc_datum(Datum::PropList(
+                                VecDeque::from(vec![(ltk, ltv)]), false)));
+                        }
+                        let lk = player.alloc_datum(Datum::Symbol(Symbol::from_str("textureLayer")));
+                        let lv = player.alloc_datum(Datum::List(
+                            crate::director::lingo::datum::DatumType::List, layers, false));
+                        items.push_back(player.alloc_datum(Datum::PropList(VecDeque::from(vec![(sk, sv), (vk, vv), (tk, tv), (ck, cv), (nk, nv), (lk, lv)]), false)));
                     }
                     let item_count = items.len();
                     let list_ref = player.alloc_datum(Datum::List(
