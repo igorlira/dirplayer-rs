@@ -107,6 +107,13 @@ impl NetHandlers {
                         req_url = Some(url.clone());
                         player.net_manager.find_task_by_url(url)
                     }
+                    // VOID is what an uninitialised property holds, and Director
+                    // answers a status for it rather than raising: PHOSPHOR's
+                    // F_Loader calls CheckDownloadStatus() from exitFrame on
+                    // EVERY run mode, but only seeds pURL under "Plugin", so
+                    // outside the plugin it polls getStreamStatus(VOID) every
+                    // frame and must get a benign status back.
+                    Datum::Void => None,
                     _ => {
                         return Err(ScriptError::new(
                             "getStreamStatus requires an integer task ID or URL string".to_string(),
