@@ -1421,12 +1421,23 @@ void main() {
                     bw_opt,
                     vc_opt,
                 )?;
-                // A file-provided 2nd UV set is a lightmap/shadowmap atlas coord in
-                // [0,1], NOT pre-centered like the base set, so it must bypass the CLOD
-                // (u+0.5, 0.5-v) remap. Without this it shifts to ~[0.5,1.5] and the
-                // forced CLAMP smears the lightmap's edge across the whole surface.
-                if tc2.is_some() {
-                    buffers.texcoord2_direct = true;
+                // Which UV space is the file's 2nd set in? The CLOD decoder stores
+                // coordinates PRE-CENTERED (-0.5..0.5) and the vertex shader undoes
+                // that with (u+0.5, 0.5-v); a set already in [0,1] must bypass it or
+                // it shifts to ~[0.5,1.5], where the forced CLAMP smears the atlas
+                // edge across the whole surface.
+                //
+                // Both layouts occur, so read it off the DATA instead of assuming:
+                // a negative coordinate can only come from the pre-centered space.
+                // AreaZero's Hangar/HangarFloor/RoadBlock lightmap sets measure
+                // u,v in -0.50..0.50 — pre-centered, exactly like their base set —
+                // and forcing them direct sampled the atlas at negative u, which
+                // clamped to a black edge. That is why the baked light contributed
+                // nothing recognisable and had to be composited as ADD to look like
+                // anything at all (docs/areazero/README.md §3.3, "scene too bright").
+                if let Some(uv2) = tc2 {
+                    let pre_centered = uv2.iter().any(|c| c[0] < -0.001 || c[1] < -0.001);
+                    buffers.texcoord2_direct = !pre_centered;
                 }
                 group.push(buffers);
             }
@@ -1893,7 +1904,13 @@ void main() {
                         if mesh_buf.meshdeform_uv_synced { continue; }
                         if let Some(mesh) = clod_meshes.get(mesh_idx) {
                             if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
-                                mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
+                                // Same space test as the loader: a negative
+                                // coordinate can only come from the pre-centered
+                                // CLOD space. Passing this through is what keeps
+                                // the re-upload from flipping the flag.
+                                let uv2 = &mesh.tex_coords[1];
+                                let direct = !uv2.iter().any(|c| c[0] < -0.001 || c[1] < -0.001);
+                                mesh_buf.update_texcoord2(context.gl(), uv2, direct);
                                 mesh_buf.meshdeform_uv_synced = true;
                                 let resource_name = resource_name.as_str();
                                 // Log UV2 sync for MAP and Main models
@@ -4196,20 +4213,31 @@ void main() {
                 // IFX blend func (IFXEnums.h): 0 = IFX_SELECT_ARG0, 1 = IFX_ADD,
                 // 2 = IFX_MODULATE (out = tex * incoming), 3 = IFX_INTERPOLATE.
                 // Mapped to our extra-layer modes below (1 = multiply, 2 = add).
-                let blend = if lower.contains("lightmap") && !lower.contains("shadow") {
-                    // Lightmap-only meshes (empty textureList[1], lightmap in textureList[2])
-                    // should shade as material color multiplied by light intensity.
-                    let lightmap_only = layer_idx > 0
-                        && layers[..layer_idx].iter().all(|prev| prev.name.is_empty());
-                    if lightmap_only { 1 } else { 2 }
+                // Lightmap-only meshes (empty textureList[1], lightmap in
+                // textureList[2]) shade as material colour multiplied by light
+                // intensity, and have no diffuse layer to read a blend function
+                // against, so they are pinned to multiply.
+                let lightmap_only = lower.contains("lightmap") && !lower.contains("shadow")
+                    && layer_idx > 0
+                    && layers[..layer_idx].iter().all(|prev| prev.name.is_empty());
+                let blend = if lightmap_only {
+                    1
                 } else {
+                    // Otherwise honour the AUTHORED blend function. A name-based
+                    // "lightmaps composite additively" override used to sit here and
+                    // is backwards for the ordinary diffuse+lightmap pair: baked
+                    // light MULTIPLIES the diffuse (IFX blend func 2 = IFX_MODULATE,
+                    // and AreaZero's four Hangar* shaders all report #multiply on
+                    // every layer). Adding it blew out lit surfaces and, worse, left
+                    // UNLIT geometry at full diffuse brightness — the pale metalwork
+                    // in the spawner-gate shafts where the reference frame has a
+                    // dark, blue-speckled void.
                     match layer.blend_func {
-                        1 => 2,  // #add / GL_ADD → our add mode
-                        2 => 1,  // #replace / GL_MODULATE → our multiply mode
-                        _ => 1,  // #multiply → multiply
+                        1 => 2,  // IFX_ADD → our add mode
+                        2 => 1,  // IFX_MODULATE → our multiply mode
+                        _ => 1,  // default multiply
                     }
                 };
-
                 result.extra_layers.push(TextureLayerBinding {
                     tex,
                     blend,
