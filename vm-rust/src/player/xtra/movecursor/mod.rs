@@ -46,7 +46,14 @@ impl MoveCursorXtra {
 
     pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if matches_ci(name, "register") {
-            return Ok(DatumRef::Void);
+            // Returns 1 when registered, 0 when the serial is rejected -- never
+            // VOID. Callers test it: PHOSPHOR's C_Input does
+            // `if RegisterMoveCursor(me) = 1 then pEXactive = 1`, and gates all
+            // of mouselook (and the fire key binding) on that flag.
+            // Serials are not validated here, so registration always succeeds.
+            return Ok(reserve_player_mut(|player| {
+                player.alloc_datum(crate::director::lingo::datum::Datum::Int(1))
+            }));
         }
         if matches_ci(name, "move_cursor") {
             return move_cursor(args);
