@@ -771,9 +771,56 @@ impl BuiltInHandlerManager {
             return player_call_datum_handler(&receiver_ref, handler_name, &args).await;
         }
         let instance_refs = instance_ids.unwrap();
+        // Only a LIST receiver can shrink under us; the single-instance form has
+        // nothing to re-check.
+        let receiver_ref_for_liveness = Some(receiver_ref.clone());
 
         let mut result = player_alloc_datum(Datum::Null);
         for instance_ref in instance_refs {
+            // Do NOT message an instance that has left the list since the
+            // snapshot was taken. `call(#handler, aList)` dispatches to the items
+            // that are in the list, and Lingo's standard teardown idiom removes
+            // the instance from that very list from inside the handler:
+            //
+            //   on delete me                       -- [PS] Robot Bonus
+            //     ...
+            //     p = [:]
+            //     gGame.scriptList.deleteOne(me)
+            //
+            // AreaZero drives its actors with `call(#enterFrame, gGame.scriptList)`,
+            // so a robot destroyed part-way through a pass — by a bullet's own
+            // enterFrame earlier in the same list — was still sent its enterFrame
+            // afterwards, with `p` already emptied. It then ran on an empty
+            // property list, rebuilt a few keys out of VOID
+            // (`p.WalkTime = p.WalkTime - gGame.TimeMP` = -1.0) and died on
+            // `abs(tVector.x)` with tVector = 0.
+            //
+            // The length check keeps this free in the common case where nothing
+            // mutated the list; only a pass that actually removed something pays
+            // for the membership rebuild.
+            if let Some(recv) = receiver_ref_for_liveness.as_ref() {
+                let wanted = instance_ref.id();
+                let still_live = reserve_player_mut(|player| {
+                    let current: Vec<DatumRef> = match player.get_datum(recv) {
+                        Datum::List(_, items, _) => items.iter().cloned().collect(),
+                        Datum::PropList(pairs, _) => {
+                            pairs.iter().map(|(_, v)| v.clone()).collect()
+                        }
+                        _ => return true, // not a list any more; leave it alone
+                    };
+                    if current.len() == list_count {
+                        return true;
+                    }
+                    current.iter().any(|value_ref| {
+                        get_datum_script_instance_ids(value_ref, player)
+                            .map(|ids| ids.iter().any(|r| r.id() == wanted))
+                            .unwrap_or(false)
+                    })
+                });
+                if !still_live {
+                    continue;
+                }
+            }
             let handler = reserve_player_ref(|player| {
                 ScriptInstanceUtils::get_script_instance_handler(
                     handler_name,
