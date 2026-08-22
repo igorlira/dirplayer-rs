@@ -1868,10 +1868,36 @@ impl Shockwave3dMemberHandlers {
                                         } else if !source_resource_name.as_str().is_empty() {
                                             map_res(source_resource_name)
                                         } else { Symbol::empty() };
+                                        //
+                                        // The fallback below is deliberately narrow. Taking "the
+                                        // first skeleton in the source scene" whenever no name
+                                        // matches binds a FOREIGN rig to geometry that has none of
+                                        // its own, and the mesh is then drawn skinned by bones that
+                                        // have nothing to do with it — off-screen, i.e. invisible.
+                                        // Most IFX meshes carry per-vertex bone data even when they
+                                        // are rigid props, so "the mesh has bone attributes" cannot
+                                        // tell the two apart; only the skeleton's NAME can.
+                                        //
+                                        // Agent Free Ride hits this cloning a model out of the very
+                                        // member it is cloning into: every laser gate is
+                                        // `cloneModelFromCastmember(newName, "bo2c18_01", sameMember)`,
+                                        // and the level member holds ~30 character/effect rigs, so
+                                        // each of the 32 gates got `player_fake`'s skeleton filed
+                                        // under its own resource key and no laser wall ever drew.
+                                        //
+                                        // A source scene with exactly ONE skeleton is the case the
+                                        // fallback was written for — a single-character member whose
+                                        // rig may be named something other than the resource (Agent
+                                        // Free Ride clones "player" out of member 5 and then plays
+                                        // motion "player" on it). That stays.
                                         let src_skel = src_skeletons.iter().find(|s|
                                                 s.name == source_model_resource_name
                                                 || s.name == source_resource_name)
-                                            .or_else(|| src_skeletons.first());
+                                            .or_else(|| if src_skeletons.len() == 1 {
+                                                src_skeletons.first()
+                                            } else {
+                                                None
+                                            });
                                         if let Some(skeleton) = src_skel {
                                             if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
                                                 let mut cloned = skeleton.clone();
