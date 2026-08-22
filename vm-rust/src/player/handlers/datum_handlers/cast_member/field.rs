@@ -312,11 +312,17 @@ impl FieldMemberHandlers {
             "scrollTop" => Ok(Datum::Int(field.scroll_top as i32)),
             "hilite" => Ok(datum_bool(field.hilite)),
             "lineCount" => {
-                if field.text.is_empty() {
-                    Ok(Datum::Int(0))
-                } else {
-                    Ok(Datum::Int(field.text.lines().count().max(1) as i32))
-                }
+                // MUST use the same splitter as the `line` accessor below.
+                // `str::lines()` breaks on LF and CRLF but NOT on a bare CR,
+                // which is Director's line delimiter -- so a CR-delimited
+                // member counted as ONE line while `member.line[2]`/`[3]`
+                // happily returned the rest. PHOSPHOR builds its hotspot
+                // tables with
+                //     pHsCnt = m.lineCount
+                //     repeat with I = 1 to pHsCnt ... value(m.line[I].item[2])
+                // so its pause menu registered only the FIRST rect: RESUME
+                // worked and the two buttons under it were dead.
+                Ok(Datum::Int(string_get_lines(&field.text).len() as i32))
             }
             "line" => {
                 let lines = string_get_lines(&field.text);
