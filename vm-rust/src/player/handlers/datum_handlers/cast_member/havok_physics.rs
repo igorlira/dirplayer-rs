@@ -1198,9 +1198,10 @@ fn get_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, world_poi
 
 /// Apply drag forces to all bodies.
 /// From x86: sub_10075C30 (DragAction::apply)
-fn apply_drag(state: &mut HavokPhysicsState) {
+fn apply_drag(state: &mut HavokPhysicsState, dt: f64) {
     let linear_drag = state.drag_params[0];
     let angular_drag = state.drag_params[1];
+    let world_scale = state.scale;
     if linear_drag == 0.0 && angular_drag == 0.0 { return; }
     for rb in &mut state.rigid_bodies {
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
@@ -1208,7 +1209,39 @@ fn apply_drag(state: &mut HavokPhysicsState) {
             for i in 0..3 { rb.force[i] -= linear_drag * rb.linear_velocity[i]; }
         }
         if angular_drag != 0.0 {
-            for i in 0..3 { rb.torque[i] -= angular_drag * rb.angular_velocity[i]; }
+            // Applied as a velocity DECAY, not a torque.
+            //
+            // As a torque it goes through explicit Euler, which is only
+            // CONDITIONALLY stable: the per-step decay is
+            // `angular_drag * I^-1 * dt`, and for a light chassis with a stiff
+            // drag that exceeds 1 (1.445 for Age of Speed 2's chassis at one
+            // substep). Past 1 the damping overshoots through zero and the body
+            // settles into a COUNTER-rotation; near 2 it diverges outright. The
+            // result then depended on `subSteps`, which is a solver-accuracy
+            // knob and must not change the physics:
+            //
+            //     subSteps    1       2       5      10
+            //     torque   -0.094   17.14   0.065   0.077
+            //     decay     0.192   0.144   0.112   0.100
+            //
+            // Per-axis on the inverse-inertia diagonal: the tensor is diagonal
+            // in the body frame, and the off-diagonal coupling a rotated tensor
+            // would add is second-order next to the decay itself.
+            // `inv_scale_sq` for the same reason applyAngularImpulse carries it:
+            // the tensor is in DISPLAY units where the engine's is in metres.
+            // A force-derived torque needs no such factor because r x F already
+            // supplies worldScale^2, which cancels — but drag, like a bare
+            // angular impulse, does not. Without it drag was ~1550x too weak to
+            // damp anything and the yaw ran away.
+            let inv_scale_sq = if world_scale.abs() > 1e-10 {
+                (1.0 / world_scale) * (1.0 / world_scale)
+            } else { 1.0 };
+            for i in 0..3 {
+                let inv_i = rb.inverse_inertia_tensor[i * 3 + i];
+                if inv_i > 0.0 {
+                    rb.angular_velocity[i] /= 1.0 + angular_drag * inv_i * inv_scale_sq * dt;
+                }
+            }
         }
     }
 }
@@ -1809,7 +1842,7 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
         apply_gravity(state);
 
         // Phase 3: Apply actions (drag, springs, dashpots)
-        apply_drag(state);
+        apply_drag(state, remaining);
         apply_springs(state, remaining);
         apply_linear_dashpots(state, remaining);
         apply_angular_dashpots(state, remaining);

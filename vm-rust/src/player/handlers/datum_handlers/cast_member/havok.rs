@@ -2522,3 +2522,171 @@ fn axis_angle_to_transform(ax: f32, ay: f32, az: f32, angle: f32, px: f32, py: f
         px,          py,          pz,          1.0,
     ]
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod steering_response_tests {
+    //! Deterministic stand-in for a car holding full lock, with no track, no
+    //! collisions and no AI. Measuring steering through gameplay is hopelessly
+    //! noisy — repeat runs of the same manoeuvre disagree on the SIGN of the
+    //! yaw rate as the car clips walls — so the balance between the per-frame
+    //! angular impulse and the drag opposing it is pinned here instead.
+    //!
+    //! Numbers are Age of Speed 2's: chassis mass 100 with the authored
+    //! half-extents, worldScale 0.0254, angular drag 100000, and the impulse
+    //! the movie applies every frame at full lock,
+    //!   turnGain(2.5) * mass(100) * powerCoeff(1) * rotCoeff(3.65) * dt * 25
+    //!
+    //! Run with:
+    //!   cargo test --lib --manifest-path vm-rust/Cargo.toml steering_response
+    //!   TRACE_YAW=1 cargo test ... -- --nocapture
+    use crate::player::cast_member::{HavokPhysicsState, HavokRigidBody};
+    use crate::player::symbols::symbol::Symbol;
+    use crate::player::symbols::symbol_table::init_symbol_table;
+    use super::super::havok_physics::{box_unit_inertia, recompute_body_inertia, step_native};
+
+    const WORLD_SCALE: f64 = 0.0254;
+    const HALF_EXTENTS: [f64; 3] = [144.70, 192.35, 34.31];
+    const MASS: f64 = 100.0;
+    const ANGULAR_DRAG: f64 = 100_000.0;
+    const DT: f64 = 0.018;
+
+    fn chassis_state() -> HavokPhysicsState {
+        init_symbol_table();
+        let mut state = HavokPhysicsState::default();
+        state.scale = WORLD_SCALE;
+        state.gravity = [0.0, 0.0, 0.0];
+        state.drag_params = [0.0, ANGULAR_DRAG];
+        let mut rb = HavokRigidBody::new_movable(Symbol::from_str("veh_chassis_1"), MASS, true);
+        let unit_i = box_unit_inertia(HALF_EXTENTS);
+        recompute_body_inertia(MASS, unit_i, &mut rb.inertia_tensor,
+                               &mut rb.inverse_inertia_tensor, &mut rb.inverse_mass);
+        rb.inertia_half_extents = HALF_EXTENTS;
+        rb.unit_inertia_tensor = unit_i;
+        rb.active = true;
+        state.rigid_bodies.push(rb);
+        state
+    }
+
+    /// Hold full lock for `frames` at `subs` substeps; return the settled yaw.
+    ///
+    fn settled_yaw_with(frames: usize, subs: i32) -> f64 {
+        let mut state = chassis_state();
+        let impulse = 2.5 * MASS * 1.0 * 3.65 * DT * 25.0;
+        // The engine compensates a DISPLAY-scale tensor with (1/worldScale)^2 in
+        // applyAngularImpulse. A metre-scale tensor needs no such factor, so the
+        // two must move together or the impulse and the drag disagree by 1550x.
+        let inv_scale_sq = (1.0 / WORLD_SCALE) * (1.0 / WORLD_SCALE);
+        // NB: apply_drag now applies the same factor internally for the
+        // display-scale case, so both sides of the balance carry it.
+        let trace = std::env::var("TRACE_YAW").is_ok();
+        for f in 0..frames {
+            let dw = state.rigid_bodies[0].inverse_inertia_tensor[8] * impulse * inv_scale_sq;
+            state.rigid_bodies[0].angular_velocity[2] += dw;
+            step_native(&mut state, DT, subs);
+            if trace && f < 8 {
+                println!("      subs={subs} f{f} -> w={:+.5}",
+                         state.rigid_bodies[0].angular_velocity[2]);
+            }
+        }
+        state.rigid_bodies[0].angular_velocity[2].abs()
+    }
+
+    /// Angular drag must not blow up or invert. It used to be added as a TORQUE
+    /// and integrated with explicit Euler, which is only CONDITIONALLY stable:
+    /// the per-substep decay is `angular_drag * I^-1 * sub_dt`, 1.445 here at
+    /// one substep. Past 1 the damping overshoots through zero into a
+    /// COUNTER-rotation; near 2 it diverges. `subSteps` is a solver-accuracy
+    /// knob and must not change the physics:
+    ///
+    ///     subSteps      1       2       5      10
+    ///     torque    -0.094   17.14   0.065   0.077   <- unstable, sign flip
+    ///     decay      0.192   0.144   0.112   0.100   <- stable, converging
+    ///
+    /// The residual spread is honest: with `a*dt = 1.445` the per-frame decay
+    /// is large, so more substeps genuinely means a more accurate continuous
+    /// decay (converging toward `exp(-a*dt)`). `w_eq = L/(drag*dt)` only holds
+    /// when `a*dt << 1`, so this is a stability tripwire, not a parity check.
+    #[test]
+    fn angular_drag_is_stable_at_every_substep_count() {
+        for subs in [1, 2, 5, 10] {
+            let w = settled_yaw_with(80, subs);
+            assert!(w.is_finite() && (0.0..2.0).contains(&w),
+                "subSteps={subs}: settled yaw {w:.4} rad/s is diverging or inverted");
+        }
+    }
+
+    /// STILL OPEN — the AoS2 defect itself.
+    ///
+    /// Director holds ~0.24 rad/s at full lock (median over every full-lock
+    /// frame above 150 km/h in a real capture; p90 0.305). We ramp without
+    /// settling, because the chassis inertia is in DISPLAY units: that makes
+    /// `drag * I^-1 * dt` about 0.001, so damping is ~1550x too weak to bite.
+    ///
+    /// DIRECTOR'S ACTUAL TENSOR, measured. `angularMomentum` is Get/Set on
+    /// hkRigidBody and L = I*w, so dividing it by `angularVelocity` reads the
+    /// real inertia straight out of a running Director. For this chassis
+    /// (mass 100), over thousands of frames with p10-p90 inside 0.1%:
+    ///
+    ///     I_xx = 259.84    I_yy = 279.00    I_zz = 489.80
+    ///
+    /// Ours, from the mesh AABB in display units: 1.272e6 / 7.372e5 / 1.931e6.
+    /// Times worldScale^2: 821 / 476 / 1246. So TWO errors compound:
+    ///
+    ///   1. UNITS. Director's is metre-scale (hundreds, not ~1e6). Confirmed.
+    ///   2. SHAPE. Even after the unit conversion we are 1.7-3.2x high, and not
+    ///      by a constant, so it is not another scale factor. Solving Director's
+    ///      diagonal back into an equivalent uniform box gives half-extents
+    ///      (2.76, 2.66, 0.86) m = (108.8, 104.6, 33.8) display units against
+    ///      our (144.7, 192.35, 34.3). Z agrees; our Y is ~2x too long. That is
+    ///      the AABB: `makeMovableRigidBody(.., isConvex=0)` routes to
+    ///      `box_unit_inertia` on the bounding box, while the engine derives it
+    ///      from the real geometry, and a car carries no mass at the nose and
+    ///      tail extremes.
+    ///
+    /// CONFIRMED ON A SECOND CAR. Age of Speed 1, mass 15000 (Director's
+    /// rigid body reports the same; its Lingo `pChassisMass = 500` is a
+    /// separate force constant, not the body mass):
+    ///
+    ///     Director   I_xx 170202   I_yy 67871   I_zz 230620
+    ///     ours*ws^2  I_xx 187781   I_yy 68936   I_zz 230632
+    ///
+    /// I_zz agrees to 0.005%. AoS1's chassis goes through the HKE mesh path, so
+    /// its tensor is polyhedron-derived and the SHAPE is already right — the
+    /// only error is the units. AoS2 is box-derived (makeMovableRigidBody with
+    /// isConvex=0 routes to `box_unit_inertia` on the AABB) and is additionally
+    /// 2-3x too large. Using `compute_polyhedron_unit_inertia` there too would
+    /// close that gap.
+    ///
+    /// WHY THE DRAG FIX CANNOT AFFECT AoS1: its angular drag is 30000 against
+    /// AoS2's 100000, and its inertia is far larger, so the per-frame decay is
+    /// `30000 * 2.7976e-9 * 1550 * 0.018` = 0.0023 — 0.23%, negligible. AoS1
+    /// damps through its Lingo terms (OppositeSteeringResistence = -7680, where
+    /// AoS2 sets both steering resistances to 0 and depends entirely on the
+    /// physics drag). Measured yaw accel is inconclusive by design: across 15
+    /// presses in a Director capture it runs median 1.212, p25 -0.003, p75
+    /// 1.524 — the track, not the engine, dominates. Do not chase an AoS1
+    /// steering delta through gameplay; the signal is not there to find.
+    ///
+    /// REFUTED — converting just the tensor to metres (x worldScale^2 in
+    /// `recompute_body_inertia`, dropping the matching `(1/worldScale)^2` from
+    /// applyAngularImpulse/applyTorque). The unit numbers come right (settles
+    /// at 0.112) but it WRECKS the car in game: `applyForceAtPoint` builds its
+    /// lever arm `r` in DISPLAY units, so `r x F` is display-scale and becomes
+    /// ~1550x too strong against a metre-scale tensor. Measured: the hover
+    /// forces tumble the chassis instantly — 8.7 km/h, all four wheels off the
+    /// ground, speed going negative. Converting the inertia means converting
+    /// the whole body space (positions, lever arms, contacts, meshes), not one
+    /// tensor.
+    #[test]
+    #[ignore = "KNOWN FAILING: documents the open AoS2 steering defect and the \
+refuted metre-inertia shortcut — see the doc comment before attempting a fix."]
+    fn steering_settles_like_director() {
+        let short = settled_yaw_with(10, 5);
+        let long = settled_yaw_with(60, 5);
+        println!("display-scale: yaw after 10 = {short:.4}, after 60 = {long:.4} rad/s (Director median 0.236, p90 0.305)");
+        assert!(long < short * 1.5,
+            "yaw never settles: {short:.3} rad/s after 10 frames but {long:.3} after 60");
+        assert!((0.10..=0.60).contains(&long),
+            "settled yaw {long:.3} rad/s is outside Director's band (~0.24, p90 0.305)");
+    }
+}
