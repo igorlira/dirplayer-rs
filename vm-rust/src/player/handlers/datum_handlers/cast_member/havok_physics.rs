@@ -1499,7 +1499,17 @@ fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) 
         for i in 0..3 { rb.linear_velocity[i] += rb.force[i] * rb.inverse_mass * dt; }
     }
 
-    // Phase 4: Angular velocity: omega += I_inv * torque * dt
+    // Phase 4: Angular velocity: omega += Iinv_BODY * torque * dt
+    //
+    // BODY-frame tensor applied DIRECTLY to a world torque, no R I R^T. This
+    // looks frame-inconsistent and is not — it is what Havok's eulerIntegrate
+    // does, and it is MEASURED: a Lingo probe applying a known force at an
+    // offset point matches Director's resulting angular-velocity DIRECTION to
+    // 0.00 deg this way and is 28.45 deg off when the tensor is rotated.
+    // The contact solver is the opposite (see `world_inv_inertia`). Do not
+    // unify them; switching this to the world tensor was tried again on
+    // 2026-08-22 against Age of Speed 2's corkscrew and changed nothing there
+    // while contradicting the probe.
     let ang_accel = mat3_transform(rb.inverse_inertia_tensor, rb.torque);
     for i in 0..3 { rb.angular_velocity[i] += ang_accel[i] * dt; }
 }
@@ -1566,6 +1576,7 @@ pub struct StepPrep {
     pub n_subs: usize,
     pub sub_dt: f64,
     force_scale: f64,
+    torque_scale: f64,
     torque_scale_pitch_roll: f64,
     torque_scale_yaw: f64,
     saved_forces: Vec<([f64; 3], [f64; 3])>,
@@ -1636,10 +1647,32 @@ pub fn step_begin(state: &mut HavokPhysicsState, time_increment: f64, num_sub_st
     // both tested force_scale=N (=7), which is 6× too strong, hence "way worse"
     // / uncontrollable. 6N matches Director at N=1, 7 AND 20, not just at 7.
     let force_scale: f64 = 6.0 * n_subs as f64;         // 42 at N=7 (was 49)
-    // Torque is left on the OLD N² basis deliberately: the probe measured only
-    // the linear response (angV stayed 0), so there is no measurement of
-    // Director's torque law to justify moving it. These keep their previous
-    // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
+    // TORQUE stays on the same 6N basis as force. A 1/N torque (6x stronger)
+    // was measured on Age of Speed 2's corkscrew and NOT shipped — see below.
+    //
+    // AoS2 is the one place a Director oracle exists for an angular response:
+    // the movie calls `applyTorque` from exactly one place (`AgeOfSpeed2
+    // Vehicle.UpdateGravity`, the roll/pitch alignment onto the road normal)
+    // and everything else it does is impulses, so the divider is a clean gain
+    // knob on that one term. Against Director's roll error of median 0.084 /
+    // p90 0.148, four runs each (this harness is wall-clock driven, so single
+    // runs mean nothing):
+    //
+    //     divider   roll err median              reaches t15
+    //     6N        0.541 / 0.286 / 0.341 / 0.713    2 of 4
+    //     N         0.090 / 0.230 / 0.177 / 0.097    4 of 4
+    //     N²        0.369 / 0.334 (2 runs)           —
+    //
+    // REJECTED anyway: at 1/N FinalDrive's car lands on its roof and its
+    // in-game snapshot moves 67%. A global 6x on every non-driven body's torque
+    // is not a law, it is compensation — almost certainly for the persistent
+    // driving ROLL already documented for FinalDrive (right-side hover points
+    // match Director, left-side sit far off), which AoS2 shows in the same
+    // form. Fix that and re-measure this; do not ship the gain on its own.
+    let torque_scale: f64 = force_scale;                // 6N, same as force
+    // SuperSonic's driven path keeps its own empirical pitch/roll vs yaw
+    // asymmetry (434 / 158.76 at N=7); it was calibrated against a different
+    // Director capture and is not touched by the measurement above.
     let n_sq = (n_subs * n_subs) as f64;                // 49 at N=7
     let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0);  // 434
     let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
@@ -1656,6 +1689,7 @@ pub fn step_begin(state: &mut HavokPhysicsState, time_increment: f64, num_sub_st
         n_subs,
         sub_dt,
         force_scale,
+        torque_scale,
         torque_scale_pitch_roll,
         torque_scale_yaw,
         saved_forces,
@@ -1668,12 +1702,13 @@ pub fn step_substep(state: &mut HavokPhysicsState, prep: &StepPrep) {
     let StepPrep {
         sub_dt,
         force_scale,
+        torque_scale,
         torque_scale_pitch_roll,
         torque_scale_yaw,
         saved_forces,
         ..
     } = prep;
-    let (sub_dt, force_scale) = (*sub_dt, *force_scale);
+    let (sub_dt, force_scale, torque_scale) = (*sub_dt, *force_scale, *torque_scale);
     let (torque_scale_pitch_roll, torque_scale_yaw) = (*torque_scale_pitch_roll, *torque_scale_yaw);
     {
         // Reset forces to game values each substep (gravity/drag added in
@@ -1687,10 +1722,10 @@ pub fn step_substep(state: &mut HavokPhysicsState, prep: &StepPrep) {
                 let (fs, tsp, tsy) = if rb.driven {
                     (force_scale, torque_scale_pitch_roll, torque_scale_yaw)
                 } else {
-                    // Non-SuperSonic hover cars: scale torque the SAME as force
-                    // (physically consistent) instead of the SuperSonic-only
+                    // Non-SuperSonic hover cars: isotropic torque on the 1/N
+                    // basis (see step_begin) instead of the SuperSonic-only
                     // pitch/roll/yaw asymmetry that crushed levelling torque.
-                    (force_scale, force_scale, force_scale)
+                    (force_scale, torque_scale, torque_scale)
                 };
                 // Step-callback force/torque is read LIVE from the body, not
                 // from the begin-time snapshot. With callbacks interleaved, the
