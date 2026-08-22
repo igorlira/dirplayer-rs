@@ -766,8 +766,35 @@ impl BitmapDatumHandlers {
                     // 8-bit: treat as palette index → grayscale
                     let idx = int_value as u8;
                     bitmap.set_pixel(x, y, (idx, idx, idx), &palettes);
+                } else if bit_depth == 32 {
+                    // 32-bit: the integer is the FULL AARRGGBB value, alpha
+                    // included -- the same encoding `getPixel(pt, #integer)`
+                    // hands back, which is the round-trip the dictionary
+                    // recommends ("If setting many pixels to the color of
+                    // another pixel with getPixel(), it is faster to set them
+                    // as integers").
+                    //
+                    // Dropping the alpha byte made every integer write opaque.
+                    // Movies build these values specifically to write
+                    // TRANSPARENCY: PHOSPHOR's C_ScoreBoard clears its 512x256
+                    // text layer with
+                    //     RGBtoInteger(rgb(255, 255, 255), 0)
+                    // and that helper returns Director's signed 32-bit form
+                    // (negative once alpha >= 128). Forced opaque, the cleared
+                    // layer came out as solid WHITE over the panel art beneath
+                    // it, so the frag table drew on a white box instead of the
+                    // translucent panel.
+                    //
+                    // `as u32` so the negative (alpha >= 128) form keeps its
+                    // bit pattern.
+                    let bits = int_value as u32;
+                    let a = ((bits >> 24) & 0xFF) as u8;
+                    let r = ((bits >> 16) & 0xFF) as u8;
+                    let g = ((bits >> 8) & 0xFF) as u8;
+                    let b = (bits & 0xFF) as u8;
+                    bitmap.set_pixel_rgba(x, y, (r, g, b, a), &palettes);
                 } else {
-                    // 16/32-bit: treat as packed RGB integer (r*65536 + g*256 + b)
+                    // 16-bit: packed RGB, no alpha channel to write.
                     let r = ((int_value >> 16) & 0xFF) as u8;
                     let g = ((int_value >> 8) & 0xFF) as u8;
                     let b = (int_value & 0xFF) as u8;

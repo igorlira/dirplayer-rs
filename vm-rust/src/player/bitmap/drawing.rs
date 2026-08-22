@@ -454,6 +454,35 @@ impl Bitmap {
         }
     }
 
+    /// Write RGBA at (x, y) on a 32-bit bitmap, alpha included.
+    ///
+    /// `set_pixel` takes an opaque RGB triple and forces alpha to 0xFF, which is
+    /// right for a `rgb()` colour object but wrong for Director's INTEGER pixel
+    /// form: on a 32-bit image that integer is the full AARRGGBB value, and
+    /// movies build one specifically to write transparency. Falls back to
+    /// `set_pixel` on any other depth, where there is no alpha channel to write.
+    pub fn set_pixel_rgba(
+        &mut self,
+        x: i32,
+        y: i32,
+        color: (u8, u8, u8, u8),
+        palettes: &PaletteMap,
+    ) {
+        if self.bit_depth != 32 {
+            self.set_pixel(x, y, (color.0, color.1, color.2), palettes);
+            return;
+        }
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        self.matte = None; // TODO draw on matte instead
+        let index = (y as usize * self.width as usize + x as usize) * 4;
+        self.data[index] = color.0;
+        self.data[index + 1] = color.1;
+        self.data[index + 2] = color.2;
+        self.data[index + 3] = color.3;
+    }
+
     /// Write a raw palette index at (x, y) for indexed (<=8-bit) bitmaps, with
     /// NO RGB round-trip. The copyPixels fast path uses this for same-depth,
     /// same-palette indexed copies so index i stays index i — the general
