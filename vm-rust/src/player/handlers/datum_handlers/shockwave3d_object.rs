@@ -6118,16 +6118,41 @@ impl Shockwave3dObjectDatumHandlers {
                         .map(|n| n.fov)
                         .unwrap_or(30.0);
                     let aspect = vw / vh;
-                    let proj = build_perspective_f32(fov, aspect, 1.0, 10000.0);
+                    let (near, far) = scene.nodes.iter()
+                        .find(|n| n.name == s3d_ref.name)
+                        .map(|n| (n.near_plane, n.far_plane))
+                        .unwrap_or((1.0, 10000.0));
+                    let proj = build_perspective_f32(fov, aspect, near, far);
                     // Transform world pos to clip space
                     let wp = [world_pos[0] as f32, world_pos[1] as f32, world_pos[2] as f32, 1.0];
                     let vp = mat4_mul_vec4(&view_matrix, &wp);
                     let cp = mat4_mul_vec4(&proj, &vp);
-                    if cp[3].abs() < 1e-6 {
-                        return Ok(player.alloc_datum(Datum::Void)); // behind camera
+                    // Director 11.5 Scripting Dictionary, `worldSpaceToSpriteSpace`:
+                    // "If the position specified is out of view of the camera, this
+                    // command returns void." That VOID is the only behind-camera test
+                    // some movies have -- PHOSPHOR's C_Overlay decides whether a light
+                    // corona is on screen with nothing but
+                    //     pCorona[COR_POS2D] = cam.worldSpaceToSpriteSpace(pos3D)
+                    //     if pCorona[COR_POS2D] = VOID then ... COR_VIEWVIS = 0
+                    //
+                    // Testing `cp[3].abs() < 1e-6` only caught the camera plane itself.
+                    // This projection puts w_clip = -z_view, so a point BEHIND the
+                    // camera has w NEGATIVE, not near zero: it passed the test and the
+                    // divide by a negative w mirrored it back into frame. Every light
+                    // behind you kept its corona drawn, on the wrong side of the screen.
+                    let w = cp[3];
+                    if w <= 1e-6 {
+                        return Ok(player.alloc_datum(Datum::Void));
                     }
-                    let ndc_x = cp[0] / cp[3];
-                    let ndc_y = cp[1] / cp[3];
+                    let ndc_x = cp[0] / w;
+                    let ndc_y = cp[1] / w;
+                    // ...and "out of view" is the whole rect, not just what is in front.
+                    // No far-plane test: `far` here is only as good as the parsed
+                    // camera yon, and a too-small default would silently hide distant
+                    // lights -- trading this bug for a subtler one.
+                    if !(-1.0..=1.0).contains(&ndc_x) || !(-1.0..=1.0).contains(&ndc_y) {
+                        return Ok(player.alloc_datum(Datum::Void));
+                    }
                     // NDC to sprite space: x: [-1,1] -> [0, vw], y: [1,-1] -> [0, vh]
                     let sx = ((ndc_x + 1.0) * 0.5 * vw) as i32;
                     let sy = ((1.0 - ndc_y) * 0.5 * vh) as i32;
