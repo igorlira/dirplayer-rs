@@ -1505,7 +1505,7 @@ impl FontMemberHandlers {
         // descent 5 where linear scaling gives 18.1 / 4.2. Measured on the
         // AreaZero Score strip: baseline 19 puts ink at strip rows 4-18 exactly
         // as the projector capture; round() gave 18 and sat the text 1px high.
-        let baseline = (phys.metrics.layout_ascender() as f64 * scale).ceil();
+        let baseline = (phys.metrics.baseline_ascender() as f64 * scale).ceil();
         // fixedLineSpace does NOT move the baseline. It grows the LINE BOX
         // (see `effective_line_h` below, which is where the Paige minimum
         // belongs); the baseline stays at `lineTop + ascent` and the slack

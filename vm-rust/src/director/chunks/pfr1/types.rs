@@ -175,6 +175,10 @@ pub struct FontMetrics {
     /// Sign convention matches ascender/descender: descent stored NEGATIVE.
     pub layout_ascender: Option<i16>,
     pub layout_descender: Option<i16>,
+    /// GDI `tmInternalLeading` from the same type-2 record: the blank band
+    /// INSIDE `layout_ascender`, above the caps. It comes off the BASELINE but
+    /// NOT off the line height -- see `baseline_ascender()`.
+    pub layout_internal_leading: Option<i16>,
     pub x_min: i16,
     pub y_min: i16,
     pub x_max: i16,
@@ -193,6 +197,7 @@ impl FontMetrics {
             descender: 0,
             layout_ascender: None,
             layout_descender: None,
+            layout_internal_leading: None,
             x_min: 0,
             y_min: 0,
             x_max: 0,
@@ -212,6 +217,25 @@ impl FontMetrics {
     /// record's real descent when present, else the bounding-box bottom.
     pub fn layout_descender(&self) -> i16 {
         self.layout_descender.unwrap_or(self.descender)
+    }
+
+    /// Ascent for placing the BASELINE inside the line box.
+    ///
+    /// This is NOT `layout_ascender()`. That value is GDI `tmAscent`, which
+    /// includes `tmInternalLeading` -- the blank band above the caps that makes
+    /// `tmHeight` a full cell. The line HEIGHT wants the raw sum (verified:
+    /// Rifleman's Courier New Bold 32 must advance 36 = (tmAsc+tmDesc)/em x 32,
+    /// and `fixedLineSpace` 34 is only a minimum), but the BASELINE sits at the
+    /// typographic ascent, with the internal leading left above it as slack.
+    ///
+    /// Using `tmAscent` for both pushed the baseline down by the internal
+    /// leading, so descenders ran past the bottom of the line box: PHOSPHOR's
+    /// scoreboard lost the tails of "Player Name" / "Frags" / "Ping", and
+    /// AreaZero's nine-line controls block merged into 6 runs instead of 10
+    /// because each line's descenders touched the next line's ascenders.
+    pub fn baseline_ascender(&self) -> i16 {
+        self.layout_ascender()
+            .saturating_sub(self.layout_internal_leading.unwrap_or(0))
     }
 }
 

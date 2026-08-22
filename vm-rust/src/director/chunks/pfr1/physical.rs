@@ -497,8 +497,13 @@ fn parse_private_records_from_aux_data(aux_data: &[u8], record: &mut PhysicalFon
         // the weight — i.e. a bold test — consistent with this layout.)
         // Paige lays text out from THIS ascent (baseline = lineTop + ascent),
         // not from the bounding box the rasterizer sizes glyph cells with.
-        if !t2.is_empty() && t2[0].len() >= 14 {
+        if !t2.is_empty() && t2[0].len() >= 18 {
             let d = &t2[0];
+            // words[5..9] = tmAscent, tmDescent, tmHeight, tmInternalLeading.
+            // Keep tmAscent/tmDescent RAW here: their sum is the natural LINE
+            // HEIGHT (Rifleman's Courier New Bold 32 must advance 36). The
+            // internal leading is carried separately and comes off only when
+            // placing the baseline -- see `FontMetrics::baseline_ascender`.
             let asc = i16::from_be_bytes([d[10], d[11]]);
             let desc = i16::from_be_bytes([d[12], d[13]]);
             // Sanity: a real ascent is positive, descent non-negative, and the
@@ -508,6 +513,17 @@ fn parse_private_records_from_aux_data(aux_data: &[u8], record: &mut PhysicalFon
                 record.metrics.layout_ascender = Some(asc);
                 // Store negative to match the descender sign convention.
                 record.metrics.layout_descender = Some(-desc);
+                // tmInternalLeading == tmHeight - unitsPerEm, so it can be
+                // NEGATIVE for a font whose cell is tighter than the em
+                // (Rifleman's Microgramma Condensed Bold: -166). A negative
+                // value would push the baseline BELOW the em box and drop the
+                // digits back through the plate rule that `tfFoes` was fixed
+                // for, so only positive internal leading is taken off. This is
+                // a deliberate floor, not a parse guard.
+                let il = i16::from_be_bytes([d[16], d[17]]);
+                if il > 0 && il < asc {
+                    record.metrics.layout_internal_leading = Some(il);
+                }
             }
         }
         if !t2.is_empty() && t2[0].len() >= 28 {
