@@ -600,6 +600,29 @@ impl HavokObjectDatumHandlers {
             }
             "interpolatingMoveTo" | "interpolatingmoveto" => {
                 let pos = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                // `interpolatingMoveTo(position, rotation)` — rotation is the same
+                // [axis, angleDegrees] list `attemptMoveTo` takes, and it sets the
+                // body's ABSOLUTE orientation. Dropping it left every repositioned
+                // body facing whatever way it happened to be facing when the move
+                // was issued, which is the attitude it had while it was crashing.
+                //
+                // Age of Speed 2 recovers a lost car with
+                //   pChassisRB.interpolatingMoveTo(pos, [lTokenUp, lAngleBtw])
+                // (`ResetToTrackCallback`, and the fallback in `Vehicle Base`), so
+                // the car was dropped 450 units over the track still upside-down or
+                // sideways from the corkscrew. Its hover rays then point away from
+                // the road, it never re-seats, and the out-of-track timer resets it
+                // again in the same attitude — the car simply tumbles off the world.
+                let rotation = if args.len() > 1 {
+                    match player.get_datum(&args[1]).clone() {
+                        Datum::List(_, items, _) if items.len() >= 2 => {
+                            let axis = match player.get_datum(&items[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector for rotation axis".to_string())) };
+                            let angle = player.get_datum(&items[1]).to_float()?;
+                            Some((axis, angle))
+                        }
+                        _ => None,
+                    }
+                } else { None };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -618,6 +641,14 @@ impl HavokObjectDatumHandlers {
                         let rb = &havok.state.rigid_bodies[idx];
                         (rb.received_force, rb.inertia_half_extents)
                     };
+                    if let Some((axis, angle)) = rotation {
+                        use crate::player::handlers::datum_handlers::cast_member::havok_physics as hv;
+                        let rb = &mut havok.state.rigid_bodies[idx];
+                        rb.rotation_axis = axis;
+                        rb.rotation_angle = angle;
+                        rb.orientation = hv::quat_from_axis_angle_degrees(axis, angle);
+                    }
+
                     if received_force {
                         havok.state.rigid_bodies[idx].position = pos;
                     } else {
@@ -683,6 +714,25 @@ impl HavokObjectDatumHandlers {
             }
             "correctorMoveTo" | "correctormoveto" => {
                 let pos = match player.get_datum(&args[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector".to_string())) };
+                // `correctorMoveTo(position, rotation [, linVel, angVel [, linAcc, angAcc]])`
+                // — a desired STATE, not just a desired point. Same dropped rotation
+                // as interpolatingMoveTo had.
+                let rotation = if args.len() > 1 {
+                    match player.get_datum(&args[1]).clone() {
+                        Datum::List(_, items, _) if items.len() >= 2 => {
+                            let axis = match player.get_datum(&items[0]) { Datum::Vector(v) => *v, _ => return Err(ScriptError::new("Expected vector for rotation axis".to_string())) };
+                            let angle = player.get_datum(&items[1]).to_float()?;
+                            Some((axis, angle))
+                        }
+                        _ => None,
+                    }
+                } else { None };
+                let lin_vel = match args.get(2).map(|a| player.get_datum(a)) {
+                    Some(Datum::Vector(v)) => Some(*v), _ => None,
+                };
+                let ang_vel = match args.get(3).map(|a| player.get_datum(a)) {
+                    Some(Datum::Vector(v)) => Some(*v), _ => None,
+                };
                 let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("Havok member not found".to_string()))?;
                 let havok = match &mut member.member_type {
@@ -693,6 +743,14 @@ impl HavokObjectDatumHandlers {
                     .find(|r| r.name == rb_name)
                 {
                     rb.position = pos;
+                    if let Some((axis, angle)) = rotation {
+                        use crate::player::handlers::datum_handlers::cast_member::havok_physics as hv;
+                        rb.rotation_axis = axis;
+                        rb.rotation_angle = angle;
+                        rb.orientation = hv::quat_from_axis_angle_degrees(axis, angle);
+                    }
+                    if let Some(v) = lin_vel { rb.linear_velocity = v; }
+                    if let Some(v) = ang_vel { rb.angular_velocity = v; }
                 }
                 Ok(DatumRef::Void)
             }
