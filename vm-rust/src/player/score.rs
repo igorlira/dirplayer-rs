@@ -149,6 +149,13 @@ pub struct Score {
     /// D5 movies need per-frame sprite property updates from channel_initialization_data
     /// (since sprite properties can change every frame via delta compression)
     pub needs_per_frame_updates: bool,
+    /// D5-and-earlier score sprite scripts currently bound to a channel by the
+    /// per-frame update pass, keyed by sprite number. In D5 the sprite script is
+    /// a per-FRAME cell property, not a span property: the cell can carry script
+    /// A on one frame, script B on the next and none after that. Remembering what
+    /// we attached is what lets the pass detach it again when the cell goes empty
+    /// (see `sync_d5_sprite_script`).
+    pub d5_sprite_scripts: HashMap<i16, (CastMemberRef, ScriptInstanceRef)>,
     /// Channels that have spans from frame_intervals (not from extend_sprite_spans).
     /// Used to prevent per-frame delta initialization from showing sprites outside their span range.
     pub channels_with_frame_interval_spans: HashSet<u32>,
@@ -281,6 +288,7 @@ impl Score {
             custom_tiles: Vec::new(),
             last_sound_clear_frame: None,
             needs_per_frame_updates: false,
+            d5_sprite_scripts: HashMap::new(),
             channels_with_frame_interval_spans: HashSet::new(),
             frame_count: None,
             active_channels_cache: RefCell::new(HashMap::new()),
@@ -355,6 +363,63 @@ impl Score {
     /// `default_cast_lib` is used to resolve cast_lib when it's 65535 or -1 (which means
     /// "use the parent's cast library", commonly used in filmloops).
     /// If the script is not found in the resolved cast library, we search all cast libraries.
+    /// Bring a D5-or-earlier channel's score sprite script in line with what
+    /// the current frame's score cell says it should be: attach `desired` if it
+    /// isn't attached yet, and detach whatever this pass attached before if the
+    /// cell now names a different script or none at all.
+    ///
+    /// Only instances this pass put on the sprite are ever removed — behaviors
+    /// added from a span or by Lingo (`scriptInstanceList.add`) are left alone.
+    fn sync_d5_sprite_script(&mut self, sprite_num: i16, desired: Option<CastMemberRef>) {
+        let current = self.d5_sprite_scripts.get(&sprite_num).cloned();
+        if current.as_ref().map(|(script_ref, _)| script_ref) == desired.as_ref() {
+            return;
+        }
+
+        if let Some((_, instance_ref)) = current {
+            let stale_id = instance_ref.id();
+            self.get_sprite_mut(sprite_num)
+                .script_instance_list
+                .retain(|inst| inst.id() != stale_id);
+            self.d5_sprite_scripts.remove(&sprite_num);
+        }
+
+        let Some(script_ref) = desired else { return };
+
+        // Already there from a span / Lingo — track nothing, so we never take
+        // away a behavior we didn't add.
+        let already_attached = reserve_player_ref(|player| {
+            self.get_sprite(sprite_num).map_or(false, |s| {
+                s.script_instance_list.iter().any(|inst_ref| {
+                    player.allocator.get_script_instance(inst_ref).script == script_ref
+                })
+            })
+        });
+        if already_attached {
+            return;
+        }
+
+        let Some((instance_ref, _datum)) =
+            Self::create_behavior(script_ref.cast_lib, script_ref.cast_member, None)
+        else {
+            return;
+        };
+        reserve_player_mut(|player| {
+            let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
+            let _ = script_set_prop(
+                player,
+                &instance_ref,
+                Symbol::from_str(&"spriteNum".to_string()),
+                &sprite_num_ref,
+                false,
+            );
+        });
+        self.get_sprite_mut(sprite_num)
+            .script_instance_list
+            .push(instance_ref.clone());
+        self.d5_sprite_scripts.insert(sprite_num, (script_ref, instance_ref));
+    }
+
     fn create_behavior(cast_lib: i32, cast_member: i32, default_cast_lib: Option<i32>) -> Option<(ScriptInstanceRef, DatumRef)> {
         // Resolve cast_lib 65535 or -1 to the default (filmloop's) cast library
         let resolved_cast_lib = if cast_lib == 65535 || cast_lib == -1 {
@@ -836,6 +901,22 @@ impl Score {
                 // don't prevent deallocation of old script instances.
                 if did_reset {
                     player.remove_script_instance_list_cache(sprite_num as i16);
+                    // The behavior lifecycle was just cleared, so drop the
+                    // D5 score-script bookkeeping with it — otherwise a
+                    // re-entered span looks like it already carries the
+                    // script and never re-attaches it.
+                    match &score_ref {
+                        ScoreRef::Stage => {
+                            player.movie.score.d5_sprite_scripts.remove(&(sprite_num as i16));
+                        }
+                        ScoreRef::FilmLoop(member_ref) => {
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                                if let super::cast_member::CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                    film_loop.score.d5_sprite_scripts.remove(&(sprite_num as i16));
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -1280,54 +1361,41 @@ impl Score {
                 sprite.ink = (data.ink & 0x7F) as i32;
                 sprite.blend = convert_raw_blend(data.blend, data.sprite_flags, dir_version);
 
-                // Attach a sprite-script behavior that appears mid-span. D5
-                // sprites can change member per frame and bring a scriptId with
-                // them; begin_sprites only attaches at span-enter (using the
-                // span's START frame data), so a script that shows up on a
+                // Sync the sprite-script behavior with this frame's score cell.
+                // D5 sprites can change member per frame and bring a scriptId
+                // with them; begin_sprites only attaches at span-enter (using
+                // the span's START frame data), so a script that shows up on a
                 // later frame would never bind. 'hackeys clickbutton (script 13,
-                // `on mouseDown` → click=3) appears on channel 6 at frame 2
+                // `on mouseDown` -> click=3) appears on channel 6 at frame 2
                 // when the channel switches from member 21 to member 22+script
                 // 13 — without this, clicking never registers and the kick
-                // never fires. Guarded against re-attachment because the
-                // per-frame deltas re-fire every loop of `go the frame`.
-                if dir_version < 600 && data.sprite_list_idx_lo != 0 {
-                    let script_cast_lib = if data.sprite_list_idx_hi == 0
-                        || data.sprite_list_idx_hi == 65535 {
-                        1
-                    } else {
-                        data.sprite_list_idx_hi as i32
-                    };
-                    let script_member = data.sprite_list_idx_lo as i32;
-                    let script_ref = CastMemberRef {
-                        cast_lib: script_cast_lib,
-                        cast_member: script_member,
-                    };
-                    let already_attached = reserve_player_ref(|player| {
-                        self.get_sprite(sprite_num).map_or(false, |s| {
-                            s.script_instance_list.iter().any(|inst_ref| {
-                                player.allocator.get_script_instance(inst_ref).script == script_ref
-                            })
+                // never fires.
+                //
+                // The cell is authoritative in BOTH directions: an empty
+                // scriptId means the sprite has no score script on this frame,
+                // so a previously-attached one has to come off again. Mario-7
+                // puts a "click to start" behavior (`on mouseUp go(the frame+1)`,
+                // `on mouseDown nothing()`) on the background sprites for the
+                // title frames only; leaving it attached made every background
+                // sprite swallow mouseDown for the rest of the movie, so the
+                // movie script's `on mouseDown` (which is what collects the
+                // items) never ran.
+                if dir_version < 600 {
+                    let desired = if data.sprite_list_idx_lo != 0 {
+                        let script_cast_lib = if data.sprite_list_idx_hi == 0
+                            || data.sprite_list_idx_hi == 65535 {
+                            1
+                        } else {
+                            data.sprite_list_idx_hi as i32
+                        };
+                        Some(CastMemberRef {
+                            cast_lib: script_cast_lib,
+                            cast_member: data.sprite_list_idx_lo as i32,
                         })
-                    });
-                    if !already_attached {
-                        if let Some((instance_ref, _datum)) =
-                            Self::create_behavior(script_cast_lib, script_member, None)
-                        {
-                            reserve_player_mut(|player| {
-                                let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
-                                let _ = script_set_prop(
-                                    player,
-                                    &instance_ref,
-                                    Symbol::from_str(&"spriteNum".to_string()),
-                                    &sprite_num_ref,
-                                    false,
-                                );
-                            });
-                            self.get_sprite_mut(sprite_num)
-                                .script_instance_list
-                                .push(instance_ref);
-                        }
-                    }
+                    } else {
+                        None
+                    };
+                    self.sync_d5_sprite_script(sprite_num, desired);
                 }
             }
         }
@@ -3472,6 +3540,7 @@ impl Score {
     }
 
     pub fn reset(&mut self) {
+        self.d5_sprite_scripts.clear();
         for channel in &mut self.channels {
             // Clear script instances for ALL sprites, not just puppeted ones
             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
