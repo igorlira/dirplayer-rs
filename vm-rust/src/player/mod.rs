@@ -628,6 +628,14 @@ pub struct DirPlayer {
     /// A score transition detected on frame entry, awaiting playback start by the
     /// renderer (which snapshots the pre-transition stage). Set by advance_frame.
     pub pending_transition: Option<crate::player::cast_member::TransitionInfo>,
+    /// A `puppetTransition` has been registered but the playhead has not moved
+    /// yet. Director plays the effect ON the next frame change, so the playhead
+    /// hold has to start THERE — arming it at registration time froze the
+    /// playhead during the very handler that goes on to call `go`, and
+    /// `advance_frame`'s hold check then swallowed the frame change outright
+    /// (BrickOut's `startGame` does `puppetTransition(32, 1, 5)` then
+    /// `go("Jeux")`, and never left the title screen).
+    pub pending_transition_hold_ms: Option<u16>,
     /// True while a score/puppet transition holds the playhead (Director blocks
     /// during a transition). The renderer clears it when the animation completes
     /// (precise sync). A separate field from `is_in_transition` (which means a
@@ -914,6 +922,7 @@ impl DirPlayer {
             movie_reload_data: None,
             is_in_transition: false,
             pending_transition: None,
+            pending_transition_hold_ms: None,
             score_transition_active: false,
             transition_hold_until_ms: None,
             actor_list_generation: 0,
@@ -1907,6 +1916,7 @@ impl DirPlayer {
         // frame change; the next frame re-dirties it only if it draws into the
         // stage image again.
         if prev_frame != next_frame {
+            self.start_pending_puppet_transition();
             self.stage_image_dirty = false;
             self.stage_image_dirty_rect = None;
             self.stage_image_dirty_full = false;
@@ -1956,6 +1966,14 @@ impl DirPlayer {
             }
         }
         true
+    }
+
+    /// Start the hold for a `puppetTransition` that was registered earlier, now
+    /// that the playhead has actually moved. No-op when none is pending.
+    pub fn start_pending_puppet_transition(&mut self) {
+        if let Some(duration_ms) = self.pending_transition_hold_ms.take() {
+            self.begin_transition_hold(duration_ms);
+        }
     }
 
     /// Begin holding the playhead for a transition of `duration_ms`. The renderer

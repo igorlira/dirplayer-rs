@@ -2042,8 +2042,11 @@ impl BuiltInHandlerManager {
                         _ => None,
                     };
                     if let Some(info) = info {
+                        // Register the effect for the renderer, and arm the
+                        // playhead hold for the NEXT frame change rather than
+                        // starting it here — see `pending_transition_hold_ms`.
                         player.pending_transition = Some(info);
-                        player.begin_transition_hold(info.duration_ms);
+                        player.pending_transition_hold_ms = Some(info.duration_ms);
                     }
                     Ok(DatumRef::Void)
                 })
