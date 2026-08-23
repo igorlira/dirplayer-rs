@@ -39,8 +39,13 @@ pub struct ScoreFrameChannelData {
     pub sprite_list_idx_lo: u16,
     pub pos_y: i16,
     pub pos_x: i16,
-    pub height: u16,
-    pub width: u16,
+    /// Signed, like posX/posY. Director writes the sprite's authored size here,
+    /// and for a checkBox/radioButton member whose label is empty that size is
+    /// NEGATIVE (the member's initialRect right edge is -4). Read unsigned it
+    /// became 65532, and the checkbox stretched into a black bar across the
+    /// panel (Rasterwerks PHOSPHOR settings: Mute / Positional / Spectator).
+    pub height: i16,
+    pub width: i16,
     pub color_flag: u8,
     pub fore_color_g: u8,
     pub back_color_g: u8,
@@ -132,10 +137,10 @@ impl ScoreFrameChannelData {
             .map_err(|e| format!("Failed to read pos_x: {:?}", e))? as i16;
         let height = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read height: {:?}", e))?;
+            .map_err(|e| format!("Failed to read height: {:?}", e))? as i16;
         let width = reader
             .read_u16()
-            .map_err(|e| format!("Failed to read width: {:?}", e))?;
+            .map_err(|e| format!("Failed to read width: {:?}", e))? as i16;
         // 20 bytes read
 
         // Extended fields: only present if sprite_record_size > 20
@@ -285,9 +290,9 @@ impl ScoreFrameChannelData {
         let pos_x = reader.read_u16()
             .map_err(|e| format!("D5: posX: {:?}", e))? as i16;         // bytes 14-15
         let height = reader.read_u16()
-            .map_err(|e| format!("D5: height: {:?}", e))?;              // bytes 16-17
+            .map_err(|e| format!("D5: height: {:?}", e))? as i16;       // bytes 16-17
         let width = reader.read_u16()
-            .map_err(|e| format!("D5: width: {:?}", e))?;               // bytes 18-19
+            .map_err(|e| format!("D5: width: {:?}", e))? as i16;        // bytes 18-19
         let colorcode = reader.read_u8()
             .map_err(|e| format!("D5: colorcode: {:?}", e))?;           // byte 20
         let editable = (colorcode & 0x40) != 0;  // bit 6
@@ -375,9 +380,9 @@ impl ScoreFrameChannelData {
         let pos_x = reader.read_u16()
             .map_err(|e| format!("D4: posX: {:?}", e))? as i16;           // bytes 10-11
         let height = reader.read_u16()
-            .map_err(|e| format!("D4: height: {:?}", e))?;                // bytes 12-13
+            .map_err(|e| format!("D4: height: {:?}", e))? as i16;         // bytes 12-13
         let width = reader.read_u16()
-            .map_err(|e| format!("D4: width: {:?}", e))?;                 // bytes 14-15
+            .map_err(|e| format!("D4: width: {:?}", e))? as i16;          // bytes 14-15
         let script_member = reader.read_u16()
             .map_err(|e| format!("D4: scriptId: {:?}", e))?;              // bytes 16-17
         let colorcode = reader.read_u8()

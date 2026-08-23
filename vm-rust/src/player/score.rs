@@ -6313,9 +6313,16 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             let rect_h = (field.rect_bottom - field.rect_top).max(0) as i32;
             let extras = (2 * field.border as i32)
                 + (2 * field.margin as i32);
-            // Use rect dimensions if available, otherwise fall back to sprite dimensions
-            let btn_w = if rect_w > 0 { rect_w + extras } else { sprite.width };
-            let btn_h = if rect_h > 0 { rect_h + extras } else { sprite.height };
+            // Use rect dimensions if available, otherwise fall back to sprite dimensions.
+            // Both can be NEGATIVE: Director writes -4 as the initialRect right edge
+            // of a checkBox/radioButton whose label is empty, and the score copies
+            // that straight into the sprite's width. Only the indicator sets the
+            // width then, so clamp instead of letting -4 through — unclamped it made
+            // the indicator's opaque label area run off the far side of the stage
+            // (Rasterwerks PHOSPHOR settings: Mute / Positional / Spectator each drew
+            // as a black bar across the panel).
+            let btn_w = if rect_w > 0 { rect_w + extras } else { sprite.width.max(0) };
+            let btn_h = if rect_h > 0 { rect_h + extras } else { sprite.height.max(0) };
             // For checkbox/radio, add 16px width for the indicator
             let extra_w = match button_member.button_type {
                 super::cast_member::ButtonType::CheckBox | super::cast_member::ButtonType::RadioButton => 16,

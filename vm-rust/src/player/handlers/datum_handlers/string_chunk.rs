@@ -43,6 +43,61 @@ pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usi
 }
 
 impl StringChunkUtils {
+    /// The line terminator to re-join with after splitting `string` into lines.
+    ///
+    /// MUST mirror `string_get_lines` detection, or a chunk write does not
+    /// round-trip: that splits CRLF as ONE break, while every join here used to
+    /// hardcode CRLF -- so writing `member.line[I]` re-joined a CR-delimited
+    /// member with CRLF. `lineCount` still answered correctly (it folds CRLF
+    /// too), but the RENDERER treats each CR and each LF as its own terminator,
+    /// deliberately, because Director does -- so "a" CR LF "b" draws as THREE
+    /// lines with a blank between. Rasterwerks PHOSPHOR fills its dropdown with
+    /// `sprite(x).member.line[I] = ...` per entry, and every menu came out
+    /// double-spaced: five items at 40px each spilling out of the 5*20+1 panel
+    /// the movie had sized for them.
+    ///
+    /// Director own delimiter is a bare CR, which is what an authored member
+    /// carries and therefore what this answers for it. CRLF is preserved only
+    /// when the text already had it, so imported content is not rewritten by an
+    /// unrelated single-line edit.
+    fn line_delimiter_for(string: &str) -> &'static str {
+        if string.contains("\r\n") {
+            "\r\n"
+        } else if string.contains('\n') {
+            "\n"
+        } else {
+            "\r"
+        }
+    }
+
+    /// The text a chunk expression reads through when its source is a cast
+    /// member. Both Field and Text members carry text and BOTH are writable
+    /// through `set_value` below, so reading only through `as_field()` was
+    /// asymmetric: `delete <chunk> of a TEXT member` unwrapped a `None` and
+    /// panicked instead of trimming it (Rasterwerks PHOSPHOR's dropdown list
+    /// member is a Text member).
+    fn member_text(
+        player: &DirPlayer,
+        member_ref: &CastMemberRef,
+    ) -> Result<String, ScriptError> {
+        let member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)
+            .ok_or_else(|| ScriptError::new(format!(
+                "Chunk expression on a member that does not exist ({}, {})",
+                member_ref.cast_lib, member_ref.cast_member
+            )))?;
+        match &member.member_type {
+            CastMemberType::Field(field) => Ok(field.text.clone()),
+            CastMemberType::Text(text) => Ok(text.text.clone()),
+            other => Err(ScriptError::new(format!(
+                "Cannot read a chunk expression from a {} member",
+                other.type_string()
+            ))),
+        }
+    }
+
     pub fn delete(
         player: &mut DirPlayer,
         original_str_src: &StringChunkSource,
@@ -53,16 +108,9 @@ impl StringChunkUtils {
                 StringChunkSource::Datum(original_str_ref) => {
                     player.get_datum(original_str_ref).string_value()?
                 }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
+                StringChunkSource::Member(member_ref) => {
+                    Self::member_text(player, member_ref)?
+                }
             };
             Self::string_by_deleting_chunk(&original_str, &chunk_expr)
         }?;
@@ -81,16 +129,9 @@ impl StringChunkUtils {
                 StringChunkSource::Datum(original_str_ref) => {
                     player.get_datum(original_str_ref).string_value()?
                 }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
+                StringChunkSource::Member(member_ref) => {
+                    Self::member_text(player, member_ref)?
+                }
             };
             Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
@@ -218,7 +259,7 @@ impl StringChunkUtils {
 
                 let mut new_chunks = chunk_list;
                 new_chunks.drain(start..end);
-                Ok(new_chunks.join("\r\n"))
+                Ok(new_chunks.join(Self::line_delimiter_for(string)))
             },
         }
     }
@@ -392,7 +433,7 @@ impl StringChunkUtils {
                 if chunk_list.len() == 0 {
                     return Ok("".to_string());
                 }
-                chunk_list[start..end].join("\r\n")
+                chunk_list[start..end].join(Self::line_delimiter_for(string))
             }
         };
 
@@ -437,7 +478,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => Self::line_delimiter_for(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -488,7 +529,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => Self::line_delimiter_for(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))
@@ -540,7 +581,7 @@ impl StringChunkUtils {
                 let delimiter = match chunk_expr.chunk_type {
                     StringChunkType::Item => chunk_expr.item_delimiter.to_string(),
                     StringChunkType::Word => " ".to_string(),
-                    StringChunkType::Line => "\r\n".to_string(),
+                    StringChunkType::Line => Self::line_delimiter_for(string).to_string(),
                     _ => unreachable!(),
                 };
                 Ok(new_chunks.join(&delimiter))

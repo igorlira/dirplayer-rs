@@ -2,12 +2,52 @@ use log::debug;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{datum_formatting::format_concrete_datum, reserve_player_mut, DatumRef, ScriptError},
+    player::{
+        datum_formatting::format_concrete_datum,
+        handlers::datum_handlers::string_chunk::StringChunkUtils, reserve_player_mut, DatumRef,
+        ScriptError,
+    },
 };
 
 pub struct StringHandlers {}
 
 impl StringHandlers {
+    /// `delete <chunkExpr>` reached as a CALL rather than as the DeleteChunk
+    /// opcode. Director's compiler emits the opcode for the command form
+    /// (`delete line 3 of member "x"`), but the parenthesised form compiles to
+    /// an ordinary one-argument ext-call whose argument is already the chunk
+    /// reference — Rasterwerks PHOSPHOR's dropdown does exactly that to trim
+    /// leftover rows off its list member:
+    ///
+    ///     repeat with I = pDropDownItemCount + 1 to pDropDownItemMax
+    ///       delete(sprite(pDropDownSprHi).member.line[pDropDownItemCount + 1])
+    ///     end repeat
+    ///
+    /// Without it every dropdown kept the PREVIOUS menu's surplus lines, so a
+    /// two-entry list still drew ten rows.
+    pub fn delete_chunk_arg(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Ok(DatumRef::Void);
+        }
+        reserve_player_mut(|player| {
+            match player.get_datum(&args[0]) {
+                Datum::StringChunk(source, expr, _) => {
+                    let (source, expr) = (source.clone(), expr.clone());
+                    StringChunkUtils::delete(player, &source, &expr)?;
+                    Ok(DatumRef::Void)
+                }
+                // Anything else has already collapsed to a value, and there is
+                // no container left to delete it from. Director errors here;
+                // stay quiet so a stray `delete(someString)` cannot park the
+                // player on a breakpoint.
+                other => {
+                    debug!("delete() on a non-chunk argument ({}), ignoring", other.type_str());
+                    Ok(DatumRef::Void)
+                }
+            }
+        })
+    }
+
     pub fn space(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(" ".to_string()))))
     }

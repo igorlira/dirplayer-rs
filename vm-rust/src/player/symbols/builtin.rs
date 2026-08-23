@@ -870,6 +870,7 @@ define_builtin_symbols! {
     "ambientColor" => AmbientColor,
     "renderer" => Renderer,
     "rendererDeviceList" => RendererDeviceList,
+    "getHardwareInfo" => GetHardwareInfo,
     "colorBufferDepth" => ColorBufferDepth,
     "depthBufferDepth" => DepthBufferDepth,
     "antiAliasingEnabled" => AntiAliasingEnabled,

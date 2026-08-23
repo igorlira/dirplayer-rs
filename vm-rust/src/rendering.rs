@@ -1203,7 +1203,7 @@ fn render_filmloop_from_channel_data(
             }
             // For shapes and other non-bitmap members, pos_x/pos_y is the top-left corner.
             // Use (0,0) registration — shapes don't have a registration point like bitmaps.
-            _ => (data.width, data.height, 0, 0),
+            _ => (data.width.max(0) as u16, data.height.max(0) as u16, 0, 0),
         };
 
         // Choose between channel data dims (sprite dims) and actual bitmap dims.
@@ -1215,13 +1215,13 @@ fn render_filmloop_from_channel_data(
             if member_width > 0 && member_height > 0 {
                 (member_width, member_height)
             } else if data.width > 0 && data.height > 0 {
-                (data.width, data.height)
+                (data.width as u16, data.height as u16)
             } else {
                 (member_width, member_height)
             }
         } else {
             if data.width > 0 && data.height > 0 {
-                (data.width, data.height)
+                (data.width as u16, data.height as u16)
             } else {
                 (member_width, member_height)
             }

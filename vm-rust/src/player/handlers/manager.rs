@@ -1192,6 +1192,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(args),
             Some(BuiltInSymbol::Integerp) => TypeHandlers::integerp(args),
             Some(BuiltInSymbol::Floatp) => TypeHandlers::floatp(args),
+            Some(BuiltInSymbol::Delete) => StringHandlers::delete_chunk_arg(args),
             Some(BuiltInSymbol::Offset) => StringHandlers::offset(args),
             Some(BuiltInSymbol::Length) => StringHandlers::length(args),
             Some(BuiltInSymbol::Script) => MovieHandlers::script(args),
@@ -1409,49 +1410,80 @@ impl BuiltInHandlerManager {
                 })
             }
             Some(BuiltInSymbol::GetRendererServices) => {
-                // Return a prop list with renderer info stubs
+                // Director's renderer-services object, as a prop list.
+                //
+                // Shapes follow what real Director answers (measured against
+                // Rasterwerks PHOSPHOR's Video settings page, which prints the
+                // whole hardware block):
+                //   Depthbuffer: [16, 24]   Colorbuffer: [16, 32]
+                //   Texture Units: 8        Max Texture Size: [16384, 16384]
+                //   Texture Formats: [#rgba8888, #rgba8880, ...]
+                // so the ranges and the texture size are LISTS and the formats
+                // are SYMBOLS, not strings.
+                //
+                // `renderer` is a SYMBOL. The movie round-trips it through
+                // `string(getRendererServices().renderer)` into a dropdown and
+                // back out through `symbol(...)`; as a string it displayed as
+                // "#openGL" and came back as the symbol #|#openGL|.
                 reserve_player_mut(|player| {
                     let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(Symbol::from_str(s)));
                     let make_str = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::String(s.to_string()));
                     let make_int = |p: &mut DirPlayer, n: i32| p.alloc_datum(Datum::Int(n));
+                    let make_int_list = |p: &mut DirPlayer, ns: &[i32]| {
+                        let items: Vec<DatumRef> = ns.iter().map(|n| p.alloc_datum(Datum::Int(*n))).collect();
+                        p.alloc_datum(Datum::List(DatumType::List, VecDeque::from(items), false))
+                    };
+                    let make_sym_list = |p: &mut DirPlayer, ss: &[&str]| {
+                        let items: Vec<DatumRef> = ss.iter()
+                            .map(|s| p.alloc_datum(Datum::Symbol(Symbol::from_str(s))))
+                            .collect();
+                        p.alloc_datum(Datum::List(DatumType::List, VecDeque::from(items), false))
+                    };
 
-                    // rendererDeviceList
+                    // The backend really is OpenGL (WebGL2), and it is the only
+                    // one on offer — no DirectX device to switch to.
                     let rdl_key = make_sym(player, "rendererDeviceList");
-                    let device = make_str(player, "WebGL2");
-                    let rdl_val = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![device]), false));
-
-                    // renderer
+                    let rdl_val = make_sym_list(player, &["openGL"]);
                     let rend_key = make_sym(player, "renderer");
-                    let rend_val = make_str(player, "#openGL");
+                    let rend_val = make_sym(player, "openGL");
 
-                    // Hardware info as nested proplist
+                    let cbd_key = make_sym(player, "colorBufferDepth");
+                    let cbd_val = make_int(player, 32);
+                    let dbd_key = make_sym(player, "depthBufferDepth");
+                    let dbd_val = make_int(player, 24);
+
                     let vendor_k = make_sym(player, "vendor");
                     let vendor_v = make_str(player, "WebGL");
                     let model_k = make_sym(player, "model");
                     let model_v = make_str(player, "WebGL2 Renderer");
                     let version_k = make_sym(player, "version");
                     let version_v = make_str(player, "2.0");
+                    let present_k = make_sym(player, "present");
+                    let present_v = make_int(player, 1);
                     let max_tex_k = make_sym(player, "maxTextureSize");
-                    let max_tex_v = make_int(player, 4096);
+                    let max_tex_v = make_int_list(player, &[4096, 4096]);
                     let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
-                    let fmt = make_str(player, "rgba8880");
-                    let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![fmt]), false));
+                    let tex_fmt_v = make_sym_list(player, &[
+                        "rgba8888", "rgba8880", "rgba5650", "rgba5551", "rgba5550", "rgba4444",
+                    ]);
                     let tex_units_k = make_sym(player, "textureUnits");
                     let tex_units_v = make_int(player, 8);
                     let depth_k = make_sym(player, "depthBufferRange");
-                    let depth_v = make_int(player, 24);
+                    let depth_v = make_int_list(player, &[16, 24]);
                     let color_k = make_sym(player, "colorBufferRange");
-                    let color_v = make_int(player, 32);
+                    let color_v = make_int_list(player, &[16, 32]);
 
                     let hw_info = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (vendor_k, vendor_v), (model_k, model_v), (version_k, version_v),
-                        (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v), (tex_units_k, tex_units_v),
-                        (depth_k, depth_v), (color_k, color_v),
+                        (present_k, present_v), (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v),
+                        (tex_units_k, tex_units_v), (depth_k, depth_v), (color_k, color_v),
                     ]), false));
                     let hw_key = make_sym(player, "hardwareInfo");
 
                     let result = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                        (rdl_key, rdl_val), (rend_key, rend_val), (hw_key, hw_info),
+                        (rdl_key, rdl_val), (rend_key, rend_val),
+                        (cbd_key, cbd_val), (dbd_key, dbd_val),
+                        (hw_key, hw_info),
                     ]), false));
                     Ok(result)
                 })
