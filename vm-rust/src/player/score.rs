@@ -5719,7 +5719,18 @@ pub fn get_concrete_sprite_render_rect(player: &DirPlayer, sprite: &Sprite) -> I
     let rect = get_concrete_sprite_rect(player, sprite);
     let layout = crate::player::stage::stage_layout(player);
     let (sx, sy) = crate::player::stage::stage_scale(player);
-    if (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
+    // Fast path only when there is genuinely nothing to do — scale 1 AND the
+    // draw rect starting at the origin. Testing the scale alone was wrong: it
+    // assumed scale 1 implies no letterbox, which held only while scale 1 meant
+    // `StretchStyle::None`. With an integer-snapped stage a movie can land at
+    // EXACTLY 1.0 inside a larger canvas (an 800x600 movie fits 1080p at 1.8x,
+    // which floors to 1.0), and the offset was then dropped: sprites drew from
+    // the canvas corner while the letterbox was painted around the centred
+    // movie box, blanking most of the frame. Clicks stayed correct, because
+    // `canvas_to_movie_coords` subtracts the origin unconditionally, so the
+    // picture and the hit areas disagreed as well.
+    let no_offset = layout.draw_rect[0].abs() < 1e-6 && layout.draw_rect[1].abs() < 1e-6;
+    if no_offset && (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 {
         return rect;
     }
     IntRect::from(
