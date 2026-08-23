@@ -5,6 +5,7 @@ use crate::{
 
 use super::budapi::BudApiXtra;
 use super::curl::{CurlXtra, CurlXtraManager};
+use super::enhancer::EnhancerXtra;
 use super::external;
 use super::fileio::{borrow_fileio_manager_mut, FileIoXtraManager};
 use super::leechprotection::LeechProtectionXtra;
@@ -26,6 +27,7 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "fileio"
         || name_lower == "curl"
         || name_lower == "movecursor"
+        || name_lower == "enhancer"
         || name_lower == "openurl"
         || name_lower == "sysmenu"
         || name_lower == "budapi"
@@ -39,6 +41,9 @@ pub fn get_registered_xtra_names() -> Vec<String> {
         "FileIO".to_string(),
         "Curl".to_string(),
         "MoveCursor".to_string(),
+        // C_Input.FindXtra matches on `pXtraList[I].name.char[1..len]`, so the
+        // name here has to START with what the movie asks for ("Enhancer").
+        "Enhancer".to_string(),
         "OpenURL".to_string(),
         "SysMenu".to_string(),
         "BudAPI".to_string(),
@@ -133,6 +138,10 @@ pub fn call_xtra_instance_handler(
         "leechprotectionremovalhelp" if LeechProtectionXtra::has_handler(handler_name) => {
             return LeechProtectionXtra::call_handler(handler_name, args)
         }
+        // Stateless as well — see the note in `create_xtra_instance`.
+        "enhancer" if EnhancerXtra::has_handler(handler_name) => {
+            return EnhancerXtra::call_handler(handler_name, args)
+        }
         _ => Err(ScriptError::new(format!(
             "No handler {} found for xtra {} instance #{}",
             handler_name, xtra_name, instance_id
@@ -226,6 +235,14 @@ pub fn create_xtra_instance(
         // an opaque instance id for parity with the real Xtras, but the id
         // is never consulted by any handler.
         "movecursor" | "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
+        // Enhancer is instance-based in the movie (`pEX = xtra("enhancer").new(serial)`
+        // and then `pEX.set_resolution(...)`), but it holds no per-instance
+        // state of its own — the one thing it owns, the fullscreen request,
+        // lives on the player. So a placeholder id is enough and every
+        // instance call routes to the same stateless handler set. What DOES
+        // matter is that `new` succeeds at all: C_Engine gates the entire
+        // resolution path on `ilk(cInput.pEX) = #instance`.
+        "enhancer" => Ok(0),
         _ => Err(ScriptError::new(format!("Xtra {} not found", xtra_name))),
     }
 }

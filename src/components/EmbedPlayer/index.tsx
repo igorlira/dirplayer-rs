@@ -29,9 +29,10 @@ type EmbedPlayerProps = {
   launchCommand?: string
   requireClickToPlay?: boolean
   enableGestures?: boolean
+  showFullscreenButton?: boolean
 };
 
-export default function EmbedPlayer({width, height, src, externalParams, launchCommand, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
+export default function EmbedPlayer({width, height, src, externalParams, launchCommand, requireClickToPlay, enableGestures, showFullscreenButton}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
@@ -138,7 +139,7 @@ export default function EmbedPlayer({width, height, src, externalParams, launchC
 
   return (
     <div style={{ width: widthValue, height: heightValue, position: 'relative', backgroundColor: '#000' }}>
-      {!!isVmReady && !movieLoadError && <Stage enableGestures={enableGestures} />}
+      {!!isVmReady && !movieLoadError && <Stage enableGestures={enableGestures} showFullscreenButton={showFullscreenButton} />}
       {movieLoadError && (
         <ShadowPortal style={{ position: 'absolute', inset: 0, zIndex: 9999 }}>
           <ErrorOverlay message={movieLoadError} compact />

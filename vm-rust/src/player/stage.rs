@@ -50,6 +50,18 @@ fn stretch_style(player: &DirPlayer) -> StretchStyle {
         Some("meet") => StretchStyle::Meet,
         Some("fill") => StretchStyle::Fill,
         Some("stage") => StretchStyle::Stage,
+        // Fullscreen with no explicit style asked for: lay the stage out to the
+        // container, aspect preserved. Without this the canvas stays the movie's
+        // own size (`None`) and the frontend has to CSS-upscale it to fill the
+        // screen — a bitmap blow-up, so a 640x480 movie on a 1920x1440 screen is
+        // three times as blurry as it needs to be. `Meet` instead resizes the
+        // canvas and scales the sprite rects, so 3D re-renders at the real
+        // resolution and text is re-rasterised rather than stretched.
+        //
+        // An EXPLICIT swStretchStyle wins even in fullscreen — a host that asked
+        // for `fill` or `stage` means it, and silently overriding would change
+        // the aspect ratio it chose.
+        _ if player.fullscreen_active => StretchStyle::Meet,
         _ => StretchStyle::None,
     }
 }

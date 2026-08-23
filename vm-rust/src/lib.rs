@@ -891,6 +891,58 @@ pub fn wants_pointer_lock() -> bool {
     reserve_player_ref(|player| player.wants_pointer_lock)
 }
 
+/// Whether the movie has asked for a fullscreen display mode, through the
+/// Enhancer Xtra's `set_resolution` (cleared again by `reset_resolution`).
+///
+/// Intent only, exactly like [`wants_pointer_lock`]: `requestFullscreen` is
+/// gated on a user gesture, so the frontend polls this from the input it is
+/// already handling rather than being pushed to. Rasterwerks PHOSPHOR reaches
+/// it from the Settings page ("Display Mode" -> fullscreen), which the player
+/// applies on the frame after the OK button is clicked.
+#[wasm_bindgen]
+pub fn wants_fullscreen() -> bool {
+    reserve_player_ref(|player| player.wants_fullscreen)
+}
+
+/// Ask for (or drop) fullscreen from OUTSIDE the movie.
+///
+/// The Enhancer route only works for a movie that ships Enhancer and calls
+/// `set_resolution` itself — PHOSPHOR does, almost nothing else does. Going
+/// fullscreen is not really a movie concern though: it is "make the stage fill
+/// the screen", which is true of any movie, 2D or 3D. So the same flag is
+/// writable directly, and a host page can offer a fullscreen button for a movie
+/// that has no idea what fullscreen is.
+///
+/// Note the browser only grants `requestFullscreen` from inside a user gesture.
+/// Called from a click handler this takes effect immediately; called from a
+/// timer or on load it records the intent and the frontend applies it on the
+/// next click it handles.
+/// Tell the VM whether the browser is REALLY showing the player fullscreen.
+///
+/// Called from the frontend's `fullscreenchange` handler, the same way
+/// `set_pointer_locked` reports the real pointer-lock state. It re-lays the
+/// stage immediately so the canvas is resized in the same tick rather than
+/// waiting for the container's ResizeObserver to catch up.
+#[wasm_bindgen]
+pub fn set_fullscreen_active(active: bool) {
+    reserve_player_mut(|player| {
+        if player.fullscreen_active == active {
+            return;
+        }
+        player.fullscreen_active = active;
+        crate::player::stage::apply_stage_draw_rect(player);
+        let (w, h) = crate::player::stage::stage_canvas_dims(player);
+        crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
+    });
+}
+
+#[wasm_bindgen]
+pub fn player_set_fullscreen(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.wants_fullscreen = enabled;
+    });
+}
+
 /// Mouse move with delta values (for pointer lock mode).
 /// The delta is added to the current mouse_loc (which the game resets to center each
 /// frame), so `the mouseH` tracks pointer-lock movementX. X must be ADDED, not

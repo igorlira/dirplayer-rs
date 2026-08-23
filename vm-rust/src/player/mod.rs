@@ -328,6 +328,21 @@ pub struct DirPlayer {
     pub ime_composition: Option<(i32, i32)>,
     pub mouse_loc: (i32, i32),
     pub wants_pointer_lock: bool,
+    /// The movie asked for a fullscreen display mode through the Enhancer
+    /// Xtra (`set_resolution`), and has not asked for it back
+    /// (`reset_resolution`). Movie INTENT only, like `wants_pointer_lock`:
+    /// the browser grants fullscreen solely from a user gesture, so the
+    /// frontend polls this and requests it on the next input it handles.
+    pub wants_fullscreen: bool,
+    /// Whether the BROWSER is really showing this player fullscreen, as
+    /// reported by the frontend's `fullscreenchange` handler.
+    ///
+    /// `wants_fullscreen` is only the movie's intent and can be refused (the
+    /// request must come from a user gesture). This one is reality, and it is
+    /// what `stretch_style` keys off: while it is set the stage is laid out to
+    /// the container instead of the movie's own size, so the renderer draws at
+    /// screen resolution rather than the frontend CSS-upscaling a small canvas.
+    pub fullscreen_active: bool,
     /// Whether the BROWSER actually holds the pointer lock for this player's
     /// canvas, as reported by the frontend's `pointerlockchange` handler.
     ///
@@ -800,6 +815,8 @@ impl DirPlayer {
             keyboard_focus_sprite: -1, // Setting keyboardFocusSprite to -1 returns keyboard focus control to the Score, and setting it to 0 disables keyboard entry into any editable sprite.
             mouse_loc: (0, 0),
             wants_pointer_lock: false,
+            wants_fullscreen: false,
+            fullscreen_active: false,
             pointer_locked: false,
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),

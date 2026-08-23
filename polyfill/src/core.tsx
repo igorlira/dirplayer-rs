@@ -73,6 +73,9 @@ const ATTR_MOUNT_HEIGHT = 'data-dirplayer-height';
 const ATTR_MOUNT_SRC = 'data-dirplayer-src';
 const ATTR_MOUNT_PARAMS = 'data-dirplayer-params';
 const ATTR_MOUNT_GESTURES = 'data-dirplayer-gestures';
+// Absence means "show it" — the button is on by default, so only the OFF
+// state needs carrying across the world boundary to the extension.
+const ATTR_MOUNT_NO_FULLSCREEN = 'data-dirplayer-no-fullscreen';
 
 // Dispatched (bubbling, cancelable) on a mount div by the polyfill world when
 // the user picks "Browser Extension" in the conflict UI. The extension world
@@ -430,7 +433,8 @@ function _renderPlayer(
   height: string,
   src: string,
   externalParams: Record<string, string>,
-  enableGestures?: boolean
+  enableGestures?: boolean,
+  showFullscreenButton?: boolean
 ) {
   notifyPlayerMounted();
   // A second createRoot on the same container would orphan the first tree,
@@ -449,6 +453,7 @@ function _renderPlayer(
             externalParams={externalParams}
             requireClickToPlay={config.requireClickToPlay}
             enableGestures={enableGestures}
+            showFullscreenButton={showFullscreenButton}
           />
         </VMProvider>
       </StoreProvider>
@@ -465,13 +470,14 @@ function renderViaExtension(
   height: string,
   src: string,
   externalParams: Record<string, string>,
-  enableGestures?: boolean
+  enableGestures?: boolean,
+  showFullscreenButton?: boolean
 ) {
   const event = new Event(EVENT_RENDER_AS_EXTENSION, { bubbles: true, cancelable: true });
   const unhandled = mount.dispatchEvent(event);
   if (unhandled) {
     console.warn('[DirPlayer] Extension did not answer the render handoff (outdated extension build?) — using web player instead');
-    _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+    _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
   }
 }
 
@@ -489,7 +495,8 @@ function renderConflictDirectly(
   height: string,
   src: string,
   externalParams: Record<string, string>,
-  enableGestures?: boolean
+  enableGestures?: boolean,
+  showFullscreenButton?: boolean
 ) {
   const w = normalizeCssSize(width);
   const h = normalizeCssSize(height);
@@ -503,9 +510,9 @@ function renderConflictDirectly(
   pendingConflictResolvers.push((choice) => {
     uiHost.remove();
     if (choice === 'extension') {
-      renderViaExtension(mount, width, height, src, externalParams, enableGestures);
+      renderViaExtension(mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
     } else {
-      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
     }
   });
 
@@ -524,7 +531,8 @@ function injectConflictOverlay(
   height: string,
   src: string,
   externalParams: Record<string, string>,
-  enableGestures?: boolean
+  enableGestures?: boolean,
+  showFullscreenButton?: boolean
 ) {
   // Save and restore position so we don't permanently change mount's layout
   // context (which can shift absolutely-positioned page siblings like sizer imgs).
@@ -549,7 +557,7 @@ function injectConflictOverlay(
       // Belt and braces: clear anything the extension left behind (an older
       // extension build does not answer the unrender event at all), then render.
       while (mount.firstChild) mount.removeChild(mount.firstChild);
-      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures);
+      _renderPlayer(conflictPolyfillConfig!, mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
     }
     // choice === 'extension': the extension player is still rendered
     // underneath — removing the overlay reveals it.
@@ -570,19 +578,20 @@ function renderPlayer(
   height: string,
   src: string,
   externalParams: Record<string, string>,
-  enableGestures?: boolean
+  enableGestures?: boolean,
+  showFullscreenButton?: boolean
 ) {
   if (conflictPolyfillConfig && !conflictChoice) {
-    renderConflictDirectly(mount, width, height, src, externalParams, enableGestures);
+    renderConflictDirectly(mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
     return;
   }
   if (conflictChoice === 'extension') {
     // The user already picked the extension — route embeds that appear after
     // the choice straight to it instead of asking again.
-    renderViaExtension(mount, width, height, src, externalParams, enableGestures);
+    renderViaExtension(mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
     return;
   }
-  _renderPlayer(config, mount, width, height, src, externalParams, enableGestures);
+  _renderPlayer(config, mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
 }
 
 function resolveDimensionValue(
@@ -626,6 +635,13 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
     || (element.parentElement?.tagName === 'OBJECT' && element.parentElement.hasAttribute('data-enable-gestures'))
     || undefined;
 
+  // On by default, opted OUT — the inverse of gestures, which are off until a
+  // page asks for them. A fullscreen button cannot change how a movie reads
+  // input, so there is no reason to make every host opt in.
+  const showFullscreenButton = !(element.hasAttribute('data-disable-fullscreen-button')
+    || (element.parentElement?.tagName === 'OBJECT'
+        && element.parentElement.hasAttribute('data-disable-fullscreen-button')));
+
   let size = resolveReplacementSize(element);
   const newElement = document.createElement('div');
   if (element.parentElement && element.parentElement.tagName === 'OBJECT') {
@@ -642,7 +658,8 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   newElement.setAttribute(ATTR_MOUNT_SRC, src);
   newElement.setAttribute(ATTR_MOUNT_PARAMS, JSON.stringify(externalParams));
   if (enableGestures) newElement.setAttribute(ATTR_MOUNT_GESTURES, 'true');
-  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
+  if (!showFullscreenButton) newElement.setAttribute(ATTR_MOUNT_NO_FULLSCREEN, 'true');
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures, showFullscreenButton);
 }
 
 function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, params: Record<string, string | null>) {
@@ -659,6 +676,10 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
     || getCaseInsensitiveValue(params, 'enableGestures') === 'true'
     || undefined;
 
+  // See replaceDirEmbed — on by default, opted out.
+  const showFullscreenButton = !(element.hasAttribute('data-disable-fullscreen-button')
+    || getCaseInsensitiveValue(params, 'disableFullscreenButton') === 'true');
+
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
   newElement.setAttribute(ATTR_MOUNT, 'true');
@@ -667,7 +688,8 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
   newElement.setAttribute(ATTR_MOUNT_SRC, src);
   newElement.setAttribute(ATTR_MOUNT_PARAMS, JSON.stringify(externalParams));
   if (enableGestures) newElement.setAttribute(ATTR_MOUNT_GESTURES, 'true');
-  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures);
+  if (!showFullscreenButton) newElement.setAttribute(ATTR_MOUNT_NO_FULLSCREEN, 'true');
+  renderPlayer(config, newElement, size.width, size.height, src, externalParams, enableGestures, showFullscreenButton);
 }
 
 function extractNoscriptElements() {
@@ -786,8 +808,9 @@ function installExtensionRenderListener(config: PolyfillConfig) {
     const src = mount.getAttribute(ATTR_MOUNT_SRC) || '';
     const externalParams = JSON.parse(mount.getAttribute(ATTR_MOUNT_PARAMS) || '{}') as Record<string, string>;
     const enableGestures = mount.hasAttribute(ATTR_MOUNT_GESTURES) || undefined;
+    const showFullscreenButton = !mount.hasAttribute(ATTR_MOUNT_NO_FULLSCREEN);
     console.log('[DirPlayer] Extension rendering mount handed over by conflict UI');
-    _renderPlayer(config, mount, width, height, src, externalParams, enableGestures);
+    _renderPlayer(config, mount, width, height, src, externalParams, enableGestures, showFullscreenButton);
   }, true);
 
   document.addEventListener(EVENT_UNRENDER_AS_EXTENSION, (event) => {
