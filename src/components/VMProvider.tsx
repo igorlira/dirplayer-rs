@@ -4,7 +4,7 @@ import {
   useReducer,
   useContext,
 } from "react";
-import init, { add_breakpoint, set_system_font_path, set_pfr_font_enabled } from "vm-rust";
+import init, { add_breakpoint, set_system_font_path, set_pfr_font_enabled, set_stage_scale_snap_integer } from "vm-rust";
 import * as wasm from "vm-rust";
 import { initVmCallbacks } from "../vm/callbacks";
 import {
@@ -146,6 +146,12 @@ function ensureVmGlobalInit(wasmUrl?: string, systemFontPath?: string): Promise<
     const savedPfr = window.localStorage.getItem("dirplayer_pfr_enabled");
     if (savedPfr !== null) {
       set_pfr_font_enabled(savedPfr === "true");
+    }
+    const savedSnap = window.localStorage.getItem(
+      "dirplayer_stage_scale_snap_integer",
+    );
+    if (savedSnap !== null) {
+      set_stage_scale_snap_integer(savedSnap === "true");
     }
   })();
   return vmGlobalInitPromise;

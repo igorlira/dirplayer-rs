@@ -72,6 +72,7 @@ fn compute_stage_layout(
     stage_width: u32,
     stage_height: u32,
     style: StretchStyle,
+    snap_integer: bool,
 ) -> StageLayout {
     let movie_width = movie_width.max(1.0);
     let movie_height = movie_height.max(1.0);
@@ -81,6 +82,26 @@ fn compute_stage_layout(
     match style {
         StretchStyle::Meet => {
             let scale = f64::min(stage_width as f64 / movie_width, stage_height as f64 / movie_height);
+            // Optionally snap the magnification to a whole number.
+            //
+            // The exact aspect fit is almost always fractional — 640x480 on a
+            // 1920x1080 screen is 2.25x — and everything the renderer can only
+            // MAGNIFY (bitmap art, 3D camera overlays, film-loop offscreens, the
+            // cursor) is then resampled unevenly: a source pixel becomes two
+            // destination pixels here and three there, which is what reads as
+            // "pixelated" even though no detail was lost. At a whole factor every
+            // source pixel becomes the same square and the result is uniform.
+            //
+            // Text is unaffected either way — it is re-rasterised at the scale
+            // rather than magnified — so this trades sharper ART against a
+            // smaller picture: 2x of a 640x480 movie is 1280x960, so the
+            // letterbox grows on both axes instead of only the sides. Which
+            // reads better depends on the movie, hence a toggle and not a policy.
+            //
+            // Only ever snaps DOWN, and never below 1.0 — a container smaller
+            // than the movie is a minification, where none of this applies and
+            // flooring would crop the movie.
+            let scale = if snap_integer && scale >= 1.0 { scale.floor() } else { scale };
             let draw_width = movie_width * scale;
             let draw_height = movie_height * scale;
             let left = ((stage_width as f64 - draw_width) / 2.0).max(0.0);
@@ -145,6 +166,7 @@ pub fn stage_layout(player: &DirPlayer) -> StageLayout {
             player.stage_size.0,
             player.stage_size.1,
             stretch_style(player),
+            player.stage_scale_snap_integer,
         )
     }
 }
@@ -403,25 +425,44 @@ mod tests {
 
     #[test]
     fn stretch_meet_letterboxes_inside_stage() {
-        let layout = compute_stage_layout(640.0, 480.0, 1000, 1000, StretchStyle::Meet);
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 1000, StretchStyle::Meet, false);
         assert_eq!(layout.canvas_width, 1000);
         assert_eq!(layout.canvas_height, 1000);
-        assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 1000.0]);
+        // The MOVIE rect, not the container — scripts work in movie coordinates.
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 640.0, 480.0]);
         assert_eq!(layout.draw_rect, [0.0, 125.0, 1000.0, 875.0]);
     }
 
     #[test]
+    fn stretch_meet_snaps_scale_to_a_whole_number() {
+        // 640x480 in 1920x1080 fits at 2.25x; snapped it is 2x, centred, with
+        // the letterbox now on both axes instead of only the sides.
+        let layout = compute_stage_layout(640.0, 480.0, 1920, 1080, StretchStyle::Meet, true);
+        assert_eq!(layout.draw_rect, [320.0, 60.0, 1600.0, 1020.0]);
+        let exact = compute_stage_layout(640.0, 480.0, 1920, 1080, StretchStyle::Meet, false);
+        assert_eq!(exact.draw_rect, [240.0, 0.0, 1680.0, 1080.0]);
+    }
+
+    #[test]
+    fn stretch_meet_snap_never_minifies_below_one() {
+        // Container SMALLER than the movie: flooring would give 0 and crop.
+        let layout = compute_stage_layout(640.0, 480.0, 320, 240, StretchStyle::Meet, true);
+        assert_eq!(layout.draw_rect, [0.0, 0.0, 320.0, 240.0]);
+    }
+
+    #[test]
     fn stretch_fill_matches_container() {
-        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Fill);
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Fill, false);
         assert_eq!(layout.canvas_width, 1000);
         assert_eq!(layout.canvas_height, 600);
-        assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 600.0]);
+        // Movie rect — same reasoning as Meet.
+        assert_eq!(layout.stage_rect, [0.0, 0.0, 640.0, 480.0]);
         assert_eq!(layout.draw_rect, [0.0, 0.0, 1000.0, 600.0]);
     }
 
     #[test]
     fn stretch_stage_resizes_stage_without_scaling_content() {
-        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Stage);
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::Stage, false);
         assert_eq!(layout.canvas_width, 1000);
         assert_eq!(layout.canvas_height, 600);
         assert_eq!(layout.stage_rect, [0.0, 0.0, 1000.0, 600.0]);
@@ -430,7 +471,7 @@ mod tests {
 
     #[test]
     fn stretch_none_keeps_authored_movie_size() {
-        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::None);
+        let layout = compute_stage_layout(640.0, 480.0, 1000, 600, StretchStyle::None, false);
         assert_eq!(layout.canvas_width, 640);
         assert_eq!(layout.canvas_height, 480);
         assert_eq!(layout.stage_rect, [0.0, 0.0, 640.0, 480.0]);

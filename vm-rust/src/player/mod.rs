@@ -343,6 +343,10 @@ pub struct DirPlayer {
     /// the container instead of the movie's own size, so the renderer draws at
     /// screen resolution rather than the frontend CSS-upscaling a small canvas.
     pub fullscreen_active: bool,
+    /// Snap the scaled stage's magnification to a whole number instead of the
+    /// exact aspect fit. A dev/debug preference, not movie state — see the
+    /// reasoning in `compute_stage_layout`.
+    pub stage_scale_snap_integer: bool,
     /// Whether the BROWSER actually holds the pointer lock for this player's
     /// canvas, as reported by the frontend's `pointerlockchange` handler.
     ///
@@ -817,6 +821,7 @@ impl DirPlayer {
             wants_pointer_lock: false,
             wants_fullscreen: false,
             fullscreen_active: false,
+            stage_scale_snap_integer: false,
             pointer_locked: false,
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),

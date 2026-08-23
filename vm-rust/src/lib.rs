@@ -2488,6 +2488,27 @@ pub fn get_pfr_font_enabled() -> bool {
     reserve_player_ref(|player| player.font_manager.pfr_enabled)
 }
 
+/// Snap a scaled stage (fullscreen, or `swStretchStyle = meet`) to a whole-number
+/// magnification instead of the exact aspect fit. See `compute_stage_layout`.
+#[wasm_bindgen]
+pub fn set_stage_scale_snap_integer(enabled: bool) {
+    reserve_player_mut(|player| {
+        player.stage_scale_snap_integer = enabled;
+        // Same invalidation as a stage RESIZE: the canvas keeps its size, but
+        // the draw rect moves and every sprite's render rect (and the size text
+        // is rasterised at) is derived from it, so the frame has to be rebuilt
+        // rather than just repositioned.
+        crate::player::stage::apply_stage_draw_rect(player);
+        let (w, h) = crate::player::stage::stage_canvas_dims(player);
+        crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_stage_scale_snap_integer() -> bool {
+    reserve_player_ref(|player| player.stage_scale_snap_integer)
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     set_panic_hook();
