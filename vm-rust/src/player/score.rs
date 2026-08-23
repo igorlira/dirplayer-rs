@@ -6383,22 +6383,44 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
                 // honor the member's word_wrap flag.
                 let force_wrap = sprite.puppet;
                 let from_bitmap = font.map(|f| {
-                    if text_member.word_wrap || force_wrap {
+                    // The cached atlas is not necessarily at the member's
+                    // authored size. `get_font_with_cast_and_bitmap` files every
+                    // atlas under a bare-name key as well as a sized one, so the
+                    // bare-name entry is whichever size was rasterised LAST — and
+                    // with a scaled stage (fullscreen, or swStretchStyle) the
+                    // renderer rasterises at `font_size * stage_scale`. This rect
+                    // is MOVIE space, so measuring straight against an enlarged
+                    // atlas inflated it by the stage scale: FurniFactory's alert
+                    // panel measured 114px instead of 36, and its single line of
+                    // text ended up pinned to the top of an over-tall box.
+                    //
+                    // Measure in the atlas's OWN units and convert the answer
+                    // back. `ratio` is 1.0 whenever the cached atlas is the
+                    // authored size, which is every unscaled movie.
+                    let ratio = if text_member.font_size > 0 && f.font_size > 0 {
+                        f.font_size as f64 / text_member.font_size as f64
+                    } else {
+                        1.0
+                    };
+                    let to_atlas = |v: i32| ((v as f64) * ratio).round() as i32;
+                    let atlas_h = if text_member.word_wrap || force_wrap {
                         measure_text_wrapped(
-                            &text_member.text, &f, text_width as u16, true,
-                            text_member.fixed_line_space,
-                            text_member.top_spacing,
-                            text_member.bottom_spacing,
+                            &text_member.text, &f,
+                            to_atlas(text_width).max(1) as u16, true,
+                            to_atlas(text_member.fixed_line_space as i32).max(0) as u16,
+                            to_atlas(text_member.top_spacing as i32) as i16,
+                            to_atlas(text_member.bottom_spacing as i32) as i16,
                             text_member.char_spacing,
                         ).1 as i32
                     } else {
                         measure_text(
                             &text_member.text, &f, None,
-                            text_member.fixed_line_space,
-                            text_member.top_spacing,
-                            text_member.bottom_spacing,
+                            to_atlas(text_member.fixed_line_space as i32).max(0) as u16,
+                            to_atlas(text_member.top_spacing as i32) as i16,
+                            to_atlas(text_member.bottom_spacing as i32) as i16,
                         ).1 as i32
-                    }
+                    };
+                    if ratio > 0.0 { ((atlas_h as f64) / ratio).round() as i32 } else { atlas_h }
                 }).filter(|h| *h > 0);
 
                 from_bitmap.or_else(|| {

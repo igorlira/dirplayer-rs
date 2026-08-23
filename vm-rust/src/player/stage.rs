@@ -76,14 +76,29 @@ fn compute_stage_layout(
             StageLayout {
                 canvas_width: stage_width,
                 canvas_height: stage_height,
-                stage_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+                // The MOVIE's rect, not the container's. `stage_rect` is what
+                // Lingo sees as `the stage.rect` / stageLeft / stageTop /
+                // stageRight / stageBottom, and every other coordinate a script
+                // handles is in movie space — sprite locs, member rects, mouseH.
+                // Reporting the container here hands scripts a number in a
+                // different unit from everything around it. Habbo v7's
+                // `Window Instance Class` centres every window with
+                //     tX = ((the stageRight - the stageLeft) / 2) - (pwidth / 2)
+                // so on a scaled stage the help window, catalogue, purse, trade
+                // and alert all centred against 1920x1080 in a 720x540 movie and
+                // flew off the bottom-right. Director's fullscreen kept the
+                // stage the same size and changed the SCREEN mode; the scaling
+                // lives in `draw_rect`, which is where the renderer reads it.
+                stage_rect: [0.0, 0.0, movie_width, movie_height],
                 draw_rect: [left, top, left + draw_width, top + draw_height],
             }
         }
         StretchStyle::Fill => StageLayout {
             canvas_width: stage_width,
             canvas_height: stage_height,
-            stage_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
+            // Movie rect — same reasoning as Meet. Fill stretches the movie to
+            // the container, so scripts still work in movie coordinates.
+            stage_rect: [0.0, 0.0, movie_width, movie_height],
             draw_rect: [0.0, 0.0, stage_width as f64, stage_height as f64],
         },
         StretchStyle::Stage => StageLayout {
@@ -239,16 +254,36 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, Scr
                 return Ok(Datum::BitmapRef(player.stage_image.unwrap()));
             }
 
+            // `(the stage).image` is addressed in MOVIE coordinates — a script
+            // that does `theStage.copyPixels(src, rect(0, 0, 320, 240), ...)`
+            // means movie pixels, and `the stage.rect` is what it sizes against.
+            // `capture_stage_bitmap` answers at the CANVAS size, which a scaled
+            // stage has enlarged, so the persistent image came back 1920x1080
+            // for a 640x480 movie: every draw landed in the top-left quarter and
+            // the compositor (which scales by canvas/image) then had nothing left
+            // to scale. Worse, the bitmap is persistent and never resized, so
+            // leaving fullscreen left a 1920x1080 image against a 640x480 canvas
+            // and the overlay shrank to a third. Render at the movie's own size
+            // whenever the two disagree.
+            let movie_w = player.movie.rect.width().max(1);
+            let movie_h = player.movie.rect.height().max(1);
+            let stage_is_scaled = {
+                let (cw, ch) = stage_canvas_dims(player);
+                cw != movie_w as u32 || ch != movie_h as u32
+            };
             let mut snapshot = None;
-            with_renderer_mut(|renderer_opt| {
-                if let Some(renderer) = renderer_opt {
-                    snapshot = Some(renderer.capture_stage_bitmap(player));
-                }
-            });
+            if !stage_is_scaled {
+                with_renderer_mut(|renderer_opt| {
+                    if let Some(renderer) = renderer_opt {
+                        snapshot = Some(renderer.capture_stage_bitmap(player));
+                    }
+                });
+            }
             let mut snapshot = snapshot.unwrap_or_else(|| {
-                let layout = stage_layout(player);
-                let w = layout.stage_rect[2] - layout.stage_rect[0];
-                let h = layout.stage_rect[3] - layout.stage_rect[1];
+                // Movie size, not `stage_rect` — under `swStretchStyle = meet`
+                // the stage rect IS the container, which is the same mismatch
+                // described above.
+                let (w, h) = (movie_w, movie_h);
                 let mut bitmap = Bitmap::new(
                     w as u16,
                     h as u16,

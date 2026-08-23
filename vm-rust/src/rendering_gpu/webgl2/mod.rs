@@ -581,10 +581,27 @@ impl WebGL2Renderer {
             }
             _ => (0.0, 0.0, sw as f32, sh as f32),
         };
-        // Stage pixels -> screen pixels; the stage image is authored at the
-        // movie's own resolution, which may be scaled to the canvas.
-        let sx = width as f32 / sw as f32;
-        let sy = height as f32 / sh as f32;
+        // Stage pixels -> screen pixels. The stage image is authored at the
+        // movie's own resolution and the canvas may be larger, but the mapping
+        // is the stage LAYOUT's, not a plain canvas/image ratio: under
+        // `swStretchStyle = meet` (and fullscreen) the movie is letterboxed
+        // inside the canvas, so scaling by canvas/image would stretch the
+        // overlay across the bars and leave it misaligned with the sprites
+        // underneath, which go through `draw_rect`.
+        let layout = crate::player::stage::stage_layout(player);
+        let draw_w = (layout.draw_rect[2] - layout.draw_rect[0]) as f32;
+        let draw_h = (layout.draw_rect[3] - layout.draw_rect[1]) as f32;
+        let (ox, oy, sx, sy) = if draw_w > 0.0 && draw_h > 0.0 {
+            (
+                layout.draw_rect[0] as f32,
+                layout.draw_rect[1] as f32,
+                draw_w / sw as f32,
+                draw_h / sh as f32,
+            )
+        } else {
+            (0.0, 0.0, width as f32 / sw as f32, height as f32 / sh as f32)
+        };
+        let _ = (width, height);
         let effective_ink = self.shader_manager.use_program(&self.context, InkMode::Copy);
         let program = match self.shader_manager.get_program(effective_ink) {
             Some(p) => p,
@@ -599,8 +616,35 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_texture {
             gl.uniform1i(Some(loc), 0);
         }
+        // Upload the projection. Every OTHER draw through this program sets it,
+        // so the overlay used to inherit whatever the last sprite left behind —
+        // which is correct right up until the stage is resized and this is the
+        // FIRST draw afterwards. That is exactly the case for an imaging-Lingo
+        // engine like Spectral Wizard, where the visible frame IS the stage
+        // image and there may be no sprite draw at all to refresh it: after
+        // leaving fullscreen the overlay kept drawing through the old 1920x1080
+        // projection into a 640x480 viewport, so the whole game rendered at
+        // 640/1920 by 480/1080 — a 213x213 picture in the corner.
+        if let Some(ref loc) = program.u_projection {
+            gl.uniform_matrix4fv_with_f32_array(Some(loc), false, &self.projection_matrix);
+        }
         if let Some(ref loc) = program.u_sprite_rect {
-            gl.uniform4f(Some(loc), dl * sx, dt * sy, dr * sx, db * sy);
+            // (x, y, WIDTH, HEIGHT) — not right/bottom edges. The old call read
+            // correctly only because it always started at the origin, where
+            // `dr * sx` doubles as the width; with a letterbox offset (or a
+            // dirty sub-rect that does not start at 0) passing the far edge
+            // stretched the quad by exactly the offset. Spectral Wizard drew
+            // from x=240 with width 1680 instead of 1440, so the frame ran off
+            // the right of the screen and every click landed short of the
+            // control it looked like it was over — `canvas_to_movie_coords`
+            // maps against the real 1440-wide drawRect.
+            gl.uniform4f(
+                Some(loc),
+                ox + dl * sx,
+                oy + dt * sy,
+                (dr - dl) * sx,
+                (db - dt) * sy,
+            );
         }
         if let Some(ref loc) = program.u_tex_rect {
             // Matching sub-rect of the stage bitmap, in normalised texture space.
@@ -966,6 +1010,47 @@ impl WebGL2Renderer {
             let h = player.movie.rect.height() as i32;
             self.xtra_scenes.draw(&self.context, player, w, h);
             self.shader_manager.clear_active();
+        }
+
+        // Letterbox. When the stage is scaled with the aspect preserved (our
+        // fullscreen, and `swStretchStyle = meet`) the movie occupies only
+        // `draw_rect` of the canvas, but nothing clips sprites to it — a sprite
+        // whose movie-space rect runs past the movie edge is normally clipped by
+        // the canvas edge, and once the canvas is wider than the movie that
+        // overflow simply becomes visible. Habbo v26's hotel backdrop is wider
+        // than its 720px stage, so the right-hand bar filled with scene while
+        // the left stayed black, which reads as the whole picture being
+        // off-centre.
+        //
+        // Painted at the END rather than clipped with a GL scissor on the way
+        // in: the scissor is global state and the 3D passes render into their
+        // own FBOs mid-frame, so leaving one armed would clip those too.
+        {
+            let layout = crate::player::stage::stage_layout(player);
+            let (cw, ch) = self.size;
+            let (l, t) = (layout.draw_rect[0] as i32, layout.draw_rect[1] as i32);
+            let (r, b) = (layout.draw_rect[2] as i32, layout.draw_rect[3] as i32);
+            let (cw_i, ch_i) = (cw as i32, ch as i32);
+            if l > 0 || t > 0 || r < cw_i || b < ch_i {
+                let bg = self.get_stage_bg_color(player);
+                let gl = self.context.gl();
+                gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+                gl.clear_color(bg.0, bg.1, bg.2, 1.0);
+                // GL's origin is bottom-left, so the vertical bars are flipped.
+                let bars: [(i32, i32, i32, i32); 4] = [
+                    (0, 0, l.max(0), ch_i),                       // left
+                    (r.min(cw_i), 0, (cw_i - r).max(0), ch_i),    // right
+                    (0, (ch_i - t).min(ch_i), cw_i, t.max(0)),    // top
+                    (0, 0, cw_i, (ch_i - b).max(0)),              // bottom
+                ];
+                for (x, y, w, h) in bars {
+                    if w > 0 && h > 0 {
+                        gl.scissor(x, y, w, h);
+                        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+                    }
+                }
+                gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+            }
         }
 
         // Update native CSS cursor (no per-frame draw needed)
@@ -2253,10 +2338,24 @@ impl WebGL2Renderer {
                     let long_wrapped_text = effective_word_wrap && text.len() > 80;
 
                     // Keep mixed source sizing behavior stable to avoid regressions in small labels/buttons.
+                    // `sprite_rect` here is the RENDER rect, already multiplied
+                    // by the stage scale (get_concrete_sprite_render_rect), while
+                    // `text_member.width` / `.height` are authored MOVIE units.
+                    // Mixing the two silently breaks whenever the stage is scaled:
+                    // fullscreen took the width from the scaled rect and the
+                    // height from the unscaled member, so FurniFactory's HUD boxes
+                    // rasterised two 21px lines into a 24px-tall texture — the
+                    // second line ("Twisters", "0", "10 of 10") landed outside it
+                    // and vanished, leaving a box with only its label. Scale the
+                    // member-authored values so both axes are in the same space.
+                    let (stage_sx, stage_sy) = crate::player::stage::stage_scale(player);
+                    let scale_member_w = |v: i32| ((v as f64) * stage_sx).round() as i32;
+                    let scale_member_h = |v: i32| ((v as f64) * stage_sy).round() as i32;
+
                     let width = if long_wrapped_text {
                         sprite_rect.width().max(1) as u32
                     } else if text_member.width > 0 {
-                        (text_member.width as i32).max(sprite_rect.width()).max(1) as u32
+                        scale_member_w(text_member.width as i32).max(sprite_rect.width()).max(1) as u32
                     } else {
                         sprite_rect.width().max(1) as u32
                     };
@@ -2331,11 +2430,12 @@ impl WebGL2Renderer {
                         let mh = text_member.height as i32;
                         let fls = text_member.fixed_line_space as i32;
                         let strides = fls.max(1) * _line_count;
-                        if fls > 0 && mh > 0 && mh + 2 < strides {
+                        // Both are movie units — see `scale_member_h` above.
+                        scale_member_h(if fls > 0 && mh > 0 && mh + 2 < strides {
                             strides
                         } else {
                             mh.max(1)
-                        }
+                        })
                     } else {
                         sprite_rect.height().max(1)
                     };
@@ -2371,7 +2471,12 @@ impl WebGL2Renderer {
                         .max(1);
                     let wrap_estimate = (text.chars().count() as i32 / chars_per_line).max(0);
                     let visual_line_estimate = source_line_count + wrap_estimate + 2;
-                    let content_estimate = max_stride * visual_line_estimate + spacing_pad;
+                    // Movie units, like `max_stride` and `spacing_pad` it is built
+                    // from — but it is compared against `base_height`, which comes
+                    // from the already-scaled render rect. Scale it so the max()
+                    // below compares like with like. No-op at scale 1.
+                    let content_estimate =
+                        scale_member_h(max_stride * visual_line_estimate + spacing_pad);
                     // For #adjust text without explicit \r/\n breaks, score.rs
                     // already grew sprite_rect.height to fit the laid-out
                     // content (its 70% rule covers wrapped single paragraphs
@@ -2426,7 +2531,6 @@ impl WebGL2Renderer {
                         (base_height.max(content_estimate)).max(1) as u32
                     };
                     let _ = has_explicit_breaks;
-
                     // Extract font properties from first styled span if available
                     let (font_name, font_size, font_style) = if !text_member.html_styled_spans.is_empty() {
                         let first_style = &text_member.html_styled_spans[0].style;
@@ -2900,8 +3004,19 @@ impl WebGL2Renderer {
                     // sprite width fit "Goombahs, Ghosts or Bowser --" on
                     // one line, while Director correctly wraps after
                     // "Ghosts or".
+                    //
+                    // `field_member.width` is the AUTHORED text width in movie
+                    // units; `width` is the sprite's render width and is already
+                    // multiplied by the stage scale. Taking the min of the two
+                    // raw meant that on a scaled stage the movie-space value
+                    // always won, so the text was rasterised at
+                    // `font_size * stage_scale` but folded at the UNSCALED width
+                    // — Mario Net Quest's help panel wrapped after two or three
+                    // words per line inside a box three times that wide. Scale it
+                    // first so both sides of the min() are in render units.
+                    let (field_sx, _) = crate::player::stage::stage_scale(player);
                     let wrap_width = if field_member.width > 0 {
-                        (field_member.width as u32).min(width)
+                        (((field_member.width as f64) * field_sx).round() as u32).min(width)
                     } else {
                         width
                     };
@@ -3471,11 +3586,26 @@ impl WebGL2Renderer {
                 if should_override {
                     let reg_x = w / 2;
                     let reg_y = h / 2;
+                    // Built from `raw_loc` (the registration point) and the film
+                    // loop's authored size — BOTH movie units, while the
+                    // `sprite_rect` being replaced came from
+                    // `get_concrete_sprite_render_rect` and is already scaled.
+                    // Writing movie units straight back dropped the stage scale,
+                    // so on a scaled stage every overriding film loop drew at its
+                    // authored size in the top-left region instead of filling its
+                    // quad: Mario Net Quest's torches and Mario himself stayed
+                    // small while the room around them grew. Map it the same way
+                    // sprite rects are mapped. No-op at scale 1 with a zero
+                    // drawRect origin.
+                    let layout = crate::player::stage::stage_layout(player);
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    let map_x = |v: i32| (layout.draw_rect[0] + v as f64 * sx).round() as i32;
+                    let map_y = |v: i32| (layout.draw_rect[1] + v as f64 * sy).round() as i32;
                     sprite_rect = IntRect::from(
-                        raw_loc.0 as i32 - reg_x,
-                        raw_loc.1 as i32 - reg_y,
-                        raw_loc.0 as i32 - reg_x + w,
-                        raw_loc.1 as i32 - reg_y + h,
+                        map_x(raw_loc.0 as i32 - reg_x),
+                        map_y(raw_loc.1 as i32 - reg_y),
+                        map_x(raw_loc.0 as i32 - reg_x + w),
+                        map_y(raw_loc.1 as i32 - reg_y + h),
                     );
                 }
 
@@ -3879,6 +4009,29 @@ impl WebGL2Renderer {
                 let w = width as i32;
                 let h = height as i32;
 
+                // `width`/`height` come from the sprite's RENDER rect, so on a
+                // scaled stage this bitmap is already enlarged — but every piece
+                // of chrome below was authored as a literal pixel count (a 10px
+                // check box, an 11px radio circle, a 3px gap, 1px frame lines)
+                // and the label used the member's unscaled font size. The result
+                // was a full-size button box holding a 1:1 indicator and 1:1
+                // text, which is how Lore's quiz answers kept their authored size
+                // while the rows holding them tripled apart.
+                //
+                // `ind` is the indicator box / circle diameter and `t` its line
+                // thickness. At scale 1 both are exactly the old constants, so
+                // unscaled rendering is unchanged.
+                let btn_scale = {
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    sx.min(sy)
+                };
+                let btn_scaled = (btn_scale - 1.0).abs() > 0.01;
+                let ind = ((10.0 * btn_scale).round() as i32).max(4);
+                let ind_r = ((11.0 * btn_scale).round() as i32).max(5);
+                let t = (btn_scale.round() as i32).max(1);
+                let gap = ((3.0 * btn_scale).round() as i32).max(1);
+                let font_size = ((font_size as f64) * btn_scale).round().max(1.0) as u16;
+
                 // Create a 32-bit RGBA bitmap for the button
                 let mut btn_bitmap = Bitmap::new(
                     width as u16, height as u16, 32, 32, 8,
@@ -3937,16 +4090,17 @@ impl WebGL2Renderer {
                     }
                     ButtonType::CheckBox => {
                         let box_y = 0;
+                        let e = ind; // outer edge
                         // Box outline
-                        btn_bitmap.fill_rect(0, box_y, 10, box_y + 1, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(0, box_y + 9, 10, box_y + 10, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(0, box_y, 1, box_y + 10, (0,0,0), &palettes, 1.0);
-                        btn_bitmap.fill_rect(9, box_y, 10, box_y + 10, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y, e, box_y + t, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y + e - t, e, box_y + e, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(0, box_y, t, box_y + e, (0,0,0), &palettes, 1.0);
+                        btn_bitmap.fill_rect(e - t, box_y, e, box_y + e, (0,0,0), &palettes, 1.0);
                         // White fill inside
-                        btn_bitmap.fill_rect(1, box_y + 1, 9, box_y + 9, (255,255,255), &palettes, 1.0);
+                        btn_bitmap.fill_rect(t, box_y + t, e - t, box_y + e - t, (255,255,255), &palettes, 1.0);
                         // Make the text area opaque
                         for y in 0..h {
-                            for x in 12..w {
+                            for x in (e + 2 * t).min(w)..w {
                                 let idx = ((y * w + x) * 4) as usize;
                                 if idx + 3 < btn_bitmap.data.len() && btn_bitmap.data[idx + 3] == 0 {
                                     btn_bitmap.data[idx + 3] = 1; // minimal alpha so it's not cut
@@ -3954,9 +4108,12 @@ impl WebGL2Renderer {
                             }
                         }
                         if hilite {
-                            for i in 1..9 {
-                                btn_bitmap.fill_rect(i, box_y + i, i + 1, box_y + i + 1, (0,0,0), &palettes, 1.0);
-                                btn_bitmap.fill_rect(9 - i, box_y + i, 10 - i, box_y + i + 1, (0,0,0), &palettes, 1.0);
+                            // The X, as two diagonals of thickness `t`.
+                            let mut i = t;
+                            while i < e - t {
+                                btn_bitmap.fill_rect(i, box_y + i, i + t, box_y + i + t, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(e - t - i, box_y + i, e - i, box_y + i + t, (0,0,0), &palettes, 1.0);
+                                i += 1;
                             }
                         }
                     }
@@ -3977,24 +4134,52 @@ impl WebGL2Renderer {
                             (3,9),(7,9),
                             (4,10),(5,10),(6,10),
                         ];
-                        for &(px, py) in circle_points {
-                            btn_bitmap.fill_rect(base_x + px, base_y + py, base_x + px + 1, base_y + py + 1, (0,0,0), &palettes, 1.0);
-                        }
-                        if hilite {
-                            // Filled inner circle (radius 2, center 5,5)
-                            btn_bitmap.fill_rect(base_x + 4, base_y + 3, base_x + 7, base_y + 4, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 4, base_x + 8, base_y + 5, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 5, base_x + 8, base_y + 6, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 3, base_y + 6, base_x + 8, base_y + 7, (0,0,0), &palettes, 1.0);
-                            btn_bitmap.fill_rect(base_x + 4, base_y + 7, base_x + 7, base_y + 8, (0,0,0), &palettes, 1.0);
+                        if !btn_scaled {
+                            // 1:1 — keep the hand-tuned midpoint circle exactly as
+                            // it was, so unscaled output stays bit-identical.
+                            for &(px, py) in circle_points {
+                                btn_bitmap.fill_rect(base_x + px, base_y + py, base_x + px + 1, base_y + py + 1, (0,0,0), &palettes, 1.0);
+                            }
+                            if hilite {
+                                // Filled inner circle (radius 2, center 5,5)
+                                btn_bitmap.fill_rect(base_x + 4, base_y + 3, base_x + 7, base_y + 4, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 4, base_x + 8, base_y + 5, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 5, base_x + 8, base_y + 6, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 3, base_y + 6, base_x + 8, base_y + 7, (0,0,0), &palettes, 1.0);
+                                btn_bitmap.fill_rect(base_x + 4, base_y + 7, base_x + 7, base_y + 8, (0,0,0), &palettes, 1.0);
+                            }
+                        } else {
+                            // Scaled: a fixed point list cannot grow, so draw the
+                            // ring and the dot from the radius instead.
+                            let _ = circle_points;
+                            let d = ind_r;
+                            let r = d as f64 / 2.0;
+                            let inner = (r - t as f64).max(0.0);
+                            let dot = (r * 0.4).max(1.0);
+                            for y in 0..d {
+                                for x in 0..d {
+                                    let dx = x as f64 + 0.5 - r;
+                                    let dy = y as f64 + 0.5 - r;
+                                    let dist = (dx * dx + dy * dy).sqrt();
+                                    let on_ring = dist <= r && dist >= inner;
+                                    let in_dot = hilite && dist <= dot;
+                                    if on_ring || in_dot {
+                                        btn_bitmap.fill_rect(
+                                            base_x + x, base_y + y,
+                                            base_x + x + 1, base_y + y + 1,
+                                            (0, 0, 0), &palettes, 1.0,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
                 // Draw text label
                 let chrome_offset_x = match button_type {
-                    ButtonType::CheckBox => 13, // 10px box + 3px gap
-                    ButtonType::RadioButton => 14, // 11px circle + 3px gap
+                    ButtonType::CheckBox => ind + gap,      // box + gap
+                    ButtonType::RadioButton => ind_r + gap, // circle + gap
                     _ => 0,
                 };
 
@@ -4340,6 +4525,14 @@ impl WebGL2Renderer {
                 // camera's `colorBuffer.clearAtRender`, which is how a movie layers a
                 // skybox, the 3D world and an orthographic UI pass into one sprite.
                 let member_key = passes.first().map(|p| p.member_key).unwrap_or((0, 0));
+                // Backdrops and overlays are authored in movie pixels but drawn
+                // into this sprite's already-enlarged render rect, so the 3D
+                // renderer needs the factor to divide its 2D ortho by. 1.0 for
+                // every unscaled movie. See `Scene3dRenderer::stage_scale`.
+                self.scene3d.stage_scale = {
+                    let (sx, sy) = crate::player::stage::stage_scale(player);
+                    sx.min(sy) as f32
+                };
                 for (i, pass) in passes.iter().enumerate() {
                     let clear = if i == 0 {
                         true
@@ -4603,9 +4796,23 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), (rotation as f32).to_radians());
         }
 
-        // Set rotation center (sprite's registration point: loc_h, loc_v)
+        // Set rotation center (sprite's registration point: loc_h, loc_v).
+        //
+        // Mapped through the stage layout FIRST. The quad's vertices come from
+        // `get_concrete_sprite_render_rect`, which is already scaled and offset
+        // by the drawRect; feeding the raw movie-space registration point as the
+        // centre made the shader rotate scaled geometry about an unscaled pivot,
+        // so the sprite swung away from where it belongs — by roughly
+        // `loc * (scale - 1)`. FurniFactory's clock (rot 25, skew 337, loc
+        // 523,95) landed in the middle of the factory floor instead of on the
+        // computer screen. A no-op at scale 1 with a zero drawRect origin, i.e.
+        // for ordinary unscaled playback.
         if let Some(ref loc) = u_rotation_center {
-            gl.uniform2f(Some(loc), raw_loc.0 as f32, raw_loc.1 as f32);
+            let layout = crate::player::stage::stage_layout(player);
+            let (sx, sy) = crate::player::stage::stage_scale(player);
+            let cx = layout.draw_rect[0] + raw_loc.0 as f64 * sx;
+            let cy = layout.draw_rect[1] + raw_loc.1 as f64 * sy;
+            gl.uniform2f(Some(loc), cx as f32, cy as f32);
         }
 
         // Set blend (0-100 -> 0.0-1.0)
@@ -5967,6 +6174,41 @@ impl WebGL2Renderer {
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
         let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
         let bottom_spacing = ((bottom_spacing as f64) * scale).round() as i16;
+        // Chrome thicknesses are authored in movie units too, but everything they
+        // are drawn against below (`render_width` / `render_height`, and the
+        // content area derived from them) is in the scaled bitmap's space. Left
+        // raw, a 2px border and a 5px drop shadow stayed 2px and 5px inside a
+        // 3.16x-larger box — a hairline around a panel whose art had tripled.
+        // `.max(1)` keeps a scaled-down border from rounding away to nothing
+        // while an unscaled 0 stays 0.
+        let border = if border > 0 {
+            (((border as f64) * scale).round() as u16).max(1)
+        } else {
+            0
+        };
+        let box_drop_shadow = if box_drop_shadow > 0 {
+            (((box_drop_shadow as f64) * scale).round() as u16).max(1)
+        } else {
+            0
+        };
+        // Per-line strides from the member's XMED par_runs. These are AUTHORED
+        // pixel values and they take priority over `line_spacing` in the draw
+        // loop below, so leaving them raw meant the glyphs grew with the stage
+        // while the stride between lines did not — the lines closed up and
+        // overlapped. WorldBuilder's "MISSION 1 / TUTORIAL" label printed both
+        // lines on top of each other; Junkbot's level.num / level.name columns
+        // are driven by the same table.
+        //
+        // `.max(1)` for the same reason as the border: a scaled-DOWN stride must
+        // not collapse to zero and stack every line at the same y. A 0 entry
+        // means "no authored stride" and has to stay 0, since the draw loop
+        // filters on `> 0` to decide whether to use it at all.
+        let per_line_spacings_scaled: Vec<u16> = per_line_spacings
+            .iter()
+            .map(|&s| if s > 0 { (((s as f64) * scale).round() as u16).max(1) } else { 0 })
+            .collect();
+        let per_line_spacings: &[u16] = &per_line_spacings_scaled;
+
         let styled_spans_scaled: Option<Vec<StyledSpan>> = styled_spans.map(|spans| {
             spans.iter().map(|s| {
                 let mut style = s.style.clone();

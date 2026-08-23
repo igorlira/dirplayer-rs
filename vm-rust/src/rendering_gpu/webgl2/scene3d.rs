@@ -211,6 +211,19 @@ pub struct Scene3dRenderer {
     fbo_depth: Option<web_sys::WebGlRenderbuffer>,
     fbo_width: u32,
     fbo_height: u32,
+    /// Stage scale in force for this frame, set by the compositor before it
+    /// renders a 3D sprite.
+    ///
+    /// Camera backdrops and overlays are positioned in the SPRITE's own
+    /// coordinate space — `addBackdrop(tex, point(x, y), rotation)` takes movie
+    /// pixels — but the viewport they are drawn into is the sprite's RENDER
+    /// rect, which a scaled stage has already enlarged. Without this the
+    /// backdrop keeps its authored size and origin inside a viewport several
+    /// times larger: estate's sky stayed a small band across the top with bare
+    /// clear colour under it. The 2D ortho below divides by this, so a
+    /// movie-space quad fills the same fraction of the viewport at any scale.
+    /// 1.0 for every unscaled movie.
+    pub stage_scale: f32,
     // Bloom post-processing FBOs (half resolution)
     bloom_fbo_a: Option<WebGlFramebuffer>,
     bloom_tex_a: Option<WebGlTexture>,
@@ -290,6 +303,7 @@ impl Scene3dRenderer {
             fullscreen_vao: None,
             fbo_width: 0,
             fbo_height: 0,
+            stage_scale: 1.0,
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
@@ -2576,8 +2590,10 @@ void main() {
             WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
-        let w = width as f32;
-        let h = height as f32;
+        // Movie-space viewport — see `stage_scale` and draw_backdrops_inline.
+        let s = if self.stage_scale > 0.0 { self.stage_scale } else { 1.0 };
+        let w = width as f32 / s;
+        let h = height as f32 / s;
         // Ortho projection: (0,0)=top-left in screen space
         // FBO is Y-flipped when composited, so use positive Y (no flip here)
         let ortho: [f32; 16] = [
@@ -2775,8 +2791,12 @@ void main() {
             WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
-        let w = width as f32;
-        let h = height as f32;
+        // Movie-space viewport: backdrops are authored in movie pixels, so the
+        // ortho works in that space and the (already enlarged) GL viewport does
+        // the scaling. See `stage_scale`.
+        let s = if self.stage_scale > 0.0 { self.stage_scale } else { 1.0 };
+        let w = width as f32 / s;
+        let h = height as f32 / s;
         // Ortho: (0,0)=top-left in sprite space. FBO is Y-flipped when composited, so
         // use positive Y here (matches render_overlays_to_fbo).
         let ortho: [f32; 16] = [
