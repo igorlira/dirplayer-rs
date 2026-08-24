@@ -1521,13 +1521,23 @@ impl FontMemberHandlers {
         // "15" hung across the rule of the "FOES LEFT" plate at y=64 instead
         // of sitting above it. Same for `tfTime` (fls 38, size 38).
 
+        // The same synthetic-bold pen the atlas path applies
+        // (`rasterizer::bold_embolden_orus`), so a member's baked `.image` stays
+        // in step with the same text drawn on stage. Without it, bold text here
+        // was stepped at regular-weight advances and its letters ran together —
+        // Coke Studios' window titles are Verdana 12 bold baked through this
+        // path. See that constant for why the pen is empirical and what it is
+        // probably compensating for.
+        let bold_embolden =
+            crate::director::chunks::pfr1::rasterizer::bold_embolden_orus(parsed, true) as f64;
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
-        let advance_of = |code: u8| -> f64 {
-            let sw = parsed
-                .glyphs
-                .get(&code)
-                .map(|g| g.set_width as f64)
-                .unwrap_or(outline_res * 0.5);
+        let advance_of = |code: u8, bold: bool| -> f64 {
+            let glyph = parsed.glyphs.get(&code);
+            let sw = glyph.map(|g| g.set_width as f64).unwrap_or(outline_res * 0.5);
+            // A glyph with no contour (the space) carries no ink for the pen to
+            // widen, and Shockwave leaves its advance alone.
+            let has_ink = glyph.map_or(false, |g| !g.contours.is_empty());
+            let sw = if bold && has_ink { sw + bold_embolden } else { sw };
             sw * scale + char_spacing as f64
         };
         let style_at = |idx: usize| -> OutlineCharStyle {
@@ -1553,7 +1563,7 @@ impl FontMemberHandlers {
                     cur_w = 0.0; last_space = None; width_to = 0.0;
                     continue;
                 }
-                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c)) };
+                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c), style_at(i).bold) };
                 let has_tab = cur.iter().any(|&(ch, _)| ch == '\t');
                 if word_wrap && !has_tab && cur_w + adv > wrap_w && !cur.is_empty() {
                     if let Some(sp) = last_space {
@@ -1563,7 +1573,7 @@ impl FontMemberHandlers {
                         lines.push(std::mem::take(&mut cur));
                         cur = tail;
                         cur_w = cur.iter()
-                            .map(|&(ch, _)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch)) })
+                            .map(|&(ch, ix)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch), style_at(ix).bold) })
                             .sum();
                         let _ = width_to;
                         last_space = None;
@@ -1615,7 +1625,7 @@ impl FontMemberHandlers {
         let line_step = effective_line_h + bottom_spacing as f64 + top_spacing as f64;
 
         let seg_width = |seg: &[(char, usize)]| -> f64 {
-            seg.iter().map(|&(c, _)| advance_of(glyph_byte_for(c))).sum()
+            seg.iter().map(|&(c, ix)| advance_of(glyph_byte_for(c), style_at(ix).bold)).sum()
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == BuiltInSymbol::Right);
 
@@ -1709,7 +1719,7 @@ impl FontMemberHandlers {
                 for &(c, idx) in seg {
                     let code = glyph_byte_for(c);
                     let st = style_at(idx);
-                    let adv = advance_of(code);
+                    let adv = advance_of(code, st.bold);
                     // Draw at the *fractional* cursor (not x.round()). The 5×
                     // supersample buffer has the sub-pixel resolution to place
                     // each glyph exactly, so inter-letter spacing matches the

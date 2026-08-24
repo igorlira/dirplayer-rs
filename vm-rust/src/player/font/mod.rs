@@ -300,11 +300,22 @@ impl FontManager {
                         let member_name_lc = member.name.to_ascii_lowercase();
                         let thin_stem_boost = font_info_lc.contains("italic")
                             || member_name_lc.contains("italic");
+                        // Synthetic bold in the font's design space, so the
+                        // weight reaches the ADVANCE and not just the ink. No-op
+                        // unless bold is asked of a regular-weight face. See
+                        // `bold_embolden_orus` — this reproduces Shockwave's tab
+                        // positions but its mechanism is contradicted by a later
+                        // specimen capture; it is standing in for the field/text
+                        // metric split we do not model yet.
+                        let want_bold = style.unwrap_or(0) & 1 != 0;
+                        let embolden_orus =
+                            rasterizer::bold_embolden_orus(&parsed_for_size, want_bold);
                         let rasterized = rasterizer::rasterize_pfr1_font_with_options(
                             &parsed_for_size,
                             requested_size as usize,
                             font_data.font_info.size as usize,
                             thin_stem_boost,
+                            embolden_orus,
                         );
 
                         let bitmap_width = rasterized.bitmap_width as u16;

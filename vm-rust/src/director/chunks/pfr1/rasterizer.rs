@@ -444,6 +444,61 @@ pub struct RasterizedFont {
     pub num_chars: usize,
 }
 
+/// Pen width, as a fraction of the em, added to a regular-weight PFR face's
+/// advances when bold is asked of it.
+///
+/// FITTED, NOT DERIVED — and its mechanism is contradicted; read this before
+/// building on it.
+///
+/// It was fitted to Shockwave's own glyph positions for "Public View" at 11 px
+/// (Coke Studios' navigator tabs, PFR `Verdana_400_000`, a field): every value
+/// in `[176.4, 182.5)` design units at 2048/em reproduces all ten positions
+/// exactly and nothing outside it does, with `e` and `V` pinning the bracket
+/// from opposite sides. With it those tabs land on Shockwave pixel for pixel.
+///
+/// But a later Shockwave capture of a purpose-built specimen movie says
+/// Director does NOT widen advances for synthetic bold at all: `charPosToLoc`
+/// over ten identical glyphs is byte-identical between `[#plain]` and `[#bold]`
+/// at every size, for every font in the library, and a field's bold ink spans
+/// the same pixels as its plain ink (only the ink COUNT changes). The same
+/// capture shows something we do not model — a field and a text member have
+/// DIFFERENT advances for the same font and size (H is 9.3 px in the field
+/// against 8.0 px in the text member) — which this pen is probably standing in
+/// for, since the movie that motivated it renders its text in fields.
+///
+/// So: correct output, wrong story. Model the field/text split and this should
+/// disappear. Do not cite it as Director's bold behaviour.
+pub const BOLD_EMBOLDEN_EM: f32 = 180.0 / 2048.0;
+
+/// The pen for `font`, in ITS design units, when bold is asked of a face that
+/// does not have it. Returns 0 when the face is already bold — a real bold
+/// outline must not be emboldened again.
+pub fn bold_embolden_orus(parsed_font: &Pfr1ParsedFont, want_bold: bool) -> f32 {
+    if !want_bold {
+        return 0.0;
+    }
+    // PFR font IDs follow `<Family>_<Weight>_<Variant>` (`Verdana_400_000`),
+    // so the weight is readable straight off the name. Anything at 600 or
+    // above is already a bold design.
+    let name = &parsed_font.physical_font.font_id;
+    let already_bold = name
+        .split('_')
+        .nth(1)
+        .and_then(|w| w.parse::<u32>().ok())
+        .map_or_else(
+            || name.to_ascii_lowercase().contains("bold"),
+            |weight| weight >= 600,
+        );
+    if already_bold {
+        return 0.0;
+    }
+    let res = parsed_font.physical_font.outline_resolution as f32;
+    if res <= 0.0 {
+        return 0.0;
+    }
+    res * BOLD_EMBOLDEN_EM
+}
+
 /// Steepen alpha ramp for crisper glyph edges.
 /// Alpha below `lo` -> 0, above `hi` -> 255, between -> linear remap to 0..255.
 fn steepen_alpha_ramp(alpha: &mut [u8], lo: u8, hi: u8) {
@@ -475,7 +530,7 @@ pub fn rasterize_pfr1_font(
     target_height: usize,
     design_size: usize,
 ) -> RasterizedFont {
-    rasterize_pfr1_font_with_options(parsed_font, target_height, design_size, false)
+    rasterize_pfr1_font_with_options(parsed_font, target_height, design_size, false, 0.0)
 }
 
 /// Variant of `rasterize_pfr1_font` that exposes additional knobs.
@@ -488,11 +543,23 @@ pub fn rasterize_pfr1_font(
 /// barely-there gray; with it they read as a clear thin stroke. Don't use
 /// it for regular-weight atlases: the same curve thickens the AA edges of
 /// solid stems and makes the whole atlas look bold.
+///
+/// `embolden_orus` synthesises BOLD from a regular-weight face, in the font's
+/// own design units. Director does this in design space, before the glyph is
+/// scaled to the requested size, so the extra weight lands in the ADVANCE as
+/// well as in the ink — and being a pre-scale quantity it can be a fraction of
+/// a device pixel. Measured against Shockwave with Coke Studios' PFR Verdana
+/// (`Verdana_400_000`, the only face in the file, no bitmap strikes): every
+/// glyph of "Public View" at 11 px sits exactly one pixel further along than an
+/// un-emboldened render — except `V`, whose un-emboldened advance already
+/// rounds up (7.52 -> 8) and which Shockwave also draws at 8. That rules out a
+/// flat per-glyph +1 and pins the pen to ~0.088 em; see `BOLD_EMBOLDEN_EM`.
 pub fn rasterize_pfr1_font_with_options(
     parsed_font: &Pfr1ParsedFont,
     target_height: usize,
     design_size: usize,
     thin_stem_boost: bool,
+    embolden_orus: f32,
 ) -> RasterizedFont {
     let phys = &parsed_font.physical_font;
 
@@ -750,8 +817,12 @@ pub fn rasterize_pfr1_font_with_options(
         // v2 = ((outlineRes/2 + (csw << 16)) / outlineRes
         // advance_16_16 = FixedPointMultiply16(v2, matrix2136_A)
         // Rounded to pixel: (advance + 0x8000) >> 16
+        // Glyphs with no contour (the space) carry no ink for the pen to
+        // widen, so their advance is untouched — which is what Shockwave does:
+        // "Public View"'s space stays 4 px while every inked glyph gains one.
+        let embolden_this = if glyph.contours.is_empty() { 0.0 } else { embolden_orus };
         let glyph_pixel_width = if out_res_i > 0 {
-            let csw = glyph.set_width as i16;
+            let csw = (glyph.set_width + embolden_this) as i16;
             let v2 = ((out_res_i >> 1) + ((csw as i32) << 16)) / out_res_i;
             let advance_16_16 = fixed_point_multiply16(v2, matrix2136_a);
             let advance_px = ((advance_16_16 + 0x8000) & !0xFFFF) >> 16;
