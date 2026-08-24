@@ -1805,6 +1805,13 @@ impl WebGL2Renderer {
                 /// displayComputer uses -2). Already factored into
                 /// `measure_text_wrapped`.
                 char_spacing: i32,
+                /// True when this text comes from a FIELD member, whose
+                /// `lineHeight` Director derives from the font rather than
+                /// taking as authored leading. The PFR line layout uses it to
+                /// decide whether the slack over the point size is leading to
+                /// add above the glyph, or just the font's own line box (see
+                /// the leading rationale in the bitmap draw loop).
+                is_field: bool,
             },
             FilmLoop {
                 initial_rect: IntRect,
@@ -2320,6 +2327,7 @@ impl WebGL2Renderer {
                         par_infos: Vec::new(),
                         par_runs: Vec::new(),
                         char_spacing: 0,
+                        is_field: false,
                     }
                 }
                 CastMemberType::Text(text_member) => {
@@ -2986,6 +2994,7 @@ impl WebGL2Renderer {
                         par_infos: text_member.par_infos.clone(),
                         par_runs: text_member.par_runs.clone(),
                         char_spacing: text_member.char_spacing,
+                        is_field: false,
                     }
                 }
                 CastMemberType::Field(field_member) => {
@@ -3376,6 +3385,7 @@ impl WebGL2Renderer {
                         par_infos: Vec::new(),
                         par_runs: Vec::new(),
                         char_spacing: 0,
+                        is_field: true,
                     }
                 }
                 CastMemberType::Button(button_member) => {
@@ -3849,6 +3859,7 @@ impl WebGL2Renderer {
                 ref par_infos,
                 ref par_runs,
                 char_spacing,
+                is_field,
             } => {
                 if text.contains('\t') || !tab_stops.is_empty() {
                     warn!(
@@ -3914,6 +3925,7 @@ impl WebGL2Renderer {
                         par_infos.as_slice(),
                         par_runs.as_slice(),
                         char_spacing,
+                        is_field,
                     ) {
                         Some((tex, _actual_w, actual_h)) => {
                             // Update sprite_rect to match actual rendered dimensions.
@@ -6153,6 +6165,7 @@ impl WebGL2Renderer {
         par_infos_for_native: &[crate::director::chunks::xmedia_styled_text::ParInfo],
         par_runs_for_native: &[crate::director::chunks::xmedia_styled_text::ParRun],
         char_spacing: i32,
+        is_field: bool,
     ) -> Option<(web_sys::WebGlTexture, u32, u32)> {
         // Whether to keep the bitmap at the authored height (no shrink-to-
         // content, no fill-scaling). True when the sprite carries a skew or
@@ -6937,6 +6950,11 @@ impl WebGL2Renderer {
                             ),
                         };
                         draw_glyph(bitmap, x);
+                        // Synthetic bold's INK: a second strike one pixel over.
+                        // Its matching ADVANCE comes from the design-space pen
+                        // baked into `char_widths` (see `bold_embolden_orus`) —
+                        // widening the ink here without widening the pen there is
+                        // what used to run bold PFR text a pixel per glyph short.
                         if bold {
                             draw_glyph(bitmap, x + 1);
                         }
@@ -7657,21 +7675,43 @@ impl WebGL2Renderer {
                                 line_height
                             }
                         });
-                    // Director-style leading: when the line cell is taller
-                    // than the glyph cell (effective_lh > native char_height),
-                    // the extra space is leading at the TOP of the line. The
-                    // glyph baseline sits in the lower portion of the cell —
-                    // not flush against the top. This matches Junkbot v1
-                    // level.num where each line is 21 px but the 04b_08 *
-                    // glyphs are only ~16 px tall: Director draws the "1"
-                    // ~5 px below the cell top, so the visible text rows
-                    // sit "inside" each row rather than crowding the top.
-                    let glyph_cell_h = if font.font_size > 0 {
+                    // Director-style leading: when the line box is taller than
+                    // the glyph box, the extra space is leading at the TOP of
+                    // the line, so the text sits inside its row instead of
+                    // crowding the top. Junkbot v1's level list pins it — each
+                    // row is 21 px for a 12 pt 04b_08 *, and Director draws the
+                    // number 9 px below the row top; Worldbuilder's tutorial
+                    // dialog is the same shape (Arial * 12 on a 14 px line).
+                    //
+                    // A FIELD is the exception. Its `lineHeight` is not authored
+                    // leading — Director derives it from the font, so the value
+                    // already IS the font's line box and there is no slack to
+                    // distribute. The atlas cell says the same thing from the
+                    // other side: its blank rows above the ink (`cap_top`) are
+                    // that same ascent gap, so adding the difference over the
+                    // point size on top applies it twice. Coke Studios'
+                    // navigator tabs are PFR Verdana 11 (3 px gap above the
+                    // caps) in a lineHeight-14 field: that put the labels 3 px
+                    // below Director's baseline, far enough for the 13 px field
+                    // box to cut their bottom rows off. Netting the gap out
+                    // lands them on Director exactly.
+                    //
+                    // Clamped at zero either way: leading is slack, never a
+                    // debt. A cell gap wider than the slack must not lift the
+                    // glyph above its line — that is what put Volter's login
+                    // text above its box.
+                    let glyph_box_h = if font.font_size > 0 {
                         font.font_size as i32
                     } else {
                         font.char_height as i32
                     };
-                    let leading_top = (effective_lh - glyph_cell_h).max(0);
+                    let cell_gap_above_ink = if is_field {
+                        pfr_cap_top.unwrap_or(0).max(0)
+                    } else {
+                        0
+                    };
+                    let leading_top =
+                        ((effective_lh - glyph_box_h).max(0) - cell_gap_above_ink).max(0);
                     render_line(line, y + leading_top, &mut text_bitmap);
                     // Track the max glyph extent (including descender). The
                     // PFR atlas's `font.char_height` includes ascender +
