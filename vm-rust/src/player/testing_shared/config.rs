@@ -4,6 +4,8 @@ use indexmap::IndexMap;
 use std::sync::OnceLock;
 use serde::Deserialize;
 use crate::player::reserve_player_mut;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 
@@ -56,6 +58,84 @@ pub struct TestConfig {
     pub external_params: IndexMap<String, String>,
     #[serde(default)]
     pub params: HashMap<String, String>,
+    /// Host-page Flash/socket wiring, applied to `window.__dirplayerFlashConfig`
+    /// by `apply_flash_config`. See `FlashConfig`.
+    #[serde(default)]
+    pub flash: FlashConfig,
+}
+
+/// The `[flash]` section: what a host page would normally hand
+/// `src/services/flashPlayerManager.ts` through
+/// `window.__dirplayerFlashConfig` (see `DirPlayer.configureFlash`).
+///
+/// The shipped manager reads that object lazily on every fetch / socket
+/// resolution, so a movie whose network access only works behind a proxy
+/// (CokeStudios dials its Multiuser gateway over TCP; a browser can only
+/// speak WebSocket) can be wired up per-test here, instead of needing a
+/// development fork of the manager with the mapping hardcoded.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FlashConfig {
+    /// `host:port` -> WebSocket URL, for both Ruffle's socket API and the
+    /// WASM Multiuser Xtra (`window.dirplayerResolveSocketUrl`).
+    #[serde(default)]
+    pub socket_proxy: Vec<SocketProxyEntry>,
+    /// Path-prefix fetch redirection, for assets a movie pulls from an
+    /// absolute URL the test server doesn't host.
+    #[serde(default)]
+    pub fetch_rewrite: Vec<FetchRewriteRule>,
+    /// Base of a generic CORS proxy, e.g. `http://127.0.0.1:3099/cors?url=`.
+    /// Empty (the default) leaves cross-origin fetches alone.
+    #[serde(default)]
+    pub cors_proxy: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SocketProxyEntry {
+    /// Movie-side host. `*` matches any host.
+    pub host: String,
+    /// Movie-side port. `0` matches any port. Written either as a TOML
+    /// integer or as a string, so it can carry a `${VAR}` placeholder.
+    #[serde(deserialize_with = "de_port")]
+    pub port: String,
+    /// WebSocket URL to dial instead. `${host}` / `${port}` expand to the
+    /// movie-side values, which is how one wildcard entry can forward a
+    /// whole range of ports.
+    pub proxy_url: String,
+}
+
+impl SocketProxyEntry {
+    /// The port as a number. An unparseable (or env-unset, hence empty) value
+    /// becomes 0, which the resolver reads as the "any port" wildcard.
+    pub fn port_number(&self) -> u32 {
+        self.port.trim().parse().unwrap_or(0)
+    }
+}
+
+/// Accept `port = 9000` and `port = "${COKESTUDIOS_GAME_PORT}"` alike.
+fn de_port<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PortSpec {
+        Int(u64),
+        Str(String),
+    }
+    Ok(match PortSpec::deserialize(d)? {
+        PortSpec::Int(i) => i.to_string(),
+        PortSpec::Str(s) => s,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FetchRewriteRule {
+    pub path_prefix: String,
+    pub target_host: String,
+    pub target_port: String,
+    #[serde(default = "FetchRewriteRule::default_protocol")]
+    pub target_protocol: String,
+}
+
+impl FetchRewriteRule {
+    fn default_protocol() -> String { "http:".to_string() }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +210,18 @@ impl TestConfig {
         cfg.params = cfg.params.into_iter()
             .map(|(k, v)| (k, Self::resolve_env(&v)))
             .collect();
+        cfg.flash.cors_proxy = Self::resolve_env(&cfg.flash.cors_proxy);
+        for entry in &mut cfg.flash.socket_proxy {
+            entry.host = Self::resolve_env(&entry.host);
+            entry.port = Self::resolve_env(&entry.port);
+            entry.proxy_url = Self::resolve_env(&entry.proxy_url);
+        }
+        for rule in &mut cfg.flash.fetch_rewrite {
+            rule.path_prefix = Self::resolve_env(&rule.path_prefix);
+            rule.target_host = Self::resolve_env(&rule.target_host);
+            rule.target_port = Self::resolve_env(&rule.target_port);
+            rule.target_protocol = Self::resolve_env(&rule.target_protocol);
+        }
         cfg
     }
 
@@ -154,6 +246,64 @@ impl TestConfig {
         reserve_player_mut(|player| {
             player.external_params = params;
         });
+    }
+
+    /// Apply `[flash]` to `window.__dirplayerFlashConfig`, the object the
+    /// shipped `flashPlayerManager.ts` reads for socket-proxy mappings, fetch
+    /// rewrites and the CORS proxy base — i.e. what a host page does through
+    /// `DirPlayer.configureFlash`. Merges into whatever the test page already
+    /// set (the browser template seeds `renderer` / `logLevel`), and only
+    /// writes keys the config actually declares.
+    ///
+    /// Must run BEFORE `load_movie`: the movie can dial its Multiuser gateway
+    /// during its own startup. No-op on native, which has no window.
+    #[allow(unused_variables)]
+    pub fn apply_flash_config(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+
+            let f = &self.flash;
+            if f.socket_proxy.is_empty() && f.fetch_rewrite.is_empty() && f.cors_proxy.is_empty() {
+                return;
+            }
+            let Some(window) = web_sys::window() else { return };
+            let key = JsValue::from_str("__dirplayerFlashConfig");
+            let existing = js_sys::Reflect::get(&window, &key).unwrap_or(JsValue::UNDEFINED);
+            let cfg: js_sys::Object = existing.dyn_into().unwrap_or_else(|_| js_sys::Object::new());
+
+            let set = |obj: &js_sys::Object, k: &str, v: &JsValue| {
+                let _ = js_sys::Reflect::set(obj, &JsValue::from_str(k), v);
+            };
+
+            if !f.socket_proxy.is_empty() {
+                let arr = js_sys::Array::new();
+                for entry in &f.socket_proxy {
+                    let o = js_sys::Object::new();
+                    set(&o, "host", &JsValue::from_str(&entry.host));
+                    set(&o, "port", &JsValue::from_f64(entry.port_number() as f64));
+                    set(&o, "proxyUrl", &JsValue::from_str(&entry.proxy_url));
+                    arr.push(&o);
+                }
+                set(&cfg, "socketProxy", &arr);
+            }
+            if !f.fetch_rewrite.is_empty() {
+                let arr = js_sys::Array::new();
+                for rule in &f.fetch_rewrite {
+                    let o = js_sys::Object::new();
+                    set(&o, "pathPrefix", &JsValue::from_str(&rule.path_prefix));
+                    set(&o, "targetHost", &JsValue::from_str(&rule.target_host));
+                    set(&o, "targetPort", &JsValue::from_str(&rule.target_port));
+                    set(&o, "targetProtocol", &JsValue::from_str(&rule.target_protocol));
+                    arr.push(&o);
+                }
+                set(&cfg, "fetchRewriteRules", &arr);
+            }
+            if !f.cors_proxy.is_empty() {
+                set(&cfg, "corsProxy", &JsValue::from_str(&f.cors_proxy));
+            }
+            let _ = js_sys::Reflect::set(&window, &key, &cfg);
+        }
     }
 
     /// Apply `[movie] startup_do` to the player, equivalent to the frontend's
@@ -190,6 +340,21 @@ impl TestConfig {
             let after = &rest[start + 2..];
             let end = after.find('}').expect("Unclosed ${...} in config value");
             let token = &after[..end];
+            // Only SCREAMING_SNAKE names are env placeholders — the same set
+            // `scripts/run-browser-tests.mjs` harvests into `window.__testEnv`.
+            // Anything else is left verbatim so a config value can carry a
+            // placeholder meant for a later consumer (`[[flash.socket_proxy]]`
+            // `proxy_url` expands `${host}` / `${port}` in the browser).
+            let var_name = token.split(':').next().unwrap_or("");
+            if var_name.is_empty()
+                || !var_name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
+                result.push_str("${");
+                result.push_str(token);
+                result.push('}');
+                rest = &after[end + 1..];
+                continue;
+            }
             let resolved = if let Some(colon) = token.find(':') {
                 let var = &token[..colon];
                 let default = &token[colon + 1..];
