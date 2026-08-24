@@ -548,6 +548,18 @@ impl TextMemberHandlers {
                 // different (wider) char advances, so `count_text_lines` wrapped to
                 // ~2x more lines here than `.image` did — making `.rect` over-report
                 // and the Text-Wrapper bake squish the terms text. Must match.
+                let member_style_bits_for_font: u8 = {
+                    let mut b = 0u8;
+                    for tag in &text_data.font_style {
+                        match tag.as_str() {
+                            "bold" => b |= 0x01,
+                            "italic" => b |= 0x02,
+                            "underline" => b |= 0x04,
+                            _ => {}
+                        }
+                    }
+                    b
+                };
                 let font = if !text_data.font.is_empty() {
                     player
                         .font_manager
@@ -556,7 +568,7 @@ impl TextMemberHandlers {
                             &player.movie.cast_manager,
                             &mut player.bitmap_manager,
                             Some(text_data.font_size),
-                            None,
+                            Some(member_style_bits_for_font).filter(|b| *b != 0),
                         )
                         .or_else(|| player.font_manager.get_system_font())
                         .unwrap()
@@ -809,6 +821,27 @@ impl TextMemberHandlers {
                 let is_multi_par_authored = text_data.par_runs.len() > 1;
                 let measured: u16 = {
                     // Match the `.image` getter's font load exactly (see `.rect`).
+                    // The member's own style has to reach the atlas lookup: a
+                    // PFR face is rasterised per (name, size, STYLE), and bold
+                    // is synthesised there with a design-space pen that widens
+                    // the advances (`rasterizer::bold_embolden_orus`). Passing
+                    // None asked for the regular atlas and then let the draw
+                    // loop smear each glyph a pixel wider without moving the
+                    // pen — which is why Coke Studios' bold window titles came
+                    // out narrower than Shockwave's and ran their letters
+                    // together.
+                    let style_bits: u8 = {
+                        let mut b = 0u8;
+                        for tag in &text_data.font_style {
+                            match tag.as_str() {
+                                "bold" => b |= 0x01,
+                                "italic" => b |= 0x02,
+                                "underline" => b |= 0x04,
+                                _ => {}
+                            }
+                        }
+                        b
+                    };
                     let font = if !text_data.font.is_empty() {
                         player
                             .font_manager
@@ -817,7 +850,7 @@ impl TextMemberHandlers {
                                 &player.movie.cast_manager,
                                 &mut player.bitmap_manager,
                                 Some(text_data.font_size),
-                                None,
+                                Some(style_bits).filter(|b| *b != 0),
                             )
                             .or_else(|| player.font_manager.get_system_font())
                             .unwrap()
@@ -1236,13 +1269,25 @@ impl TextMemberHandlers {
                         .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
                     let font_size = preferred_font_size
                         .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
+                    let image_style_bits: u8 = {
+                        let mut b = 0u8;
+                        for tag in &text_data.font_style {
+                            match tag.as_str() {
+                                "bold" => b |= 0x01,
+                                "italic" => b |= 0x02,
+                                "underline" => b |= 0x04,
+                                _ => {}
+                            }
+                        }
+                        b
+                    };
                     let mut loaded = if let Some(name) = font_name {
                         player.font_manager.get_font_with_cast_and_bitmap(
                             name,
                             &player.movie.cast_manager,
                             &mut player.bitmap_manager,
                             font_size,
-                            None,
+                            Some(image_style_bits).filter(|b| *b != 0),
                         )
                     } else {
                         None
@@ -1774,6 +1819,17 @@ impl TextMemberHandlers {
                         // on sub-pixel coverage to stay legible; see the
                         // matching carve-out at the `!text_data.anti_alias`
                         // binarization below (atlas path only).
+                        // A stored threshold of 0 is honoured LITERALLY: nothing
+                        // is below it, so an `antiAlias = true` member is smooth
+                        // at every size. Measured in Shockwave with the fCheck
+                        // specimen movie — `Verdana * 10, aa:1 thr:0` renders 66%
+                        // anti-aliased ink, while the same size at `thr:14` comes
+                        // back perfectly binary. Do NOT "helpfully" substitute
+                        // Director's default of 14 for a stored 0; that was tried
+                        // to make Coke Studios' chat crisp and this capture
+                        // refutes it. If a member looks wrong here, suspect our
+                        // PARSE of `anti_alias` / `anti_alias_threshold` rather
+                        // than the rule.
                         let aa_threshold = text_data.info.as_ref()
                             .map(|i| i.anti_alias_threshold)
                             .unwrap_or(14);

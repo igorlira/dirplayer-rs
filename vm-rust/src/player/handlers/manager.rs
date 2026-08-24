@@ -2101,15 +2101,33 @@ impl BuiltInHandlerManager {
                         .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
 
-                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, alignment, tab_stops, word_wrap) = match &member.member_type {
+                    // `font_style` matters as much as the name and size: a PFR
+                    // atlas is keyed by (name, size, STYLE) and bold is
+                    // synthesised into its advances with a design-space pen, so
+                    // measuring with the regular atlas returns a SHORTER x than
+                    // the one `.image` just rasterised. Coke Studios' chat
+                    // bubbles are exactly that pattern — `ChatRenderer` sizes
+                    // each bubble with `charPosToLoc(len + 1).locH` and crops
+                    // the rendered image to it, so a short measurement clipped
+                    // the bold speaker name to "Dreamcatch".
+                    let (text, fixed_line_space, top_spacing, char_spacing, member_width, font_name, font_size, font_style_bits, alignment, tab_stops, word_wrap) = match &member.member_type {
                         crate::player::cast_member::CastMemberType::Text(t) => {
-                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, t.alignment.clone(), t.tab_stops.clone(), t.word_wrap)
+                            let mut b = 0u8;
+                            for tag in &t.font_style {
+                                match tag.as_str() {
+                                    "bold" => b |= 0x01,
+                                    "italic" => b |= 0x02,
+                                    "underline" => b |= 0x04,
+                                    _ => {}
+                                }
+                            }
+                            (t.text.clone(), t.fixed_line_space, t.top_spacing, t.char_spacing as i16, t.width as i16, t.font.clone(), t.font_size, b, t.alignment.clone(), t.tab_stops.clone(), t.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Field(f) => {
-                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, f.alignment.clone(), Vec::new(), f.word_wrap)
+                            (f.text.clone(), f.fixed_line_space, f.top_spacing, 0, f.width as i16, f.font.clone(), f.font_size, crate::player::cast_member::text_style_string_to_byte(&f.font_style), f.alignment.clone(), Vec::new(), f.word_wrap)
                         }
                         crate::player::cast_member::CastMemberType::Button(b) => {
-                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, b.field.alignment.clone(), Vec::new(), b.field.word_wrap)
+                            (b.field.text.clone(), b.field.fixed_line_space, b.field.top_spacing, 0, b.field.width as i16, b.field.font.clone(), b.field.font_size, crate::player::cast_member::text_style_string_to_byte(&b.field.font_style), b.field.alignment.clone(), Vec::new(), b.field.word_wrap)
                         }
                         _ => {
                             return Err(ScriptError::new(
@@ -2148,7 +2166,7 @@ impl BuiltInHandlerManager {
                             &player.movie.cast_manager,
                             &mut player.bitmap_manager,
                             font_size_opt,
-                            None,
+                            Some(font_style_bits).filter(|b| *b != 0),
                         )
                     } else {
                         None
