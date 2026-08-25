@@ -19,6 +19,38 @@ use std::borrow::Borrow;
 use log::debug;
 use wasm_bindgen::JsCast;
 
+/// Director preserves whitespace authored at the beginning of a source line.
+/// Some movies use it to position a short run inside a shared member rectangle,
+/// so native Canvas2D layout must retain the run's measured width.
+fn native_line_start_whitespace_advance(
+    token_is_whitespace: bool,
+    current_line_is_empty: bool,
+    token_width: f64,
+) -> f64 {
+    if token_is_whitespace && current_line_is_empty {
+        token_width
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_line_start_whitespace_advance;
+
+    #[test]
+    fn native_text_preserves_authored_leading_whitespace_advance() {
+        assert_eq!(native_line_start_whitespace_advance(true, true, 12.5), 12.5);
+        assert_eq!(native_line_start_whitespace_advance(true, true, 136.0), 136.0);
+    }
+
+    #[test]
+    fn native_text_does_not_add_leading_advance_to_other_tokens() {
+        assert_eq!(native_line_start_whitespace_advance(true, false, 12.5), 0.0);
+        assert_eq!(native_line_start_whitespace_advance(false, true, 12.5), 0.0);
+    }
+}
+
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
 pub struct HtmlStyle {
@@ -842,14 +874,28 @@ impl FontMemberHandlers {
                     lines_out.push(std::mem::take(line));
                 }
 
-                if !(is_whitespace && line.segments.is_empty()) {
+                // Leading whitespace on a source line is authored layout, not
+                // disposable wrapping padding. Whitespace preceding a wrap
+                // stays on the previous line because the following visible
+                // token is what triggers the wrap.
+                let leading_whitespace_width = native_line_start_whitespace_advance(
+                    is_whitespace,
+                    line.segments.is_empty(),
+                    token_width,
+                );
+                if leading_whitespace_width > 0.0 || !(is_whitespace && line.segments.is_empty()) {
+                    let segment_width = if leading_whitespace_width > 0.0 {
+                        leading_whitespace_width
+                    } else {
+                        token_width
+                    };
                     line.max_font_px = line.max_font_px.max(style.size_px);
                     if !has_tab {
-                        line.width += token_width;
+                        line.width += segment_width;
                     }
                     line.segments.push(NativeSegment {
                         text: token_text.clone(),
-                        width: token_width,
+                        width: segment_width,
                         style: style.clone(),
                         is_tab: false,
                         start_byte,
