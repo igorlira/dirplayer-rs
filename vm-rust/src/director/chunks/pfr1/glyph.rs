@@ -178,6 +178,42 @@ pub struct Pfr1HeaderParser<'a> {
     // Runtime mode bytes for coordinate path
     cd4_mode_x: u8,
     cd4_mode_y: u8,
+
+    // ===== Grid-fit (hinted) state — active only when `grid_fit` is true =====
+    grid_fit: bool,
+    // Font-level hint source data (orus), copied from PhysicalFontRecord.
+    fit_blue_values: Vec<i16>,
+    fit_blue_fuzz: i16,
+    fit_blue_ppem: i16,      // byte 124: ppem threshold for overshoot suppression
+    fit_stem_snap_v: Vec<i16>, // X-axis stem widths
+    fit_stem_snap_h: Vec<i16>, // Y-axis stem widths
+    // Per-size fit tables, built once per parse after ComputeFontOffsets.
+    fit_tables_ready: bool,
+    fit_blue_zones: Vec<[i16; 3]>, // [min, max, value] in scaled sub-pixel units (Y)
+    fit_blue_suppress: bool,       // field 2190: size below blue threshold
+    fit_word228: i16,              // scaled BlueShift-like limit for top edges
+    fit_word230: i16,              // asymmetric rounding bias for top edges
+    fit_snap_x: Vec<[i16; 3]>,     // [min, max, value] scaled stem-width snaps (X)
+    fit_snap_y: Vec<[i16; 3]>,     // (Y)
+    // Per-axis fit mode bytes. Both default to 0 (fitting ON); only render
+    // mode 5 takes them from the private record. Bit 4 = plain linear scale
+    // (no stem fit), bit 8 = no blue zones.
+    fit_mode_x: u8,
+    fit_mode_y: u8,
+    // Length of the MAIN (header-declared) ctrl tables, before extra-item
+    // edges were appended. The outline commands' orus lookups read only these
+    // Director resolves them against the raw header-declared tables, not
+    // the extras-extended live ones.
+    main_ctrl_x_len: usize,
+    main_ctrl_y_len: usize,
+    // The glyph's set width in OUTLINE units (converted from metrics units),
+    // and the resulting re-centering correction:
+    // the average (linear - snapped) displacement of the outermost X stem
+    // edges inside the advance, in scaled sub-pixel units. Applied along the
+    // X transform so a glyph whose stems all snapped one way is pulled back
+    // to sit centred in its (linear) advance.
+    fit_set_width_orus: i32,
+    fit_2192: i32,
 }
 
 const MAX_RECURSION_DEPTH: u32 = 10;
@@ -346,6 +382,25 @@ impl<'a> Pfr1HeaderParser<'a> {
             coord_state_inherited: false,
             cd4_mode_x: 4,
             cd4_mode_y: 4,
+            grid_fit: false,
+            fit_blue_values: Vec::new(),
+            fit_blue_fuzz: 0,
+            fit_blue_ppem: 0,
+            fit_stem_snap_v: Vec::new(),
+            fit_stem_snap_h: Vec::new(),
+            fit_tables_ready: false,
+            fit_blue_zones: Vec::new(),
+            fit_blue_suppress: false,
+            fit_word228: 0,
+            fit_word230: 0,
+            fit_snap_x: Vec::new(),
+            fit_snap_y: Vec::new(),
+            fit_mode_x: 0,
+            fit_mode_y: 0,
+            main_ctrl_x_len: usize::MAX,
+            main_ctrl_y_len: usize::MAX,
+            fit_set_width_orus: 0,
+            fit_2192: 0,
         };
 
         // Initialize cd4 mode from physical font private records
@@ -369,6 +424,37 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
 
         parser
+    }
+
+    /// Enable the Director grid-fit path and copy the font-level hint data
+    /// (blue values, stem snaps) it feeds on.
+    pub fn enable_grid_fit(&mut self, physical_font: Option<&PhysicalFontRecord>) {
+        self.grid_fit = true;
+        if let Some(pf) = physical_font {
+            self.fit_blue_values = pf.blue_values.clone();
+            self.fit_blue_fuzz = pf.blue_fuzz as i16;
+            self.fit_blue_ppem = pf.blue_scale as i16;
+            self.fit_stem_snap_v = pf.stem_snap_v.clone();
+            self.fit_stem_snap_h = pf.stem_snap_h.clone();
+            // Mode bytes 543/544 default to 0 (fitting on); only private
+            // render-mode 5 carries explicit overrides.
+            if pf.private_mode_716 == 5 {
+                self.fit_mode_x = pf.private_type2_byte28;
+                self.fit_mode_y = pf.private_type2_byte29;
+            }
+        }
+    }
+
+    /// Copy grid-fit source data from a parent parser (compound sub-glyphs).
+    fn copy_grid_fit_from(&mut self, parent: &Pfr1HeaderParser) {
+        self.grid_fit = parent.grid_fit;
+        self.fit_blue_values = parent.fit_blue_values.clone();
+        self.fit_blue_fuzz = parent.fit_blue_fuzz;
+        self.fit_blue_ppem = parent.fit_blue_ppem;
+        self.fit_stem_snap_v = parent.fit_stem_snap_v.clone();
+        self.fit_stem_snap_h = parent.fit_stem_snap_h.clone();
+        self.fit_mode_x = parent.fit_mode_x;
+        self.fit_mode_y = parent.fit_mode_y;
     }
 
     /// Initialize transform flags from font matrix
@@ -457,7 +543,19 @@ impl<'a> Pfr1HeaderParser<'a> {
         let font_matrix16_c = self.matrix_c << 8;
         let font_matrix16_d = self.matrix_d << 8;
 
-        let scale_factor = (self.outline_resolution as i32) << 16;
+        // The device transform: matrix2136 = FixedPointMultiply16(size << 16,
+        // fontMatrix << 8), where `size` is the pixel em being rendered
+        // (Director feeds the point size in; the advance formula in the
+        // rasterizer uses the same product). The legacy callers pass
+        // target_em_px == outline_resolution ("unity"), which keeps
+        // coordinates in orus; the grid-fit path passes the real pixel size
+        // so the zone tables scale into pixel space.
+        let size = if self.target_em_px > 0 {
+            self.target_em_px
+        } else {
+            self.outline_resolution as i32
+        };
+        let scale_factor = size << 16;
 
         let matrix2136_a = Self::fixed_point_multiply16(scale_factor, font_matrix16_a);
         let matrix2136_b = Self::fixed_point_multiply16(scale_factor, font_matrix16_b);
@@ -832,7 +930,11 @@ impl<'a> Pfr1HeaderParser<'a> {
         // Post-process (skip for compound glyphs — returns compound contours directly)
         if !is_compound {
             self.remove_duplicate_points();
-            self.trim_contour_outliers();
+            // The outlier trim's thresholds are tuned for orus-space coords;
+            // in grid-fit pixel space they would eat real points.
+            if !self.grid_fit {
+                self.trim_contour_outliers();
+            }
             self.close_contours();
         }
 
@@ -920,10 +1022,17 @@ impl<'a> Pfr1HeaderParser<'a> {
             self.ctrl_y.clear();
             self.ce9d_nibble_aligned = false;
         }
+        // Snapshot the main table lengths before extras can extend them —
+        // the outline commands' orus lookups see only these entries.
+        self.main_ctrl_x_len = self.ctrl_x.len();
+        self.main_ctrl_y_len = self.ctrl_y.len();
 
         // Skip extra items if flag bit 3 is set
-        // Extra items are after control values but BEFORE outline commands
+        // Extra items are after control values but BEFORE outline commands.
+        // The grid-fit path processes them (extra controlled edges); the
+        // legacy path only skips them.
         let has_extra_items = (flags & 0x08) != 0;
+        let extra_items_start = self.pos;
         if has_extra_items && self.pos < self.data.len() {
             let extra_count = self.data[self.pos] as usize;
             self.pos += 1;
@@ -933,6 +1042,11 @@ impl<'a> Pfr1HeaderParser<'a> {
                 self.pos += item_len + 2; // Skip length + type + data
             }
         }
+        let extra_items_range = if has_extra_items {
+            Some((extra_items_start, self.pos.min(self.data.len())))
+        } else {
+            None
+        };
 
         // Record outline start position (after extra items / control values)
         self.outline_start_pos = self.pos;
@@ -949,8 +1063,12 @@ impl<'a> Pfr1HeaderParser<'a> {
         }
 
         // Compute scaled coordinates and zone tables
-        self.compute_scaled_coordinates();
-        self.initialize_zone_tables();
+        if self.grid_fit {
+            self.fit_scaled_and_zones(extra_items_range);
+        } else {
+            self.compute_scaled_coordinates();
+            self.initialize_zone_tables();
+        }
 
         // uses exact glyph size - 1 as outline end position
         self.outline_end_pos = if self.data.len() > 0 { self.data.len() - 1 } else { 0 };
@@ -958,7 +1076,14 @@ impl<'a> Pfr1HeaderParser<'a> {
         // Scale output coordinates from secondary_scale space back to orus space.
         // The coordinate pipeline (compute_coord_shift + apply_transform_flags) right-shifts
         // by secondary_scale, so we multiply by 2^secondary_scale to recover orus coordinates.
-        self.orus_zero_scale = 1.0;
+        // Grid-fit: keep the sub-pixel fraction. apply_transform_flags skips
+        // its truncating `>> secondary_scale`, and the f32 conversion divides
+        // by the pixel unit instead.
+        self.orus_zero_scale = if self.grid_fit && self.scaled_pow2 > 0 {
+            1.0 / self.scaled_pow2 as f32
+        } else {
+            1.0
+        };
 
         // Initialize hint stream state (reads backwards from end of glyph data)
         self.hint_pos = self.outline_end_pos as i32;
@@ -1348,6 +1473,28 @@ impl<'a> Pfr1HeaderParser<'a> {
             return;
         }
 
+        // Grid-fit: stroke endpoints come from the FITTED scaled tables (in
+        // pixel units), not the raw orus ctrl values — otherwise stroke-grid
+        // glyphs leak orus-space coordinates into a pixel-space glyph.
+        let (ctrl_x_px, ctrl_y_px): (Vec<f32>, Vec<f32>) = if self.grid_fit && self.scaled_pow2 > 0 {
+            let inv = 1.0 / self.scaled_pow2 as f32;
+            (
+                self.scaled_x.iter().map(|&v| v as f32 * inv).collect(),
+                self.scaled_y.iter().map(|&v| v as f32 * inv).collect(),
+            )
+        } else {
+            (
+                self.ctrl_x.iter().map(|&v| v as f32).collect(),
+                self.ctrl_y.iter().map(|&v| v as f32).collect(),
+            )
+        };
+        let stroke_width = if self.grid_fit && self.scaled_pow2 > 0 && self.outline_resolution > 0 {
+            // Stroke width is in orus; convert to pixels for grid-fit space.
+            (stroke_width * self.target_em_px as f32 / self.outline_resolution as f32).max(1.0)
+        } else {
+            stroke_width
+        };
+
         // Horizontal runs
         for r in 0..rows {
             let mut start_col: isize = -1;
@@ -1356,9 +1503,9 @@ impl<'a> Pfr1HeaderParser<'a> {
                 if drawn && start_col < 0 {
                     start_col = c as isize;
                 } else if !drawn && start_col >= 0 {
-                    let y = self.ctrl_y[r] as f32;
-                    let x1 = self.ctrl_x[start_col as usize] as f32;
-                    let x2 = self.ctrl_x[(c.saturating_sub(1)).min(cols - 1)] as f32;
+                    let y = ctrl_y_px[r];
+                    let x1 = ctrl_x_px[start_col as usize];
+                    let x2 = ctrl_x_px[(c.saturating_sub(1)).min(cols - 1)];
 
                     if (x2 - x1).abs() > 1.0 {
                         self.strokes.push(PfrStroke::line(x1, y, x2, y, stroke_width));
@@ -1376,9 +1523,9 @@ impl<'a> Pfr1HeaderParser<'a> {
                 if drawn && start_row < 0 {
                     start_row = r as isize;
                 } else if !drawn && start_row >= 0 {
-                    let x = self.ctrl_x[c] as f32;
-                    let y1 = self.ctrl_y[start_row as usize] as f32;
-                    let y2 = self.ctrl_y[(r.saturating_sub(1)).min(rows - 1)] as f32;
+                    let x = ctrl_x_px[c];
+                    let y1 = ctrl_y_px[start_row as usize];
+                    let y2 = ctrl_y_px[(r.saturating_sub(1)).min(rows - 1)];
 
                     if (y2 - y1).abs() > 1.0 {
                         self.strokes.push(PfrStroke::line(x, y1, x, y2, stroke_width));
@@ -1390,10 +1537,12 @@ impl<'a> Pfr1HeaderParser<'a> {
 
         // Fallback: boundary rectangle if drawn cells exist but no strokes
         if self.strokes.is_empty() && drawn_cells.iter().any(|v| *v) {
-            let min_x = *self.ctrl_x.iter().min().unwrap_or(&0) as f32;
-            let max_x = *self.ctrl_x.iter().max().unwrap_or(&0) as f32;
-            let min_y = *self.ctrl_y.iter().min().unwrap_or(&0) as f32;
-            let max_y = *self.ctrl_y.iter().max().unwrap_or(&0) as f32;
+            let fold_min = |v: &[f32]| v.iter().cloned().fold(f32::MAX, f32::min);
+            let fold_max = |v: &[f32]| v.iter().cloned().fold(f32::MIN, f32::max);
+            let min_x = if ctrl_x_px.is_empty() { 0.0 } else { fold_min(&ctrl_x_px) };
+            let max_x = if ctrl_x_px.is_empty() { 0.0 } else { fold_max(&ctrl_x_px) };
+            let min_y = if ctrl_y_px.is_empty() { 0.0 } else { fold_min(&ctrl_y_px) };
+            let max_y = if ctrl_y_px.is_empty() { 0.0 } else { fold_max(&ctrl_y_px) };
 
             self.strokes.push(PfrStroke::line(min_x, min_y, min_x, max_y, stroke_width));
             self.strokes.push(PfrStroke::line(max_x, min_y, max_x, max_y, stroke_width));
@@ -1777,7 +1926,8 @@ impl<'a> Pfr1HeaderParser<'a> {
     fn orus_lookup(&self, axis: i32, direction: i16) -> i16 {
         let ctrl = if axis == 1 { &self.ctrl_y } else { &self.ctrl_x };
         let current = if axis == 1 { self.cur_y } else { self.cur_x };
-        let count = ctrl.len();
+        let main_len = if axis == 1 { self.main_ctrl_y_len } else { self.main_ctrl_x_len };
+        let count = ctrl.len().min(main_len);
 
         if count == 0 {
             // When count==0, return current UNCHANGED
@@ -2029,11 +2179,711 @@ impl<'a> Pfr1HeaderParser<'a> {
             }
         };
 
-        // Apply secondaryScale to convert to pixel space
-        out_x >>= self.secondary_scale;
-        out_y >>= self.secondary_scale;
+        // Apply secondaryScale to convert to pixel space. The grid-fit path
+        // keeps sub-pixel units here; `orus_zero_scale` divides them out in
+        // the f32 conversion so snapped fractions survive.
+        if !self.grid_fit {
+            out_x >>= self.secondary_scale;
+            out_y >>= self.secondary_scale;
+        } else if self.fit_2192 != 0 {
+            // Re-centering correction: shift the fitted glyph
+            // along the advance by the average outer-stem snap displacement.
+            match self.x_transform_flag {
+                0 => out_x += self.fit_2192,
+                1 => out_x -= self.fit_2192,
+                _ => {}
+            }
+        }
 
         (out_x, out_y)
+    }
+
+    // ===================== Grid-fit (hinted) path =====================
+    // The scaled control tables are not a
+    // plain linear scale of the ctrl orus values: control values come in PAIRS
+    // (stem edges), and each pair's WIDTH is snapped — to the font's stem-snap
+    // table, to a minimum of one pixel, and to the pixel grid — while its
+    // POSITION is grid-rounded (X: midpoint; Y: blue-zone capture of either
+    // edge). Everything runs in "scaled sub-pixel units": one pixel is
+    // `scaled_pow2` units, `shift_difference` converts orus·scale products
+    // down into them.
+
+    /// Round a scaled value to the pixel grid: `mask & (half + v)`.
+    #[inline]
+    fn fit_round(&self, v: i32) -> i16 {
+        ((v.wrapping_add(self.scaled_pow2_half as i32)) as i16) & self.scaled_pow2_neg
+    }
+
+    /// Build the per-size blue-zone and stem-snap tables (once per size).
+    fn fit_build_tables(&mut self) {
+        if self.fit_tables_ready {
+            return;
+        }
+        self.fit_tables_ready = true;
+
+        let shift = self.shift_difference as i32;
+        let quarter = (self.scaled_pow2_half >> 1) as i32;
+
+        // ---- Blue zones (Y axis); mode bit 8 disables them ----
+        let n_pairs = if (self.fit_mode_y & 8) != 0 {
+            0
+        } else {
+            self.fit_blue_values.len() / 2
+        };
+        let scale_y = self.font_scale_y as i32;
+        let offset_y = self.font_offset_y;
+        let mut zones: Vec<[i16; 3]> = Vec::with_capacity(n_pairs);
+        for i in 0..n_pairs {
+            let lo = self.fit_blue_values[2 * i] as i32;
+            let hi = self.fit_blue_values[2 * i + 1] as i32;
+            // The FIRST zone's snap target is the scaled position of orus 0
+            // (the baseline), not of its own lower blue value.
+            let value_src = if i == 0 { 0 } else { lo };
+            let value = ((offset_y + scale_y * value_src) >> shift) as i16;
+            let min = ((offset_y + scale_y * (lo - self.fit_blue_fuzz as i32)) >> shift) as i16;
+            let max = ((offset_y + scale_y * (hi + self.fit_blue_fuzz as i32)) >> shift) as i16;
+            zones.push([min, max, value]);
+        }
+        // Overlap fix-ups: each zone reaches at most a quarter pixel past its
+        // snap value, and adjacent zones split the gap at the midpoint.
+        if !zones.is_empty() {
+            let v = zones[0][2] as i32 - quarter;
+            if (zones[0][0] as i32) > v {
+                zones[0][0] = v as i16;
+            }
+            for i in 1..zones.len() {
+                let mid = ((zones[i][0] as i32 + zones[i - 1][1] as i32) >> 1) as i16;
+                let mut up = (zones[i - 1][2] as i32 + quarter) as i16;
+                if up > mid {
+                    up = mid;
+                }
+                if zones[i - 1][1] < up {
+                    zones[i - 1][1] = up;
+                }
+                let mut dn = (zones[i][2] as i32 - quarter) as i16;
+                if dn < mid {
+                    dn = mid;
+                }
+                if zones[i][0] > dn {
+                    zones[i][0] = dn;
+                }
+            }
+            let last = zones.len() - 1;
+            let up = (zones[last][2] as i32 + quarter) as i16;
+            if zones[last][1] < up {
+                zones[last][1] = up;
+            }
+        }
+        self.fit_blue_zones = zones;
+
+        // Overshoot suppression below the blue ppem threshold (field 2190):
+        // scale_y * em < blue_ppem << coord_shift.
+        let em = self.outline_resolution as i32;
+        self.fit_blue_suppress =
+            scale_y * em < (self.fit_blue_ppem as i32) << self.coord_shift;
+        // word 230 = 2731 >> (12 - secondary_scale): ~0.667px asymmetric bias
+        // used when re-rounding a top edge relative to its zone value.
+        let sec = self.secondary_scale as i32;
+        self.fit_word230 = (2731i32 >> (12 - sec).clamp(0, 15)) as i16;
+        // word 228 = scale_y * word126 >> shift, word126 = 0.007 * em orus.
+        let word126 = ((459i64 * em as i64 + 0x8000) >> 16) as i32;
+        self.fit_word228 = ((scale_y * word126) >> shift) as i16;
+
+        // ---- Stem-snap tables, X then Y ----
+        let snap_v = std::mem::take(&mut self.fit_stem_snap_v);
+        let snap_h = std::mem::take(&mut self.fit_stem_snap_h);
+        self.fit_snap_x = self.fit_build_snap_table(self.font_scale_x, &snap_v, self.std_vw as i32);
+        self.fit_snap_y = self.fit_build_snap_table(self.font_scale_y, &snap_h, self.std_hw as i32);
+        self.fit_stem_snap_v = snap_v;
+        self.fit_stem_snap_h = snap_h;
+    }
+
+    /// One axis of the stem-snap table: snap records `[min, max, value]` in
+    /// scaled units, from the font's stem-snap widths plus a wider band around
+    /// the standard stem width.
+    fn fit_build_snap_table(&self, scale: i16, snaps: &[i16], std_w: i32) -> Vec<[i16; 3]> {
+        let shift = self.shift_difference as i32;
+        let quarter = (self.scaled_pow2_half >> 1) as i32;
+        let mut recs: Vec<[i16; 3]> = Vec::with_capacity(snaps.len() + 1);
+
+        for &snap in snaps {
+            let v11 = ((self.rounding_bias_2128 + scale as i32 * snap as i32) >> shift) as i16;
+            let mut lo = (v11 as i32 - quarter) as i16;
+            if let Some(prev) = recs.last_mut() {
+                if prev[1] > lo {
+                    if prev[1] > v11 {
+                        prev[1] = v11;
+                    }
+                    if lo < prev[2] {
+                        lo = prev[2];
+                    }
+                    lo = ((lo as i32 + prev[1] as i32) >> 1) as i16;
+                    prev[1] = lo;
+                }
+            }
+            recs.push([lo, (v11 as i32 + quarter) as i16, v11]);
+        }
+
+        if std_w > 0 {
+            let sh = (16 - self.secondary_scale as i32).clamp(0, 15);
+            let v15 = ((self.rounding_bias_2128 + std_w * scale as i32) >> shift) as i16;
+            let rounded = if v15 >= self.scaled_pow2 {
+                self.fit_round(v15 as i32)
+            } else {
+                self.scaled_pow2
+            };
+            // Band ~[-0.36, +0.60]px around the linear StdW, clamped against
+            // the grid-rounded StdW by [-0.725, +0.875]px.
+            let mut lo = v15 as i32 - (23593 >> sh);
+            lo = lo.max(rounded as i32 - (47513 >> sh));
+            lo = lo.min(v15 as i32);
+            let mut hi = v15 as i32 + (39322 >> sh);
+            hi = hi.min(rounded as i32 + (57344 >> sh));
+            hi = hi.max(v15 as i32);
+            let mut lo = lo as i16;
+            let mut hi = hi as i16;
+
+            // Records whose value falls inside the StdW band merge into it.
+            let mut kept: Vec<[i16; 3]> = Vec::with_capacity(recs.len() + 1);
+            for rec in recs {
+                if rec[2] < lo || rec[2] > hi {
+                    kept.push(rec);
+                } else {
+                    if rec[0] < lo {
+                        lo = rec[0];
+                    }
+                    if rec[1] > hi {
+                        hi = rec[1];
+                    }
+                }
+            }
+            // Insert the StdW record sorted by value; clamp against neighbors.
+            let ins = kept.iter().position(|r| r[2] > v15).unwrap_or(kept.len());
+            if ins > 0 && lo < kept[ins - 1][1] {
+                lo = kept[ins - 1][1];
+            }
+            if ins < kept.len() && hi > kept[ins][0] {
+                hi = kept[ins][1];
+            }
+            kept.insert(ins, [lo, hi, v15]);
+            kept
+        } else {
+            recs
+        }
+    }
+
+    /// Snap one scaled stem width: stem-snap table, then a 1px minimum, then
+    /// the pixel grid (shared tail of both axes' pair fitting).
+    #[inline]
+    fn fit_snap_width(&self, mut w: i16, snap_table: &[[i16; 3]]) -> i16 {
+        for rec in snap_table {
+            if w < rec[0] {
+                break;
+            }
+            if w <= rec[1] {
+                w = rec[2];
+                break;
+            }
+        }
+        if w >= self.scaled_pow2 {
+            self.fit_round(w as i32)
+        } else {
+            self.scaled_pow2
+        }
+    }
+
+    /// Snap X control pairs (stems) into `scaled_x`.
+    /// `adjacent` < 0 places each stem at its grid-rounded scaled midpoint;
+    /// otherwise the stem is placed relative to the already-fitted pair at
+    /// that index.
+    fn fit_snap_pairs_x(&mut self, start: usize, end: usize, adjacent: i32) {
+        let shift = self.shift_difference as i32;
+        let mut i = start;
+        while i + 1 < end.min(self.ctrl_x.len()) {
+            let a = self.ctrl_x[i] as i32;
+            let b = self.ctrl_x[i + 1] as i32;
+            let w = ((self.rounding_bias_2128 + self.font_scale_x as i32 * (b - a)) >> shift) as i16;
+            let snapped = self.fit_snap_width(w, &self.fit_snap_x);
+            let (mid, base) = if adjacent < 0 || (adjacent as usize) + 1 >= self.scaled_x.len() {
+                ((b + a) >> 1,
+                 self.font_offset_x - (((snapped as i32) << shift) >> 1))
+            } else {
+                let j = adjacent as usize;
+                ((b + a - self.ctrl_x[j] as i32 - self.ctrl_x[j + 1] as i32) >> 1,
+                 ((self.scaled_x[j + 1] as i32 + self.scaled_x[j] as i32 - snapped as i32) << shift) >> 1)
+            };
+            let pos = self.fit_round((base + self.font_scale_x as i32 * mid) >> shift);
+            self.scaled_x[i] = pos;
+            self.scaled_x[i + 1] = pos.wrapping_add(snapped);
+            i += 2;
+        }
+        // Odd trailing entry: plain linear scale.
+        if i < end.min(self.ctrl_x.len()) {
+            self.scaled_x[i] =
+                ((self.font_offset_x + self.font_scale_x as i32 * self.ctrl_x[i] as i32) >> shift) as i16;
+        }
+    }
+
+    /// Snap Y control pairs into `scaled_y`, capturing edges that land in a
+    /// blue zone.
+    fn fit_snap_pairs_y(&mut self, start: usize, end: usize, adjacent: i32) {
+        let shift = self.shift_difference as i32;
+        let n_zones = self.fit_blue_zones.len();
+        let mut bot_cur = 0usize;
+        let mut top_cur = 0usize;
+        let mut i = start;
+        while i + 1 < end.min(self.ctrl_y.len()) {
+            let a = self.ctrl_y[i] as i32;
+            let b = self.ctrl_y[i + 1] as i32;
+            let mut cases = 0u8;
+            let mut bot_snap: i16 = 0;
+            let mut top_snap: i16 = 0;
+
+            // Bottom edge against the blue zones (cursor only advances —
+            // pairs arrive sorted by position).
+            let bpos = ((self.font_offset_y + a * self.font_scale_y as i32) >> shift) as i16;
+            while bot_cur < n_zones && bpos > self.fit_blue_zones[bot_cur][1] {
+                bot_cur += 1;
+            }
+            if bot_cur < n_zones && bpos >= self.fit_blue_zones[bot_cur][0] {
+                cases |= 1;
+                let z = self.fit_blue_zones[bot_cur];
+                let v12 = if self.fit_blue_suppress {
+                    0
+                } else {
+                    self.fit_round(z[2] as i32 - bpos as i32)
+                };
+                bot_snap = self.fit_round(z[2] as i32).wrapping_sub(v12);
+            }
+
+            // Top edge.
+            let tpos = ((self.font_offset_y + b * self.font_scale_y as i32) >> shift) as i16;
+            while top_cur < n_zones && tpos > self.fit_blue_zones[top_cur][1] {
+                top_cur += 1;
+            }
+            if top_cur < n_zones && tpos >= self.fit_blue_zones[top_cur][0] {
+                cases |= 2;
+                let z = self.fit_blue_zones[top_cur];
+                let v18 = if self.fit_blue_suppress {
+                    0
+                } else {
+                    let d = tpos.wrapping_sub(z[2]);
+                    if d >= self.scaled_pow2_half || d < self.fit_word228 {
+                        self.fit_round(d as i32)
+                    } else {
+                        self.scaled_pow2
+                    }
+                };
+                let anchored =
+                    ((self.fit_word230 as i32 + z[2] as i32) as i16) & self.scaled_pow2_neg;
+                top_snap = v18.wrapping_add(anchored);
+            }
+
+            // Snapped height.
+            let hsnap: i16 = if a == b {
+                0
+            } else {
+                let h = ((self.rounding_bias_2128 + self.font_scale_y as i32 * (b - a)) >> shift) as i16;
+                self.fit_snap_width(h, &self.fit_snap_y)
+            };
+
+            match cases {
+                0 => {
+                    let (mid, base) = if adjacent < 0 || (adjacent as usize) + 1 >= self.scaled_y.len() {
+                        ((a + b) >> 1,
+                         self.font_offset_y - (((hsnap as i32) << shift) >> 1))
+                    } else {
+                        let j = adjacent as usize;
+                        ((a + b - self.ctrl_y[j] as i32 - self.ctrl_y[j + 1] as i32) >> 1,
+                         ((self.scaled_y[j + 1] as i32 + self.scaled_y[j] as i32 - hsnap as i32) << shift) >> 1)
+                    };
+                    let pos = self.fit_round((base + self.font_scale_y as i32 * mid) >> shift);
+                    self.scaled_y[i] = pos;
+                    self.scaled_y[i + 1] = pos.wrapping_add(hsnap);
+                }
+                1 => {
+                    self.scaled_y[i] = bot_snap;
+                    self.scaled_y[i + 1] = bot_snap.wrapping_add(hsnap);
+                }
+                2 => {
+                    self.scaled_y[i] = top_snap.wrapping_sub(hsnap);
+                    self.scaled_y[i + 1] = top_snap;
+                }
+                _ => {
+                    self.scaled_y[i] = bot_snap;
+                    self.scaled_y[i + 1] = top_snap;
+                }
+            }
+            i += 2;
+        }
+        if i < end.min(self.ctrl_y.len()) {
+            self.scaled_y[i] =
+                ((self.font_offset_y + self.font_scale_y as i32 * self.ctrl_y[i] as i32) >> shift) as i16;
+        }
+    }
+
+    /// Fill the scaled tables from the ctrl pairs, append any extra
+    /// controlled edges from the glyph's extra-item block (types 1 and 2),
+    /// then build the zone tables from the fitted result.
+    fn fit_scaled_and_zones(&mut self, extra_items: Option<(usize, usize)>) {
+        self.fit_build_tables();
+        let shift = self.shift_difference as i32;
+
+        let n_main_x = self.ctrl_x.len();
+        let n_main_y = self.ctrl_y.len();
+        self.scaled_x = vec![0; n_main_x];
+        self.scaled_y = vec![0; n_main_y];
+
+        // Axis fitting is skipped (plain linear scale) when the mode byte has
+        // bit 4 set, or when the axis has no usable scale (full-matrix case).
+        let fit_x = (self.fit_mode_x & 4) == 0 && self.font_scale_x != 0 && self.x_transform_flag <= 3;
+        let fit_y = (self.fit_mode_y & 4) == 0 && self.font_scale_y != 0 && self.y_transform_flag <= 3;
+
+        if fit_x {
+            self.fit_snap_pairs_x(0, n_main_x, -1);
+        } else {
+            for i in 0..n_main_x {
+                self.scaled_x[i] =
+                    ((self.font_offset_x + self.font_scale_x as i32 * self.ctrl_x[i] as i32) >> shift) as i16;
+            }
+        }
+        if fit_y {
+            self.fit_snap_pairs_y(0, n_main_y, -1);
+        } else {
+            for i in 0..n_main_y {
+                self.scaled_y[i] =
+                    ((self.font_offset_y + self.font_scale_y as i32 * self.ctrl_y[i] as i32) >> shift) as i16;
+            }
+        }
+
+        // ---- Extra items: additional controlled edges ----
+        let mut extras_x = false;
+        let mut extras_y = false;
+        if let Some((start, end)) = extra_items {
+            let data: Vec<u8> = self.data[start..end.min(self.data.len())].to_vec();
+            let mut p = 0usize;
+            if p < data.len() {
+                let n_items = data[p] as usize;
+                p += 1;
+                for _ in 0..n_items {
+                    if p + 2 > data.len() {
+                        break;
+                    }
+                    let item_len = data[p] as usize;
+                    let item_type = data[p + 1];
+                    let item = &data[p + 2..(p + 2 + item_len).min(data.len())];
+                    p += item_len + 2;
+                    match item_type {
+                        1 => {
+                            let (ex, ey) = self.fit_extra_pairs(item, fit_x, fit_y);
+                            extras_x |= ex;
+                            extras_y |= ey;
+                        }
+                        2 => {
+                            let (ex, ey) = self.fit_extra_edges(item, fit_x, fit_y);
+                            extras_x |= ex;
+                            extras_y |= ey;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // ---- Zone tables from the fitted ctrl/scaled tables ----
+        self.initialize_zone_tables_fitted(0, extras_x);
+        self.initialize_zone_tables_fitted(1, extras_y);
+
+        // ---- Re-centering correction ----
+        // Average (linear - snapped) displacement of the outermost MAIN X stem
+        // edges that fall inside the advance band [0, setWidth]: the first
+        // pair START in band and the last pair END in band.
+        self.fit_2192 = 0;
+        if fit_x && self.fit_set_width_orus != 0 {
+            let (band_lo, band_hi) = if self.fit_set_width_orus < 0 {
+                (self.fit_set_width_orus, 0)
+            } else {
+                (0, self.fit_set_width_orus)
+            };
+            let mut lo_idx: i32 = -1;
+            let mut hi_idx: i32 = -1;
+            let mut k = 0usize;
+            while k + 1 < n_main_x {
+                let a = self.ctrl_x[k] as i32;
+                let b = self.ctrl_x[k + 1] as i32;
+                if lo_idx < 0 && a >= band_lo && a <= band_hi {
+                    lo_idx = k as i32;
+                }
+                if b >= band_lo && b <= band_hi {
+                    hi_idx = (k + 1) as i32;
+                }
+                k += 2;
+            }
+            let mut sum: i32 = 0;
+            let mut n: i32 = 0;
+            for idx in [lo_idx, hi_idx] {
+                if idx >= 0 {
+                    let i = idx as usize;
+                    let linear = (self.rounding_bias_2128
+                        + self.font_scale_x as i32 * self.ctrl_x[i] as i32)
+                        >> shift;
+                    sum += linear - self.scaled_x[i] as i32;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                // Director applies this at BLIT time to the already-rasterized
+                // glyph's origin (its 16.16 bbox position), so the
+                // ink only ever moves by whole pixels. We bake the shift into
+                // the contours instead, so quantize it to the pixel grid —
+                // a fractional shift would re-sample the fitted outline.
+                self.fit_2192 = self.fit_round((sum + (n >> 1)) / n) as i32;
+            }
+        }
+    }
+
+    /// Extra-item type 1 — additional (start, end) orus stem pairs,
+    /// big-endian, appended to the ctrl tables and fitted against the nearest
+    /// overlapping existing pair. Returns which axes grew.
+    fn fit_extra_pairs(&mut self, item: &[u8], fit_x: bool, fit_y: bool) -> (bool, bool) {
+        let mut p = 0usize;
+        let mut grew = (false, false);
+        for axis in 0..2 {
+            if p >= item.len() {
+                break;
+            }
+            let count = item[p] as usize;
+            p += 1;
+            let enabled = if axis == 0 { fit_x } else { fit_y };
+            if !enabled {
+                p += 4 * count;
+                continue;
+            }
+            for _ in 0..count {
+                if p + 4 > item.len() {
+                    break;
+                }
+                let a = i16::from_be_bytes([item[p], item[p + 1]]);
+                let b = i16::from_be_bytes([item[p + 2], item[p + 3]]);
+                p += 4;
+                let (ctrl, scaled) = if axis == 0 {
+                    (&mut self.ctrl_x, &mut self.scaled_x)
+                } else {
+                    (&mut self.ctrl_y, &mut self.scaled_y)
+                };
+                let base = ctrl.len();
+                // Skip a truncated/odd table — pairs must start on an even slot.
+                if base % 2 != 0 {
+                    break;
+                }
+                ctrl.push(a);
+                ctrl.push(b);
+                scaled.push(0);
+                scaled.push(0);
+                // Find an existing pair overlapping the new one: first pair
+                // whose end >= new start, if the new end also exceeds its
+                // start; otherwise anchor to pair 0.
+                let mut adj = 0usize;
+                let (ctrl, n) = if axis == 0 {
+                    (&self.ctrl_x, base)
+                } else {
+                    (&self.ctrl_y, base)
+                };
+                let mut k = 0usize;
+                while k + 1 < n {
+                    if a <= ctrl[k + 1] {
+                        break;
+                    }
+                    k += 2;
+                }
+                if k + 1 < n && b > ctrl[k] {
+                    adj = k;
+                }
+                if axis == 0 {
+                    self.fit_snap_pairs_x(base, base + 2, adj as i32);
+                    grew.0 = true;
+                } else {
+                    self.fit_snap_pairs_y(base, base + 2, adj as i32);
+                    grew.1 = true;
+                }
+            }
+        }
+        grew
+    }
+
+    /// Extra-item type 2 — controlled edges defined as deltas
+    /// from an existing ctrl entry. The scaled delta collapses to zero when
+    /// smaller than the record's threshold (in 16ths of a pixel).
+    fn fit_extra_edges(&mut self, item: &[u8], fit_x: bool, fit_y: bool) -> (bool, bool) {
+        let shift = self.shift_difference as i32;
+        let mut p = 0usize;
+        let mut grew = (false, false);
+        for axis in 0..2 {
+            if p >= item.len() {
+                break;
+            }
+            let count = item[p] as usize;
+            p += 1;
+            let enabled = if axis == 0 { fit_x } else { fit_y };
+            let scale = if axis == 0 { self.font_scale_x } else { self.font_scale_y } as i32;
+            let mut ref_idx: i32 = 0;
+            for _ in 0..count {
+                if p >= item.len() {
+                    break;
+                }
+                let b = item[p];
+                p += 1;
+                let threshold: i32;
+                let delta: i32;
+                if b & 0x80 != 0 {
+                    ref_idx = (b & 0x3F) as i32 - 1;
+                    if ref_idx < 0 {
+                        if p >= item.len() {
+                            break;
+                        }
+                        ref_idx = item[p] as i32;
+                        p += 1;
+                    }
+                    if b & 0x40 != 0 {
+                        threshold = 16;
+                    } else {
+                        if p >= item.len() {
+                            break;
+                        }
+                        threshold = item[p] as i32;
+                        p += 1;
+                    }
+                    if p >= item.len() {
+                        break;
+                    }
+                    let d8 = item[p] as i8;
+                    p += 1;
+                    if d8 == 0 {
+                        if p + 2 > item.len() {
+                            break;
+                        }
+                        delta = i16::from_be_bytes([item[p], item[p + 1]]) as i32;
+                        p += 2;
+                    } else {
+                        delta = d8 as i32;
+                    }
+                } else {
+                    ref_idx += (b >> 4) as i32;
+                    threshold = 16;
+                    // Sign-extend the low nibble.
+                    delta = (((b << 4) as i8) >> 4) as i32;
+                }
+                if !enabled {
+                    continue;
+                }
+                let scaled_delta = ((self.rounding_bias_2128 + delta * scale) >> shift) as i16;
+                let thr = ((threshold << self.secondary_scale) >> 4) as i16;
+                let snap = if scaled_delta >= thr || scaled_delta <= thr.wrapping_neg() {
+                    self.fit_round(scaled_delta as i32)
+                } else {
+                    0
+                };
+                let (ctrl, scaled) = if axis == 0 {
+                    (&mut self.ctrl_x, &mut self.scaled_x)
+                } else {
+                    (&mut self.ctrl_y, &mut self.scaled_y)
+                };
+                let r = ref_idx as usize;
+                if r >= ctrl.len() {
+                    continue;
+                }
+                let new_ctrl = ctrl[r].wrapping_add(delta as i16);
+                let new_scaled = scaled[r].wrapping_add(snap);
+                ctrl.push(new_ctrl);
+                scaled.push(new_scaled);
+                if axis == 0 {
+                    grew.0 = true;
+                } else {
+                    grew.1 = true;
+                }
+            }
+        }
+        grew
+    }
+
+    /// Build the piecewise-linear zone tables from the FITTED
+    /// ctrl/scaled tables. Offsets reconstruct the snapped positions exactly
+    /// (`scaled << shift`), and the scalar division truncates like the
+    /// original — no rounding bias.
+    fn initialize_zone_tables_fitted(&mut self, axis: i32, had_extras: bool) {
+        let (ctrl, scaled, font_scale, font_offset) = if axis == 1 {
+            (self.ctrl_y.clone(), self.scaled_y.clone(), self.font_scale_y, self.font_offset_y)
+        } else {
+            (self.ctrl_x.clone(), self.scaled_x.clone(), self.font_scale_x, self.font_offset_x)
+        };
+        let shift = self.shift_difference as i32;
+        let bias = self.rounding_bias_2128;
+
+        let mut zones: Vec<i16> = Vec::new();
+        let mut scalars: Vec<i16> = Vec::new();
+        let mut offsets: Vec<i32> = Vec::new();
+        let n_ctrl = ctrl.len();
+
+        if n_ctrl == 0 {
+            scalars.push(font_scale);
+            offsets.push(font_offset + bias);
+            zones.push(i16::MAX);
+        } else {
+            let mut order: Vec<usize> = (0..n_ctrl).collect();
+            if had_extras {
+                order.sort_by_key(|&i| ctrl[i]);
+            }
+            let first = order[0];
+            let mut last_ctrl = ctrl[first];
+            let mut last_scaled = scaled[first];
+            scalars.push(font_scale);
+            offsets.push(bias + ((last_scaled as i32) << shift) - font_scale as i32 * last_ctrl as i32);
+            zones.push(last_ctrl);
+
+            for &idx in order.iter().skip(1) {
+                let d = ctrl[idx] as i32 - last_ctrl as i32;
+                if d <= 0 {
+                    continue;
+                }
+                let scalar = (((scaled[idx] as i32 - last_scaled as i32) << shift) / d) as i16;
+                let offset =
+                    bias + ((scaled[idx] as i32) << shift) - ctrl[idx] as i32 * scalar as i32;
+                let k = zones.len();
+                if scalar == scalars[k - 1] && offset == offsets[k - 1] {
+                    zones[k - 1] = ctrl[idx];
+                } else {
+                    zones.push(ctrl[idx]);
+                    scalars.push(scalar);
+                    offsets.push(offset);
+                }
+                last_ctrl = ctrl[idx];
+                last_scaled = scaled[idx];
+            }
+
+            let final_offset =
+                bias + ((last_scaled as i32) << shift) - font_scale as i32 * last_ctrl as i32;
+            let k = zones.len();
+            if font_scale == scalars[k - 1] && final_offset == offsets[k - 1] {
+                zones[k - 1] = i16::MAX;
+            } else {
+                zones.push(i16::MAX);
+                scalars.push(font_scale);
+                offsets.push(final_offset);
+            }
+        }
+
+        let n_zones = zones.len() as i16;
+        if axis == 1 {
+            self.zones_y = zones;
+            self.scalars_y = scalars;
+            self.offsets_y = offsets;
+            self.n_zones_y = n_zones;
+        } else {
+            self.zones_x = zones;
+            self.scalars_x = scalars;
+            self.offsets_x = offsets;
+            self.n_zones_x = n_zones;
+        }
     }
 
     /// Compute scaled coordinate arrays
@@ -2587,6 +3437,7 @@ impl<'a> Pfr1HeaderParser<'a> {
             }
 
             // Inherit parent's coord state and apply component transform through matrix
+            sub_parser.copy_grid_fit_from(self);
             sub_parser.copy_parent_coord_state(self);
             sub_parser.apply_component_transform(
                 record.x_offset as i16, record.y_offset as i16,
@@ -2855,6 +3706,9 @@ impl<'a> Pfr1HeaderParser<'a> {
     }
 
     fn remove_duplicate_points(&mut self) {
+        // In grid-fit pixel space, points half a pixel apart are real
+        // geometry — only collapse true duplicates there.
+        let eps = if self.grid_fit { 1.0 / 32.0 } else { 0.5 };
         for contour in &mut self.contours {
             let mut deduped = Vec::new();
             let mut last_x = f32::MIN;
@@ -2865,7 +3719,7 @@ impl<'a> Pfr1HeaderParser<'a> {
                     deduped.push(cmd.clone());
                     continue;
                 }
-                if (cmd.x - last_x).abs() > 0.5 || (cmd.y - last_y).abs() > 0.5 {
+                if (cmd.x - last_x).abs() > eps || (cmd.y - last_y).abs() > eps {
                     deduped.push(cmd.clone());
                     last_x = cmd.x;
                     last_y = cmd.y;
@@ -2905,6 +3759,7 @@ impl<'a> Pfr1HeaderParser<'a> {
     }
 
     fn close_contours(&mut self) {
+        let eps = if self.grid_fit { 1.0 / 32.0 } else { 0.5 };
         for contour in &mut self.contours {
             if contour.commands.is_empty() { continue; }
 
@@ -2919,7 +3774,7 @@ impl<'a> Pfr1HeaderParser<'a> {
             let end_x = last.x;
             let end_y = last.y;
 
-            if (end_x - start_x).abs() > 0.5 || (end_y - start_y).abs() > 0.5 {
+            if (end_x - start_x).abs() > eps || (end_y - start_y).abs() > eps {
                 contour.commands.push(PfrCmd::line_to(start_x, start_y));
             }
         }
@@ -3276,6 +4131,7 @@ pub fn parse_glyph(
     gps_section_size: usize,
     known_gps_offsets: &[usize],
     physical_font: Option<&PhysicalFontRecord>,
+    grid_fit: bool,
 ) -> Option<OutlineGlyph> {
     let start = char_record.gps_offset as usize;
     let size = char_record.gps_size as usize;
@@ -3333,6 +4189,19 @@ pub fn parse_glyph(
             target_em_px,
         );
         parser.diag_char_code = char_code;
+        if grid_fit {
+            parser.enable_grid_fit(physical_font);
+            // Set width converted metrics -> outline units, the band the
+            // re-centering correction scans (the advance formula's 16.16 em
+            // fraction round-tripped through the outline resolution).
+            let metrics_res = physical_font
+                .map(|p| p.metrics_resolution)
+                .filter(|&r| r > 0)
+                .unwrap_or(outline_resolution.max(1)) as i64;
+            let frac = ((metrics_res >> 1) + ((char_record.set_width as i64) << 16)) / metrics_res;
+            parser.fit_set_width_orus =
+                ((frac * outline_resolution as i64 + 0x8000) >> 16) as i32;
+        }
         let glyph = parser.parse();
         header_contours = glyph.contours.len();
         header_score = score_glyph(&glyph, true);
@@ -3344,8 +4213,10 @@ pub fn parse_glyph(
         }
     }
 
-    // Try PFR1DirectParser as fallback
-    {
+    // Try PFR1DirectParser as fallback. The grid-fit path skips it: its
+    // output is orus-space and would win the score contest against small
+    // pixel-space coordinates.
+    if !grid_fit {
         let parser = Pfr1DirectParser::new(glyph_data);
         let glyph = parser.parse();
         direct_contours = glyph.contours.len();
@@ -3386,8 +4257,13 @@ pub fn parse_glyph(
         glyph.char_code = char_code;
         glyph.set_width = char_record.set_width as f32;
 
-        // Clamp and scale extreme coordinates
-        let outline_res = outline_resolution as f32;
+        // Clamp and scale extreme coordinates. Grid-fit glyphs are in pixel
+        // space, so the sanity band scales with the target size, not the em.
+        let outline_res = if grid_fit && target_em_px > 0 {
+            target_em_px as f32
+        } else {
+            outline_resolution as f32
+        };
         let max_valid = outline_res * 3.0;
         let mut min_x = f32::MAX;
         let mut max_x = f32::MIN;
@@ -3418,7 +4294,10 @@ pub fn parse_glyph(
             .max(max_y.abs())
             .max(min_x.abs())
             .max(min_y.abs());
-        if max_coord > outline_res * 2.0 && max_coord > 0.0 {
+        // Grid-fit glyphs are already snapped to the pixel grid; rescaling
+        // would destroy the fit (Volter's tall accents legitimately exceed
+        // 2x the em). Junk glyphs were clamped above and stay clamped.
+        if !grid_fit && max_coord > outline_res * 2.0 && max_coord > 0.0 {
             log(&format!(
                 "  [NORM] char {} ('{}') max_coord={:.1} outline_res={:.1} scale={:.4} bbox=({:.1},{:.1})..({:.1},{:.1}) compound={}",
                 char_code, ch, max_coord, outline_res, outline_res / max_coord,

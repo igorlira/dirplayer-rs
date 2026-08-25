@@ -438,6 +438,12 @@ pub struct RasterizedFont {
     pub grid_rows: usize,
     /// Per-character advance widths (in pixels)
     pub char_widths: Vec<u16>,
+    /// Per-character FRACTIONAL advances, straight from the 16.16 formula
+    /// before pixel rounding. Director's string layout accumulates these and
+    /// rounds each glyph's PEN POSITION (accumulate in 16.16, blit at
+    /// `(pen + 0x8000) >> 16`) — the integer `char_widths` are only the
+    /// rounded metric report.
+    pub char_widths_frac: Vec<f32>,
     /// First char code in the grid
     pub first_char: u8,
     /// Number of chars
@@ -759,6 +765,7 @@ pub fn rasterize_pfr1_font_with_options(
 
     // Per-character advance widths
     let mut char_widths = vec![cell_width as u16; num_chars];
+    let mut char_widths_frac = vec![cell_width as f32; num_chars];
     let trace_bitmap_debug = parsed_font
         .font_name
         .to_ascii_lowercase()
@@ -813,7 +820,7 @@ pub fn rasterize_pfr1_font_with_options(
         let idx = char_code as usize;
         if idx >= num_chars { continue; }
 
-        // Director advance width (sub_6A11CC67): 16.16 fixed-point formula.
+        // Director advance width: 16.16 fixed-point formula.
         // v2 = ((outlineRes/2 + (csw << 16)) / outlineRes
         // advance_16_16 = FixedPointMultiply16(v2, matrix2136_A)
         // Rounded to pixel: (advance + 0x8000) >> 16
@@ -821,19 +828,23 @@ pub fn rasterize_pfr1_font_with_options(
         // widen, so their advance is untouched — which is what Shockwave does:
         // "Public View"'s space stays 4 px while every inked glyph gains one.
         let embolden_this = if glyph.contours.is_empty() { 0.0 } else { embolden_orus };
-        let glyph_pixel_width = if out_res_i > 0 {
+        let (glyph_pixel_width, glyph_frac_width) = if out_res_i > 0 {
             let csw = (glyph.set_width + embolden_this) as i16;
             let v2 = ((out_res_i >> 1) + ((csw as i32) << 16)) / out_res_i;
             let advance_16_16 = fixed_point_multiply16(v2, matrix2136_a);
             let advance_px = ((advance_16_16 + 0x8000) & !0xFFFF) >> 16;
-            (advance_px.max(if glyph.set_width > 0.0 { 1 } else { 0 })) as usize
+            (
+                (advance_px.max(if glyph.set_width > 0.0 { 1 } else { 0 })) as usize,
+                advance_16_16 as f32 / 65536.0,
+            )
         } else {
-            0
+            (0, 0.0)
         };
 
         // Always set char_widths from outline metrics (correct spacing)
         if glyph_pixel_width > 0 {
             char_widths[idx] = glyph_pixel_width as u16;
+            char_widths_frac[idx] = glyph_frac_width;
         }
 
         // Skip rasterization if a bitmap glyph exists — bitmap glyphs are
@@ -1101,13 +1112,18 @@ pub fn rasterize_pfr1_font_with_options(
 
         // Only set char_widths from bitmap if outline didn't already provide them
         if !has_outline {
-            let bmp_adv = if outline_res > 0.0 {
+            let (bmp_adv, bmp_frac) = if outline_res > 0.0 {
                 let advance_f = bmp_glyph.set_width as f32 * target_height as f32 / outline_res;
-                advance_f.round().max(if bmp_glyph.set_width > 0 { 1.0 } else { 0.0 }) as u16
+                (
+                    advance_f.round().max(if bmp_glyph.set_width > 0 { 1.0 } else { 0.0 }) as u16,
+                    advance_f,
+                )
             } else {
-                ((bmp_glyph.set_width as f32) * set_width_scale).max(1.0) as u16
+                let a = (bmp_glyph.set_width as f32) * set_width_scale;
+                (a.max(1.0) as u16, a)
             };
             char_widths[idx] = bmp_adv;
+            char_widths_frac[idx] = bmp_frac;
         }
 
         // Copy bitmap data to RGBA grid.
@@ -1286,6 +1302,7 @@ pub fn rasterize_pfr1_font_with_options(
         grid_columns,
         grid_rows,
         char_widths,
+        char_widths_frac,
         first_char,
         num_chars,
     }
