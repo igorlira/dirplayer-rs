@@ -9,6 +9,7 @@ pub fn parse_physical_font(
     phys_offset: usize,
     phys_end: usize,
     max_chars: u16,
+    max_blue_values: u8,
 ) -> Result<PhysicalFontRecord, String> {
     if phys_offset >= data.len() {
         return Err("Physical font offset out of range".to_string());
@@ -154,16 +155,18 @@ pub fn parse_physical_font(
                     }
                 }
                 3 => {
-                    // Stem snap tables
-                    // Read as nibbles: sshSize (4 bits) + ssvSize (4 bits)
-                    // Then ssvSize i16 values + sshSize i16 values
-                    let ssh_size = reader.read_bits(4) as usize;
-                    let ssv_size = reader.read_bits(4) as usize;
+                    // Stem snap tables (type-3 record):
+                    // one count byte — HIGH nibble = vertical-stem (X width)
+                    // count, LOW nibble = horizontal-stem (Y width) count —
+                    // then the vertical values followed by the horizontal
+                    // values, big-endian i16 orus each.
+                    let ssv_size = reader.read_bits(4) as usize; // high nibble
+                    let ssh_size = reader.read_bits(4) as usize; // low nibble
                     for _ in 0..ssv_size {
-                        reader.read_i16();
+                        record.stem_snap_v.push(reader.read_i16());
                     }
                     for _ in 0..ssh_size {
-                        reader.read_i16();
+                        record.stem_snap_h.push(reader.read_i16());
                     }
                 }
                 5 => {
@@ -201,6 +204,16 @@ pub fn parse_physical_font(
             let probe_pos = reader.position();
 
             let n_blue_values = reader.read_u8() as usize;
+            // The PFR header declares the maximum blue-value count for the
+            // whole resource. A probe whose count exceeds it cannot be the
+            // real table, and accepting it lands the reader hundreds of bytes
+            // off — Tiki Island/Tiki Magic hit exactly that: a 0xFF count byte
+            // whose downstream u16 happened to equal max_chars, yielding 255
+            // junk "blue values" and a wrecked Y grid-fit.
+            if max_blue_values > 0 && n_blue_values > max_blue_values as usize {
+                reader.set_position(probe_pos + 1);
+                continue;
+            }
             let byte_counter = (n_blue_values * 2) + 6;
 
             // Need room to skip and read 16 bits
@@ -238,7 +251,14 @@ pub fn parse_physical_font(
     }
     let blue_fuzz = reader.read_u8();
     let blue_scale = reader.read_u8();
-    record.blue_values = blue_values;
+    // Guard against a misaligned read: a table longer than the header's
+    // declared maximum is not a blue table. Dropping it costs only the
+    // optional blue-zone snapping, where keeping garbage collapses glyphs.
+    if max_blue_values > 0 && blue_values.len() > max_blue_values as usize {
+        record.blue_values = Vec::new();
+    } else {
+        record.blue_values = blue_values;
+    }
     record.blue_fuzz = blue_fuzz;
     record.blue_scale = blue_scale;
 

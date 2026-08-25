@@ -268,6 +268,11 @@ pub struct PhysicalFontRecord {
     pub blue_values: Vec<i16>,
     pub blue_fuzz: u8,
     pub blue_scale: u8,
+    // Stem snap widths in orus, from the extra-item type-3 record.
+    // `stem_snap_v` = vertical stems (X-axis widths, paired with StdVW);
+    // `stem_snap_h` = horizontal stems (Y-axis widths, paired with StdHW).
+    pub stem_snap_v: Vec<i16>,
+    pub stem_snap_h: Vec<i16>,
     // Extra items
     pub has_bitmap_section: bool,
     pub bitmap_size_table_offset: u32,
@@ -326,6 +331,8 @@ impl PhysicalFontRecord {
             blue_values: Vec::new(),
             blue_fuzz: 0,
             blue_scale: 0,
+            stem_snap_v: Vec::new(),
+            stem_snap_h: Vec::new(),
             has_bitmap_section: false,
             bitmap_size_table_offset: 0,
             gps_offset: 0,

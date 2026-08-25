@@ -74,7 +74,13 @@ pub fn parse_pfr1_font_with_target(data: &[u8], target_em_px: i32) -> Result<Pfr
         phys_end = phys_end.min(gps_offset);
     }
 
-    font.physical_font = physical::parse_physical_font(data, phys_offset, phys_end, pfr_header.max_chars)?;
+    font.physical_font = physical::parse_physical_font(
+        data,
+        phys_offset,
+        phys_end,
+        pfr_header.max_chars,
+        pfr_header.max_blue_values,
+    )?;
     // Header carries max orus values used by PFR1 glyph parsing
     font.physical_font.max_x_orus = pfr_header.max_x_orus;
     font.physical_font.max_y_orus = pfr_header.max_y_orus;
