@@ -34,9 +34,26 @@ fn native_line_start_whitespace_advance(
     }
 }
 
+/// Canvas2D exposes fractional CSS-font metrics, while Director advances its
+/// text cursor in whole stage pixels. Quantize visible-token advances after
+/// preserving Canvas kerning; for whitespace runs, quantize the per-character
+/// advance before accumulating it. This prevents authored spacing (including
+/// leading padding) from drifting by many pixels across a member.
+fn native_director_token_advance(
+    is_whitespace: bool,
+    char_count: usize,
+    measured_width: f64,
+) -> f64 {
+    if is_whitespace && char_count > 0 {
+        (measured_width / char_count as f64).round() * char_count as f64
+    } else {
+        measured_width.round()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::native_line_start_whitespace_advance;
+    use super::{native_director_token_advance, native_line_start_whitespace_advance};
 
     #[test]
     fn native_text_preserves_authored_leading_whitespace_advance() {
@@ -48,6 +65,25 @@ mod tests {
     fn native_text_does_not_add_leading_advance_to_other_tokens() {
         assert_eq!(native_line_start_whitespace_advance(true, false, 12.5), 0.0);
         assert_eq!(native_line_start_whitespace_advance(false, true, 12.5), 0.0);
+    }
+
+    #[test]
+    fn native_text_quantizes_whitespace_before_accumulating() {
+        // Arial 12 is approximately 3.3359 px per space in Canvas2D. Director
+        // advances it by 3 stage pixels, so 11 authored spaces land at x=33.
+        let canvas_width = 3.335_937_5 * 11.0;
+        assert_eq!(
+            native_director_token_advance(true, 11, canvas_width),
+            33.0,
+        );
+    }
+
+    #[test]
+    fn native_text_quantizes_visible_token_cursor_advance() {
+        assert_eq!(
+            native_director_token_advance(false, 4, 18.625),
+            19.0,
+        );
     }
 }
 
@@ -858,10 +894,15 @@ impl FontMemberHandlers {
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
                 ctx.set_font(&style.font);
-                let token_width = ctx
+                let measured_token_width = ctx
                     .measure_text(token_text)
                     .map(|m| m.width())
                     .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
+                let token_width = native_director_token_advance(
+                    is_whitespace,
+                    token_text.chars().count(),
+                    measured_token_width,
+                );
 
                 // If the line has a tab marker, text after the tab is positioned by
                 // the tab stop (e.g. right-aligned), so it doesn't increase line width
