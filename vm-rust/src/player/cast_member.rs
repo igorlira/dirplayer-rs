@@ -4497,6 +4497,7 @@ impl CastMember {
         chunk: &CastMemberChunk,
         bitmap_manager: &mut BitmapManager,
         cast_lib: u32,
+        text_encoding: crate::io::encoding::DirectorTextEncoding,
     ) -> Option<CastMember>
     {
         for opt_child in &member_def.children {
@@ -4574,7 +4575,7 @@ impl CastMember {
                     hex_dump
                 );
 
-                if let Some(styled_text) = xm.parse_styled_text() {
+                if let Some(styled_text) = xm.parse_styled_text(text_encoding) {
                     debug!("Detected as XMED styled text");
                     let stxt_font_size: Option<u16> = None;
                     return Some(Self::create_text_member_from_xmed(
@@ -4640,12 +4641,19 @@ impl CastMember {
             let has_pfr = Self::extract_pfr(member_def).is_some();
             if has_pfr {
                 debug!("Detected as PFR font");
-                return Some(Self::parse_xmedia_font(member_def, number, chunk, xm, bitmap_manager));
+                return Some(Self::parse_xmedia_font(
+                    member_def,
+                    number,
+                    chunk,
+                    xm,
+                    bitmap_manager,
+                    text_encoding,
+                ));
             }
 
             // 5) No PFR font data — create a TextMember from the XMedia text content
             // Use the proper XMED parser to get clean text, fall back to empty
-            let text = xm.parse_styled_text()
+            let text = xm.parse_styled_text(text_encoding)
                 .map(|st| st.text.clone())
                 .unwrap_or_default();
             let member_name = chunk.member_info.as_ref()
@@ -4733,6 +4741,7 @@ impl CastMember {
         chunk: &CastMemberChunk,
         xm: &XMediaChunk,
         bitmap_manager: &mut BitmapManager,
+        text_encoding: crate::io::encoding::DirectorTextEncoding,
     ) -> CastMember {
         let pfr = Self::extract_pfr(member_def);
 
@@ -4741,7 +4750,7 @@ impl CastMember {
         let preview_text = if pfr.is_some() {
             String::new()
         } else {
-            xm.parse_styled_text()
+            xm.parse_styled_text(text_encoding)
                 .map(|st| st.text.clone())
                 .filter(|s| s.len() > 3)
                 .unwrap_or_default()
@@ -5393,10 +5402,12 @@ impl CastMember {
         lctx: &Option<ScriptContext>,
         bitmap_manager: &mut BitmapManager,
         dir_version: u16,
+        platform: u16,
         palette_id_offset: i16,
         font_table: &HashMap<u16, String>,
     ) -> CastMember {
         let chunk = &member_def.chunk;
+        let text_encoding = crate::io::encoding::DirectorTextEncoding::from_platform(platform);
 
         let member_type = match chunk.member_type {
             MemberType::Text => {
@@ -5692,7 +5703,7 @@ impl CastMember {
                     }
                 }
                 // Also scan XMedia children
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib, text_encoding) {
                     return cm;
                 }
                 // Fallback: use first child bytes if available. Hoist the
@@ -5896,7 +5907,7 @@ impl CastMember {
                 }
 
                 // Try all XMedia children for SWF or fonts
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib, text_encoding) {
                     return cm;
                 }
 

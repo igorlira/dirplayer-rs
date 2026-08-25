@@ -17,6 +17,33 @@
 //! - https://en.wikipedia.org/wiki/Windows-1252
 //! - https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WINDOWS/CP1252.TXT
 
+/// Single-byte text encoding used by a Director movie's text members.
+/// Director platform ID 1 is Macintosh; other known IDs are Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectorTextEncoding {
+    MacRoman,
+    Windows1252,
+}
+
+impl DirectorTextEncoding {
+    pub fn from_platform(platform: u16) -> Self {
+        if platform == 1 {
+            Self::MacRoman
+        } else {
+            Self::Windows1252
+        }
+    }
+
+    /// Prefer genuine UTF-8 (Director 10+) and otherwise use the movie's
+    /// platform-specific legacy encoding.
+    pub fn decode_text_auto(self, bytes: &[u8]) -> String {
+        match self {
+            Self::MacRoman => decode_text_auto_macroman(bytes),
+            Self::Windows1252 => decode_text_auto(bytes),
+        }
+    }
+}
+
 /// Windows-1252 byte → Unicode codepoint table for bytes 0x80-0xFF.
 /// U+FFFD marks the five officially-undefined positions.
 const WIN1252_HIGH: [char; 128] = [
@@ -194,5 +221,38 @@ pub fn decode_text_auto_macroman(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
         Err(_) => decode_macroman(bytes),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_legacy_encoding_from_director_platform() {
+        assert_eq!(DirectorTextEncoding::from_platform(1), DirectorTextEncoding::MacRoman);
+        assert_eq!(DirectorTextEncoding::from_platform(256), DirectorTextEncoding::Windows1252);
+    }
+
+    #[test]
+    fn decodes_portuguese_accents_from_mac_roman() {
+        let encoding = DirectorTextEncoding::MacRoman;
+        assert_eq!(encoding.decode_text_auto(&[0x90]), "ê");
+        assert_eq!(encoding.decode_text_auto(&[0x8E]), "é");
+    }
+
+    #[test]
+    fn decodes_portuguese_accents_from_windows_1252() {
+        let encoding = DirectorTextEncoding::Windows1252;
+        assert_eq!(encoding.decode_text_auto(&[0xEA]), "ê");
+        assert_eq!(encoding.decode_text_auto(&[0xE9]), "é");
+    }
+
+    #[test]
+    fn preserves_ascii_and_valid_utf8_for_both_platforms() {
+        for encoding in [DirectorTextEncoding::MacRoman, DirectorTextEncoding::Windows1252] {
+            assert_eq!(encoding.decode_text_auto(b"experiencia"), "experiencia");
+            assert_eq!(encoding.decode_text_auto("experiência".as_bytes()), "experiência");
+        }
     }
 }

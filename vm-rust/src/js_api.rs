@@ -629,7 +629,10 @@ impl JsApi {
         dir_file.chunk_container.cached_chunk_views.get(&chunk_id).cloned()
     }
 
-    fn chunk_to_js(chunk: &Chunk) -> js_sys::Object {
+    fn chunk_to_js(
+        chunk: &Chunk,
+        text_encoding: crate::io::encoding::DirectorTextEncoding,
+    ) -> js_sys::Object {
         let map = js_sys::Map::new();
         match chunk {
             Chunk::Cast(c) => {
@@ -874,7 +877,7 @@ impl JsApi {
                     }
                 } else if xm.is_styled_text() {
                     map.str_set("content_type", &JsValue::from_str("Styled Text"));
-                    if let Some(st) = xm.parse_styled_text() {
+                    if let Some(st) = xm.parse_styled_text(text_encoding) {
                         map.str_set("text", &JsValue::from_str(&ascii_safe(&st.text)));
                         map.str_set("alignment", &JsValue::from_str(&format!("{:?}", st.alignment)));
                         map.str_set("word_wrap", &JsValue::from_bool(st.word_wrap));
@@ -963,7 +966,10 @@ impl JsApi {
         };
 
         match chunks::make_chunk(dir_file.endian, &mut rifx, chunk_info.fourcc, raw_bytes) {
-            Ok(chunk) => Self::chunk_to_js(&chunk),
+            Ok(chunk) => Self::chunk_to_js(
+                &chunk,
+                crate::io::encoding::DirectorTextEncoding::from_platform(dir_file.config.platform),
+            ),
             Err(e) => error_result(&e),
         }
     }
