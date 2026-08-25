@@ -647,11 +647,20 @@ impl WebGL2Renderer {
             );
         }
         if let Some(ref loc) = program.u_tex_rect {
-            // Matching sub-rect of the stage bitmap, in normalised texture space.
+            // Matching sub-rect of the stage bitmap, in normalised texture
+            // space. Like `u_sprite_rect` above this is (x, y, WIDTH, HEIGHT)
+            // — the vertex shader does `u_tex_rect.xy + tc * u_tex_rect.zw` —
+            // and passing the far EDGES instead was invisible only while the
+            // dirty rect started at the origin, where right/bottom happen to
+            // equal width/height. Splat draws its lives/drinks strip into
+            // rect(130, 430, 630, 470), which gave v a span of 470/480 across
+            // a 40-row quad: the whole bottom half of the stage was crushed
+            // into the strip's first ~4 rows and the rest clamped to the very
+            // last texture row — the "collapsed graphics" at the bottom.
             gl.uniform4f(
                 Some(loc),
                 dl / sw as f32, dt / sh as f32,
-                dr / sw as f32, db / sh as f32,
+                (dr - dl) / sw as f32, (db - dt) / sh as f32,
             );
         }
         if let Some(ref loc) = program.u_flip {
