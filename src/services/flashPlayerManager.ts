@@ -352,14 +352,33 @@ function getSocketProxyConfig(): Array<{host: string, port: number, proxyUrl: st
 // it even when the host page doesn't call `configureFlashManager`.
 // Re-evaluates `getSocketProxyConfig` on every call so dev defaults +
 // runtime-supplied entries both stay live.
+//
+// An entry matches by host and port, with two wildcards so a host page can
+// express "route this whole server through the proxy" without enumerating
+// every address the movie might dial (CokeStudios' gateway address is baked
+// into the movie's own casts, and differs between the archived cut and a
+// self-hosted one):
+//   host: "*"  matches any host
+//   port: 0    matches any port
+// The chosen `proxyUrl` may then reference the movie-side values it replaced
+// as `${host}` / `${port}` — e.g. `ws://127.0.0.1:${port}` forwards a whole
+// range of ports to a local WS-TCP proxy listening on the same numbers.
+// Exact entries are preferred over wildcard ones regardless of list order.
 (window as any).dirplayerResolveSocketUrl = (host: string, port: number): string => {
   const proxies = getSocketProxyConfig();
+  const expand = (url: string) =>
+    url.replace(/\$\{host\}/g, host).replace(/\$\{port\}/g, String(port));
+  let wildcard: string | null = null;
   for (const entry of proxies) {
-    if (entry.host.toLowerCase() === host.toLowerCase() && entry.port === port) {
-      return entry.proxyUrl;
+    const hostOk = entry.host === "*" || entry.host.toLowerCase() === host.toLowerCase();
+    const portOk = entry.port === 0 || entry.port === port;
+    if (!hostOk || !portOk) continue;
+    if (entry.host !== "*" && entry.port !== 0) {
+      return expand(entry.proxyUrl); // exact match wins outright
     }
+    if (wildcard === null) wildcard = expand(entry.proxyUrl);
   }
-  return "";
+  return wildcard ?? "";
 };
 
 // Each Flash sprite has its own Ruffle instance — keyed by the Director
