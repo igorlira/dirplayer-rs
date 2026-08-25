@@ -6182,6 +6182,9 @@ impl WebGL2Renderer {
         // non-uniformity.
         let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
         let scale = scale_x.min(scale_y);
+        // Member-authored size, before stage scaling — the antiAliasThreshold
+        // rule below compares against THIS (Director's rule is in member units).
+        let member_font_size = font_size;
         let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
         let line_spacing = ((line_spacing as f64) * scale).round() as u16;
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
@@ -6506,7 +6509,7 @@ impl WebGL2Renderer {
         // registered in the browser, so Canvas2D fillText would fall back to a system font.
         let use_native_for_pfr = match glyph_pref {
             GlyphPreference::Native => true,  // Force native even for PFR
-            GlyphPreference::Bitmap | GlyphPreference::Outline => false,  // Force bitmap atlas
+            GlyphPreference::Bitmap | GlyphPreference::Outline | GlyphPreference::Hinted => false,  // Force bitmap atlas
             GlyphPreference::Auto => {
                 if is_pfr_font {
                     if font.char_widths.is_some() {
@@ -6792,6 +6795,35 @@ impl WebGL2Renderer {
                         );
                     }
 
+                    // NOTE: a fractional 16.16 pen accumulation was tried
+                    // here and REGRESSED the hinted specimen 8.38% -> 9.25%:
+                    // that pen belongs to Director's GDI screen-font path.
+                    // Paige lays TEXT out from the ROUNDED per-glyph widths
+                    // Director reports — keep integers.
+                    // Hinted bold: Director's FIELD path (the GDI-style
+                    // engine) advances every inked glyph one extra pixel —
+                    // the classic tmOverhang of a synthetic double-strike.
+                    // TEXT members gain nothing (measured in the specimen:
+                    // charPosToLoc is byte-identical plain vs bold). The
+                    // non-hinted path keeps the legacy design-space pen
+                    // baked into char_widths instead.
+                    // A face that is already bold gains nothing (settled:
+                    // PFR weight >= 600). The atlas font name carries the
+                    // weight ("Verdana Bold *" / "Verdana_700_0").
+                    let face_already_bold = {
+                        let n = font.font_name.to_ascii_lowercase();
+                        n.contains("bold") || n.contains("_600") || n.contains("_700") || n.contains("_800")
+                    };
+                    let bold_overhang: i32 = if bold
+                        && is_field
+                        && is_pfr_font
+                        && !face_already_bold
+                        && glyph_pref == GlyphPreference::Hinted
+                    {
+                        1
+                    } else {
+                        0
+                    };
                     let mut x = start_x;
                     let mut char_i: usize = 0;
                     for ch in line.chars() {
@@ -6955,14 +6987,17 @@ impl WebGL2Renderer {
                         // baked into `char_widths` (see `bold_embolden_orus`) —
                         // widening the ink here without widening the pen there is
                         // what used to run bold PFR text a pixel per glyph short.
-                        if bold {
+                        // A face that is ALREADY bold gains nothing (Director's
+                        // settled rule): a second strike on "Verdana Bold *
+                        // [#bold]" rendered visibly heavier than Shockwave.
+                        if bold && !face_already_bold {
                             draw_glyph(bitmap, x + 1);
                         }
                         // Apply member-level charSpacing between glyphs.
                         // Negative tightens (FurniFactory displayComputer
                         // uses -2). Already factored into measure_text_wrapped
                         // so sprite_rect width matches.
-                        x += adv + char_spacing;
+                        x += adv + char_spacing + bold_overhang;
                         char_i += 1;
                     }
 
@@ -7780,6 +7815,42 @@ impl WebGL2Renderer {
         // Studios' `nav_vego_search_field` v-ego search box uses ink 0 Copy and
         // needs its white bg drawn — preserved here.
         let has_bg_fill = ink == 0;
+
+        // GlyphPreference::Hinted — Director's aliasing rule, now that grid-fit
+        // stems survive a 50% coverage threshold (they are at least 1px wide):
+        //   TEXT member: anti-aliased only when `antiAlias` is set AND the
+        //   member's fontSize >= antiAliasThreshold (a stored threshold of 0 is
+        //   honoured literally: nothing is below it, so always smooth).
+        //   FIELD member: always 1-bit (Director never anti-aliases fields).
+        // Applied only to the PFR bitmap-atlas path — native Canvas2D text
+        // (system fonts) keeps its browser rendering.
+        if get_glyph_preference() == GlyphPreference::Hinted
+            && spans_for_native.is_none()
+            && is_pfr_font
+        {
+            let binary = if is_field {
+                true
+            } else {
+                let (aa, thr) = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&cache_key.member_ref)
+                    .and_then(|m| m.member_type.as_text())
+                    .map(|t| {
+                        (
+                            t.anti_alias,
+                            t.info.as_ref().map(|i| i.anti_alias_threshold).unwrap_or(14),
+                        )
+                    })
+                    .unwrap_or((true, 14));
+                !aa || (member_font_size as u32) < thr
+            };
+            if binary {
+                for i in (3..text_bitmap.data.len()).step_by(4) {
+                    text_bitmap.data[i] = if text_bitmap.data[i] >= 128 { 255 } else { 0 };
+                }
+            }
+        }
 
         // After drawing text, handle background pixels.
         // The bitmap was pre-filled with alpha=0 (transparent).

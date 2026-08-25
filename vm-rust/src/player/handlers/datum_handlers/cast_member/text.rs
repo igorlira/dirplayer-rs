@@ -62,6 +62,16 @@ pub(crate) fn count_text_lines(
     wrap_width: i32,
     char_spacing: i32,
 ) -> usize {
+    // A single TRAILING return ends the last paragraph without opening a
+    // visual line: Director's `.rect`/`.height`/`.image` size the box for the
+    // visible lines only (measured: the fCheck sweep text ends in RETURN and
+    // Shockwave reports 11 lines where counting the trailing empty gives 12).
+    // Interior blank lines still count.
+    let text: &str = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .or_else(|| text.strip_suffix('\r'))
+        .unwrap_or(text);
     if word_wrap && wrap_width > 0 {
         let cs = char_spacing;
         let space_w = font.get_char_advance(b' ') as i32 + cs;
@@ -1327,7 +1337,9 @@ impl TextMemberHandlers {
                 //
                 // Cloned once (consistent with `text_data` above); .image is not
                 // a per-frame call for cached members.
-                let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> = if is_pfr_font {
+                // (parsed font, raw PFR bytes) — the raw bytes let the Hinted
+                // preference re-parse grid-fitted at the render size below.
+                let pfr_outline: Option<(crate::director::chunks::pfr1::types::Pfr1ParsedFont, Option<Vec<u8>>)> = if is_pfr_font {
                     let name = preferred_font_name.as_deref().unwrap_or("");
                     if name.is_empty() {
                         None
@@ -1336,34 +1348,49 @@ impl TextMemberHandlers {
                         use crate::player::font::FontManager;
                         let lc = name.to_ascii_lowercase();
                         let canon = FontManager::canonical_font_name(name);
-                        let mut found = None;
+                        // An EXACT name match must win over a canonical one.
+                        // `canonical_font_name` folds style words away, so
+                        // "Verdana *" and "Verdana Bold *" both canonicalise to
+                        // "verdana" — and since `members.values()` is an
+                        // unordered map, whichever came out first decided the
+                        // face. Asking for `Verdana *` picked `Verdana Bold *`
+                        // (`Verdana_700_0`) about as often as not, and a baked
+                        // `.image` silently came out in the wrong weight.
+                        let mut exact = None;
+                        let mut fallback = None;
                         'find_outline: for cast in &player.movie.cast_manager.casts {
                             for m in cast.members.values() {
                                 if let CastMemberType::Font(fd) = &m.member_type {
-                                    let matches = fd.font_info.name.to_lowercase() == lc
-                                        || m.name.to_lowercase() == lc
-                                        || (!canon.is_empty()
-                                            && (FontManager::canonical_font_name(&fd.font_info.name) == canon
-                                                || FontManager::canonical_font_name(&m.name) == canon));
-                                    if matches {
-                                        if let Some(p) = &fd.pfr_parsed {
-                                            // Smooth outline-only fonts only.
-                                            // Bitmap-strike fonts AND pixel fonts
-                                            // (rectilinear, e.g. Volter) stay on
-                                            // the atlas path for crisp pixels.
-                                            if !p.glyphs.is_empty()
-                                                && p.bitmap_glyphs.is_empty()
-                                                && !p.is_pixel_font
-                                            {
-                                                found = Some(p.clone());
+                                    let is_exact = fd.font_info.name.to_lowercase() == lc
+                                        || m.name.to_lowercase() == lc;
+                                    let is_canon = !canon.is_empty()
+                                        && (FontManager::canonical_font_name(&fd.font_info.name) == canon
+                                            || FontManager::canonical_font_name(&m.name) == canon);
+                                    if !is_exact && !is_canon {
+                                        continue;
+                                    }
+                                    if let Some(p) = &fd.pfr_parsed {
+                                        // Smooth outline-only fonts only.
+                                        // Bitmap-strike fonts AND pixel fonts
+                                        // (rectilinear, e.g. Volter) stay on
+                                        // the atlas path for crisp pixels.
+                                        if !p.glyphs.is_empty()
+                                            && p.bitmap_glyphs.is_empty()
+                                            && !p.is_pixel_font
+                                        {
+                                            if is_exact {
+                                                exact = Some((p.clone(), fd.pfr_data.clone()));
                                                 break 'find_outline;
+                                            }
+                                            if fallback.is_none() {
+                                                fallback = Some((p.clone(), fd.pfr_data.clone()));
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        found
+                        exact.or(fallback)
                     }
                 } else {
                     None
@@ -1469,51 +1496,15 @@ impl TextMemberHandlers {
                     // a 25-px PFR cell rounds down to 1 line. CS catalog rows that
                     // wrapped to ["Premier Studio Chair - 500", "dB"] were getting
                     // a 14-px-tall bitmap that clipped the second line.
-                    let line_count = if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
-                        let max_w = explicit_box_width.unwrap() as i32;
-                        let cs = text_data.char_spacing;
-                        let space_w =
-                            font.get_char_advance(b' ') as i32 + cs;
-                        let normalised: String = text_data.text
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n");
-                        let mut count: usize = 0;
-                        for raw in normalised.split('\n') {
-                            if raw.is_empty() {
-                                count += 1;
-                                continue;
-                            }
-                            let mut current_w: i32 = 0;
-                            let mut had_word = false;
-                            for word in raw.split(' ') {
-                                if word.is_empty() { continue; }
-                                let word_w: i32 = word
-                                    .chars()
-                                    .map(|c| font.get_char_advance(c as u8) as i32 + cs)
-                                    .sum();
-                                let candidate = if !had_word {
-                                    word_w
-                                } else {
-                                    current_w + space_w + word_w
-                                };
-                                if candidate <= max_w || !had_word {
-                                    current_w = candidate;
-                                    had_word = true;
-                                } else {
-                                    count += 1;
-                                    current_w = word_w;
-                                }
-                            }
-                            count += 1;
-                        }
-                        count.max(1)
-                    } else {
-                        text_data.text
-                            .replace("\r\n", "\n")
-                            .chars()
-                            .filter(|c| *c == '\r' || *c == '\n')
-                            .count() + 1
-                    };
+                    // Shared with the `.rect`/`.height` getters (including the
+                    // trailing-return rule) so .image stays 1:1 with .rect.
+                    let line_count = count_text_lines(
+                        &text_data.text,
+                        &font,
+                        text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0),
+                        explicit_box_width.unwrap_or(0) as i32,
+                        text_data.char_spacing,
+                    );
                     // Honor the member's explicit line height (set from the font
                     // struct's #lineHeight → fixedLineSpace) so the produced bitmap
                     // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
@@ -1659,7 +1650,7 @@ impl TextMemberHandlers {
                 } else {
                     match glyph_pref {
                         GlyphPreference::Native => true,
-                        GlyphPreference::Bitmap | GlyphPreference::Outline => false,
+                        GlyphPreference::Bitmap | GlyphPreference::Outline | GlyphPreference::Hinted => false,
                         GlyphPreference::Auto => false, // PFR bitmap glyph rendering
                     }
                 };
@@ -1758,7 +1749,7 @@ impl TextMemberHandlers {
                     // the Coke Studios Navigator). Falls through to the
                     // atlas-copy path below when there's no outline data or the
                     // Canvas2D render errors.
-                    if let Some(ref parsed) = pfr_outline {
+                    if let Some((ref parsed, ref pfr_raw)) = pfr_outline {
                         let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
                         let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
                         let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
@@ -1833,9 +1824,29 @@ impl TextMemberHandlers {
                         let aa_threshold = text_data.info.as_ref()
                             .map(|i| i.anti_alias_threshold)
                             .unwrap_or(14);
-                        let aliased = text_data.anti_alias && (osize as u32) < aa_threshold;
+                        // Hinted: Director's actual rule — `antiAlias = FALSE`
+                        // is ALSO binary. The legacy carve-out (smooth despite
+                        // anti_alias=false, because our thin stems died under a
+                        // 50% threshold) only applies to the un-hinted path.
+                        let hinted = get_glyph_preference() == GlyphPreference::Hinted;
+                        let aliased = if hinted {
+                            !text_data.anti_alias || (osize as u32) < aa_threshold
+                        } else {
+                            text_data.anti_alias && (osize as u32) < aa_threshold
+                        };
+                        // Hinted: replace the unity-parse outlines with a
+                        // grid-fit parse at the render size — otherwise the
+                        // stems are too thin to survive the binary rule above.
+                        let hinted_parsed = if hinted {
+                            pfr_raw.as_ref().and_then(|r| {
+                                crate::director::chunks::pfr1::parse_pfr1_font_hinted(r, osize as i32).ok()
+                            })
+                        } else {
+                            None
+                        };
+                        let parsed_for_render = hinted_parsed.as_ref().unwrap_or(parsed);
                         match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
-                            &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
+                            &mut bitmap, parsed_for_render, osize, &text_data.text, &per_char, default_style,
                             // start_y = 0: the renderer applies `top_spacing`
                             // internally (y_top starts at top_spacing), matching
                             // the atlas-copy path. Passing it here too would
@@ -2118,7 +2129,8 @@ impl TextMemberHandlers {
                         }
 
                         // Walk the line again to draw, skipping `\t` chars and using
-                        // the precomputed segment starts.
+                        // the precomputed segment starts. (A fractional 16.16
+                        // pen was tried and refuted — see the stage path.)
                         let mut current_segment = 0usize;
                         let mut x = segment_starts[0];
                         for (ch_idx, ch) in line.chars().enumerate() {
@@ -2165,7 +2177,17 @@ impl TextMemberHandlers {
                                     x, y_pos, &palettes, &ch_params,
                                 );
                             }
-                            if per.bold {
+                            // An already-bold face gains nothing from a bold
+                            // style (Director's settled rule) — skip the
+                            // synthetic second strike so it doesn't render
+                            // heavier than Shockwave.
+                            let atlas_face_bold = {
+                                let n = font.font_name.to_ascii_lowercase();
+                                n.contains("bold") || n.contains("_600")
+                                    || n.contains("_700") || n.contains("_800")
+                                    || n.contains("_900")
+                            };
+                            if per.bold && !atlas_face_bold {
                                 if use_tight {
                                     bitmap_font_copy_char_tight(
                                         &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,

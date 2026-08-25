@@ -393,6 +393,11 @@ impl RenderedTextCacheKey {
         font_style.hash(&mut settings_hasher);
         line_spacing.hash(&mut settings_hasher);
         top_spacing.hash(&mut settings_hasher);
+        // The glyph preference changes how PFR text rasterizes (atlas vs
+        // native vs grid-fit + aliasing rule). Without it in the key, textures
+        // rendered before a `set_glyph_preference` call keep serving the old
+        // look after the font cache is cleared.
+        (crate::player::font::get_glyph_preference() as u8).hash(&mut settings_hasher);
         let settings_hash = settings_hasher.finish();
 
         Self {

@@ -942,6 +942,7 @@ impl CastManager {
                             font_size,
                             font_style,
                             char_widths: font_data.char_widths.clone(),
+                            char_widths_frac: None,
                             pfr_native_size: font_size,
                         };
 

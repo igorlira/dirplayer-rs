@@ -2031,6 +2031,7 @@ pub fn set_glyph_preference(mode: &str) {
         "bitmap" => GlyphPreference::Bitmap,
         "native" => GlyphPreference::Native,
         "outline" => GlyphPreference::Outline,
+        "hinted" => GlyphPreference::Hinted,
         _ => GlyphPreference::Auto,
     };
     set_pref(pref);
@@ -2045,6 +2046,7 @@ pub fn get_glyph_preference() -> String {
         GlyphPreference::Bitmap => "bitmap".to_string(),
         GlyphPreference::Native => "native".to_string(),
         GlyphPreference::Outline => "outline".to_string(),
+        GlyphPreference::Hinted => "hinted".to_string(),
     }
 }
 

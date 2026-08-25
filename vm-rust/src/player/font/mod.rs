@@ -33,10 +33,15 @@ pub enum GlyphPreference {
     /// Force outline-only rasterization for PFR fonts (skip bitmap strikes).
     /// Requires font cache clear + re-rasterization to take effect.
     Outline,
+    /// Parse PFR fonts grid-fitted (hinted) at the requested pixel size —
+    /// Director's stem-snap / blue-zone pipeline — instead of the
+    /// parse-at-unity + downscale path. Renders through the bitmap atlas.
+    /// Requires font cache clear + re-rasterization to take effect.
+    Hinted,
 }
 
 thread_local! {
-    static GLYPH_PREFERENCE: Cell<GlyphPreference> = Cell::new(GlyphPreference::Auto);
+    static GLYPH_PREFERENCE: Cell<GlyphPreference> = Cell::new(GlyphPreference::Hinted);
 }
 
 pub fn get_glyph_preference() -> GlyphPreference {
@@ -76,6 +81,11 @@ pub struct BitmapFont {
     pub font_size: u16,
     pub font_style: u8,
     pub char_widths: Option<Vec<u16>>,
+    /// Fractional advances (16.16-derived) parallel to `char_widths`.
+    /// Director's string layout accumulates THESE and rounds each glyph's pen
+    /// position; the integer widths are the rounded metric report. Present
+    /// only for PFR-rasterized fonts.
+    pub char_widths_frac: Option<Vec<f32>>,
     pub pfr_native_size: u16,
 }
 
@@ -98,6 +108,19 @@ impl BitmapFont {
     #[inline]
     pub fn get_char_advance_for(&self, c: char) -> u16 {
         self.get_char_advance(crate::io::encoding::glyph_byte_for(c))
+    }
+
+    /// Fractional advance (Director's 16.16 pen accumulation), falling back
+    /// to the rounded integer advance when no fractional table exists.
+    #[inline]
+    pub fn get_char_advance_frac(&self, char_num: u8) -> f32 {
+        if let Some(ref widths) = self.char_widths_frac {
+            let idx = char_num.saturating_sub(self.first_char_num) as usize;
+            if idx < widths.len() {
+                return widths[idx];
+            }
+        }
+        self.get_char_advance(char_num) as f32
     }
 }
 
@@ -278,9 +301,24 @@ impl FontManager {
                         // for fugue_arial / fugue_arial_italic verifies this
                         // produces complete, thin glyphs.
                         let outline_res = parsed.physical_font.outline_resolution as i32;
-                        let parse_target = if outline_res > 0 { outline_res } else { 0 };
+                        // GlyphPreference::Hinted: parse grid-fitted at the
+                        // actual pixel size instead of unity + downscale.
+                        let hinted = get_glyph_preference() == GlyphPreference::Hinted
+                            && requested_size > 0;
+                        let parse_target = if hinted {
+                            requested_size as i32
+                        } else if outline_res > 0 {
+                            outline_res
+                        } else {
+                            0
+                        };
                         let parsed_for_size = if let Some(ref raw) = font_data.pfr_data {
-                            match parse_pfr1_font_with_target(raw, parse_target) {
+                            let result = if hinted {
+                                crate::director::chunks::pfr1::parse_pfr1_font_hinted(raw, parse_target)
+                            } else {
+                                parse_pfr1_font_with_target(raw, parse_target)
+                            };
+                            match result {
                                 Ok(p) => p,
                                 Err(_) => parsed.clone(),
                             }
@@ -308,8 +346,16 @@ impl FontManager {
                         // specimen capture; it is standing in for the field/text
                         // metric split we do not model yet.
                         let want_bold = style.unwrap_or(0) & 1 != 0;
-                        let embolden_orus =
-                            rasterizer::bold_embolden_orus(&parsed_for_size, want_bold);
+                        // Hinted: no design-space pen. The specimen capture
+                        // shows Director's TEXT bold does not widen advances
+                        // at all, and FIELD bold adds a flat +1px overhang —
+                        // applied at draw time (see the stage render), not
+                        // baked into the atlas widths.
+                        let embolden_orus = if hinted {
+                            0.0
+                        } else {
+                            rasterizer::bold_embolden_orus(&parsed_for_size, want_bold)
+                        };
                         let rasterized = rasterizer::rasterize_pfr1_font_with_options(
                             &parsed_for_size,
                             requested_size as usize,
@@ -346,6 +392,7 @@ impl FontManager {
                         let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
 
                         let final_char_widths = rasterized.char_widths;
+                        let final_char_widths_frac = rasterized.char_widths_frac;
 
                         let font = BitmapFont {
                             bitmap_ref,
@@ -362,6 +409,7 @@ impl FontManager {
                             font_size: requested_size,
                             font_style: font_data.font_info.style,
                             char_widths: Some(final_char_widths),
+                            char_widths_frac: Some(final_char_widths_frac),
                             pfr_native_size: font_data.font_info.size,
                         };
 
@@ -412,11 +460,21 @@ impl FontManager {
                         Ok(p) => Some(p),
                         Err(_) => None,
                     };
-                    let parse_target = parsed_for_res.as_ref()
-                        .map(|p| p.physical_font.outline_resolution as i32)
-                        .filter(|&v| v > 0)
-                        .unwrap_or(0);
-                    match parse_pfr1_font_with_target(pfr_bytes, parse_target) {
+                    let hinted = get_glyph_preference() == GlyphPreference::Hinted;
+                    let parse_target = if hinted {
+                        requested_size as i32
+                    } else {
+                        parsed_for_res.as_ref()
+                            .map(|p| p.physical_font.outline_resolution as i32)
+                            .filter(|&v| v > 0)
+                            .unwrap_or(0)
+                    };
+                    let parse_result = if hinted {
+                        crate::director::chunks::pfr1::parse_pfr1_font_hinted(pfr_bytes, parse_target)
+                    } else {
+                        parse_pfr1_font_with_target(pfr_bytes, parse_target)
+                    };
+                    match parse_result {
                         Ok(parsed) => {
                             let rasterized = rasterizer::rasterize_pfr1_font(&parsed, requested_size as usize, 0);
 
@@ -448,6 +506,7 @@ impl FontManager {
                             let bitmap_ref = bitmap_manager.add_bitmap(bitmap);
 
                             let final_char_widths = rasterized.char_widths;
+                        let final_char_widths_frac = rasterized.char_widths_frac;
 
                             let font = BitmapFont {
                                 bitmap_ref,
@@ -464,6 +523,7 @@ impl FontManager {
                                 font_size: requested_size,
                                 font_style: style.unwrap_or(0),
                                 char_widths: Some(final_char_widths),
+                            char_widths_frac: Some(final_char_widths_frac),
                                 pfr_native_size: 0,
                             };
 
@@ -626,6 +686,7 @@ impl FontManager {
                                 font_size: font_data.font_info.size,
                                 font_style: font_data.font_info.style,
                                 char_widths: font_data.char_widths.clone(),
+                                char_widths_frac: None,
                                 pfr_native_size: font_data.font_info.size,
                             };
 
@@ -856,6 +917,7 @@ impl FontManager {
             font_size: size,
             font_style,
             char_widths: Some(rasterized.char_widths),
+            char_widths_frac: Some(rasterized.char_widths_frac),
             pfr_native_size: 0,
         };
 
@@ -1007,6 +1069,7 @@ pub async fn player_load_system_font(path: &str) {
                     font_size: 12,
                     font_style: 0,
                     char_widths: None,
+                    char_widths_frac: None,
                     pfr_native_size: 0,
                 };
 
@@ -1198,7 +1261,18 @@ pub fn pfr_outline_auto_line_height(
     // Layout metrics (type-2 aux record's real ascent/descent, bbox fallback)
     // — must be the SAME pair `render_pfr_outline_text_to_bitmap` steps its
     // `line_natural` by, or measure and render drift and the last line clips.
-    let lh = (((m.layout_ascender() - m.layout_descender()) as f64) * (font_size as f64 / res)).round();
+    //
+    // Director's auto line = round(ascent·s/em) + round(descent·s/em) + 1:
+    // each metric rounds to the pixel grid SEPARATELY (the same quantisation
+    // the grid-fit applies to the glyphs), plus one leading row. Measured off
+    // the Shockwave fCheck capture across ten font/size combos and exact on
+    // all of them — Verdana 13/14/16 @10/11/12 (a summed round gives
+    // 12/13/15), Arial 12→15, Prima Sans Mono 12→17, Cafeteria 12→13,
+    // Tiki Island 12→14, Tiki Magic 12→13, Univers Condensed 12→16.
+    let s = font_size as f64 / res;
+    let asc = (m.layout_ascender() as f64 * s).round();
+    let desc = ((-(m.layout_descender()) as f64).max(0.0) * s).round();
+    let lh = asc + desc + 1.0;
     if lh >= 1.0 { Some(lh as u16) } else { None }
 }
 
