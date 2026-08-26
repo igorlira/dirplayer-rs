@@ -25,6 +25,49 @@ use crate::{
 
 const SCENE3D_LOG: bool = false;
 
+/// Content signature of one resource's decoded meshes — everything that ends up
+/// in its GPU buffers, plus the parameters that transform it on the way there.
+///
+/// Replaces a vertex+face COUNT signature. Counts can only ever prove a resource
+/// is DIFFERENT, never that it is the same, so carry-over had to be gated on the
+/// scene's global `mesh_content_version`; that made ONE new mesh (AreaZero
+/// builds a fresh `newMesh` trail for every rocket fired) re-upload EVERY mesh
+/// in the member. Measured: the same class of frame costs 0.2ms when the global
+/// flag stays put and 133ms when it moves.
+///
+/// Hashing the real content lets each resource be judged on its own, so a new
+/// resource costs one upload. Only paid on frames that rebuild at all.
+fn mesh_content_signature(
+    meshes: &[crate::director::chunks::w3d::types::ClodDecodedMesh],
+    subdiv: Option<&(i32, f32)>,
+    uv_gen_mode: Option<u8>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    #[allow(deprecated)]
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    meshes.len().hash(&mut h);
+    for m in meshes {
+        m.positions.len().hash(&mut h);
+        m.faces.len().hash(&mut h);
+        for v in &m.positions { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); v[2].to_bits().hash(&mut h); }
+        for v in &m.normals { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); v[2].to_bits().hash(&mut h); }
+        for uvset in &m.tex_coords {
+            uvset.len().hash(&mut h);
+            for v in uvset { v[0].to_bits().hash(&mut h); v[1].to_bits().hash(&mut h); }
+        }
+        for f in &m.faces { f.hash(&mut h); }
+        for c in &m.diffuse_colors { for x in c { x.to_bits().hash(&mut h); } }
+        for c in &m.specular_colors { for x in c { x.to_bits().hash(&mut h); } }
+        for b in &m.bone_indices { b.len().hash(&mut h); for x in b { x.hash(&mut h); } }
+        for w in &m.bone_weights { w.len().hash(&mut h); for x in w { x.to_bits().hash(&mut h); } }
+    }
+    // `#sds` rewrites the geometry after decode, and the UV generator changes the
+    // uploaded texcoords, so both must be part of the identity.
+    if let Some((d, t)) = subdiv { d.hash(&mut h); t.to_bits().hash(&mut h); }
+    uv_gen_mode.hash(&mut h);
+    h.finish()
+}
+
 fn log(msg: &str) {
     if SCENE3D_LOG {
         debug!("[SCENE-3D] {}", msg);
@@ -1290,21 +1333,25 @@ void main() {
         let mut mesh_groups: HashMap<Symbol, Vec<Mesh3dBuffers>> = HashMap::new();
         let mut mesh_signatures: HashMap<Symbol, u64> = HashMap::new();
         let mut all_meshes = Vec::new();
-        // Meshes may only be carried over when NOTHING about the geometry has
-        // changed: `#sds` rewrites it, and `mesh_content_version` is the scene's
-        // own "geometry was mutated" signal.
-        //
-        // Gating on `sds_version` alone was wrong and caused visible regressions
-        // (Intel 3dText lost its tunnelling, a Havok camera view came out from
-        // the wrong angle). The per-resource signature is vertex + face COUNTS,
-        // so a mesh regenerated with identical topology but moved vertices
-        // compares equal — exactly what geometry animation does. Counts alone
-        // can only prove a resource is different, never that it is the same, so
-        // they must not override the scene's explicit change flag.
+        // Was ANY mesh rewritten since this GPU entry was built? When nothing
+        // was, every resource still present is identical by definition and can
+        // be carried over WITHOUT hashing it — which matters, because hashing
+        // the whole scene's geometry costs 10-30ms on a big member. Measured:
+        // making every rebuild hash unconditionally turned a 0.2ms rebuild into
+        // a 30.7ms one. The hash is only worth paying when the scene says some
+        // mesh actually moved and we need to find out which.
         let content_unchanged = old_gpu.as_ref().map_or(false, |o| {
             o.sds_version == sds_version && o.mesh_content_version == scene.mesh_content_version
         });
 
+        // Mesh carry-over is decided PER RESOURCE by `mesh_content_signature`
+        // below, not by the scene's global `mesh_content_version`. The old
+        // signature was vertex + face COUNTS, which can only prove a resource is
+        // different and never that it is the same — geometry animation moves
+        // vertices without changing counts — so it had to be backed by the
+        // global flag, and gating on `sds_version` alone caused real regressions
+        // (Intel 3dText lost its tunnelling, a Havok camera view came out from
+        // the wrong angle). Hashing the actual content removes that trade-off.
         // Collect resource names used by LIGHT nodes (to skip their geometry)
         let light_resources: std::collections::HashSet<Symbol> = scene.nodes.iter()
             .filter(|n| n.node_type == W3dNodeType::Light)
@@ -1321,21 +1368,33 @@ void main() {
             if light_resources.contains(name) {
                 continue; // Skip light cone/sphere meshes
             }
-            // Signature: vertex + face counts across this resource's meshes.
-            // Same idea as the texture byte-length check — cheap, and it moves
-            // whenever the geometry is rebuilt.
-            let sig: u64 = decoded_meshes
-                .iter()
-                .map(|m| (m.positions.len() as u64) << 20 ^ (m.faces.len() as u64))
-                .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b));
+            // Per-resource CONTENT signature — see `mesh_content_signature`.
+            // Judged on its own, so this no longer needs the scene's global
+            // `mesh_content_version` as a gate: adding one mesh resource leaves
+            // every other resource's signature untouched and it is carried over.
+            // Fast path: no mesh was rewritten, so carry this resource over
+            // as-is and keep its stored signature, which is still true of it.
             if content_unchanged {
                 if let Some(old) = old_gpu.as_mut() {
-                    if old.mesh_signatures.get(name) == Some(&sig) {
-                        if let Some(group) = old.mesh_groups.remove(name) {
-                            mesh_signatures.insert(*name, sig);
-                            mesh_groups.insert(name.clone(), group);
-                            continue;
-                        }
+                    if let Some(group) = old.mesh_groups.remove(name) {
+                        let old_sig = old.mesh_signatures.get(name).copied().unwrap_or(0);
+                        mesh_signatures.insert(*name, old_sig);
+                        mesh_groups.insert(name.clone(), group);
+                        continue;
+                    }
+                }
+            }
+            let sig: u64 = mesh_content_signature(
+                decoded_meshes,
+                subdiv_map.get(&name.to_lowercase()),
+                scene.model_resources.get(name).and_then(|r| r.uv_gen_mode),
+            );
+            if let Some(old) = old_gpu.as_mut() {
+                if old.mesh_signatures.get(name) == Some(&sig) {
+                    if let Some(group) = old.mesh_groups.remove(name) {
+                        mesh_signatures.insert(*name, sig);
+                        mesh_groups.insert(name.clone(), group);
+                        continue;
                     }
                 }
             }
