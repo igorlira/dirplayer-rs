@@ -2196,7 +2196,7 @@ impl Shockwave3dObjectDatumHandlers {
                                             node_name, key, lod_level, lod_f, meshes.len()
                                         ));
                                         scene.clod_meshes.insert(key.clone(), meshes);
-                                        scene.mesh_content_version += 1;
+                                        scene.bump_mesh(key.clone());
                                     }
                                 }
                               }
@@ -2851,7 +2851,7 @@ impl Shockwave3dObjectDatumHandlers {
                                             };
                                             if !meshes.is_empty() {
                                                 scene.clod_meshes.insert(s3d_ref.name.clone(), meshes);
-                                                scene.mesh_content_version += 1;
+                                                scene.bump_mesh(s3d_ref.name.clone());
                                             }
                                         }
                                     }
@@ -2993,8 +2993,7 @@ impl Shockwave3dObjectDatumHandlers {
                                                     }
                                                     if mesh.tex_coords[tc_idx] != coords {
                                                         mesh.tex_coords[tc_idx] = coords;
-                                                        scene.mesh_content_version =
-                                                            scene.mesh_content_version.wrapping_add(1);
+                                                        scene.bump_mesh(*key);
                                                     }
                                                 }
                                             }
@@ -3049,7 +3048,7 @@ impl Shockwave3dObjectDatumHandlers {
                                             .and_then(|meshes| meshes.get_mut(mesh_idx))
                                         {
                                             if is_normals { mesh.normals = verts; } else { mesh.positions = verts; }
-                                            scene.mesh_content_version = scene.mesh_content_version.wrapping_add(1);
+                                            scene.bump_mesh(key);
                                         }
                                     }
                                 }
@@ -3116,7 +3115,7 @@ impl Shockwave3dObjectDatumHandlers {
                                             } else {
                                                 mesh.tex_coords[0] = uvs;
                                             }
-                                            scene.mesh_content_version = scene.mesh_content_version.wrapping_add(1);
+                                            scene.bump_mesh(key);
                                         }
                                     }
                                 }
@@ -5062,7 +5061,7 @@ impl Shockwave3dObjectDatumHandlers {
                                                 let target = if is_normals { &mut mesh.normals } else { &mut mesh.positions };
                                                 if vidx < target.len() {
                                                     target[vidx] = v;
-                                                    scene.mesh_content_version = scene.mesh_content_version.wrapping_add(1);
+                                                    scene.bump_mesh(key);
                                                 }
                                             }
                                         }
@@ -6544,7 +6543,7 @@ impl Shockwave3dObjectDatumHandlers {
                                 // Without this bump the new vertices live
                                 // in `scene.clod_meshes` but never reach the
                                 // GPU — the model renders empty / placeholder.
-                                scene.mesh_content_version += 1;
+                                scene.bump_mesh(res_name.clone());
                                 scene.texture_content_version += 1; // trigger GPU texture re-upload
                             }
                         }

@@ -509,6 +509,16 @@ pub struct W3dScene {
     pub raw_meshes: Vec<W3dRawMesh>,
     /// Monotonically increasing counter; bumped whenever mesh geometry changes
     pub mesh_content_version: u64,
+    /// Per-resource write counter, the geometry twin of `texture_write_versions`.
+    /// Lets the renderer carry an unchanged mesh across a rebuild without
+    /// comparing its contents: one resource being rewritten no longer says
+    /// anything about the others. Bump through `bump_mesh`.
+    pub mesh_write_versions: HashMap<Symbol, u64>,
+    /// Bumped when geometry changed but the change could NOT be attributed to
+    /// particular resources (a whole scene merged in). The renderer falls back
+    /// to hashing contents for that rebuild, which is correct but slower — so
+    /// prefer `bump_mesh` wherever the resource is known.
+    pub mesh_bulk_version: u64,
     /// Monotonically increasing counter; bumped whenever texture_images is mutated
     pub texture_content_version: u64,
     /// Per-texture write counter, bumped by `put_texture_image` on every write.
@@ -551,6 +561,32 @@ impl W3dScene {
     /// `nearFiltering` for a texture, defaulting to Director's documented TRUE.
     pub fn texture_near_filtering(&self, name: &Symbol) -> bool {
         self.texture_near_filtering.get(name).copied().unwrap_or(true)
+    }
+
+    /// Record that ONE mesh resource was rewritten.
+    ///
+    /// Every geometry mutation should go through here (or `bump_all_meshes`):
+    /// it keeps the per-resource counter and the scene-wide
+    /// `mesh_content_version` in step, and the renderer needs both — the
+    /// scene-wide one to notice anything changed at all, the per-resource one
+    /// to work out WHAT, without re-deriving it from the vertex data.
+    ///
+    /// Adding or removing a resource needs no bump: a name the renderer has
+    /// never uploaded is uploaded, and one that has disappeared is dropped.
+    pub fn bump_mesh(&mut self, name: Symbol) {
+        *self.mesh_write_versions.entry(name).or_insert(0) += 1;
+        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+    }
+
+    /// Geometry changed in a way that cannot be attributed to named resources.
+    pub fn bump_all_meshes(&mut self) {
+        self.mesh_bulk_version = self.mesh_bulk_version.wrapping_add(1);
+        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+    }
+
+    /// Write counter for one resource; 0 when it has never been rewritten.
+    pub fn mesh_write_version(&self, name: &Symbol) -> u64 {
+        self.mesh_write_versions.get(name).copied().unwrap_or(0)
     }
 
     pub fn put_texture_image(&mut self, name: Symbol, data: Vec<u8>) {

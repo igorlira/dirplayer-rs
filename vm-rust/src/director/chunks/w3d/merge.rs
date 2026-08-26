@@ -263,7 +263,9 @@ impl W3dScene {
         self.model_root_com.extend(src.model_root_com);
 
         // Force the renderer to re-upload geometry and textures.
-        self.mesh_content_version = self.mesh_content_version.wrapping_add(1);
+        // A whole scene merged in: the changed resources are not enumerated
+        // here, so this is the one bulk case (see `bump_all_meshes`).
+        self.bump_all_meshes();
         self.texture_content_version = self.texture_content_version.wrapping_add(1);
     }
 }

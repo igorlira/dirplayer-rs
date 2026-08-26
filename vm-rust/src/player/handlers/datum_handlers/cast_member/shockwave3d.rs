@@ -331,7 +331,7 @@ impl Shockwave3dMemberHandlers {
                 state.smoothness,
             );
             scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
-            scene.mesh_content_version += 1;
+            scene.bump_mesh(Symbol::builtin(BuiltInSymbol::Text));
         }
     }
 
@@ -405,7 +405,7 @@ impl Shockwave3dMemberHandlers {
                         mesh.name = resname;
                         if let Some(scene) = w3d.scene_mut() {
                             scene.clod_meshes.insert(resname, vec![mesh]);
-                            scene.mesh_content_version += 1;
+                            scene.bump_mesh(resname);
                         }
                     }
                 }
@@ -477,7 +477,7 @@ impl Shockwave3dMemberHandlers {
                 }
             }
         }
-        scene.mesh_content_version += 1;
+        scene.bump_mesh(Symbol::builtin(BuiltInSymbol::Text));
     }
 
     fn apply_text3d_display_face(
@@ -654,7 +654,7 @@ impl Shockwave3dMemberHandlers {
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
                             scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
-                            scene.mesh_content_version += 1;
+                            scene.bump_mesh(Symbol::builtin(BuiltInSymbol::Text));
                         }
                     }
                 } else if let Some((bw, bh, rgba)) = glyph_bitmap {
@@ -695,7 +695,7 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
                         scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
-                        scene.mesh_content_version += 1;
+                        scene.bump_mesh(Symbol::builtin(BuiltInSymbol::Text));
                     }
                 }
 
@@ -1328,6 +1328,16 @@ impl Shockwave3dMemberHandlers {
                                 // has already seen — so carry-over cannot be
                                 // decided by them here. Stamp the epoch instead.
                                 fresh.texture_epoch = reset_gen;
+                                // Geometry has the identical rewind problem, and
+                                // it is not theoretical: the Havok "Properties"
+                                // demo calls resetWorld() and then rebuilds
+                                // "GroundPlaneRes" from scratch, so a restored
+                                // per-resource counter compared EQUAL to the one
+                                // the GPU had recorded for the previous scene and
+                                // the friction ramp kept the old scene's buffers.
+                                // Stamping the bulk version sends that rebuild
+                                // down the content-comparison path instead.
+                                fresh.mesh_bulk_version = reset_gen;
                                 w3d.parsed_scene = Some(std::rc::Rc::new(fresh));
                             }
                             w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
@@ -1348,8 +1358,11 @@ impl Shockwave3dMemberHandlers {
                                         // Same rewind problem as resetWorld: a fresh
                                         // parse has EMPTY write counters, which compare
                                         // equal to whatever the GPU recorded.
-                                        scene.texture_epoch = REVERT_GEN
+                                        let revert_gen = REVERT_GEN
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        scene.texture_epoch = revert_gen;
+                                        // Same rewind, same fix, for geometry.
+                                        scene.mesh_bulk_version = revert_gen;
                                         w3d.parsed_scene = Some(std::rc::Rc::new(scene));
                                     }
                                     Err(_) => {
@@ -2640,6 +2653,7 @@ impl Shockwave3dMemberHandlers {
                                             // Store generated mesh geometry so the renderer can upload it
                                             if !meshes.is_empty() {
                                                 scene.clod_meshes.insert(obj_sym, meshes);
+                                                scene.bump_mesh(obj_sym);
                                             }
                                         }
                                         _ => {}
@@ -3008,7 +3022,7 @@ impl Shockwave3dMemberHandlers {
                                         }],
                                         ..Default::default()
                                     });
-                                    scene.mesh_content_version += 1;
+                                    scene.bump_mesh(Symbol::from_str(&resname.clone()));
                                 }
                                 w3d_t.runtime_state.text3d_resources.insert(Symbol::from_str(&resname.clone()), (source, state));
                             }
@@ -3033,6 +3047,8 @@ impl Shockwave3dMemberHandlers {
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,
+                            mesh_write_versions: HashMap::new(),
+                            mesh_bulk_version: 0,
                             texture_content_version: 0,
                             texture_write_versions: HashMap::new(),
                             texture_epoch: 0,
