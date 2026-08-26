@@ -2312,6 +2312,24 @@ impl Shockwave3dObjectDatumHandlers {
                         _ => None,
                     };
                     if let Some(bmp_ref) = bitmap_ref {
+                        // A bitmap headed for a 3D texture must not carry a
+                        // hi-res twin: this upload reads `data`, so the twin is
+                        // pure cost. AreaZero's `[M] Text Director` bakes EVERY
+                        // in-world string this way (kill/score popups, the whole
+                        // menu), and each one was paying a full scaled text
+                        // rasterisation plus a magnified mirror blit for a twin
+                        // nothing would ever sample. Banning here also sticks to
+                        // the cast member through `member.image =`, so the cost
+                        // is paid at most once per member rather than per popup.
+                        if player
+                            .bitmap_manager
+                            .get_bitmap(bmp_ref)
+                            .map_or(false, |b| !b.hi_res.banned)
+                        {
+                            if let Some(b) = player.bitmap_manager.get_bitmap_mut(bmp_ref) {
+                                b.ban_hi_res();
+                            }
+                        }
                         let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap(bmp_ref) {
                             let w = bmp.width;
                             let h = bmp.height;

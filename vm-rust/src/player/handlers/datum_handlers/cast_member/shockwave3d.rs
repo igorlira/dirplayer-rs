@@ -2720,6 +2720,33 @@ impl Shockwave3dMemberHandlers {
                                             _ => None,
                                         }
                                     };
+                                    // Same reasoning as the `texture.image =` setter: a
+                                    // member feeding a 3D texture reads `data`, so a
+                                    // hi-res twin on it is pure cost. Ban it once, and
+                                    // `member.image =` keeps the ban across refreshes.
+                                    {
+                                        let img_ref = player
+                                            .movie
+                                            .cast_manager
+                                            .find_member_by_ref(&src_ref)
+                                            .and_then(|m| match &m.member_type {
+                                                CastMemberType::Bitmap(bm) => Some(bm.image_ref),
+                                                _ => None,
+                                            });
+                                        if let Some(img_ref) = img_ref {
+                                            if player
+                                                .bitmap_manager
+                                                .get_bitmap(img_ref)
+                                                .map_or(false, |b| !b.hi_res.banned)
+                                            {
+                                                if let Some(b) =
+                                                    player.bitmap_manager.get_bitmap_mut(img_ref)
+                                                {
+                                                    b.ban_hi_res();
+                                                }
+                                            }
+                                        }
+                                    }
                                     let rgba_data = {
                                         let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         src_member.and_then(|m| {
@@ -3002,7 +3029,7 @@ impl Shockwave3dMemberHandlers {
                         let mut empty_scene = W3dScene {
                             materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
                             lights: Vec::new(), texture_images: HashMap::new(),
-                    texture_near_filtering: HashMap::new(), texture_infos: Vec::new(),
+                            texture_near_filtering: HashMap::new(), texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,

@@ -107,13 +107,6 @@ impl BitmapMemberHandlers {
                     let new_width = bitmap.width;
                     let new_height = bitmap.height;
                     let mut clone = bitmap.clone();
-                    // The other place a promised hi-res twin is cashed in (see
-                    // `HiResTwin::pending`): assigning a text member's `.image`
-                    // straight to a bitmap member puts it on screen without any
-                    // copyPixels in between, and the renderer cannot render a
-                    // promise. No-op unless the stage is scaled AND the source
-                    // came from a text member.
-                    TextMemberHandlers::materialize_hi_res(player, &mut clone);
 
                     let (member_image_ref, old_palette) = {
                         let cast_member = player
@@ -136,6 +129,25 @@ impl BitmapMemberHandlers {
                         }
                     }
 
+                    // A member whose image has been used as a 3D texture stays
+                    // banned from hi-res twins across reassignment. Without this
+                    // the ban would die with the bitmap it was set on, and a
+                    // member refreshed every popup (AreaZero's "TextTemplate")
+                    // would pay the twin cost again every single time.
+                    if player
+                        .bitmap_manager
+                        .get_bitmap(member_image_ref)
+                        .map_or(false, |b| b.hi_res.banned)
+                    {
+                        clone.ban_hi_res();
+                    }
+                    // The other place a promised hi-res twin is cashed in (see
+                    // `HiResTwin::pending`): assigning a text member's `.image`
+                    // straight to a bitmap member puts it on screen without any
+                    // copyPixels in between, and the renderer cannot render a
+                    // promise. No-op unless the stage is scaled, the source came
+                    // from a text member, and the target is not banned above.
+                    TextMemberHandlers::materialize_hi_res(player, &mut clone);
                     player
                         .bitmap_manager
                         .replace_bitmap(member_image_ref, clone);
