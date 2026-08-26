@@ -9,7 +9,7 @@ use crate::{
         DatumRef, DirPlayer, ScriptError, bitmap::{
             bitmap::{Bitmap, PaletteRef, get_system_default_palette},
             drawing::CopyPixelsParams,
-        }, cast_lib::CastMemberRef, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
+        }, cast_lib::CastMemberRef, cast_member::TextMember, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
             cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
             cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
         }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
@@ -413,6 +413,1140 @@ impl TextMemberHandlers {
                 "No handler {handler_name} for text member type"
             ))),
         }
+    }
+
+    /// Rasterise a text/field member into a bitmap, exactly as Director's
+    /// `member.image` does.
+    ///
+    /// Split out of the `"image"` getter so it can be run TWICE for the same
+    /// member: once at the authored metrics (the image scripts see) and once
+    /// with every metric multiplied by the stage scale, to produce the hi-res
+    /// twin described on `Bitmap::hi_res`. It reads `text_data` and nothing
+    /// else about the member, which is what makes the second run possible —
+    /// pass it a metric-scaled copy and it lays the same text out larger.
+    fn render_text_image(
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
+        text_data: &TextMember,
+    ) -> Result<crate::player::bitmap::bitmap::Bitmap, ScriptError> {
+        // The member's authored foreground colour. Read here rather than taken
+        // as an argument so the two runs (authored / stage-scaled) cannot
+        // disagree about it — only METRICS differ between them.
+        let member_color = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(cast_member_ref)
+            .map(|m| m.color.clone())
+            .unwrap_or(crate::player::sprite::ColorRef::Rgb(0, 0, 0));
+                if DEBUG_TEXT_IMAGE {
+                    debug!(
+                        "[text.image] member={}:{} text_len={} spans={} font='{}' size={} wrap={} align='{}'",
+                        cast_member_ref.cast_lib,
+                        cast_member_ref.cast_member,
+                        text_data.text.len(),
+                        text_data.html_styled_spans.len(),
+                        text_data.font,
+                        text_data.font_size,
+                        text_data.word_wrap,
+                        text_data.alignment
+                    );
+                }
+                // Use the same rendering approach as sprite display
+                // Get dimensions - use styled spans if available for accurate measurement
+                let mut preferred_font_name: Option<String> = None;
+                let mut preferred_font_size: Option<u16> = None;
+                if !text_data.html_styled_spans.is_empty() {
+                    let first_style = &text_data.html_styled_spans[0].style;
+                    let font_size = first_style.font_size
+                        .filter(|&s| s > 0)
+                        .or_else(|| if text_data.font_size > 0 { Some(text_data.font_size as i32) } else { None })
+                        .unwrap_or(12) as u16;
+                    let font_name = if !text_data.font.is_empty() {
+                        text_data.font.clone()
+                    } else {
+                        first_style.font_face.clone()
+                            .filter(|f| !f.is_empty())
+                            .unwrap_or_else(|| "Arial".to_string())
+                    };
+                    preferred_font_name = Some(font_name);
+                    preferred_font_size = Some(font_size);
+                } else {
+                    if !text_data.font.is_empty() {
+                        preferred_font_name = Some(text_data.font.clone());
+                    }
+                    if text_data.font_size > 0 {
+                        preferred_font_size = Some(text_data.font_size);
+                    }
+                }
+                if DEBUG_TEXT_IMAGE {
+                    debug!(
+                        "[text.image] font='{}' size={}",
+                        preferred_font_name.as_deref().unwrap_or("(none)"),
+                        preferred_font_size.unwrap_or(0)
+                    );
+                }
+
+                // Load font to determine if it's PFR
+                let font = {
+                    let font_name = preferred_font_name.as_deref()
+                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
+                    let font_size = preferred_font_size
+                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
+                    let image_style_bits: u8 = {
+                        let mut b = 0u8;
+                        for tag in &text_data.font_style {
+                            match tag.as_str() {
+                                "bold" => b |= 0x01,
+                                "italic" => b |= 0x02,
+                                "underline" => b |= 0x04,
+                                _ => {}
+                            }
+                        }
+                        b
+                    };
+                    let mut loaded = if let Some(name) = font_name {
+                        player.font_manager.get_font_with_cast_and_bitmap(
+                            name,
+                            &player.movie.cast_manager,
+                            &mut player.bitmap_manager,
+                            font_size,
+                            Some(image_style_bits).filter(|b| *b != 0),
+                        )
+                    } else {
+                        None
+                    };
+                    if loaded.is_none() {
+                        if let Some(name) = font_name {
+                            let name_lower = name.to_lowercase();
+                            for (key, font) in player.font_manager.font_cache.iter() {
+                                if key.to_lowercase() == name_lower
+                                    || key.to_lowercase().starts_with(&format!("{}_", name_lower))
+                                {
+                                    loaded = Some(font.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    loaded.or_else(|| player.font_manager.get_system_font())
+                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
+                };
+                let is_pfr_font = font.char_widths.is_some();
+
+                // For SMOOTH PFR OUTLINE fonts (no bitmap strikes), grab the
+                // parsed outlines so the renderer can compose text from sub-pixel
+                // glyph outlines instead of the atlas-copy path (which quantizes
+                // side bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                //
+                // PFR carries NO "pixel font" flag (its physical-font flags are
+                // only proportional / vertical / charcode width — confirmed
+                // against FreeType's pfr driver), and the member's anti-alias bit
+                // doesn't separate them either (Habbo authors both Volter AND
+                // CS-Verdana with anti_alias=false). So we classify by glyph
+                // GEOMETRY (`is_pixel_font`): pixel fonts (Volter, FFF Reaction)
+                // are drawn as axis-aligned rectangles (~0% béziers, ~100% H/V
+                // edges) and must render crisp via atlas-copy; smooth fonts
+                // (Verdana, Arial) are curve-heavy and need sub-pixel composition.
+                //
+                // Cloned once (consistent with `text_data` above); .image is not
+                // a per-frame call for cached members.
+                // (parsed font, raw PFR bytes) — the raw bytes let the Hinted
+                // preference re-parse grid-fitted at the render size below.
+                let pfr_outline: Option<(crate::director::chunks::pfr1::types::Pfr1ParsedFont, Option<Vec<u8>>)> = if is_pfr_font {
+                    let name = preferred_font_name.as_deref().unwrap_or("");
+                    if name.is_empty() {
+                        None
+                    } else {
+                        use crate::player::cast_member::CastMemberType;
+                        use crate::player::font::FontManager;
+                        let lc = name.to_ascii_lowercase();
+                        let canon = FontManager::canonical_font_name(name);
+                        // An EXACT name match must win over a canonical one.
+                        // `canonical_font_name` folds style words away, so
+                        // "Verdana *" and "Verdana Bold *" both canonicalise to
+                        // "verdana" — and since `members.values()` is an
+                        // unordered map, whichever came out first decided the
+                        // face. Asking for `Verdana *` picked `Verdana Bold *`
+                        // (`Verdana_700_0`) about as often as not, and a baked
+                        // `.image` silently came out in the wrong weight.
+                        let mut exact = None;
+                        let mut fallback = None;
+                        'find_outline: for cast in &player.movie.cast_manager.casts {
+                            for m in cast.members.values() {
+                                if let CastMemberType::Font(fd) = &m.member_type {
+                                    let is_exact = fd.font_info.name.to_lowercase() == lc
+                                        || m.name.to_lowercase() == lc;
+                                    let is_canon = !canon.is_empty()
+                                        && (FontManager::canonical_font_name(&fd.font_info.name) == canon
+                                            || FontManager::canonical_font_name(&m.name) == canon);
+                                    if !is_exact && !is_canon {
+                                        continue;
+                                    }
+                                    if let Some(p) = &fd.pfr_parsed {
+                                        // Smooth outline-only fonts only.
+                                        // Bitmap-strike fonts AND pixel fonts
+                                        // (rectilinear, e.g. Volter) stay on
+                                        // the atlas path for crisp pixels.
+                                        if !p.glyphs.is_empty()
+                                            && p.bitmap_glyphs.is_empty()
+                                            && !p.is_pixel_font
+                                        {
+                                            if is_exact {
+                                                exact = Some((p.clone(), fd.pfr_data.clone()));
+                                                break 'find_outline;
+                                            }
+                                            if fallback.is_none() {
+                                                fallback = Some((p.clone(), fd.pfr_data.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        exact.or(fallback)
+                    }
+                } else {
+                    None
+                };
+
+                // Compute the authored box width (used as max_width for word wrap).
+                // Doing this BEFORE measuring so PFR measurement can wrap correctly.
+                let explicit_box_width = if text_data.width > 0 {
+                    Some(text_data.width)
+                } else if let Some(ref info) = text_data.info {
+                    if info.width > 0 { Some(info.width as u16) } else { None }
+                } else {
+                    None
+                };
+
+                // Decide the measurement path. When the member will render via
+                // Canvas2D (non-PFR, or standard-font with prefer_native), measure
+                // with Canvas2D so `.rect` / `.height` / `.image` dimensions match
+                // the actual rendered bitmap — PFR wrap points disagree with
+                // Canvas2D's wider browser-font metrics and would size the bitmap
+                // for the wrong line count.
+                let requested_font_for_measure = preferred_font_name.as_deref()
+                    .filter(|n| !n.is_empty())
+                    .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None })
+                    .unwrap_or("Arial");
+                let measure_with_canvas = !is_pfr_font;
+                let member_style_bits: u8 = {
+                    let mut s = 0u8;
+                    for tag in &text_data.font_style {
+                        match tag.as_str() {
+                            "bold" => s |= 0x01,
+                            "italic" => s |= 0x02,
+                            "underline" => s |= 0x04,
+                            _ => {}
+                        }
+                    }
+                    s
+                };
+
+                let (mut width, mut height) = if measure_with_canvas {
+                    let font_size = preferred_font_size.unwrap_or(12);
+                    FontMemberHandlers::measure_text_native_styled(
+                        &text_data.text,
+                        requested_font_for_measure,
+                        font_size,
+                        Some(member_style_bits),
+                        text_data.word_wrap,
+                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        text_data.fixed_line_space,
+                    )
+                } else if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
+                    // PFR font with word wrap: use measure_text_wrapped so the
+                    // measured height accounts for wrapped lines. Pass char_spacing
+                    // so measurement matches the renderer's `x += adv + char_spacing`.
+                    measure_text_wrapped(
+                        &text_data.text,
+                        &font,
+                        explicit_box_width.unwrap(),
+                        true,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        text_data.char_spacing,
+                    )
+                } else {
+                    measure_text(
+                        &text_data.text,
+                        &font,
+                        None,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                    )
+                };
+                let mut box_width = width;
+                let mut box_height = height;
+                if let Some(w) = explicit_box_width {
+                    // For text members with an authored box width, keep wrapping constrained to that box.
+                    box_width = w.max(1);
+                }
+                // PFR bitmap-font path: raw `measure_text*` reports the full PFR
+                // cell height (char_height-1) which over-reports vs Director's
+                // glyph-extent height (~font_size × 1.4). Recompute to match
+                // the `.height` getter so CS chat's
+                // `nameImage.copyPixels(nameTempImage, nameImage.rect, nameImage.rect)`
+                // uses consistent bounds. Skipped when measuring with Canvas2D
+                // (above branch) because that already returns the right height.
+                if is_pfr_font && !measure_with_canvas {
+                    let nominal = if text_data.font_size > 0 {
+                        text_data.font_size
+                    } else if font.font_size > 0 {
+                        font.font_size
+                    } else {
+                        font.char_height
+                    };
+                    // For wrapped text, re-walk the wrap logic to count visual
+                    // lines directly. The previous `height / raw_line_h` formula
+                    // was wrong: `raw_line_h = font.char_height - 1` can be much
+                    // larger than the actual `line_step` used by measure_text_wrapped
+                    // (which honours `fixed_line_space`), so 2-line text divided by
+                    // a 25-px PFR cell rounds down to 1 line. CS catalog rows that
+                    // wrapped to ["Premier Studio Chair - 500", "dB"] were getting
+                    // a 14-px-tall bitmap that clipped the second line.
+                    // Shared with the `.rect`/`.height` getters (including the
+                    // trailing-return rule) so .image stays 1:1 with .rect.
+                    let line_count = count_text_lines(
+                        &text_data.text,
+                        &font,
+                        text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0),
+                        explicit_box_width.unwrap_or(0) as i32,
+                        text_data.char_spacing,
+                    );
+                    // Honor the member's explicit line height (set from the font
+                    // struct's #lineHeight → fixedLineSpace) so the produced bitmap
+                    // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
+                    // matching the baked login_b_title bitmap). The bitmap is
+                    // drawn 1:1. With no fixedLineSpace this is Paige auto
+                    // leading — the shared helper, NOT the old font_size×1.4
+                    // guess, which disagreed with the renderer's own fallback
+                    // (13 here vs 25 there) and sized the box for the wrong
+                    // number of lines.
+                    // Same Paige minimum rule as the `.rect` getter above.
+                    let outline_natural = crate::player::font::outline_auto_line_height_for_font(
+                        player, &text_data.font, nominal,
+                    );
+                    let line_h = if text_data.fixed_line_space > 0 {
+                        match outline_natural {
+                            Some(n) => text_data.fixed_line_space.max(n),
+                            None => text_data.fixed_line_space,
+                        }
+                    } else {
+                        outline_natural.unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
+                            &font,
+                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                            nominal,
+                        ))
+                    };
+                    // See `.rect` getter for rationale on folding
+                    // top_spacing + bottom_spacing into line_step.
+                    let line_step = line_h as i32
+                        + text_data.top_spacing as i32
+                        + text_data.bottom_spacing as i32;
+                    box_height = (text_data.top_spacing as i32
+                        + line_h as i32
+                        + (line_count as i32 - 1) * line_step)
+                        .max(1) as u16;
+                }
+                // CRITICAL: member.image.height MUST equal member.rect.height
+                // (Director invariant) — otherwise Habbo's Text-Wrapper bake
+                // `pimage.copyPixels(member.image, dest=image-height, src=member.rect)`
+                // stretches the text vertically (login text 2px tall, registration
+                // paragraph blown up to one giant line). Use the IDENTICAL box_height
+                // selection as the `.rect`/`.height` getters above.
+                {
+                    // `.image` must always render the FULL content (>= measured) so
+                    // movies that capture it to build scroll buffers / dropdowns get
+                    // every line — Director's text `.image` never clips the rendered
+                    // content. This is unlike the `.rect`/`.height` getters, which
+                    // REPORT a logical size (and trust text_data.height for authored
+                    // multi-line members like Junkbot credits). Capturing movies:
+                    // CS navigator roomlist (copyPixels member.image), Spineworld
+                    // GUI_droplist (makeListImage reads txt_droplist.image).
+                    // Reserve the PFR descender overflow for the auto-sized
+                    // (non-wrapping #adjust) case below: the Writer forces
+                    // fixedLineSpace=fontSize, but the glyph descender (and the
+                    // underline drawn on it — `underline_y = y_pos + pfr_desc_bottom`)
+                    // reaches BELOW that. Shrinking the box to the fixedLineSpace-based
+                    // `measured` then clipped the v7 Navigator "Go" link underline.
+                    // Adds 0 when fixedLineSpace already covers the descender.
+                    let pfr_descender_overflow: u16 = player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
+                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
+                        ));
+                    // Fold the descender/underline overflow into `measured` so every
+                    // content-sized branch (and the `.rect`/`.height` getters) agree —
+                    // the Origins Text-Wrapper bakes with src=member.rect, so .image
+                    // and .rect must match or the underline ("login_b_login_forgotten",
+                    // Navigator "Go") is dropped.
+                    let measured = box_height + pfr_descender_overflow;
+                    box_height = if text_data.box_type == BuiltInSymbol::Adjust {
+                        if text_data.rect_set_at_runtime {
+                            // CS / Origins runtime-set rect: grow to content, keep the
+                            // set height when it fits (keeps .image == .rect so the
+                            // Origins Text-Wrapper bake stays 1:1, no stretch).
+                            // Non-wrapping #adjust auto-sizes to content (see `.rect`):
+                            // the v7 Habbo Purse big-text writer's 480-tall canvas
+                            // must shrink to the digits so checkSaldo's centred
+                            // copyPixels keeps them on-screen.
+                            if !text_data.word_wrap {
+                                measured
+                            } else {
+                                text_data.height.max(measured)
+                            }
+                        } else {
+                            measured
+                        }
+                    } else if text_data.height > 0 {
+                        // #fixed/#scroll/#limit: the BOX is authoritative and content
+                        // that does not fit is simply not shown. Identical rule to the
+                        // `.rect` / `.height` getters above — which is the point: this
+                        // used to be `max(measured, height)`, so a box smaller than its
+                        // content reported one size through `.rect` and another through
+                        // `.image`, breaking the very invariant this block documents.
+                        //
+                        // AreaZero's HUD is the case that exposed it. [M] Text Director
+                        // sets `member("Text").height` to the QUAD's height (20 for the
+                        // Score/Level strips), bakes `.image`, then copyPixels that into
+                        // a power-of-two texture at `rect(0, 0, membersize)` and rescales
+                        // the quad's UVs by `membersize / textureSize`. All three steps
+                        // assume `.image` IS the member rect. Ours came out 128x34 for a
+                        // 128x20 member — topSpacing 10 + fixedLineSpace 11 plus the PFR
+                        // descender overflow — so the strip was laid out for a 34-tall
+                        // box, clipped to the 32-tall texture, and sampled through UVs
+                        // computed for 20: "Score" and "Level" lost their bottom row.
+                        text_data.height
+                    } else if let Some(h) = text_data.info.as_ref()
+                        .map(|i| i.height).filter(|h| *h > 0)
+                    {
+                        h as u16
+                    } else {
+                        measured
+                    };
+                }
+
+                // Create 32-bit bitmap with TRANSPARENT background for .image.
+                // Director's text member .image produces foreColor text with alpha=255
+                // on a transparent (alpha=0) background. This supports two common patterns:
+                //   1. copyPixels to grayscale for alpha mask: black bg → low alpha, text → high alpha
+                //   2. extractAlpha(): returns alpha channel where bg=0, text=255
+                let mut bitmap = Bitmap::new(
+                    box_width.max(1),
+                    box_height.max(1),
+                    32,
+                    32,
+                    8, // alpha depth
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                bitmap.use_alpha = true;
+                // Start fully transparent (RGBA = 0,0,0,0)
+                bitmap.data.fill(0);
+
+                // Determine alignment
+                let text_alignment: TextAlignment = text_data.alignment.into();
+
+
+                let glyph_pref = get_glyph_preference();
+                // font and is_pfr_font already loaded above for measurement
+
+                let use_native = if !text_data.tab_stops.is_empty() {
+                    true // Force native rendering for tab stop support
+                } else if !is_pfr_font {
+                    true // Always use Canvas2D for non-PFR fonts (system/browser fonts)
+                } else {
+                    match glyph_pref {
+                        GlyphPreference::Native => true,
+                        GlyphPreference::Bitmap | GlyphPreference::Outline | GlyphPreference::Hinted => false,
+                        GlyphPreference::Auto => false, // PFR bitmap glyph rendering
+                    }
+                };
+
+                // Set when the PFR outline compositor handled this member, so
+                // the binary anti-alias threshold below is skipped — outline
+                // output is already crisp anti-aliased text matching Shockwave,
+                // and binarizing it would shred the thin strokes.
+                let mut rendered_via_outline = false;
+
+                if use_native && !is_pfr_font {
+                    // Native Canvas2D rendering for standard fonts
+                    let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
+                    let font_size_val = preferred_font_size.unwrap_or(12);
+                    // Use the member's actual foreColor for .image rendering.
+                    // Director renders text members with their foreColor on their bgColor.
+                    let (r, g, b) = {
+                        use crate::player::bitmap::bitmap::resolve_color_ref;
+                        let palettes = player.movie.cast_manager.palettes();
+                        resolve_color_ref(
+                            &palettes,
+                            &member_color,
+                            &bitmap.palette_ref,
+                            bitmap.original_bit_depth,
+                        )
+                    };
+                    let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+
+                    // Prefer the stored styled spans (set via chunk style setters
+                    // or XMED parsing) over a single synthetic span. Fill in any
+                    // Nones from the spans with member-level defaults so each span
+                    // has a concrete font / size / color for the renderer.
+                    let spans: Vec<StyledSpan> = if text_data.html_styled_spans.len() >= 2 {
+                        text_data.html_styled_spans.iter().map(|sp| {
+                            let mut s = sp.style.clone();
+                            if s.font_face.is_none() {
+                                s.font_face = Some(font_name_str.to_string());
+                            }
+                            if s.font_size.is_none() {
+                                s.font_size = Some(font_size_val as i32);
+                            }
+                            if s.color.is_none() {
+                                s.color = Some(default_color_u32);
+                            }
+                            // Member-level fontStyle defaults apply only when the
+                            // span has no overrides of its own. We can't perfectly
+                            // tell "no override" from "explicitly off" at this
+                            // layer, but the chunk-style setters set bold/italic/
+                            // underline explicitly whenever Lingo writes fontStyle,
+                            // so the OR-with-defaults here just carries the member-
+                            // wide `[#underline]` CS sets before per-chunk writes.
+                            s.bold = s.bold || default_bold;
+                            s.italic = s.italic || default_italic;
+                            s.underline = s.underline || default_underline;
+                            StyledSpan { text: sp.text.clone(), style: s }
+                        }).collect()
+                    } else {
+                        let mut style = HtmlStyle::default();
+                        style.font_face = Some(font_name_str.to_string());
+                        style.font_size = Some(font_size_val as i32);
+                        style.color = Some(default_color_u32);
+                        style.bold = default_bold;
+                        style.italic = default_italic;
+                        style.underline = default_underline;
+                        vec![StyledSpan {
+                            text: text_data.text.clone(),
+                            style,
+                        }]
+                    };
+                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
+                        &mut bitmap,
+                        &spans,
+                        0,
+                        text_data.top_spacing as i32,
+                        box_width as i32,
+                        box_height as i32,
+                        text_alignment,
+                        box_width as i32,
+                        text_data.word_wrap,
+                        None,
+                        text_data.fixed_line_space,
+                        text_data.top_spacing,
+                        text_data.bottom_spacing,
+                        &text_data.tab_stops,
+                        &text_data.par_infos,
+                        &text_data.par_runs,
+                    ) {
+                        warn!("[text.image] Native render error: {:?}", e);
+                    }
+                } else {
+                    // Sub-pixel outline composition for OUTLINE PFR fonts —
+                    // preserves side bearings at small sizes (Verdana 10px in
+                    // the Coke Studios Navigator). Falls through to the
+                    // atlas-copy path below when there's no outline data or the
+                    // Canvas2D render errors.
+                    if let Some((ref parsed, ref pfr_raw)) = pfr_outline {
+                        let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                        let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                        let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                        let (dr, dg, db) = {
+                            use crate::player::bitmap::bitmap::resolve_color_ref;
+                            let palettes = player.movie.cast_manager.palettes();
+                            resolve_color_ref(&palettes, &member_color, &bitmap.palette_ref, bitmap.original_bit_depth)
+                        };
+                        let default_style = OutlineCharStyle {
+                            color: (dr, dg, db),
+                            bold: default_bold,
+                            italic: default_italic,
+                            underline: default_underline,
+                        };
+                        // Per-char styles aligned to CRLF-normalised text (same
+                        // convention the renderer uses to index `per_char`).
+                        let mut per_char: Vec<OutlineCharStyle> = Vec::new();
+                        if text_data.html_styled_spans.len() >= 2 {
+                            let mut prev_was_cr = false;
+                            for span in &text_data.html_styled_spans {
+                                let col = span.style.color
+                                    .map(|c| (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+                                    .unwrap_or((dr, dg, db));
+                                let entry = OutlineCharStyle {
+                                    color: col,
+                                    bold: span.style.bold,
+                                    italic: span.style.italic,
+                                    underline: span.style.underline,
+                                };
+                                for c in span.text.chars() {
+                                    if prev_was_cr && c == '\n' { prev_was_cr = false; continue; }
+                                    prev_was_cr = c == '\r';
+                                    per_char.push(entry);
+                                }
+                            }
+                        }
+                        // Fall back to the MEMBER's charSpacing when there are no HTML
+                        // styled spans to carry one. A plain text member set from Lingo
+                        // (`member.charSpacing = -1`) has no spans at all, so defaulting
+                        // to 0 silently dropped the authored tracking.
+                        //
+                        // AreaZero's menu styles all carry `#kerning: -1`, which
+                        // `[M] Text Director` assigns as `tTextMember.charSpacing`.
+                        // Losing it made every baked string 1px per character too wide:
+                        // "[MEDIUM]" overflowed its 105px member (the mesh is exactly
+                        // 105 wide) and lost the closing bracket, and "PLAY MORE GAMES"
+                        // came out 15px wide of where Director centres it.
+                        let cs_px: i32 = text_data.html_styled_spans.first()
+                            .map(|s| s.style.char_spacing)
+                            .unwrap_or(text_data.char_spacing);
+                        let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
+                        // Director renders text ALIASED below the member's
+                        // antiAliasThreshold (default 14): AreaZero's fs-12 HUD
+                        // strips are hard-edged in a real projector while its
+                        // fs-20 "Score" is smoothed. `anti_alias == false`
+                        // members deliberately KEEP the smooth path here — the
+                        // CS-Verdana navigator (anti_alias=false, 10px) relies
+                        // on sub-pixel coverage to stay legible; see the
+                        // matching carve-out at the `!text_data.anti_alias`
+                        // binarization below (atlas path only).
+                        // A stored threshold of 0 is honoured LITERALLY: nothing
+                        // is below it, so an `antiAlias = true` member is smooth
+                        // at every size. Measured in Shockwave with the fCheck
+                        // specimen movie — `Verdana * 10, aa:1 thr:0` renders 66%
+                        // anti-aliased ink, while the same size at `thr:14` comes
+                        // back perfectly binary. Do NOT "helpfully" substitute
+                        // Director's default of 14 for a stored 0; that was tried
+                        // to make Coke Studios' chat crisp and this capture
+                        // refutes it. If a member looks wrong here, suspect our
+                        // PARSE of `anti_alias` / `anti_alias_threshold` rather
+                        // than the rule.
+                        let aa_threshold = text_data.info.as_ref()
+                            .map(|i| i.anti_alias_threshold)
+                            .unwrap_or(14);
+                        // Hinted: Director's actual rule — `antiAlias = FALSE`
+                        // is ALSO binary. The legacy carve-out (smooth despite
+                        // anti_alias=false, because our thin stems died under a
+                        // 50% threshold) only applies to the un-hinted path.
+                        let hinted = get_glyph_preference() == GlyphPreference::Hinted;
+                        let aliased = if hinted {
+                            !text_data.anti_alias || (osize as u32) < aa_threshold
+                        } else {
+                            text_data.anti_alias && (osize as u32) < aa_threshold
+                        };
+                        // Hinted: replace the unity-parse outlines with a
+                        // grid-fit parse at the render size — otherwise the
+                        // stems are too thin to survive the binary rule above.
+                        let hinted_parsed = if hinted {
+                            pfr_raw.as_ref().and_then(|r| {
+                                crate::director::chunks::pfr1::parse_pfr1_font_hinted(r, osize as i32).ok()
+                            })
+                        } else {
+                            None
+                        };
+                        let parsed_for_render = hinted_parsed.as_ref().unwrap_or(parsed);
+                        match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
+                            &mut bitmap, parsed_for_render, osize, &text_data.text, &per_char, default_style,
+                            // start_y = 0: the renderer applies `top_spacing`
+                            // internally (y_top starts at top_spacing), matching
+                            // the atlas-copy path. Passing it here too would
+                            // double the top inset.
+                            0, 0, box_width as i32, box_height as i32,
+                            text_alignment, box_width as i32, text_data.word_wrap,
+                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
+                            cs_px, &text_data.tab_stops, aliased,
+                        ) {
+                            Ok(()) => rendered_via_outline = true,
+                            Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),
+                        }
+                    }
+                    if !rendered_via_outline {
+                    // Bitmap glyph rendering using PFR rasterizer font
+                    let font_bitmap = player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
+                    let palettes = player.movie.cast_manager.palettes();
+                    let params = CopyPixelsParams {
+                        blend: 100,
+                        ink: 36,
+                        color: member_color.clone(),
+                        bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
+                        mask_image: None,
+                        is_text_rendering: true,
+                        rotation: 0.0,
+                        skew: 0.0,
+                        sprite: None,
+                        mask_offset: (0, 0),
+                        original_dst_rect: None,
+                        bg_color_explicit: false,
+                        fore_color_explicit: false,
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                    };
+
+                    use crate::player::bitmap::bitmap::resolve_color_ref;
+                    use crate::player::font::{bitmap_font_copy_char, bitmap_font_copy_char_tight};
+
+                    let text_color = resolve_color_ref(
+                        &palettes,
+                        &params.color,
+                        &bitmap.palette_ref,
+                        bitmap.original_bit_depth,
+                    );
+                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                    let is_pfr_font = font.char_widths.is_some();
+
+                    // PFR pixel-font vertical anchoring (Paige semantics). Recover
+                    // the strike's cap-top / descender-bottom from the atlas so the
+                    // first line's cell top anchors at lineTop and the underline lands
+                    // in the descent, matching Shockwave. Shared with the on-stage
+                    // `Bitmap::draw_text` path so both render identically.
+                    let (pfr_cap_top, pfr_desc_bottom) =
+                        crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
+
+                    let max_width = box_width as i32;
+                    // Anchor the first line's atlas cell top at box row 0. In Paige
+                    // the line is placed by its baseline = lineTop + ascent, and the
+                    // PFR atlas cell top already corresponds to (baseline - ascent) =
+                    // lineTop, so the cell top maps straight onto box row 0. The
+                    // natural ascent-to-cap gap (cap_top) above the capitals is kept,
+                    // exactly as Shockwave renders it. (Previously this subtracted
+                    // cap_top, pulling the caps onto row 0 and the whole block ~3-4px
+                    // too high.) Non-PFR fonts keep the historical top_spacing.
+                    let mut y = match (pfr_cap_top, pfr_desc_bottom) {
+                        // Director positions baked text using BOTH the authored
+                        // topSpacing (extra space above the line) AND the
+                        // fixedLineSpace leading distributed above the glyph:
+                        //   - The v7 Navigator ROOM ROWS go through Habbo's Writer
+                        //     Class, which FORCES `fixedLineSpace = fontSize` (9) and
+                        //     puts the real line height into `topSpacing`
+                        //     (= fixedLineSpace(18) - fontSize(9) = 9). Their offset
+                        //     therefore lives in topSpacing, not fixedLineSpace.
+                        //   - The TITLE is a non-Writer member that keeps
+                        //     fixedLineSpace=15 over a ~11px glyph, so its offset is
+                        //     fixedLineSpace leading (descender sits at line bottom).
+                        // Volter strikes' taller atlas cell masked both; the scaling
+                        // outline exposed them, baking text ~7px too high (the
+                        // window-element bitmap PLACEMENT is correct). For tight
+                        // lines both terms are ~0, so the registration ToS / headings
+                        // are unchanged. No member has both terms large, so summing
+                        // does not double-count.
+                        //
+                        // The topSpacing term carries a -1: the glyph descender (db)
+                        // already overruns the Writer-forced `fixedLineSpace=fontSize`
+                        // by ~1px, so applying the raw topSpacing dropped the room rows
+                        // 1px below Shockwave. Calibrated against the v7 Navigator room
+                        // list (topSpacing=9 -> 8px effective).
+                        (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
+                            (text_data.fixed_line_space as i32 - 1 - db).max(0)
+                                + (text_data.top_spacing as i32 - 1).max(0)
+                        }
+                        (Some(_), _) => text_data.top_spacing as i32,
+                        (None, _) => text_data.top_spacing as i32,
+                    };
+                    // Underline row sits just below the line's baseline, and this
+                    // is also the per-line advance below. Use the member's explicit
+                    // line height (fixedLineSpace) when set so the underline lands
+                    // inside the bitmap (Volter login link text is 11px tall);
+                    // otherwise Paige auto leading via the shared helper. The raw
+                    // atlas cell (char_height-1, ~25 for Volter-9) is NOT a line
+                    // height — it put 25 px between Habbo v31's 9 px catalogue
+                    // lines and sized the box for a different line count than the
+                    // measure pass above.
+                    let line_height = if text_data.fixed_line_space > 0 {
+                        (text_data.fixed_line_space as i32).max(1)
+                    } else {
+                        let nominal = if text_data.font_size > 0 {
+                            text_data.font_size
+                        } else if font.font_size > 0 {
+                            font.font_size
+                        } else {
+                            font.char_height
+                        };
+                        // Same rule as the measure pass above, so the atlas path
+                        // can't drift from the box it was given.
+                        (crate::player::font::outline_auto_line_height_for_font(
+                            player, &text_data.font, nominal,
+                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
+                            &font, Some(font_bitmap), nominal,
+                        )) as i32).max(1)
+                    };
+
+                    // Get char_spacing from styled spans (XMED data)
+                    let char_spacing: i32 = text_data.html_styled_spans.first()
+                        .map(|s| s.style.char_spacing)
+                        .unwrap_or(0);
+
+                    // Build a per-character style map. Indexed by character
+                    // position in `text_data.text`, each entry gives the style
+                    // overrides for that character. Coke Studios applies
+                    // per-line / per-item colour + bold/underline via chunk
+                    // setters, and relies on this bitmap render path honouring
+                    // them. When no styled spans are present every char gets
+                    // the member-level defaults.
+                    #[derive(Clone, Copy)]
+                    struct PerCharStyle {
+                        bold: bool,
+                        italic: bool,
+                        underline: bool,
+                        color: (u8, u8, u8),
+                    }
+                    let default_per_char = PerCharStyle {
+                        bold: default_bold,
+                        italic: default_italic,
+                        underline: default_underline,
+                        color: text_color,
+                    };
+                    let mut per_char: Vec<PerCharStyle> = Vec::new();
+                    if text_data.html_styled_spans.len() >= 2 {
+                        // Build per-char with the SAME normalisation the renderer
+                        // applies (CRLF → LF, lone CR → LF). The renderer iterates
+                        // normalised lines and indexes per_char by
+                        // `line_char_offset + ch_idx`, where line_char_offset
+                        // assumes single-char line breaks. If we kept the raw
+                        // `\r\n` here, per_char would be one entry longer per
+                        // CRLF and styles would shift backwards on every CRLF
+                        // — Coke Studios' roomlist (Windows-saved with `\r\n`)
+                        // bleeds audition row's bold/blue down by N lines.
+                        let mut prev_was_cr = false;
+                        for span in &text_data.html_styled_spans {
+                            let col = if let Some(c) = span.style.color {
+                                (((c >> 16) & 0xFF) as u8,
+                                 ((c >> 8) & 0xFF) as u8,
+                                 (c & 0xFF) as u8)
+                            } else {
+                                text_color
+                            };
+                            // Spans set via chunk-style setters are authoritative
+                            // for that range: don't OR with member defaults, or
+                            // `[#plain]` wouldn't be able to strip underline from
+                            // a member that has underline as its default style.
+                            let style_entry = PerCharStyle {
+                                bold: span.style.bold,
+                                italic: span.style.italic,
+                                underline: span.style.underline,
+                                color: col,
+                            };
+                            for c in span.text.chars() {
+                                if prev_was_cr && c == '\n' {
+                                    // Drop \n that follows \r — the \r already
+                                    // contributed an entry that the renderer
+                                    // treats as the single break.
+                                    prev_was_cr = false;
+                                    continue;
+                                }
+                                prev_was_cr = c == '\r';
+                                per_char.push(style_entry);
+                            }
+                        }
+                    }
+
+                    // Capture tab stops for the closure (line_char_offset usage below
+                    // also needs them, but the closure can't borrow text_data through
+                    // reserve_player_mut). Clone to a small Vec.
+                    let line_tab_stops: Vec<(BuiltInSymbol, i32)> = text_data
+                        .tab_stops
+                        .iter()
+                        .map(|t| (t.tab_type.clone(), t.position as i32))
+                        .collect();
+
+                    let mut flush_line = |line: &str, line_char_offset: usize, y_pos: i32, bitmap: &mut Bitmap| {
+                        // Helper: width of a substring (character advances).
+                        let segment_width = |s: &str| -> i32 {
+                            s.chars()
+                                .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
+                                .sum::<i32>()
+                        };
+
+                        // Split the line into tab-delimited segments. Each segment
+                        // starts at a tab-stop position (or 0 for the first one).
+                        // Director tab-stop semantics applied here:
+                        //   - #left:    next segment renders starting at the stop
+                        //   - #right:   next segment renders ending at the stop
+                        //   - #center:  next segment centred on the stop
+                        //   - #decimal: treated as #right for now (CS doesn't use it)
+                        // Without tab stops we fall back to advance-as-glyph (TAB
+                        // glyphs in PFR atlases are usually zero-width).
+                        let segments: Vec<&str> = line.split('\t').collect();
+                        let mut segment_starts: Vec<i32> = Vec::with_capacity(segments.len());
+
+                        // Compute the line's logical width for alignment when there
+                        // are no tabs OR when tabs leave the line left-anchored.
+                        let logical_line_width: i32 = if segments.len() == 1 {
+                            segment_width(line)
+                        } else {
+                            let mut acc = 0i32;
+                            for (i, seg) in segments.iter().enumerate() {
+                                let seg_w = segment_width(seg);
+                                if i == 0 {
+                                    acc = seg_w;
+                                } else if let Some((tab_type, tab_pos)) = line_tab_stops.get(i - 1) {
+                                    acc = match tab_type.as_str() {
+                                        "right" => *tab_pos,
+                                        "center" => (*tab_pos + seg_w / 2).max(acc),
+                                        _ => (*tab_pos + seg_w).max(acc + seg_w),
+                                    };
+                                } else {
+                                    acc += seg_w;
+                                }
+                            }
+                            acc
+                        };
+
+                        // Apply line-level alignment offset (only meaningful when no
+                        // right-type tabs anchor the right edge — tabs already
+                        // place segments at fixed positions).
+                        let has_right_tab = line_tab_stops
+                            .iter()
+                            .any(|(t, _)| *t == BuiltInSymbol::Right);
+                        let line_offset = if has_right_tab {
+                            0
+                        } else {
+                            match text_alignment {
+                                TextAlignment::Center => ((max_width - logical_line_width) / 2).max(0),
+                                TextAlignment::Right => (max_width - logical_line_width).max(0),
+                                _ => 0,
+                            }
+                        };
+
+                        // First segment always starts at line_offset (no preceding tab).
+                        segment_starts.push(line_offset);
+                        let mut cursor_x = line_offset + segment_width(segments[0]);
+                        for i in 1..segments.len() {
+                            let seg_w = segment_width(segments[i]);
+                            let stop_x = match line_tab_stops.get(i - 1) {
+                                Some((tab_type, tab_pos)) => match tab_type {
+                                    BuiltInSymbol::Right => (*tab_pos - seg_w).max(cursor_x),
+                                    BuiltInSymbol::Center => (*tab_pos - seg_w / 2).max(cursor_x),
+                                    _ => (*tab_pos).max(cursor_x), // #left / #decimal
+                                },
+                                None => cursor_x, // no more tab stops — render inline
+                            };
+                            segment_starts.push(stop_x);
+                            cursor_x = stop_x + seg_w;
+                        }
+
+                        // Walk the line again to draw, skipping `\t` chars and using
+                        // the precomputed segment starts. (A fractional 16.16
+                        // pen was tried and refuted — see the stage path.)
+                        let mut current_segment = 0usize;
+                        let mut x = segment_starts[0];
+                        for (ch_idx, ch) in line.chars().enumerate() {
+                            if ch == '\t' {
+                                current_segment += 1;
+                                if let Some(&sx) = segment_starts.get(current_segment) {
+                                    x = sx;
+                                }
+                                continue;
+                            }
+                            let adv = font.get_char_advance_for(ch) as i32;
+                            let per = per_char
+                                .get(line_char_offset + ch_idx)
+                                .copied()
+                                .unwrap_or(default_per_char);
+                            // Use tight copy for PFR fonts when cell width is much larger
+                            // than character advance, to prevent transparent cell areas from
+                            // overlapping and erasing adjacent characters.
+                            let use_tight = is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
+                            let ch_params = CopyPixelsParams {
+                                blend: params.blend,
+                                ink: params.ink,
+                                color: crate::player::sprite::ColorRef::Rgb(per.color.0, per.color.1, per.color.2),
+                                bg_color: params.bg_color.clone(),
+                                mask_image: None,
+                                is_text_rendering: params.is_text_rendering,
+                                rotation: params.rotation,
+                                skew: params.skew,
+                                sprite: None,
+                                mask_offset: params.mask_offset,
+                                original_dst_rect: params.original_dst_rect.clone(),
+                                bg_color_explicit: false,
+                                fore_color_explicit: false,
+                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            };
+                            if use_tight {
+                                bitmap_font_copy_char_tight(
+                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
+                                    x, y_pos, &palettes, &ch_params,
+                                );
+                            } else {
+                                bitmap_font_copy_char(
+                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
+                                    x, y_pos, &palettes, &ch_params,
+                                );
+                            }
+                            // An already-bold face gains nothing from a bold
+                            // style (Director's settled rule) — skip the
+                            // synthetic second strike so it doesn't render
+                            // heavier than Shockwave.
+                            let atlas_face_bold = {
+                                let n = font.font_name.to_ascii_lowercase();
+                                n.contains("bold") || n.contains("_600")
+                                    || n.contains("_700") || n.contains("_800")
+                                    || n.contains("_900")
+                            };
+                            if per.bold && !atlas_face_bold {
+                                if use_tight {
+                                    bitmap_font_copy_char_tight(
+                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
+                                        x + 1, y_pos, &palettes, &ch_params,
+                                    );
+                                } else {
+                                    bitmap_font_copy_char(
+                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
+                                        x + 1, y_pos, &palettes, &ch_params,
+                                    );
+                                }
+                            }
+                            if per.underline {
+                                // Per-character underline so per-span underline
+                                // is honoured (CS uses underline on some items
+                                // only). Draw one pixel row under this glyph.
+                                // Paige draws the underline in the descent. For
+                                // PFR strikes put it on the descender's lowest row
+                                // (scanned), so it sits just under the text instead
+                                // of at the oversized atlas cell bottom.
+                                let underline_y = match pfr_desc_bottom {
+                                    Some(db) => y_pos + db,
+                                    None => y_pos + line_height - 1,
+                                };
+                                let run_end = (x + adv + char_spacing).max(x);
+                                for ux in x..run_end {
+                                    bitmap.set_pixel(ux, underline_y, per.color, &palettes);
+                                }
+                            }
+                            x += adv + char_spacing;
+                        }
+                    };
+
+                    // Normalise CRLF / lone CR to \n first so a `\r\n` pair counts
+                    // as ONE line break — splitting on either char individually
+                    // would double the line count for Lingo strings produced via
+                    // `& RETURN` on platforms where RETURN is `\r\n`. Coke
+                    // Studios' roomlist hits exactly this: every row of
+                    // "London I\tGo!\r\n..." was rendering with an empty line
+                    // between, doubling the visual line spacing.
+                    let normalised_text: String = text_data.text
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n");
+                    let raw_lines: Vec<&str> = normalised_text.split('\n').collect();
+                    let mut lines_to_draw: Vec<String> = Vec::new();
+
+                    if text_data.word_wrap && max_width > 0 {
+                        for raw in raw_lines {
+                            if raw.is_empty() {
+                                lines_to_draw.push(String::new());
+                                continue;
+                            }
+                            // Wrap on space-separated words but preserve TAB
+                            // characters. Splitting via split_whitespace() and
+                            // re-joining with " " would silently strip tabs and
+                            // break tab-stop layouts (CS roomlist relies on a
+                            // right-tab to anchor "Go!" at the row's right
+                            // edge — tab-stripped lines collapsed everything
+                            // back to the left).
+                            let mut current = String::new();
+                            for word in raw.split(' ') {
+                                if word.is_empty() {
+                                    // Multiple spaces in a row — preserve them
+                                    if !current.is_empty() {
+                                        current.push(' ');
+                                    }
+                                    continue;
+                                }
+                                let candidate = if current.is_empty() {
+                                    word.to_string()
+                                } else {
+                                    format!("{} {}", current, word)
+                                };
+                                let candidate_width: i32 = candidate
+                                    .chars()
+                                    .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
+                                    .sum();
+                                if candidate_width <= max_width || current.is_empty() {
+                                    current = candidate;
+                                } else {
+                                    lines_to_draw.push(current);
+                                    current = word.to_string();
+                                }
+                            }
+                            if !current.is_empty() {
+                                lines_to_draw.push(current);
+                            }
+                        }
+                    } else {
+                        lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
+                    }
+
+                    let effective_line_height = if text_data.fixed_line_space > 0 {
+                        text_data.fixed_line_space as i32
+                    } else {
+                        line_height
+                    };
+                    let line_step = effective_line_height
+                        + text_data.bottom_spacing as i32
+                        + text_data.top_spacing as i32;
+                    // Track the character offset into `text_data.text` so
+                    // per-span styling aligns with the chars being drawn.
+                    // Word-wrap rebuilds lines from whitespace-split tokens so
+                    // the offset tracking is approximate there; for the
+                    // non-wrap case (which is what CS uses for the roomlist)
+                    // it's exact.
+                    let mut char_offset = 0usize;
+                    for line in lines_to_draw {
+                        flush_line(&line, char_offset, y, &mut bitmap);
+                        y += line_step;
+                        char_offset += line.chars().count() + 1; // +1 for the line break
+                    }
+                    } // end !rendered_via_outline (atlas-copy fallback)
+
+                } // end bitmap glyph else branch
+
+                // Honour `member.antialias = 0` by thresholding the bitmap's
+                // alpha channel to binary (0 or 255). Director with antialias
+                // disabled produces crisp 1-bit text; coverage-as-alpha (what
+                // Canvas2D and the PFR rasterizer both emit) shows up as a
+                // faded grey halo around the strokes when later composited
+                // via `[#ink: 36]`. The Coke Studios jukebox catalog disables
+                // AA explicitly (see cataloglist script line 85) and expects
+                // sharp text — without the threshold the catalog list looks
+                // washed out compared to Shockwave.
+                if !text_data.anti_alias && bitmap.bit_depth == 32 && !rendered_via_outline {
+                    // Director with `anti_alias=false` rasterises text as 1-bit
+                    // — no coverage to threshold. Our pipeline renders via
+                    // Canvas2D (always AA) and then thresholds the alpha to
+                    // simulate the 1-bit effect. The file's
+                    // `anti_alias_threshold` is often 0 for these members
+                    // (spineworld_dcr txt_droplist authored at 0); honouring
+                    // that value lets every halo pixel through and produces a
+                    // thick / double-struck appearance. Floor at 128 — the
+                    // midpoint of the coverage scale, which empirically
+                    // matches Director's crispness for non-AA text (Coke
+                    // Studios jukebox catalog and others).
+                    let threshold = text_data.info.as_ref()
+                        .map(|i| i.anti_alias_threshold as u8)
+                        .unwrap_or(128)
+                        .max(128);
+                    for i in (3..bitmap.data.len()).step_by(4) {
+                        bitmap.data[i] = if bitmap.data[i] >= threshold { 255 } else { 0 };
+                    }
+                }
+        Ok(bitmap)
     }
 
     pub fn get_prop(
@@ -1225,1115 +2359,18 @@ impl TextMemberHandlers {
                 }
             }
             "image" => {
-                if DEBUG_TEXT_IMAGE {
-                    debug!(
-                        "[text.image] member={}:{} text_len={} spans={} font='{}' size={} wrap={} align='{}'",
-                        cast_member_ref.cast_lib,
-                        cast_member_ref.cast_member,
-                        text_data.text.len(),
-                        text_data.html_styled_spans.len(),
-                        text_data.font,
-                        text_data.font_size,
-                        text_data.word_wrap,
-                        text_data.alignment
-                    );
-                }
-                // Use the same rendering approach as sprite display
-                // Get dimensions - use styled spans if available for accurate measurement
-                let mut preferred_font_name: Option<String> = None;
-                let mut preferred_font_size: Option<u16> = None;
-                if !text_data.html_styled_spans.is_empty() {
-                    let first_style = &text_data.html_styled_spans[0].style;
-                    let font_size = first_style.font_size
-                        .filter(|&s| s > 0)
-                        .or_else(|| if text_data.font_size > 0 { Some(text_data.font_size as i32) } else { None })
-                        .unwrap_or(12) as u16;
-                    let font_name = if !text_data.font.is_empty() {
-                        text_data.font.clone()
-                    } else {
-                        first_style.font_face.clone()
-                            .filter(|f| !f.is_empty())
-                            .unwrap_or_else(|| "Arial".to_string())
-                    };
-                    preferred_font_name = Some(font_name);
-                    preferred_font_size = Some(font_size);
-                } else {
-                    if !text_data.font.is_empty() {
-                        preferred_font_name = Some(text_data.font.clone());
-                    }
-                    if text_data.font_size > 0 {
-                        preferred_font_size = Some(text_data.font_size);
-                    }
-                }
-                if DEBUG_TEXT_IMAGE {
-                    debug!(
-                        "[text.image] font='{}' size={}",
-                        preferred_font_name.as_deref().unwrap_or("(none)"),
-                        preferred_font_size.unwrap_or(0)
-                    );
-                }
-
-                // Load font to determine if it's PFR
-                let font = {
-                    let font_name = preferred_font_name.as_deref()
-                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
-                    let font_size = preferred_font_size
-                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
-                    let image_style_bits: u8 = {
-                        let mut b = 0u8;
-                        for tag in &text_data.font_style {
-                            match tag.as_str() {
-                                "bold" => b |= 0x01,
-                                "italic" => b |= 0x02,
-                                "underline" => b |= 0x04,
-                                _ => {}
-                            }
-                        }
-                        b
-                    };
-                    let mut loaded = if let Some(name) = font_name {
-                        player.font_manager.get_font_with_cast_and_bitmap(
-                            name,
-                            &player.movie.cast_manager,
-                            &mut player.bitmap_manager,
-                            font_size,
-                            Some(image_style_bits).filter(|b| *b != 0),
-                        )
-                    } else {
-                        None
-                    };
-                    if loaded.is_none() {
-                        if let Some(name) = font_name {
-                            let name_lower = name.to_lowercase();
-                            for (key, font) in player.font_manager.font_cache.iter() {
-                                if key.to_lowercase() == name_lower
-                                    || key.to_lowercase().starts_with(&format!("{}_", name_lower))
-                                {
-                                    loaded = Some(font.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    loaded.or_else(|| player.font_manager.get_system_font())
-                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
-                };
-                let is_pfr_font = font.char_widths.is_some();
-
-                // For SMOOTH PFR OUTLINE fonts (no bitmap strikes), grab the
-                // parsed outlines so the renderer can compose text from sub-pixel
-                // glyph outlines instead of the atlas-copy path (which quantizes
-                // side bearings to 0 at small sizes — Coke Studios Verdana 10px).
+                let bitmap = Self::render_text_image(player, cast_member_ref, &text_data)?;
+                // On a SCALED stage, rasterise a second time with every metric
+                // multiplied by the stage scale and attach it as the bitmap's
+                // hi-res twin (see `Bitmap::hi_res`). Movies that compose their
+                // UI by copying `.image` into a bitmap — the Coke Studios
+                // navigator's room list is the case this was written for — then
+                // stay as sharp as the text sprites around them, instead of
+                // being magnified while every real text sprite is re-rasterised.
                 //
-                // PFR carries NO "pixel font" flag (its physical-font flags are
-                // only proportional / vertical / charcode width — confirmed
-                // against FreeType's pfr driver), and the member's anti-alias bit
-                // doesn't separate them either (Habbo authors both Volter AND
-                // CS-Verdana with anti_alias=false). So we classify by glyph
-                // GEOMETRY (`is_pixel_font`): pixel fonts (Volter, FFF Reaction)
-                // are drawn as axis-aligned rectangles (~0% béziers, ~100% H/V
-                // edges) and must render crisp via atlas-copy; smooth fonts
-                // (Verdana, Arial) are curve-heavy and need sub-pixel composition.
-                //
-                // Cloned once (consistent with `text_data` above); .image is not
-                // a per-frame call for cached members.
-                // (parsed font, raw PFR bytes) — the raw bytes let the Hinted
-                // preference re-parse grid-fitted at the render size below.
-                let pfr_outline: Option<(crate::director::chunks::pfr1::types::Pfr1ParsedFont, Option<Vec<u8>>)> = if is_pfr_font {
-                    let name = preferred_font_name.as_deref().unwrap_or("");
-                    if name.is_empty() {
-                        None
-                    } else {
-                        use crate::player::cast_member::CastMemberType;
-                        use crate::player::font::FontManager;
-                        let lc = name.to_ascii_lowercase();
-                        let canon = FontManager::canonical_font_name(name);
-                        // An EXACT name match must win over a canonical one.
-                        // `canonical_font_name` folds style words away, so
-                        // "Verdana *" and "Verdana Bold *" both canonicalise to
-                        // "verdana" — and since `members.values()` is an
-                        // unordered map, whichever came out first decided the
-                        // face. Asking for `Verdana *` picked `Verdana Bold *`
-                        // (`Verdana_700_0`) about as often as not, and a baked
-                        // `.image` silently came out in the wrong weight.
-                        let mut exact = None;
-                        let mut fallback = None;
-                        'find_outline: for cast in &player.movie.cast_manager.casts {
-                            for m in cast.members.values() {
-                                if let CastMemberType::Font(fd) = &m.member_type {
-                                    let is_exact = fd.font_info.name.to_lowercase() == lc
-                                        || m.name.to_lowercase() == lc;
-                                    let is_canon = !canon.is_empty()
-                                        && (FontManager::canonical_font_name(&fd.font_info.name) == canon
-                                            || FontManager::canonical_font_name(&m.name) == canon);
-                                    if !is_exact && !is_canon {
-                                        continue;
-                                    }
-                                    if let Some(p) = &fd.pfr_parsed {
-                                        // Smooth outline-only fonts only.
-                                        // Bitmap-strike fonts AND pixel fonts
-                                        // (rectilinear, e.g. Volter) stay on
-                                        // the atlas path for crisp pixels.
-                                        if !p.glyphs.is_empty()
-                                            && p.bitmap_glyphs.is_empty()
-                                            && !p.is_pixel_font
-                                        {
-                                            if is_exact {
-                                                exact = Some((p.clone(), fd.pfr_data.clone()));
-                                                break 'find_outline;
-                                            }
-                                            if fallback.is_none() {
-                                                fallback = Some((p.clone(), fd.pfr_data.clone()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        exact.or(fallback)
-                    }
-                } else {
-                    None
-                };
-
-                // Compute the authored box width (used as max_width for word wrap).
-                // Doing this BEFORE measuring so PFR measurement can wrap correctly.
-                let explicit_box_width = if text_data.width > 0 {
-                    Some(text_data.width)
-                } else if let Some(ref info) = text_data.info {
-                    if info.width > 0 { Some(info.width as u16) } else { None }
-                } else {
-                    None
-                };
-
-                // Decide the measurement path. When the member will render via
-                // Canvas2D (non-PFR, or standard-font with prefer_native), measure
-                // with Canvas2D so `.rect` / `.height` / `.image` dimensions match
-                // the actual rendered bitmap — PFR wrap points disagree with
-                // Canvas2D's wider browser-font metrics and would size the bitmap
-                // for the wrong line count.
-                let requested_font_for_measure = preferred_font_name.as_deref()
-                    .filter(|n| !n.is_empty())
-                    .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None })
-                    .unwrap_or("Arial");
-                let measure_with_canvas = !is_pfr_font;
-                let member_style_bits: u8 = {
-                    let mut s = 0u8;
-                    for tag in &text_data.font_style {
-                        match tag.as_str() {
-                            "bold" => s |= 0x01,
-                            "italic" => s |= 0x02,
-                            "underline" => s |= 0x04,
-                            _ => {}
-                        }
-                    }
-                    s
-                };
-
-                let (mut width, mut height) = if measure_with_canvas {
-                    let font_size = preferred_font_size.unwrap_or(12);
-                    FontMemberHandlers::measure_text_native_styled(
-                        &text_data.text,
-                        requested_font_for_measure,
-                        font_size,
-                        Some(member_style_bits),
-                        text_data.word_wrap,
-                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                        text_data.fixed_line_space,
-                    )
-                } else if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
-                    // PFR font with word wrap: use measure_text_wrapped so the
-                    // measured height accounts for wrapped lines. Pass char_spacing
-                    // so measurement matches the renderer's `x += adv + char_spacing`.
-                    measure_text_wrapped(
-                        &text_data.text,
-                        &font,
-                        explicit_box_width.unwrap(),
-                        true,
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                        text_data.char_spacing,
-                    )
-                } else {
-                    measure_text(
-                        &text_data.text,
-                        &font,
-                        None,
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                    )
-                };
-                let mut box_width = width;
-                let mut box_height = height;
-                if let Some(w) = explicit_box_width {
-                    // For text members with an authored box width, keep wrapping constrained to that box.
-                    box_width = w.max(1);
-                }
-                // PFR bitmap-font path: raw `measure_text*` reports the full PFR
-                // cell height (char_height-1) which over-reports vs Director's
-                // glyph-extent height (~font_size × 1.4). Recompute to match
-                // the `.height` getter so CS chat's
-                // `nameImage.copyPixels(nameTempImage, nameImage.rect, nameImage.rect)`
-                // uses consistent bounds. Skipped when measuring with Canvas2D
-                // (above branch) because that already returns the right height.
-                if is_pfr_font && !measure_with_canvas {
-                    let nominal = if text_data.font_size > 0 {
-                        text_data.font_size
-                    } else if font.font_size > 0 {
-                        font.font_size
-                    } else {
-                        font.char_height
-                    };
-                    // For wrapped text, re-walk the wrap logic to count visual
-                    // lines directly. The previous `height / raw_line_h` formula
-                    // was wrong: `raw_line_h = font.char_height - 1` can be much
-                    // larger than the actual `line_step` used by measure_text_wrapped
-                    // (which honours `fixed_line_space`), so 2-line text divided by
-                    // a 25-px PFR cell rounds down to 1 line. CS catalog rows that
-                    // wrapped to ["Premier Studio Chair - 500", "dB"] were getting
-                    // a 14-px-tall bitmap that clipped the second line.
-                    // Shared with the `.rect`/`.height` getters (including the
-                    // trailing-return rule) so .image stays 1:1 with .rect.
-                    let line_count = count_text_lines(
-                        &text_data.text,
-                        &font,
-                        text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0),
-                        explicit_box_width.unwrap_or(0) as i32,
-                        text_data.char_spacing,
-                    );
-                    // Honor the member's explicit line height (set from the font
-                    // struct's #lineHeight → fixedLineSpace) so the produced bitmap
-                    // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
-                    // matching the baked login_b_title bitmap). The bitmap is
-                    // drawn 1:1. With no fixedLineSpace this is Paige auto
-                    // leading — the shared helper, NOT the old font_size×1.4
-                    // guess, which disagreed with the renderer's own fallback
-                    // (13 here vs 25 there) and sized the box for the wrong
-                    // number of lines.
-                    // Same Paige minimum rule as the `.rect` getter above.
-                    let outline_natural = crate::player::font::outline_auto_line_height_for_font(
-                        player, &text_data.font, nominal,
-                    );
-                    let line_h = if text_data.fixed_line_space > 0 {
-                        match outline_natural {
-                            Some(n) => text_data.fixed_line_space.max(n),
-                            None => text_data.fixed_line_space,
-                        }
-                    } else {
-                        outline_natural.unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                            &font,
-                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
-                            nominal,
-                        ))
-                    };
-                    // See `.rect` getter for rationale on folding
-                    // top_spacing + bottom_spacing into line_step.
-                    let line_step = line_h as i32
-                        + text_data.top_spacing as i32
-                        + text_data.bottom_spacing as i32;
-                    box_height = (text_data.top_spacing as i32
-                        + line_h as i32
-                        + (line_count as i32 - 1) * line_step)
-                        .max(1) as u16;
-                }
-                // CRITICAL: member.image.height MUST equal member.rect.height
-                // (Director invariant) — otherwise Habbo's Text-Wrapper bake
-                // `pimage.copyPixels(member.image, dest=image-height, src=member.rect)`
-                // stretches the text vertically (login text 2px tall, registration
-                // paragraph blown up to one giant line). Use the IDENTICAL box_height
-                // selection as the `.rect`/`.height` getters above.
-                {
-                    // `.image` must always render the FULL content (>= measured) so
-                    // movies that capture it to build scroll buffers / dropdowns get
-                    // every line — Director's text `.image` never clips the rendered
-                    // content. This is unlike the `.rect`/`.height` getters, which
-                    // REPORT a logical size (and trust text_data.height for authored
-                    // multi-line members like Junkbot credits). Capturing movies:
-                    // CS navigator roomlist (copyPixels member.image), Spineworld
-                    // GUI_droplist (makeListImage reads txt_droplist.image).
-                    // Reserve the PFR descender overflow for the auto-sized
-                    // (non-wrapping #adjust) case below: the Writer forces
-                    // fixedLineSpace=fontSize, but the glyph descender (and the
-                    // underline drawn on it — `underline_y = y_pos + pfr_desc_bottom`)
-                    // reaches BELOW that. Shrinking the box to the fixedLineSpace-based
-                    // `measured` then clipped the v7 Navigator "Go" link underline.
-                    // Adds 0 when fixedLineSpace already covers the descender.
-                    let pfr_descender_overflow: u16 = player
-                        .bitmap_manager
-                        .get_bitmap(font.bitmap_ref)
-                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
-                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
-                        ));
-                    // Fold the descender/underline overflow into `measured` so every
-                    // content-sized branch (and the `.rect`/`.height` getters) agree —
-                    // the Origins Text-Wrapper bakes with src=member.rect, so .image
-                    // and .rect must match or the underline ("login_b_login_forgotten",
-                    // Navigator "Go") is dropped.
-                    let measured = box_height + pfr_descender_overflow;
-                    box_height = if text_data.box_type == BuiltInSymbol::Adjust {
-                        if text_data.rect_set_at_runtime {
-                            // CS / Origins runtime-set rect: grow to content, keep the
-                            // set height when it fits (keeps .image == .rect so the
-                            // Origins Text-Wrapper bake stays 1:1, no stretch).
-                            // Non-wrapping #adjust auto-sizes to content (see `.rect`):
-                            // the v7 Habbo Purse big-text writer's 480-tall canvas
-                            // must shrink to the digits so checkSaldo's centred
-                            // copyPixels keeps them on-screen.
-                            if !text_data.word_wrap {
-                                measured
-                            } else {
-                                text_data.height.max(measured)
-                            }
-                        } else {
-                            measured
-                        }
-                    } else if text_data.height > 0 {
-                        // #fixed/#scroll/#limit: the BOX is authoritative and content
-                        // that does not fit is simply not shown. Identical rule to the
-                        // `.rect` / `.height` getters above — which is the point: this
-                        // used to be `max(measured, height)`, so a box smaller than its
-                        // content reported one size through `.rect` and another through
-                        // `.image`, breaking the very invariant this block documents.
-                        //
-                        // AreaZero's HUD is the case that exposed it. [M] Text Director
-                        // sets `member("Text").height` to the QUAD's height (20 for the
-                        // Score/Level strips), bakes `.image`, then copyPixels that into
-                        // a power-of-two texture at `rect(0, 0, membersize)` and rescales
-                        // the quad's UVs by `membersize / textureSize`. All three steps
-                        // assume `.image` IS the member rect. Ours came out 128x34 for a
-                        // 128x20 member — topSpacing 10 + fixedLineSpace 11 plus the PFR
-                        // descender overflow — so the strip was laid out for a 34-tall
-                        // box, clipped to the 32-tall texture, and sampled through UVs
-                        // computed for 20: "Score" and "Level" lost their bottom row.
-                        text_data.height
-                    } else if let Some(h) = text_data.info.as_ref()
-                        .map(|i| i.height).filter(|h| *h > 0)
-                    {
-                        h as u16
-                    } else {
-                        measured
-                    };
-                }
-
-                // Create 32-bit bitmap with TRANSPARENT background for .image.
-                // Director's text member .image produces foreColor text with alpha=255
-                // on a transparent (alpha=0) background. This supports two common patterns:
-                //   1. copyPixels to grayscale for alpha mask: black bg → low alpha, text → high alpha
-                //   2. extractAlpha(): returns alpha channel where bg=0, text=255
-                let mut bitmap = Bitmap::new(
-                    box_width.max(1),
-                    box_height.max(1),
-                    32,
-                    32,
-                    8, // alpha depth
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
-                bitmap.use_alpha = true;
-                // Start fully transparent (RGBA = 0,0,0,0)
-                bitmap.data.fill(0);
-
-                // Determine alignment
-                let text_alignment: TextAlignment = text_data.alignment.into();
-
-
-                let glyph_pref = get_glyph_preference();
-                // font and is_pfr_font already loaded above for measurement
-
-                let use_native = if !text_data.tab_stops.is_empty() {
-                    true // Force native rendering for tab stop support
-                } else if !is_pfr_font {
-                    true // Always use Canvas2D for non-PFR fonts (system/browser fonts)
-                } else {
-                    match glyph_pref {
-                        GlyphPreference::Native => true,
-                        GlyphPreference::Bitmap | GlyphPreference::Outline | GlyphPreference::Hinted => false,
-                        GlyphPreference::Auto => false, // PFR bitmap glyph rendering
-                    }
-                };
-
-                // Set when the PFR outline compositor handled this member, so
-                // the binary anti-alias threshold below is skipped — outline
-                // output is already crisp anti-aliased text matching Shockwave,
-                // and binarizing it would shred the thin strokes.
-                let mut rendered_via_outline = false;
-
-                if use_native && !is_pfr_font {
-                    // Native Canvas2D rendering for standard fonts
-                    let font_name_str = preferred_font_name.as_deref().unwrap_or("Arial");
-                    let font_size_val = preferred_font_size.unwrap_or(12);
-                    // Use the member's actual foreColor for .image rendering.
-                    // Director renders text members with their foreColor on their bgColor.
-                    let (r, g, b) = {
-                        use crate::player::bitmap::bitmap::resolve_color_ref;
-                        let palettes = player.movie.cast_manager.palettes();
-                        resolve_color_ref(
-                            &palettes,
-                            &member.color,
-                            &bitmap.palette_ref,
-                            bitmap.original_bit_depth,
-                        )
-                    };
-                    let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
-
-                    // Prefer the stored styled spans (set via chunk style setters
-                    // or XMED parsing) over a single synthetic span. Fill in any
-                    // Nones from the spans with member-level defaults so each span
-                    // has a concrete font / size / color for the renderer.
-                    let spans: Vec<StyledSpan> = if text_data.html_styled_spans.len() >= 2 {
-                        text_data.html_styled_spans.iter().map(|sp| {
-                            let mut s = sp.style.clone();
-                            if s.font_face.is_none() {
-                                s.font_face = Some(font_name_str.to_string());
-                            }
-                            if s.font_size.is_none() {
-                                s.font_size = Some(font_size_val as i32);
-                            }
-                            if s.color.is_none() {
-                                s.color = Some(default_color_u32);
-                            }
-                            // Member-level fontStyle defaults apply only when the
-                            // span has no overrides of its own. We can't perfectly
-                            // tell "no override" from "explicitly off" at this
-                            // layer, but the chunk-style setters set bold/italic/
-                            // underline explicitly whenever Lingo writes fontStyle,
-                            // so the OR-with-defaults here just carries the member-
-                            // wide `[#underline]` CS sets before per-chunk writes.
-                            s.bold = s.bold || default_bold;
-                            s.italic = s.italic || default_italic;
-                            s.underline = s.underline || default_underline;
-                            StyledSpan { text: sp.text.clone(), style: s }
-                        }).collect()
-                    } else {
-                        let mut style = HtmlStyle::default();
-                        style.font_face = Some(font_name_str.to_string());
-                        style.font_size = Some(font_size_val as i32);
-                        style.color = Some(default_color_u32);
-                        style.bold = default_bold;
-                        style.italic = default_italic;
-                        style.underline = default_underline;
-                        vec![StyledSpan {
-                            text: text_data.text.clone(),
-                            style,
-                        }]
-                    };
-                    if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
-                        &mut bitmap,
-                        &spans,
-                        0,
-                        text_data.top_spacing as i32,
-                        box_width as i32,
-                        box_height as i32,
-                        text_alignment,
-                        box_width as i32,
-                        text_data.word_wrap,
-                        None,
-                        text_data.fixed_line_space,
-                        text_data.top_spacing,
-                        text_data.bottom_spacing,
-                        &text_data.tab_stops,
-                        &text_data.par_infos,
-                        &text_data.par_runs,
-                    ) {
-                        warn!("[text.image] Native render error: {:?}", e);
-                    }
-                } else {
-                    // Sub-pixel outline composition for OUTLINE PFR fonts —
-                    // preserves side bearings at small sizes (Verdana 10px in
-                    // the Coke Studios Navigator). Falls through to the
-                    // atlas-copy path below when there's no outline data or the
-                    // Canvas2D render errors.
-                    if let Some((ref parsed, ref pfr_raw)) = pfr_outline {
-                        let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                        let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                        let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
-                        let (dr, dg, db) = {
-                            use crate::player::bitmap::bitmap::resolve_color_ref;
-                            let palettes = player.movie.cast_manager.palettes();
-                            resolve_color_ref(&palettes, &member.color, &bitmap.palette_ref, bitmap.original_bit_depth)
-                        };
-                        let default_style = OutlineCharStyle {
-                            color: (dr, dg, db),
-                            bold: default_bold,
-                            italic: default_italic,
-                            underline: default_underline,
-                        };
-                        // Per-char styles aligned to CRLF-normalised text (same
-                        // convention the renderer uses to index `per_char`).
-                        let mut per_char: Vec<OutlineCharStyle> = Vec::new();
-                        if text_data.html_styled_spans.len() >= 2 {
-                            let mut prev_was_cr = false;
-                            for span in &text_data.html_styled_spans {
-                                let col = span.style.color
-                                    .map(|c| (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
-                                    .unwrap_or((dr, dg, db));
-                                let entry = OutlineCharStyle {
-                                    color: col,
-                                    bold: span.style.bold,
-                                    italic: span.style.italic,
-                                    underline: span.style.underline,
-                                };
-                                for c in span.text.chars() {
-                                    if prev_was_cr && c == '\n' { prev_was_cr = false; continue; }
-                                    prev_was_cr = c == '\r';
-                                    per_char.push(entry);
-                                }
-                            }
-                        }
-                        // Fall back to the MEMBER's charSpacing when there are no HTML
-                        // styled spans to carry one. A plain text member set from Lingo
-                        // (`member.charSpacing = -1`) has no spans at all, so defaulting
-                        // to 0 silently dropped the authored tracking.
-                        //
-                        // AreaZero's menu styles all carry `#kerning: -1`, which
-                        // `[M] Text Director` assigns as `tTextMember.charSpacing`.
-                        // Losing it made every baked string 1px per character too wide:
-                        // "[MEDIUM]" overflowed its 105px member (the mesh is exactly
-                        // 105 wide) and lost the closing bracket, and "PLAY MORE GAMES"
-                        // came out 15px wide of where Director centres it.
-                        let cs_px: i32 = text_data.html_styled_spans.first()
-                            .map(|s| s.style.char_spacing)
-                            .unwrap_or(text_data.char_spacing);
-                        let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
-                        // Director renders text ALIASED below the member's
-                        // antiAliasThreshold (default 14): AreaZero's fs-12 HUD
-                        // strips are hard-edged in a real projector while its
-                        // fs-20 "Score" is smoothed. `anti_alias == false`
-                        // members deliberately KEEP the smooth path here — the
-                        // CS-Verdana navigator (anti_alias=false, 10px) relies
-                        // on sub-pixel coverage to stay legible; see the
-                        // matching carve-out at the `!text_data.anti_alias`
-                        // binarization below (atlas path only).
-                        // A stored threshold of 0 is honoured LITERALLY: nothing
-                        // is below it, so an `antiAlias = true` member is smooth
-                        // at every size. Measured in Shockwave with the fCheck
-                        // specimen movie — `Verdana * 10, aa:1 thr:0` renders 66%
-                        // anti-aliased ink, while the same size at `thr:14` comes
-                        // back perfectly binary. Do NOT "helpfully" substitute
-                        // Director's default of 14 for a stored 0; that was tried
-                        // to make Coke Studios' chat crisp and this capture
-                        // refutes it. If a member looks wrong here, suspect our
-                        // PARSE of `anti_alias` / `anti_alias_threshold` rather
-                        // than the rule.
-                        let aa_threshold = text_data.info.as_ref()
-                            .map(|i| i.anti_alias_threshold)
-                            .unwrap_or(14);
-                        // Hinted: Director's actual rule — `antiAlias = FALSE`
-                        // is ALSO binary. The legacy carve-out (smooth despite
-                        // anti_alias=false, because our thin stems died under a
-                        // 50% threshold) only applies to the un-hinted path.
-                        let hinted = get_glyph_preference() == GlyphPreference::Hinted;
-                        let aliased = if hinted {
-                            !text_data.anti_alias || (osize as u32) < aa_threshold
-                        } else {
-                            text_data.anti_alias && (osize as u32) < aa_threshold
-                        };
-                        // Hinted: replace the unity-parse outlines with a
-                        // grid-fit parse at the render size — otherwise the
-                        // stems are too thin to survive the binary rule above.
-                        let hinted_parsed = if hinted {
-                            pfr_raw.as_ref().and_then(|r| {
-                                crate::director::chunks::pfr1::parse_pfr1_font_hinted(r, osize as i32).ok()
-                            })
-                        } else {
-                            None
-                        };
-                        let parsed_for_render = hinted_parsed.as_ref().unwrap_or(parsed);
-                        match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
-                            &mut bitmap, parsed_for_render, osize, &text_data.text, &per_char, default_style,
-                            // start_y = 0: the renderer applies `top_spacing`
-                            // internally (y_top starts at top_spacing), matching
-                            // the atlas-copy path. Passing it here too would
-                            // double the top inset.
-                            0, 0, box_width as i32, box_height as i32,
-                            text_alignment, box_width as i32, text_data.word_wrap,
-                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                            cs_px, &text_data.tab_stops, aliased,
-                        ) {
-                            Ok(()) => rendered_via_outline = true,
-                            Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),
-                        }
-                    }
-                    if !rendered_via_outline {
-                    // Bitmap glyph rendering using PFR rasterizer font
-                    let font_bitmap = player
-                        .bitmap_manager
-                        .get_bitmap(font.bitmap_ref)
-                        .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
-                    let palettes = player.movie.cast_manager.palettes();
-                    let params = CopyPixelsParams {
-                        blend: 100,
-                        ink: 36,
-                        color: member.color.clone(),
-                        bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
-                        mask_image: None,
-                        is_text_rendering: true,
-                        rotation: 0.0,
-                        skew: 0.0,
-                        sprite: None,
-                        mask_offset: (0, 0),
-                        original_dst_rect: None,
-                        bg_color_explicit: false,
-                        fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
-                    };
-
-                    use crate::player::bitmap::bitmap::resolve_color_ref;
-                    use crate::player::font::{bitmap_font_copy_char, bitmap_font_copy_char_tight};
-
-                    let text_color = resolve_color_ref(
-                        &palettes,
-                        &params.color,
-                        &bitmap.palette_ref,
-                        bitmap.original_bit_depth,
-                    );
-                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
-                    let is_pfr_font = font.char_widths.is_some();
-
-                    // PFR pixel-font vertical anchoring (Paige semantics). Recover
-                    // the strike's cap-top / descender-bottom from the atlas so the
-                    // first line's cell top anchors at lineTop and the underline lands
-                    // in the descent, matching Shockwave. Shared with the on-stage
-                    // `Bitmap::draw_text` path so both render identically.
-                    let (pfr_cap_top, pfr_desc_bottom) =
-                        crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
-
-                    let max_width = box_width as i32;
-                    // Anchor the first line's atlas cell top at box row 0. In Paige
-                    // the line is placed by its baseline = lineTop + ascent, and the
-                    // PFR atlas cell top already corresponds to (baseline - ascent) =
-                    // lineTop, so the cell top maps straight onto box row 0. The
-                    // natural ascent-to-cap gap (cap_top) above the capitals is kept,
-                    // exactly as Shockwave renders it. (Previously this subtracted
-                    // cap_top, pulling the caps onto row 0 and the whole block ~3-4px
-                    // too high.) Non-PFR fonts keep the historical top_spacing.
-                    let mut y = match (pfr_cap_top, pfr_desc_bottom) {
-                        // Director positions baked text using BOTH the authored
-                        // topSpacing (extra space above the line) AND the
-                        // fixedLineSpace leading distributed above the glyph:
-                        //   - The v7 Navigator ROOM ROWS go through Habbo's Writer
-                        //     Class, which FORCES `fixedLineSpace = fontSize` (9) and
-                        //     puts the real line height into `topSpacing`
-                        //     (= fixedLineSpace(18) - fontSize(9) = 9). Their offset
-                        //     therefore lives in topSpacing, not fixedLineSpace.
-                        //   - The TITLE is a non-Writer member that keeps
-                        //     fixedLineSpace=15 over a ~11px glyph, so its offset is
-                        //     fixedLineSpace leading (descender sits at line bottom).
-                        // Volter strikes' taller atlas cell masked both; the scaling
-                        // outline exposed them, baking text ~7px too high (the
-                        // window-element bitmap PLACEMENT is correct). For tight
-                        // lines both terms are ~0, so the registration ToS / headings
-                        // are unchanged. No member has both terms large, so summing
-                        // does not double-count.
-                        //
-                        // The topSpacing term carries a -1: the glyph descender (db)
-                        // already overruns the Writer-forced `fixedLineSpace=fontSize`
-                        // by ~1px, so applying the raw topSpacing dropped the room rows
-                        // 1px below Shockwave. Calibrated against the v7 Navigator room
-                        // list (topSpacing=9 -> 8px effective).
-                        (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
-                            (text_data.fixed_line_space as i32 - 1 - db).max(0)
-                                + (text_data.top_spacing as i32 - 1).max(0)
-                        }
-                        (Some(_), _) => text_data.top_spacing as i32,
-                        (None, _) => text_data.top_spacing as i32,
-                    };
-                    // Underline row sits just below the line's baseline, and this
-                    // is also the per-line advance below. Use the member's explicit
-                    // line height (fixedLineSpace) when set so the underline lands
-                    // inside the bitmap (Volter login link text is 11px tall);
-                    // otherwise Paige auto leading via the shared helper. The raw
-                    // atlas cell (char_height-1, ~25 for Volter-9) is NOT a line
-                    // height — it put 25 px between Habbo v31's 9 px catalogue
-                    // lines and sized the box for a different line count than the
-                    // measure pass above.
-                    let line_height = if text_data.fixed_line_space > 0 {
-                        (text_data.fixed_line_space as i32).max(1)
-                    } else {
-                        let nominal = if text_data.font_size > 0 {
-                            text_data.font_size
-                        } else if font.font_size > 0 {
-                            font.font_size
-                        } else {
-                            font.char_height
-                        };
-                        // Same rule as the measure pass above, so the atlas path
-                        // can't drift from the box it was given.
-                        (crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                            &font, Some(font_bitmap), nominal,
-                        )) as i32).max(1)
-                    };
-
-                    // Get char_spacing from styled spans (XMED data)
-                    let char_spacing: i32 = text_data.html_styled_spans.first()
-                        .map(|s| s.style.char_spacing)
-                        .unwrap_or(0);
-
-                    // Build a per-character style map. Indexed by character
-                    // position in `text_data.text`, each entry gives the style
-                    // overrides for that character. Coke Studios applies
-                    // per-line / per-item colour + bold/underline via chunk
-                    // setters, and relies on this bitmap render path honouring
-                    // them. When no styled spans are present every char gets
-                    // the member-level defaults.
-                    #[derive(Clone, Copy)]
-                    struct PerCharStyle {
-                        bold: bool,
-                        italic: bool,
-                        underline: bool,
-                        color: (u8, u8, u8),
-                    }
-                    let default_per_char = PerCharStyle {
-                        bold: default_bold,
-                        italic: default_italic,
-                        underline: default_underline,
-                        color: text_color,
-                    };
-                    let mut per_char: Vec<PerCharStyle> = Vec::new();
-                    if text_data.html_styled_spans.len() >= 2 {
-                        // Build per-char with the SAME normalisation the renderer
-                        // applies (CRLF → LF, lone CR → LF). The renderer iterates
-                        // normalised lines and indexes per_char by
-                        // `line_char_offset + ch_idx`, where line_char_offset
-                        // assumes single-char line breaks. If we kept the raw
-                        // `\r\n` here, per_char would be one entry longer per
-                        // CRLF and styles would shift backwards on every CRLF
-                        // — Coke Studios' roomlist (Windows-saved with `\r\n`)
-                        // bleeds audition row's bold/blue down by N lines.
-                        let mut prev_was_cr = false;
-                        for span in &text_data.html_styled_spans {
-                            let col = if let Some(c) = span.style.color {
-                                (((c >> 16) & 0xFF) as u8,
-                                 ((c >> 8) & 0xFF) as u8,
-                                 (c & 0xFF) as u8)
-                            } else {
-                                text_color
-                            };
-                            // Spans set via chunk-style setters are authoritative
-                            // for that range: don't OR with member defaults, or
-                            // `[#plain]` wouldn't be able to strip underline from
-                            // a member that has underline as its default style.
-                            let style_entry = PerCharStyle {
-                                bold: span.style.bold,
-                                italic: span.style.italic,
-                                underline: span.style.underline,
-                                color: col,
-                            };
-                            for c in span.text.chars() {
-                                if prev_was_cr && c == '\n' {
-                                    // Drop \n that follows \r — the \r already
-                                    // contributed an entry that the renderer
-                                    // treats as the single break.
-                                    prev_was_cr = false;
-                                    continue;
-                                }
-                                prev_was_cr = c == '\r';
-                                per_char.push(style_entry);
-                            }
-                        }
-                    }
-
-                    // Capture tab stops for the closure (line_char_offset usage below
-                    // also needs them, but the closure can't borrow text_data through
-                    // reserve_player_mut). Clone to a small Vec.
-                    let line_tab_stops: Vec<(BuiltInSymbol, i32)> = text_data
-                        .tab_stops
-                        .iter()
-                        .map(|t| (t.tab_type.clone(), t.position as i32))
-                        .collect();
-
-                    let mut flush_line = |line: &str, line_char_offset: usize, y_pos: i32, bitmap: &mut Bitmap| {
-                        // Helper: width of a substring (character advances).
-                        let segment_width = |s: &str| -> i32 {
-                            s.chars()
-                                .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
-                                .sum::<i32>()
-                        };
-
-                        // Split the line into tab-delimited segments. Each segment
-                        // starts at a tab-stop position (or 0 for the first one).
-                        // Director tab-stop semantics applied here:
-                        //   - #left:    next segment renders starting at the stop
-                        //   - #right:   next segment renders ending at the stop
-                        //   - #center:  next segment centred on the stop
-                        //   - #decimal: treated as #right for now (CS doesn't use it)
-                        // Without tab stops we fall back to advance-as-glyph (TAB
-                        // glyphs in PFR atlases are usually zero-width).
-                        let segments: Vec<&str> = line.split('\t').collect();
-                        let mut segment_starts: Vec<i32> = Vec::with_capacity(segments.len());
-
-                        // Compute the line's logical width for alignment when there
-                        // are no tabs OR when tabs leave the line left-anchored.
-                        let logical_line_width: i32 = if segments.len() == 1 {
-                            segment_width(line)
-                        } else {
-                            let mut acc = 0i32;
-                            for (i, seg) in segments.iter().enumerate() {
-                                let seg_w = segment_width(seg);
-                                if i == 0 {
-                                    acc = seg_w;
-                                } else if let Some((tab_type, tab_pos)) = line_tab_stops.get(i - 1) {
-                                    acc = match tab_type.as_str() {
-                                        "right" => *tab_pos,
-                                        "center" => (*tab_pos + seg_w / 2).max(acc),
-                                        _ => (*tab_pos + seg_w).max(acc + seg_w),
-                                    };
-                                } else {
-                                    acc += seg_w;
-                                }
-                            }
-                            acc
-                        };
-
-                        // Apply line-level alignment offset (only meaningful when no
-                        // right-type tabs anchor the right edge — tabs already
-                        // place segments at fixed positions).
-                        let has_right_tab = line_tab_stops
-                            .iter()
-                            .any(|(t, _)| *t == BuiltInSymbol::Right);
-                        let line_offset = if has_right_tab {
-                            0
-                        } else {
-                            match text_alignment {
-                                TextAlignment::Center => ((max_width - logical_line_width) / 2).max(0),
-                                TextAlignment::Right => (max_width - logical_line_width).max(0),
-                                _ => 0,
-                            }
-                        };
-
-                        // First segment always starts at line_offset (no preceding tab).
-                        segment_starts.push(line_offset);
-                        let mut cursor_x = line_offset + segment_width(segments[0]);
-                        for i in 1..segments.len() {
-                            let seg_w = segment_width(segments[i]);
-                            let stop_x = match line_tab_stops.get(i - 1) {
-                                Some((tab_type, tab_pos)) => match tab_type {
-                                    BuiltInSymbol::Right => (*tab_pos - seg_w).max(cursor_x),
-                                    BuiltInSymbol::Center => (*tab_pos - seg_w / 2).max(cursor_x),
-                                    _ => (*tab_pos).max(cursor_x), // #left / #decimal
-                                },
-                                None => cursor_x, // no more tab stops — render inline
-                            };
-                            segment_starts.push(stop_x);
-                            cursor_x = stop_x + seg_w;
-                        }
-
-                        // Walk the line again to draw, skipping `\t` chars and using
-                        // the precomputed segment starts. (A fractional 16.16
-                        // pen was tried and refuted — see the stage path.)
-                        let mut current_segment = 0usize;
-                        let mut x = segment_starts[0];
-                        for (ch_idx, ch) in line.chars().enumerate() {
-                            if ch == '\t' {
-                                current_segment += 1;
-                                if let Some(&sx) = segment_starts.get(current_segment) {
-                                    x = sx;
-                                }
-                                continue;
-                            }
-                            let adv = font.get_char_advance_for(ch) as i32;
-                            let per = per_char
-                                .get(line_char_offset + ch_idx)
-                                .copied()
-                                .unwrap_or(default_per_char);
-                            // Use tight copy for PFR fonts when cell width is much larger
-                            // than character advance, to prevent transparent cell areas from
-                            // overlapping and erasing adjacent characters.
-                            let use_tight = is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
-                            let ch_params = CopyPixelsParams {
-                                blend: params.blend,
-                                ink: params.ink,
-                                color: crate::player::sprite::ColorRef::Rgb(per.color.0, per.color.1, per.color.2),
-                                bg_color: params.bg_color.clone(),
-                                mask_image: None,
-                                is_text_rendering: params.is_text_rendering,
-                                rotation: params.rotation,
-                                skew: params.skew,
-                                sprite: None,
-                                mask_offset: params.mask_offset,
-                                original_dst_rect: params.original_dst_rect.clone(),
-                                bg_color_explicit: false,
-                                fore_color_explicit: false,
-                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
-                            };
-                            if use_tight {
-                                bitmap_font_copy_char_tight(
-                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                    x, y_pos, &palettes, &ch_params,
-                                );
-                            } else {
-                                bitmap_font_copy_char(
-                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                    x, y_pos, &palettes, &ch_params,
-                                );
-                            }
-                            // An already-bold face gains nothing from a bold
-                            // style (Director's settled rule) — skip the
-                            // synthetic second strike so it doesn't render
-                            // heavier than Shockwave.
-                            let atlas_face_bold = {
-                                let n = font.font_name.to_ascii_lowercase();
-                                n.contains("bold") || n.contains("_600")
-                                    || n.contains("_700") || n.contains("_800")
-                                    || n.contains("_900")
-                            };
-                            if per.bold && !atlas_face_bold {
-                                if use_tight {
-                                    bitmap_font_copy_char_tight(
-                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                        x + 1, y_pos, &palettes, &ch_params,
-                                    );
-                                } else {
-                                    bitmap_font_copy_char(
-                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                        x + 1, y_pos, &palettes, &ch_params,
-                                    );
-                                }
-                            }
-                            if per.underline {
-                                // Per-character underline so per-span underline
-                                // is honoured (CS uses underline on some items
-                                // only). Draw one pixel row under this glyph.
-                                // Paige draws the underline in the descent. For
-                                // PFR strikes put it on the descender's lowest row
-                                // (scanned), so it sits just under the text instead
-                                // of at the oversized atlas cell bottom.
-                                let underline_y = match pfr_desc_bottom {
-                                    Some(db) => y_pos + db,
-                                    None => y_pos + line_height - 1,
-                                };
-                                let run_end = (x + adv + char_spacing).max(x);
-                                for ux in x..run_end {
-                                    bitmap.set_pixel(ux, underline_y, per.color, &palettes);
-                                }
-                            }
-                            x += adv + char_spacing;
-                        }
-                    };
-
-                    // Normalise CRLF / lone CR to \n first so a `\r\n` pair counts
-                    // as ONE line break — splitting on either char individually
-                    // would double the line count for Lingo strings produced via
-                    // `& RETURN` on platforms where RETURN is `\r\n`. Coke
-                    // Studios' roomlist hits exactly this: every row of
-                    // "London I\tGo!\r\n..." was rendering with an empty line
-                    // between, doubling the visual line spacing.
-                    let normalised_text: String = text_data.text
-                        .replace("\r\n", "\n")
-                        .replace('\r', "\n");
-                    let raw_lines: Vec<&str> = normalised_text.split('\n').collect();
-                    let mut lines_to_draw: Vec<String> = Vec::new();
-
-                    if text_data.word_wrap && max_width > 0 {
-                        for raw in raw_lines {
-                            if raw.is_empty() {
-                                lines_to_draw.push(String::new());
-                                continue;
-                            }
-                            // Wrap on space-separated words but preserve TAB
-                            // characters. Splitting via split_whitespace() and
-                            // re-joining with " " would silently strip tabs and
-                            // break tab-stop layouts (CS roomlist relies on a
-                            // right-tab to anchor "Go!" at the row's right
-                            // edge — tab-stripped lines collapsed everything
-                            // back to the left).
-                            let mut current = String::new();
-                            for word in raw.split(' ') {
-                                if word.is_empty() {
-                                    // Multiple spaces in a row — preserve them
-                                    if !current.is_empty() {
-                                        current.push(' ');
-                                    }
-                                    continue;
-                                }
-                                let candidate = if current.is_empty() {
-                                    word.to_string()
-                                } else {
-                                    format!("{} {}", current, word)
-                                };
-                                let candidate_width: i32 = candidate
-                                    .chars()
-                                    .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
-                                    .sum();
-                                if candidate_width <= max_width || current.is_empty() {
-                                    current = candidate;
-                                } else {
-                                    lines_to_draw.push(current);
-                                    current = word.to_string();
-                                }
-                            }
-                            if !current.is_empty() {
-                                lines_to_draw.push(current);
-                            }
-                        }
-                    } else {
-                        lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
-                    }
-
-                    let effective_line_height = if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space as i32
-                    } else {
-                        line_height
-                    };
-                    let line_step = effective_line_height
-                        + text_data.bottom_spacing as i32
-                        + text_data.top_spacing as i32;
-                    // Track the character offset into `text_data.text` so
-                    // per-span styling aligns with the chars being drawn.
-                    // Word-wrap rebuilds lines from whitespace-split tokens so
-                    // the offset tracking is approximate there; for the
-                    // non-wrap case (which is what CS uses for the roomlist)
-                    // it's exact.
-                    let mut char_offset = 0usize;
-                    for line in lines_to_draw {
-                        flush_line(&line, char_offset, y, &mut bitmap);
-                        y += line_step;
-                        char_offset += line.chars().count() + 1; // +1 for the line break
-                    }
-                    } // end !rendered_via_outline (atlas-copy fallback)
-
-                } // end bitmap glyph else branch
-
-                // Honour `member.antialias = 0` by thresholding the bitmap's
-                // alpha channel to binary (0 or 255). Director with antialias
-                // disabled produces crisp 1-bit text; coverage-as-alpha (what
-                // Canvas2D and the PFR rasterizer both emit) shows up as a
-                // faded grey halo around the strokes when later composited
-                // via `[#ink: 36]`. The Coke Studios jukebox catalog disables
-                // AA explicitly (see cataloglist script line 85) and expects
-                // sharp text — without the threshold the catalog list looks
-                // washed out compared to Shockwave.
-                if !text_data.anti_alias && bitmap.bit_depth == 32 && !rendered_via_outline {
-                    // Director with `anti_alias=false` rasterises text as 1-bit
-                    // — no coverage to threshold. Our pipeline renders via
-                    // Canvas2D (always AA) and then thresholds the alpha to
-                    // simulate the 1-bit effect. The file's
-                    // `anti_alias_threshold` is often 0 for these members
-                    // (spineworld_dcr txt_droplist authored at 0); honouring
-                    // that value lets every halo pixel through and produces a
-                    // thick / double-struck appearance. Floor at 128 — the
-                    // midpoint of the coverage scale, which empirically
-                    // matches Director's crispness for non-AA text (Coke
-                    // Studios jukebox catalog and others).
-                    let threshold = text_data.info.as_ref()
-                        .map(|i| i.anti_alias_threshold as u8)
-                        .unwrap_or(128)
-                        .max(128);
-                    for i in (3..bitmap.data.len()).step_by(4) {
-                        bitmap.data[i] = if bitmap.data[i] >= threshold { 255 } else { 0 };
-                    }
-                }
-
+                // Nothing script-visible changes: `bitmap` is still the
+                // movie-unit image, and the twin is dropped by any imaging
+                // operation that cannot maintain it.
                 // Text `.image` snapshots are produced per-call and not owned
                 // by any cast member; let the DatumRef refcount free them.
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
