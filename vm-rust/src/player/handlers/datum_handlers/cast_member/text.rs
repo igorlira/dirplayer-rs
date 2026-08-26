@@ -1549,6 +1549,82 @@ impl TextMemberHandlers {
         Ok(bitmap)
     }
 
+    /// Render the hi-res twin a `.image` call promised (`HiResTwin::pending`).
+    ///
+    /// Re-reads the member's CURRENT text and metrics, so it is only correct
+    /// while the member has not been rewritten since `.image` was taken. In
+    /// practice the two are a statement apart — `img = member.image` then a
+    /// `copyPixels` of `img` — and a mismatch costs only sharpness, since the
+    /// twin is dropped rather than trusted if it does not match the base
+    /// bitmap's size (`set_hi_res`).
+    pub fn materialize_hi_res(player: &mut DirPlayer, bitmap: &mut Bitmap) {
+        let Some((member_ref, scale)) = bitmap.hi_res.pending.take() else { return };
+        if bitmap.hi_res.image.is_some() || bitmap.hi_res.banned {
+            return;
+        }
+        let text_data = match player
+            .movie
+            .cast_manager
+            .find_member_by_ref(&member_ref)
+            .and_then(|m| m.member_type.as_text())
+        {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let scaled = Self::scale_text_member_metrics(&text_data, scale);
+        if let Ok(hi) = Self::render_text_image(player, &member_ref, &scaled) {
+            bitmap.set_hi_res(hi, scale);
+        }
+    }
+
+    /// A copy of `text_data` with every length in it multiplied by `scale`, so
+    /// `render_text_image` lays the same text out at the stage size.
+    ///
+    /// This is the whole trick behind the hi-res twin: rather than magnifying
+    /// pixels, re-run the layout with the type actually set larger. Everything
+    /// that contributes a distance to that layout has to be scaled together or
+    /// the two images stop being the same picture — the point size, the box the
+    /// text folds inside, the line box (`fixedLineSpace`), the paragraph
+    /// spacing, the letter spacing, the tab stops the room list right-aligns
+    /// "Go!" against, and the per-span sizes of styled runs. A `0` stays `0`:
+    /// several of these use zero to mean "not authored, derive it", and scaling
+    /// that to a small non-zero number would turn a derived metric into a
+    /// literal one.
+    fn scale_text_member_metrics(text_data: &TextMember, scale: f64) -> TextMember {
+        let up_u16 = |v: u16| if v == 0 { 0 } else { ((v as f64 * scale).round() as i64).clamp(1, u16::MAX as i64) as u16 };
+        let up_i16 = |v: i16| if v == 0 { 0 } else { ((v as f64 * scale).round() as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16 };
+        let up_i32 = |v: i32| if v == 0 { 0 } else { (v as f64 * scale).round() as i32 };
+
+        let mut out = text_data.clone();
+        out.font_size = up_u16(text_data.font_size);
+        out.width = up_u16(text_data.width);
+        out.height = up_u16(text_data.height);
+        out.fixed_line_space = up_u16(text_data.fixed_line_space);
+        out.top_spacing = up_i16(text_data.top_spacing);
+        out.bottom_spacing = up_i16(text_data.bottom_spacing);
+        out.char_spacing = up_i32(text_data.char_spacing);
+        for tab in out.tab_stops.iter_mut() {
+            tab.position = up_i32(tab.position);
+        }
+        for span in out.html_styled_spans.iter_mut() {
+            if let Some(sz) = span.style.font_size {
+                span.style.font_size = Some(up_i32(sz));
+            }
+        }
+        // XMED per-paragraph strides take priority over `fixed_line_space` in
+        // the draw loop, so an unscaled table would keep the rows at their
+        // movie-unit pitch while the glyphs grew — the same trap as bug #16 in
+        // the scaled-stage sweep.
+        for par in out.par_infos.iter_mut() {
+            par.line_spacing = up_i32(par.line_spacing as i32) as _;
+        }
+        if let Some(info) = out.info.as_mut() {
+            info.width = up_u16(info.width as u16) as _;
+        }
+        out
+    }
+
+
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,

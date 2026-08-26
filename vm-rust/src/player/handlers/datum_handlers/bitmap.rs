@@ -14,6 +14,7 @@ use crate::{
 };
 
 use super::prop_list::PropListUtils;
+use crate::player::handlers::datum_handlers::cast_member::text::TextMemberHandlers;
 
 pub struct BitmapDatumHandlers {}
 
@@ -34,6 +35,18 @@ impl BitmapDatumHandlers {
             reserve_player_mut(|player| {
                 if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
                     if player.stage_image == Some(*bref) {
+                        // The stage framebuffer is never worth a hi-res twin.
+                        // An "imaging Lingo" title redraws it EVERY FRAME — for
+                        // Spectral Wizard it IS the visible frame — so a twin
+                        // seeded by one text `.image` baked into a speech bubble
+                        // would make every subsequent blit run at scale² the
+                        // pixels for the rest of the movie (measured: 4x slower
+                        // end to end). It also gains nothing: the stage image is
+                        // composited through the stage LAYOUT, which magnifies
+                        // it, and it is addressed by scripts in movie units.
+                        if let Some(b) = player.bitmap_manager.get_bitmap_mut(*bref) {
+                            b.ban_hi_res();
+                        }
                         player.stage_image_dirty = true;
                         // Remember WHERE, so the renderer composites only the
                         // touched region instead of pasting the whole opaque
@@ -77,6 +90,25 @@ impl BitmapDatumHandlers {
                 Ok::<(), ScriptError>(())
             })?;
         }
+        // Every in-place mutation EXCEPT copyPixels writes `data` without any
+        // way to reproduce the same edit in the hi-res twin, so drop the twin
+        // rather than let it drift out of step with the pixels Director sees.
+        // The bitmap then renders magnified — the behaviour before `hi_res`
+        // existed. copyPixels maintains the twin itself (`copy_pixels` below).
+        if matches!(
+            &*handler_name.as_lower_str(),
+            "fill" | "draw" | "setpixel" | "applyfilter" | "setalpha" | "floodfill"
+        ) {
+            reserve_player_mut(|player| {
+                if let Ok(bref) = player.get_datum(datum).to_bitmap_ref() {
+                    if let Some(b) = player.bitmap_manager.get_bitmap_mut(*bref) {
+                        b.invalidate_hi_res();
+                    }
+                }
+                Ok::<(), ScriptError>(())
+            })?;
+        }
+
         match handler_name.as_lower_str() {
             "fill" => Self::fill(datum, args),
             "draw" => Self::draw(datum, args),
@@ -953,6 +985,77 @@ impl BitmapDatumHandlers {
         })
     }
 
+    /// Replay one `copyPixels` into the destination's hi-res twin, in that
+    /// twin's coordinate space (see `Bitmap::hi_res`).
+    ///
+    /// Only runs when one of the two bitmaps already carries a twin — a twin is
+    /// SEEDED by a text/field member's `.image`, never by an ordinary blit, so
+    /// this costs nothing for a movie that never composes text into a bitmap.
+    ///
+    /// Bails (dropping the twin) for anything it cannot reproduce faithfully:
+    /// a mask image, a rotation/skew blit, or an `original_dst_rect`, all of
+    /// which carry movie-unit geometry of their own that would have to be
+    /// scaled in lockstep. Dropping is always safe — the bitmap then renders
+    /// magnified, which is the pre-existing behaviour.
+    fn mirror_copy_into_hi_res(
+        dst: &mut Bitmap,
+        src: &Bitmap,
+        dest_rect: IntRect,
+        src_rect: IntRect,
+        params: &HashMap<String, Datum>,
+        palettes: &crate::player::bitmap::palette_map::PaletteMap,
+    ) {
+        // Only a MATERIALISED twin counts. An unfulfilled promise on the
+        // source means we deliberately chose not to render it, so magnifying
+        // the destination into a twin here would cost scale^2 per blit and
+        // deliver no extra sharpness at all.
+        let scale = dst.hi_res.scale.max(src.hi_res.scale);
+        if scale <= 1.0 {
+            return;
+        }
+        if params.contains_key("maskImage")
+            || params.contains_key("mask")
+            || params.contains_key("original_dst_rect")
+            || params.get("rotation").and_then(|d| d.float_value().ok()).unwrap_or(0.0) != 0.0
+            || params.get("skew").and_then(|d| d.float_value().ok()).unwrap_or(0.0) != 0.0
+        {
+            dst.invalidate_hi_res();
+            return;
+        }
+        dst.ensure_hi_res(scale);
+        // Charge this blit against the twin's write budget FIRST: a bitmap that
+        // is really a per-frame framebuffer loses its twin here and pays
+        // nothing more (see `HiResTwin::banned`).
+        let dest_px = (dest_rect.width().max(0) as u64)
+            .saturating_mul(dest_rect.height().max(0) as u64)
+            .saturating_mul((scale * scale).round().max(1.0) as u64);
+        if !dst.note_hi_res_written(dest_px) {
+            return;
+        }
+        let Some(mut hi) = dst.hi_res.image.take() else { return };
+        let up = |r: &IntRect| {
+            IntRect::from(
+                (r.left as f64 * scale).round() as i32,
+                (r.top as f64 * scale).round() as i32,
+                (r.right as f64 * scale).round() as i32,
+                (r.bottom as f64 * scale).round() as i32,
+            )
+        };
+        // A source that has its own twin at the same scale is sampled from it —
+        // that is where the sharp pixels are. Otherwise sample the 1:1 source
+        // into the enlarged destination rect, which magnifies it by exactly the
+        // factor the renderer would have applied anyway.
+        match src.hi_res.image.as_deref() {
+            Some(src_hi) if (src.hi_res.scale - scale).abs() < 1e-6 => {
+                hi.copy_pixels(palettes, src_hi, up(&dest_rect), up(&src_rect), params, None);
+            }
+            _ => {
+                hi.copy_pixels(palettes, src, up(&dest_rect), src_rect, params, None);
+            }
+        }
+        dst.hi_res.image = Some(hi);
+    }
+
     pub fn copy_pixels(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let dst_bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
@@ -964,6 +1067,12 @@ impl BitmapDatumHandlers {
             } else {
                 src_bitmap_ref.to_bitmap_ref()?
             };
+            // Copy the two slot ids out as plain values: the `*_bitmap_ref`
+            // bindings borrow `player` (via the datum they came from), and the
+            // hi-res materialisation below needs `&mut DirPlayer`, not just a
+            // disjoint borrow of `bitmap_manager`.
+            let src_id = *src_bitmap_ref;
+            let dst_id = *dst_bitmap_ref;
             let dest_rect_or_quad = player.get_datum(&args[1]);
             let (src_rect_vals, _flags) = player.get_datum(&args[2]).to_rect_inline()?;
             let sx1 = src_rect_vals[0] as i32;
@@ -1050,19 +1159,72 @@ impl BitmapDatumHandlers {
                     ))
                 }
             };
+            // A `.image` snapshot only PROMISES its hi-res twin; this is one of
+            // the two places that promise is worth cashing in, because the blit
+            // is how composed artwork reaches the screen. Done on the stored
+            // bitmap (not the clone) so copying the same source twice renders
+            // the twin once.
+            // ...but only when the DESTINATION could actually hold a twin.
+            // Spectral Wizard blits every one of its 250+ text `.image`
+            // snapshots into the stage framebuffer, which is banned, so
+            // materialising the source there would rebuild the whole cost the
+            // promise exists to avoid.
+            let dst_can_twin = player
+                .bitmap_manager
+                .get_bitmap(dst_id)
+                .map_or(false, |b| !b.hi_res.banned);
+            if dst_can_twin
+                && player
+                    .bitmap_manager
+                    .get_bitmap(src_id)
+                    .map_or(false, |b| b.hi_res.pending.is_some())
+            {
+                let mut twin = player
+                    .bitmap_manager
+                    .get_bitmap(src_id)
+                    .map(|b| {
+                        let mut shell = Bitmap::new(b.width, b.height, b.bit_depth, b.original_bit_depth, 0, b.palette_ref.clone());
+                        shell.hi_res = b.hi_res.clone();
+                        shell
+                    });
+                if let Some(shell) = twin.as_mut() {
+                    TextMemberHandlers::materialize_hi_res(player, shell);
+                }
+                if let (Some(shell), Some(stored)) = (
+                    twin,
+                    player.bitmap_manager.get_bitmap_mut(src_id),
+                ) {
+                    stored.hi_res = shell.hi_res;
+                }
+            }
             let src_bitmap = player
                 .bitmap_manager
-                .get_bitmap(*src_bitmap_ref)
+                .get_bitmap(src_id)
                 .unwrap()
                 .clone();
             let palettes = player.movie.cast_manager.palettes();
             let dst_bitmap = player
                 .bitmap_manager
-                .get_bitmap_mut(*dst_bitmap_ref)
+                .get_bitmap_mut(dst_id)
                 .unwrap();
 
             match dest_shape {
                 DestShape::Rect(dest_rect) => {
+                    // Keep the hi-res twin (see `Bitmap::hi_res`) in step, so a
+                    // picture composed out of text `.image` snapshots stays
+                    // sharp on a scaled stage instead of being magnified.
+                    //
+                    // BEFORE the 1:1 copy: `ensure_hi_res` seeds a missing twin
+                    // from the destination's CURRENT contents, which is what the
+                    // twin should hold up to this point.
+                    Self::mirror_copy_into_hi_res(
+                        dst_bitmap,
+                        &src_bitmap,
+                        dest_rect.clone(),
+                        IntRect::from_tuple((sx1, sy1, sx2, sy2)),
+                        &param_list_concrete,
+                        &palettes,
+                    );
                     dst_bitmap.copy_pixels(
                         &palettes,
                         &src_bitmap,
@@ -1073,6 +1235,11 @@ impl BitmapDatumHandlers {
                     );
                 }
                 DestShape::Quad(quad) => {
+                    // The quad warp has no hi-res equivalent (the corners are
+                    // movie-unit points and the sampler is its own path), so
+                    // the twin cannot be kept truthful — drop it and let the
+                    // bitmap magnify, exactly as before this existed.
+                    dst_bitmap.invalidate_hi_res();
                     dst_bitmap.copy_pixels_quad(
                         &palettes,
                         &src_bitmap,

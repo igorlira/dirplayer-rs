@@ -5,6 +5,7 @@ use crate::{
     },
 };
 use num_traits::FromPrimitive;
+use crate::player::handlers::datum_handlers::cast_member::text::TextMemberHandlers;
 
 pub struct BitmapMemberHandlers {}
 
@@ -106,6 +107,13 @@ impl BitmapMemberHandlers {
                     let new_width = bitmap.width;
                     let new_height = bitmap.height;
                     let mut clone = bitmap.clone();
+                    // The other place a promised hi-res twin is cashed in (see
+                    // `HiResTwin::pending`): assigning a text member's `.image`
+                    // straight to a bitmap member puts it on screen without any
+                    // copyPixels in between, and the renderer cannot render a
+                    // promise. No-op unless the stage is scaled AND the source
+                    // came from a text member.
+                    TextMemberHandlers::materialize_hi_res(player, &mut clone);
 
                     let (member_image_ref, old_palette) = {
                         let cast_member = player

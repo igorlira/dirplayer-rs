@@ -4050,6 +4050,7 @@ impl CastMember {
                         trim_white_space: bitmap_info.trim_white_space,
                         was_trimmed: false,
                         version: 0,
+                        hi_res: Default::default(),
                     });
                 }
             }
@@ -6874,6 +6875,7 @@ impl CastMember {
                         trim_white_space: false,
                         was_trimmed: false,
                         version: 0,
+                        hi_res: Default::default(),
                     };
                     let image_ref = bitmap_manager.add_bitmap(bitmap);
                     let info = crate::director::enums::BitmapInfo {

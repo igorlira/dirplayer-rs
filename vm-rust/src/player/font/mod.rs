@@ -1045,6 +1045,7 @@ pub async fn player_load_system_font(path: &str) {
                 trim_white_space: false,
                 was_trimmed: false,
                 version: 0,
+                hi_res: Default::default(),
             };
 
             reserve_player_mut(|player| {
