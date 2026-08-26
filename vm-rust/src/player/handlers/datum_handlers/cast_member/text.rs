@@ -2435,7 +2435,10 @@ impl TextMemberHandlers {
                 }
             }
             "image" => {
-                let bitmap = Self::render_text_image(player, cast_member_ref, &text_data)?;
+                // Rasterise once at the authored size — that is what Director
+                // hands scripts, and every rect they then pass to copyPixels is
+                // in those units.
+                let mut bitmap = Self::render_text_image(player, cast_member_ref, &text_data)?;
                 // On a SCALED stage, rasterise a second time with every metric
                 // multiplied by the stage scale and attach it as the bitmap's
                 // hi-res twin (see `Bitmap::hi_res`). Movies that compose their
@@ -2447,6 +2450,14 @@ impl TextMemberHandlers {
                 // Nothing script-visible changes: `bitmap` is still the
                 // movie-unit image, and the twin is dropped by any imaging
                 // operation that cannot maintain it.
+                let (sx, sy) = crate::player::stage::stage_scale(player);
+                let scale = sx.min(sy);
+                if scale > 1.0 + 1e-3 {
+                    // Only PROMISE the twin. Rasterising it here would double
+                    // the cost of every `.image` call, and most of them never
+                    // reach the screen — see `HiResTwin::pending`.
+                    bitmap.promise_hi_res(cast_member_ref.clone(), scale);
+                }
                 // Text `.image` snapshots are produced per-call and not owned
                 // by any cast member; let the DatumRef refcount free them.
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
