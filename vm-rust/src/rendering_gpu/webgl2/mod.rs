@@ -3973,6 +3973,9 @@ impl WebGL2Renderer {
                     ink: ink as i32,
                     colorize: None,
                     sprite_bg_color: None,
+                    // Film-loop offscreens are composited by the renderer, not
+                    // by imaging Lingo, so they never carry a hi-res twin.
+                    hi_res_milli: 0,
                 };
 
                 if !self.texture_cache.needs_update(&cache_key, filmloop_frame) {
@@ -5920,10 +5923,24 @@ impl WebGL2Renderer {
             let needs_matte = player.bitmap_manager.get_bitmap(image_ref)
                 .map(|b| b.matte.is_none() && !(b.original_bit_depth == 32 && b.use_alpha))
                 .unwrap_or(false);
-            if needs_matte {
+            // Same question for the hi-res twin, which is uploaded in the
+            // bitmap's place below and so needs its own matte computed from its
+            // own pixels.
+            let twin_needs_matte = player.bitmap_manager.get_bitmap(image_ref)
+                .and_then(|b| b.hi_res.image.as_deref())
+                .map(|h| h.matte.is_none() && !(h.original_bit_depth == 32 && h.use_alpha))
+                .unwrap_or(false);
+            if needs_matte || twin_needs_matte {
                 let palettes = player.movie.cast_manager.palettes();
                 if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(image_ref) {
-                    bitmap.create_matte(&palettes);
+                    if needs_matte {
+                        bitmap.create_matte(&palettes);
+                    }
+                    if twin_needs_matte {
+                        if let Some(hi) = bitmap.hi_res.image.as_deref_mut() {
+                            hi.create_matte(&palettes);
+                        }
+                    }
                 }
             }
         }
@@ -5939,9 +5956,29 @@ impl WebGL2Renderer {
             return None;
         }
 
+        // Upload the hi-res twin in the bitmap's place when it has one (see
+        // `Bitmap::hi_res`): a Lingo-COMPOSED picture that carries text stays
+        // as sharp as the text sprites around it on a scaled stage, instead of
+        // being magnified. The quad is the sprite's already-scaled render rect
+        // either way, so only the texture's resolution changes — at the stage
+        // scale the twin is very nearly 1:1 with the destination pixels.
+        //
+        // NOT for ink 9 (Mask): that ink pairs the bitmap with the NEXT cast
+        // member's bitmap as a mask, in movie units, and there is no twin of
+        // the mask to pair the twin with.
+        let source: &crate::player::bitmap::bitmap::Bitmap = match bitmap.hi_res.image.as_deref() {
+            Some(hi) if ink != 9 && !hi.data.is_empty() && hi.width > 0 && hi.height > 0 => hi,
+            _ => bitmap,
+        };
+        let hi_res_milli = if std::ptr::eq(source, bitmap) {
+            0
+        } else {
+            (bitmap.hi_res.scale * 1000.0).round().max(0.0) as u32
+        };
+
         let bitmap_version = bitmap.version;
-        let width = bitmap.width as u32;
-        let height = bitmap.height as u32;
+        let width = source.width as u32;
+        let height = source.height as u32;
 
         // Create cache key including ink, colorize, and sprite_bg_color for inks that use bgColor matte
         // These inks use bgColor for matte/transparency computation:
@@ -5969,6 +6006,7 @@ impl WebGL2Renderer {
             ink,
             colorize,
             sprite_bg_color: cache_key_bg_color,
+            hi_res_milli,
         };
 
         // Check cache - return cached texture if version matches
@@ -6026,7 +6064,7 @@ impl WebGL2Renderer {
             (None, (0, 0))
         };
 
-        let rgba_data = Self::bitmap_to_rgba(bitmap, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), mask_offset, is_flash_bitmap);
+        let rgba_data = Self::bitmap_to_rgba(source, &palettes, ink, colorize, sprite_bg_color, mask_bitmap_ref.as_ref(), mask_offset, is_flash_bitmap);
 
         // Validate data size
         let expected_size = (width * height * 4) as usize;
