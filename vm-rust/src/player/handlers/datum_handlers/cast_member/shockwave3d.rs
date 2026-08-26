@@ -3001,7 +3001,8 @@ impl Shockwave3dMemberHandlers {
                         use std::collections::HashMap;
                         let mut empty_scene = W3dScene {
                             materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
-                            lights: Vec::new(), texture_images: HashMap::new(), texture_infos: Vec::new(),
+                            lights: Vec::new(), texture_images: HashMap::new(),
+                    texture_near_filtering: HashMap::new(), texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,

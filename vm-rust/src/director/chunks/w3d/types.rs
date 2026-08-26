@@ -490,6 +490,16 @@ pub struct W3dScene {
     pub nodes: Vec<W3dNode>,
     pub lights: Vec<W3dLight>,
     pub texture_images: HashMap<Symbol, Vec<u8>>,
+    /// Per-texture `nearFiltering` (Director 11.5 Scripting Dictionary, 3D
+    /// texture property): TRUE uses bilinear filtering when the texture covers
+    /// more screen space than its source, FALSE samples it unfiltered. The
+    /// documented default is TRUE, so an ABSENT entry means TRUE.
+    ///
+    /// Movies that blit UI text into a texture turn this OFF so the glyphs stay
+    /// crisp — AreaZero's `[M] Text Director` sets it on every string it bakes,
+    /// and ignoring it left the in-game controls list soft enough to be
+    /// unreadable wherever it crossed bright scene geometry.
+    pub texture_near_filtering: HashMap<Symbol, bool>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
@@ -538,6 +548,11 @@ impl W3dScene {
     /// `texture_write_versions` (which texture changed) and
     /// `texture_content_version` (whether ANY texture changed) in step, and the
     /// renderer relies on both to decide what to re-upload.
+    /// `nearFiltering` for a texture, defaulting to Director's documented TRUE.
+    pub fn texture_near_filtering(&self, name: &Symbol) -> bool {
+        self.texture_near_filtering.get(name).copied().unwrap_or(true)
+    }
+
     pub fn put_texture_image(&mut self, name: Symbol, data: Vec<u8>) {
         self.texture_images.insert(name, data);
         *self.texture_write_versions.entry(name).or_insert(0) += 1;

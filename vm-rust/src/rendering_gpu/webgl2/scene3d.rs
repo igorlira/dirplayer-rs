@@ -1551,7 +1551,7 @@ void main() {
                 }
             }
             let flip_v = lower.contains("skyline");
-            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
+            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v, scene.texture_near_filtering(tex_name)) {
                 texture_sizes.insert(*tex_name, (w, h));
                 if has_alpha {
                     alpha_textures.insert(tex_name.clone());
@@ -1663,8 +1663,8 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
-        decode_and_upload_texture_impl(context, data, flip_v)
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+        decode_and_upload_texture_impl(context, data, flip_v, near_filtering)
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
@@ -1685,7 +1685,7 @@ void main() {
             let needs_upload = gpu_data.texture_versions.get(tex_name) != Some(&write_version);
             if needs_upload {
                 let flip_v = lower.contains("skyline");
-                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
+                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v, scene.texture_near_filtering(tex_name)) {
                     gpu_data.texture_sizes.insert(*tex_name, (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(*tex_name);
@@ -5763,7 +5763,7 @@ fn classify_texture_alpha(rgba_data: &[u8]) -> (bool, bool) {
     (has_alpha, soft_alpha)
 }
 
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -5883,8 +5883,20 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     let texture = gl.create_texture()?;
     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
 
-    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR as i32);
-    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
+    // `nearFiltering` FALSE means the movie asked for NO bilinear filtering on
+    // this texture (Director 11.5 Scripting Dictionary; default TRUE). Movies
+    // bake UI text into textures and turn it off precisely so the glyphs stay
+    // pixel-crisp — smoothing them spreads a one-pixel stem over two pixels at
+    // half intensity, which is exactly what made AreaZero's in-game controls
+    // list unreadable where it crossed bright geometry. Minification stays
+    // mipmapped either way, so distant geometry does not start aliasing.
+    let (min_filter, mag_filter) = if near_filtering {
+        (WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR, WebGl2RenderingContext::LINEAR)
+    } else {
+        (WebGl2RenderingContext::NEAREST_MIPMAP_NEAREST, WebGl2RenderingContext::NEAREST)
+    };
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, min_filter as i32);
+    gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, mag_filter as i32);
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::REPEAT as i32);
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::REPEAT as i32);
 

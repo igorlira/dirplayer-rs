@@ -2277,6 +2277,33 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                     Ok(())
+                  } else if s3d_ref.object_type == BuiltInSymbol::Texture
+                      && prop_name.eq_ignore_ascii_case("nearFiltering")
+                  {
+                    // 3D texture property (Director 11.5 Scripting Dictionary,
+                    // `nearFiltering`): TRUE applies bilinear filtering when the
+                    // texture covers more screen space than its source, FALSE
+                    // leaves it unfiltered. Documented default is TRUE.
+                    //
+                    // A movie that bakes UI text into a texture turns this off so
+                    // the glyphs stay pixel-crisp. This was previously a getter
+                    // returning a constant with no setter at all, so the request
+                    // was silently dropped and every such texture was drawn
+                    // bilinear-smoothed.
+                    let on = value.int_value().map(|v| v != 0).unwrap_or(true);
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                scene.texture_near_filtering.insert(s3d_ref.name, on);
+                                // The sampler state lives on the uploaded GPU
+                                // texture, so force a re-upload of this one.
+                                *scene.texture_write_versions.entry(s3d_ref.name).or_insert(0) += 1;
+                                scene.texture_content_version =
+                                    scene.texture_content_version.wrapping_add(1);
+                            }
+                        }
+                    }
+                    Ok(())
                   } else if s3d_ref.object_type == BuiltInSymbol::Texture && prop_name.eq_ignore_ascii_case("image") {
                     // texture("name").image = bitmapObject
                     // Convert bitmap to RGBA and store in scene.texture_images
@@ -8082,7 +8109,12 @@ impl Shockwave3dObjectDatumHandlers {
                 let val = if prop == "width" { dim.0 } else { dim.1 };
                 Ok(player.alloc_datum(Datum::Int(val as i32)))
             },
-            "nearFiltering" => Ok(player.alloc_datum(Datum::Int(1))),
+            // Director 11.5: 3D texture property, default TRUE. Report what the
+            // movie set rather than a constant — scripts read this back.
+            "nearFiltering" => {
+                let on = scene.texture_near_filtering(&texture_name);
+                Ok(player.alloc_datum(Datum::Int(if on { 1 } else { 0 })))
+            },
             _ => {
                 log(&format!("[W3D] texture(\"{}\").{} (stub)", texture_name, prop));
                 Ok(player.alloc_datum(Datum::Void))
