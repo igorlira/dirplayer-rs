@@ -92,6 +92,13 @@ struct MemberGpuData {
     /// GEOMETRY signature: (nodes, clod+raw meshes, shaders). Deliberately does
     /// NOT include the texture count — see `ensure_member_data`.
     scene_version: (usize, usize, usize),
+    /// Per-resource mesh write counter each uploaded group was built from, so an
+    /// unchanged resource can be carried over without comparing its contents.
+    mesh_versions: HashMap<Symbol, u64>,
+    /// The scene's bulk-geometry counter at upload time. While it holds still,
+    /// `mesh_versions` accounts for every geometry change; once it moves, some
+    /// change was unattributed and contents must be compared instead.
+    mesh_bulk_version: u64,
     /// Scene's mesh_content_version at last upload
     mesh_content_version: u64,
     /// Signature of the `#sds` subdivision state (per-resource depth/tension/
@@ -1332,6 +1339,7 @@ void main() {
 
         let mut mesh_groups: HashMap<Symbol, Vec<Mesh3dBuffers>> = HashMap::new();
         let mut mesh_signatures: HashMap<Symbol, u64> = HashMap::new();
+        let mut mesh_versions: HashMap<Symbol, u64> = HashMap::new();
         let mut all_meshes = Vec::new();
         // Was ANY mesh rewritten since this GPU entry was built? When nothing
         // was, every resource still present is identical by definition and can
@@ -1343,15 +1351,25 @@ void main() {
         let content_unchanged = old_gpu.as_ref().map_or(false, |o| {
             o.sds_version == sds_version && o.mesh_content_version == scene.mesh_content_version
         });
+        // Every geometry change since this entry was built named its resource,
+        // so `mesh_write_versions` is a complete account of what moved. `#sds`
+        // rewrites geometry outside that bookkeeping, so it disqualifies too.
+        let attributed = old_gpu.as_ref().map_or(false, |o| {
+            o.sds_version == sds_version && o.mesh_bulk_version == scene.mesh_bulk_version
+        });
 
-        // Mesh carry-over is decided PER RESOURCE by `mesh_content_signature`
-        // below, not by the scene's global `mesh_content_version`. The old
-        // signature was vertex + face COUNTS, which can only prove a resource is
-        // different and never that it is the same — geometry animation moves
-        // vertices without changing counts — so it had to be backed by the
-        // global flag, and gating on `sds_version` alone caused real regressions
-        // (Intel 3dText lost its tunnelling, a Havok camera view came out from
-        // the wrong angle). Hashing the actual content removes that trade-off.
+        // Mesh carry-over is decided PER RESOURCE, in three tiers below:
+        // the scene's own record of what changed when that is complete
+        // (`attributed`), a whole-member shortcut when nothing changed at all
+        // (`content_unchanged`), and a content hash otherwise.
+        //
+        // The original signature was vertex + face COUNTS, which can only prove
+        // a resource is different and never that it is the same — geometry
+        // animation moves vertices without changing counts — so it had to be
+        // backed by the global `mesh_content_version`, and gating on
+        // `sds_version` alone caused real regressions (Intel 3dText lost its
+        // tunnelling, a Havok camera view came out from the wrong angle).
+
         // Collect resource names used by LIGHT nodes (to skip their geometry)
         let light_resources: std::collections::HashSet<Symbol> = scene.nodes.iter()
             .filter(|n| n.node_type == W3dNodeType::Light)
@@ -1368,17 +1386,34 @@ void main() {
             if light_resources.contains(name) {
                 continue; // Skip light cone/sphere meshes
             }
-            // Per-resource CONTENT signature — see `mesh_content_signature`.
-            // Judged on its own, so this no longer needs the scene's global
-            // `mesh_content_version` as a gate: adding one mesh resource leaves
-            // every other resource's signature untouched and it is carried over.
-            // Fast path: no mesh was rewritten, so carry this resource over
-            // as-is and keep its stored signature, which is still true of it.
+            // Fast path 2: some mesh was rewritten, but every rewrite since this
+            // entry was built named its resource, and THIS resource was not one
+            // of them. Carry it over without hashing — this is what keeps the
+            // cost of one new mesh proportional to that mesh rather than to the
+            // whole member.
+            if attributed && !content_unchanged {
+                if let Some(old) = old_gpu.as_mut() {
+                    if old.mesh_versions.get(name).copied().unwrap_or(0)
+                        == scene.mesh_write_version(name)
+                    {
+                        if let Some(group) = old.mesh_groups.remove(name) {
+                            let old_sig = old.mesh_signatures.get(name).copied().unwrap_or(0);
+                            mesh_signatures.insert(*name, old_sig);
+                            mesh_versions.insert(*name, scene.mesh_write_version(name));
+                            mesh_groups.insert(name.clone(), group);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Fast path 1: no mesh was rewritten at all, so carry this resource
+            // over as-is and keep its stored signature, which is still true of it.
             if content_unchanged {
                 if let Some(old) = old_gpu.as_mut() {
                     if let Some(group) = old.mesh_groups.remove(name) {
                         let old_sig = old.mesh_signatures.get(name).copied().unwrap_or(0);
                         mesh_signatures.insert(*name, old_sig);
+                        mesh_versions.insert(*name, scene.mesh_write_version(name));
                         mesh_groups.insert(name.clone(), group);
                         continue;
                     }
@@ -1393,6 +1428,7 @@ void main() {
                 if old.mesh_signatures.get(name) == Some(&sig) {
                     if let Some(group) = old.mesh_groups.remove(name) {
                         mesh_signatures.insert(*name, sig);
+                        mesh_versions.insert(*name, scene.mesh_write_version(name));
                         mesh_groups.insert(name.clone(), group);
                         continue;
                     }
@@ -1530,6 +1566,7 @@ void main() {
                 group.push(buffers);
             }
             mesh_signatures.insert(*name, sig);
+            mesh_versions.insert(*name, scene.mesh_write_version(name));
             mesh_groups.insert(name.clone(), group);
         }
 
@@ -1679,6 +1716,8 @@ void main() {
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, mesh_signatures, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
             scene_version: current_version,
+            mesh_versions,
+            mesh_bulk_version: scene.mesh_bulk_version,
             mesh_content_version: scene.mesh_content_version,
             sds_version,
             texture_versions,
