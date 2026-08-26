@@ -46,7 +46,9 @@ struct MemberGpuData {
     /// Cached inverse bind matrices per skeleton name
     inverse_bind_cache: HashMap<Symbol, Vec<[f32; 16]>>,
     /// Snapshot of scene content counts when GPU data was built
-    scene_version: (usize, usize, usize, usize), // (nodes, clod_meshes, texture_images, shaders)
+    /// GEOMETRY signature: (nodes, clod+raw meshes, shaders). Deliberately does
+    /// NOT include the texture count — see `ensure_member_data`.
+    scene_version: (usize, usize, usize),
     /// Scene's mesh_content_version at last upload
     mesh_content_version: u64,
     /// Signature of the `#sds` subdivision state (per-resource depth/tension/
@@ -1235,7 +1237,20 @@ void main() {
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
-        let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
+        // GEOMETRY signature only. `texture_images.len()` used to be part of
+        // this, so simply ADDING a texture tore down and rebuilt every mesh and
+        // re-decoded every image in the member — for a movie that bakes each
+        // in-world string into a `newTexture` (AreaZero's `[M] Text Director`)
+        // that fired the first time each caption appeared, which is exactly the
+        // "sometimes it freezes" report: measured 96.4ms of a 100.6ms frame,
+        // 65 textures re-uploaded, for one small text texture arriving.
+        //
+        // Textures are already handled without a rebuild: `texture_content_version`
+        // below routes to `update_textures_incremental`, which uploads any
+        // texture whose per-texture write counter moved — including one that was
+        // not there before (absent counter != present counter). So a texture
+        // appearing needs no geometry work at all.
+        let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.shaders.len());
         // Map each model resource to the active `#sds` subdivision applied to a
         // model node using it: resource_name (lowercase) → (depth, tension).
         // Only enabled modifiers with depth ≥ 1 subdivide.
