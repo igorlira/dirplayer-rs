@@ -85,7 +85,6 @@ define_builtin_symbols! {
     "exitLock" => ExitLock,
     "itemDelimiter" => ItemDelimiter,
     "debugPlaybackEnabled" => DebugPlaybackEnabled,
-    "editShortCutsEnabled" => EditShortCutsEnabled,
     "alertHook" => AlertHook,
     "traceScript" => TraceScript,
     // Movie properties dirplayer supports that the upstream table lacked.
@@ -99,6 +98,18 @@ define_builtin_symbols! {
     "enableFlashLingo" => EnableFlashLingo,
     "preLoadEventAbort" => PreLoadEventAbort,
     "machineType" => MachineType,
+    // NOTE: `editShortCutsEnabled` (capital C) is intentionally NOT a second
+    // entry, for the same reason as `rollOver` below. The table interns
+    // case-insensitively, so both spellings are ONE symbol; a duplicate entry
+    // only decides — by its position — which variant `spur_to_builtin` ends up
+    // holding, and the loser becomes a variant no input can ever produce.
+    //
+    // This one was live: `EditShortCutsEnabled` existed with no handler
+    // anywhere, and `the editShortcutsEnabled = 0` worked solely because the
+    // lower-c entry sat LATER in this table and overwrote it. Reversing the two
+    // lines made every spelling resolve to the unhandled variant, which would
+    // have silently stopped Junk Food Jack's `prepareMovie` from setting it —
+    // no error, just a property that quietly does nothing.
     "editShortcutsEnabled" => EditShortcutsEnabled,
     // 3D object types dirplayer exposes that upstream lacked.
     "collision" => Collision,
