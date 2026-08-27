@@ -8013,10 +8013,37 @@ impl Shockwave3dObjectDatumHandlers {
                     name: resource_name,
                 })))
             },
-            "lifetime" => Ok(player.alloc_datum(Datum::Int(1000))),
-            "gravity" => Ok(player.alloc_datum(Datum::Vector([0.0, -9.8, 0.0]))),
-            "wind" => Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]))),
-            "drag" => Ok(player.alloc_datum(Datum::Float(0.0))),
+            // #particle resource properties. These are SET into
+            // `runtime_state.particles` (see the setter), so report what is
+            // stored rather than a constant — the values below were fixed
+            // stubs, and `lifetime` in particular came back 1000 whatever the
+            // movie had written, while `gravity` claimed -9.8 for a resource
+            // whose documented default is zero.
+            //
+            // Defaults and units per the Director 11.5 Scripting Dictionary:
+            //   lifetime  milliseconds, default 10000 (stored here in seconds)
+            //   gravity   vector, default vector(0, 0, 0)
+            //   wind      vector, default vector(0, 0, 0)
+            //   drag      percent of velocity lost per step, 0..100, default 0
+            "lifetime" | "gravity" | "wind" | "drag" => {
+                let ps = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
+                    .and_then(|m| m.member_type.as_shockwave3d())
+                    .and_then(|w3d| w3d.runtime_state.particles.get(&resource_name))
+                    .cloned();
+                let d = match (&*prop.to_ascii_lowercase(), ps) {
+                    ("lifetime", Some(p)) => Datum::Int((p.lifetime * 1000.0).round() as i32),
+                    ("lifetime", None) => Datum::Int(10000),
+                    ("gravity", Some(p)) => Datum::Vector([p.gravity[0] as f64, p.gravity[1] as f64, p.gravity[2] as f64]),
+                    ("wind", Some(p)) => Datum::Vector([p.wind[0] as f64, p.wind[1] as f64, p.wind[2] as f64]),
+                    ("drag", Some(p)) => Datum::Float(p.drag as f64),
+                    ("drag", None) => Datum::Float(0.0),
+                    _ => Datum::Vector([0.0, 0.0, 0.0]),
+                };
+                Ok(player.alloc_datum(d))
+            },
             // Accept common resource properties silently
             "width" | "length" | "lengthVertices" | "widthVertices"
             | "height" | "numVertices" | "numFaces" => {
