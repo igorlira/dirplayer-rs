@@ -78,9 +78,37 @@ pub struct ClodMeshDecoder {
     normal_iq: f32,
     normal_crease_iq: f32,
     texcoord_iq: f32,
+    /// Read from the block but unused: the CLOD vertex record carries no
+    /// diffuse-colour magnitudes for these movies, and the bone weights that
+    /// used to be scaled by this factor belong to `bone_weight_iq`.
+    #[allow(dead_code)]
     diffuse_color_iq: f32,
     #[allow(dead_code)]
     specular_color_iq: f32,
+    /// Inverse quantization for per-vertex BONE WEIGHTS.
+    ///
+    /// The ModelResource block carries six quality floats — normalCrease, then
+    /// five inverse-quant factors. The engine keeps them as
+    /// `CIFXModifierDecoder` members 42..47 and multiplies a bone weight
+    /// magnitude (arithmetic context 20) by member **47**, the LAST of the six:
+    ///
+    ///   v105 = ReadCompressedU32(ctx 20, &mag);
+    ///   w    = (float)mag * *((float *)this + 47);
+    ///   weights[k] = w;  weights[0] -= w;
+    ///
+    /// i.e. the same float this parser stores as `spec_iq` — NOT `diff_iq`.
+    /// Both the encoder (`MakeCompressedGeometryBlock2`, which writes
+    /// `(u32)(weight * 1/iq)`) and the file data agree: the influences are
+    /// written sorted by descending weight with `weights[0]` as the residual,
+    /// so the written weights can sum to at most `(n-1)/n`. Across every
+    /// skinned mesh in Agent Free Ride 1 and 2 the totals cap at exactly 8192
+    /// for 2 influences (= 1/2) and 10922 for 3 (= 2/3), which pins the factor
+    /// to 1/16384 — the value in `spec_iq`. Reading it as `diff_iq` (1/512)
+    /// made every weight 32x too large, so it clamped to 1.0 and drove the
+    /// residual negative; after the renderer's `max(0.0)` that collapsed each
+    /// blended vertex onto a single bone and left the characters' shoulders
+    /// and elbows visibly faceted.
+    bone_weight_iq: f32,
 
     has_neighbor_mesh: bool,
     shading_count: u32,
@@ -110,6 +138,7 @@ impl ClodMeshDecoder {
             texcoord_iq: 1.0,
             diffuse_color_iq: 1.0,
             specular_color_iq: 1.0,
+            bone_weight_iq: 1.0,
             has_neighbor_mesh: false,
             shading_count: 0,
             sync_table: None,
@@ -128,6 +157,7 @@ impl ClodMeshDecoder {
         self.texcoord_iq = res_info.tc_iq;
         self.diffuse_color_iq = res_info.diff_iq;
         self.specular_color_iq = res_info.spec_iq;
+        self.bone_weight_iq = res_info.spec_iq;
         self.has_neighbor_mesh = res_info.has_neighbor_mesh;
         self.shading_count = res_info.shading_count;
         self.sync_table = res_info.sync_table.clone();
@@ -509,7 +539,7 @@ impl ClodMeshDecoder {
                     indices.push(bs.read_compressed_u32(19));
                     if n > 0 {
                         let weight_mag = bs.read_compressed_u32(20);
-                        let w = (weight_mag as f32 * self.diffuse_color_iq).clamp(0.0, 1.0);
+                        let w = weight_mag as f32 * self.bone_weight_iq;
                         weights.push(w);
                         weights[0] -= w;
                     }

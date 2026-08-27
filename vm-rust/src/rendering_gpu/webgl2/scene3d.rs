@@ -6189,11 +6189,12 @@ fn decode_dxt1_block(block: &[u8], rgba: &mut [u8], start_x: u32, start_y: u32, 
 
 /// Pack variable-length bone indices into fixed vec4 (as f32 for vertex attribute).
 /// Pack per-vertex bone influences into fixed vec4 index + weight arrays. IFX keeps up
-/// to 6 influences SORTED BY MAGNITUDE; the GPU path caps at 4. The W3D decoder stores
-/// influences UNSORTED (bone[0] is the residual `1-Σothers`), so a naive take(4) can
-/// drop the HEAVIEST bones and pull a >4-influence vertex (spine/shoulder/hip) toward
-/// the wrong joints. So sort each vertex's (index, weight) pairs by weight descending,
-/// keep the 4 largest, then renormalize the survivors to sum 1.
+/// to 6 influences per vertex; the GPU path caps at 4. The stream writes them sorted by
+/// descending weight with bone[0] carrying the residual `1-Σothers`, but nothing in the
+/// format guarantees that, so a naive take(4) could drop the HEAVIEST bones and pull a
+/// >4-influence vertex (spine/shoulder/hip) toward the wrong joints. Sort each vertex's
+/// (index, weight) pairs by weight descending, keep the 4 largest, then renormalize the
+/// survivors to sum 1.
 fn pack_bone_influences_sorted(indices: &[Vec<u32>], weights: &[Vec<f32>]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
     let mut idx_out = Vec::with_capacity(indices.len());
     let mut wgt_out = Vec::with_capacity(indices.len());
