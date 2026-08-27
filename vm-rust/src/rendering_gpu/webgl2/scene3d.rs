@@ -209,6 +209,20 @@ struct TextureBindResult<'a> {
     diffuse_tex_mode: u8,   // W3dTextureLayer.tex_mode (0=mesh UVs, 5=#wrapPlanar)
     extra_layers: Vec<TextureLayerBinding<'a>>, // up to 2 extra layers (layer1 + layer2)
     specular: Option<&'a WebGlTexture>,
+    /// Lower-cased name of the layer bound as diffuse, so a caller can look it
+    /// up in `alpha_textures` / `soft_alpha_textures` without re-walking layers.
+    diffuse_name: String,
+}
+
+/// What `bind_material_for_mesh` resolved for one mesh, so the caller can decide
+/// how that mesh composites without re-walking the shader/material tables.
+struct MeshMatInfo {
+    /// Material opacity (Director `shader.blend / 100`).
+    opacity: f32,
+    /// `effective_blend_func`: 1 = IFX_ADD (additive), anything else = normal.
+    blend_func: u8,
+    /// Lower-cased name of the texture bound as diffuse, "" when none.
+    diffuse_name: String,
 }
 
 /// Particle billboard shader
@@ -3292,14 +3306,53 @@ void main() {
                 mode
             };
 
+            // See the per-mesh depth note in the loop: only a model whose transparent
+            // classification came off a fully hidden mesh gets that treatment.
+            let model_has_hidden_mesh = force_blend
+                && self.get_model_opacity(scene, model_node, runtime_state) < 0.001;
             if let Some(mesh_group) = gpu_data.mesh_groups.get(&resource) {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
-                    let bound = self.bind_material_for_mesh(
+                    let mesh_mat = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
                         res_info, mesh_idx, member_key, runtime_state, force_blend,
                     );
-                    if !bound {
+                    if mesh_mat.is_none() {
                         self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
+                    }
+                    // A model dragged into the transparent pass by a HIDDEN mesh still
+                    // has to resolve its own solid geometry against itself.
+                    //
+                    // Agent Free Ride's rider carries its four gadgets as meshes of the
+                    // one skinned model and hides the unused ones with `shader.blend = 0`.
+                    // `get_model_opacity` takes the minimum across the bound shaders, so
+                    // it reports 0.000 off a mesh that draws nothing and the whole rider —
+                    // body, board, jetpack — lands in PASS 2, which runs
+                    // `depth_mask(false)`. With no depth inside the model the 8 meshes
+                    // simply paint in index order and the torso (5..7) painted over the
+                    // jetpack (1) that sits on the back, leaving only the slivers of pack
+                    // falling outside the body silhouette.
+                    //
+                    // So for exactly that model shape — one whose classification came off
+                    // a fully hidden mesh — let a mesh that is genuinely opaque (full
+                    // material opacity, not additive, no alpha in its diffuse texture)
+                    // write depth for its own draw, the way Director resolves it per mesh.
+                    //
+                    // Models with no hidden mesh keep the pass's mask untouched. The
+                    // guard is deliberate scope control, not a fix for a known casualty:
+                    // it keeps this out of every ordinary multi-mesh model that reaches
+                    // PASS 2 for some other reason (a soft-alpha layer, an additive
+                    // surface), where painting order was already the behaviour in place.
+                    if force_blend && model_has_hidden_mesh {
+                        let opaque_mesh = mesh_mat.as_ref().map(|mm| {
+                            mm.opacity >= 0.999
+                                && mm.blend_func != 1
+                                && !mm.diffuse_name.is_empty()
+                                && self.member_data.get(member_key).map(|g| {
+                                    let n = Symbol::from_str(&mm.diffuse_name);
+                                    !g.alpha_textures.contains(&n)
+                                }).unwrap_or(false)
+                        }).unwrap_or(false);
+                        gl.depth_mask(opaque_mesh);
                     }
                     // Reflection map last so the per-mesh candidate search can't clobber it.
                     self.apply_reflection_map(gl, shader, scene, model_node, member_key, runtime_state);
@@ -3351,6 +3404,11 @@ void main() {
                     }
                 }
             }
+        }
+        // The per-mesh depth writes above are a within-model override; the
+        // transparent pass owns the mask, so hand it back the way it was set.
+        if force_blend {
+            gl.depth_mask(false);
         }
         // Restore culling/depth state if changed
         if is_skybox {
@@ -4283,6 +4341,7 @@ void main() {
             diffuse_tex_mode: 0,
             extra_layers: Vec::new(),
             specular: None,
+            diffuse_name: String::new(),
         };
 
         let mut diffuse_name = String::new();
@@ -4405,6 +4464,7 @@ void main() {
         // Director uses that layout for lightmap-only meshes, which should render via
         // the non-textured material path plus the extra lightmap layer.
 
+        result.diffuse_name = diffuse_name;
         result
     }
 
@@ -4875,7 +4935,7 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         force_blend: bool,
-    ) -> bool {
+    ) -> Option<MeshMatInfo> {
         // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
         if let Some(override_name) = runtime_state
             .and_then(|rs| Self::node_shader_override(rs, model_node.name, Some(mesh_idx)))
@@ -4897,9 +4957,11 @@ void main() {
                 }
                 let mut tex_bound = false;
                 let mut has_lightmap_layer = false;
+                let mut diffuse_name = String::new();
                 if let Some(gpu_data) = self.member_data.get(member_key) {
                     let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
                     has_lightmap_layer = !layers.extra_layers.is_empty();
+                    diffuse_name = layers.diffuse_name.clone();
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
                 let is_prim = res_info.and_then(|r| r.primitive_type.as_ref()).is_some();
@@ -4924,13 +4986,13 @@ void main() {
                 let first_bf = Self::effective_blend_func(w3d_shader);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
         }
 
         let res_info = match res_info {
             Some(r) => r,
-            None => return false,
+            None => return None,
         };
 
         // Per-mesh shader candidates, SPECIFIC ONES FIRST.
@@ -5050,8 +5112,10 @@ void main() {
             }
 
             let mut tex_bound = false;
+            let mut diffuse_name = String::new();
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
                 let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
+                diffuse_name = layers.diffuse_name.clone();
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
@@ -5082,7 +5146,7 @@ void main() {
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
         }
 
@@ -5121,10 +5185,14 @@ void main() {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
             }
             Self::apply_blend_mode(gl, shader, mat.opacity, best_blend_func, force_blend);
-            return true;
+            return Some(MeshMatInfo {
+                opacity: mat.opacity,
+                blend_func: best_blend_func,
+                diffuse_name: String::new(),
+            });
         }
 
-        false
+        None
     }
 
     fn set_material_uniforms(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, mat: &W3dMaterial) {
