@@ -1360,6 +1360,12 @@ impl TypeHandlers {
                 // first physics step in spectral-wizard's colliPlayer) and
                 // pass them straight into abs(); Director tolerates this.
                 Datum::Void => Datum::Int(0),
+                Datum::String(s) | Datum::StringChunk(_, _, s) => {
+                    let t = s.trim();
+                    if let Ok(i) = t.parse::<i32>() { Datum::Int(i.abs()) }
+                    else if let Ok(f) = t.parse::<f64>() { Datum::Float(f.abs()) }
+                    else { return Err(ScriptError::new(format!("Cannot get abs of non-numeric string: {:?}", s))); }
+                }
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot get abs of type: {}",
@@ -1622,8 +1628,21 @@ impl TypeHandlers {
             if args.len() != 2 {
                 return Err(ScriptError::new("Power requires 2 arguments".to_string()));
             }
-            let base = player.get_datum(&args[0]);
-            let exponent = player.get_datum(&args[1]);
+            // Numeric strings coerce, as they do for the other operators.
+            let as_number = |d: &Datum| -> Datum {
+                match d {
+                    Datum::String(s) | Datum::StringChunk(_, _, s) => {
+                        let t = s.trim();
+                        if let Ok(i) = t.parse::<i32>() { Datum::Int(i) }
+                        else if let Ok(f) = t.parse::<f64>() { Datum::Float(f) }
+                        else { d.clone() }
+                    }
+                    other => other.clone(),
+                }
+            };
+            let base_num = as_number(player.get_datum(&args[0]));
+            let exponent_num = as_number(player.get_datum(&args[1]));
+            let (base, exponent) = (&base_num, &exponent_num);
 
             match (base, exponent) {
                 (Datum::Int(base), Datum::Int(exponent)) => {
