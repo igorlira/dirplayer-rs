@@ -1462,6 +1462,13 @@ impl BuiltInHandlerManager {
                     let present_v = make_int(player, 1);
                     let max_tex_k = make_sym(player, "maxTextureSize");
                     let max_tex_v = make_int_list(player, &[4096, 4096]);
+                    // Renderer-wide default pixel format for every texture in
+                    // every 3D member (Director 11.5 Scripting Dictionary,
+                    // `textureRenderFormat`), documented default #rgba5551.
+                    // A texture's own `renderFormat` overrides it; `#default`
+                    // there means "use this".
+                    let trf_k = make_sym(player, "textureRenderFormat");
+                    let trf_v = make_sym(player, "rgba5551");
                     let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
                     let tex_fmt_v = make_sym_list(player, &[
                         "rgba8888", "rgba8880", "rgba5650", "rgba5551", "rgba5550", "rgba4444",
@@ -1476,6 +1483,7 @@ impl BuiltInHandlerManager {
                     let hw_info = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (vendor_k, vendor_v), (model_k, model_v), (version_k, version_v),
                         (present_k, present_v), (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v),
+                        (trf_k, trf_v),
                         (tex_units_k, tex_units_v), (depth_k, depth_v), (color_k, color_v),
                     ]), false));
                     let hw_key = make_sym(player, "hardwareInfo");

@@ -1662,7 +1662,7 @@ void main() {
                 }
             }
             let flip_v = lower.contains("skyline");
-            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v, scene.texture_near_filtering(tex_name)) {
+            if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v, scene.texture_near_filtering(tex_name), scene.texture_quality.get(tex_name).map(|q| q.as_str()).as_deref()) {
                 texture_sizes.insert(*tex_name, (w, h));
                 if has_alpha {
                     alpha_textures.insert(tex_name.clone());
@@ -1776,8 +1776,8 @@ void main() {
     }
 
     /// Decode JPEG/PNG image data and upload as WebGL texture (delegates to free function)
-    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
-        decode_and_upload_texture_impl(context, data, flip_v, near_filtering)
+    fn decode_and_upload_texture(&self, context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool, quality: Option<&str>) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+        decode_and_upload_texture_impl(context, data, flip_v, near_filtering, quality)
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
@@ -1798,7 +1798,7 @@ void main() {
             let needs_upload = gpu_data.texture_versions.get(tex_name) != Some(&write_version);
             if needs_upload {
                 let flip_v = lower.contains("skyline");
-                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v, scene.texture_near_filtering(tex_name)) {
+                if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v, scene.texture_near_filtering(tex_name), scene.texture_quality.get(tex_name).map(|q| q.as_str()).as_deref()) {
                     gpu_data.texture_sizes.insert(*tex_name, (w, h));
                     if has_alpha {
                         gpu_data.alpha_textures.insert(*tex_name);
@@ -5876,7 +5876,7 @@ fn classify_texture_alpha(rgba_data: &[u8]) -> (bool, bool) {
     (has_alpha, soft_alpha)
 }
 
-fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
+fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: bool, near_filtering: bool, quality: Option<&str>) -> Option<(WebGlTexture, u32, u32, bool, bool)> {
     if data.len() < 4 { return None; }
 
     // Detection priority: JPEG/PNG magic → DXT header → raw RGBA (our own format)
@@ -6003,10 +6003,25 @@ fn decode_and_upload_texture_impl(context: &WebGL2Context, data: &[u8], flip_v: 
     // half intensity, which is exactly what made AreaZero's in-game controls
     // list unreadable where it crossed bright geometry. Minification stays
     // mipmapped either way, so distant geometry does not start aliasing.
-    let (min_filter, mag_filter) = if near_filtering {
-        (WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR, WebGl2RenderingContext::LINEAR)
-    } else {
-        (WebGl2RenderingContext::NEAREST_MIPMAP_NEAREST, WebGl2RenderingContext::NEAREST)
+    //
+    // `quality` (same dictionary) chooses the MIPMAPPING level on top of that:
+    // `#low` none, `#medium` bilinear, `#high` trilinear. Its documented default
+    // is `#low`, but this engine has always mipmapped everything and a movie
+    // that never mentions `quality` keeps that — a DELIBERATE divergence, since
+    // switching every untouched texture to unmipmapped would make distant
+    // geometry alias across every movie at once. A movie that DOES set it gets
+    // what it asked for. The undocumented `#lowFiltered` family is treated as
+    // its base level.
+    let mip = match quality.map(|q| q.to_ascii_lowercase()) {
+        Some(ref q) if q.starts_with("low") => Some(false),
+        Some(ref q) if q.starts_with("medium") || q.starts_with("high") => Some(true),
+        _ => None,
+    };
+    let (min_filter, mag_filter) = match (near_filtering, mip) {
+        (true, Some(false)) => (WebGl2RenderingContext::LINEAR, WebGl2RenderingContext::LINEAR),
+        (true, _) => (WebGl2RenderingContext::LINEAR_MIPMAP_LINEAR, WebGl2RenderingContext::LINEAR),
+        (false, Some(false)) => (WebGl2RenderingContext::NEAREST, WebGl2RenderingContext::NEAREST),
+        (false, _) => (WebGl2RenderingContext::NEAREST_MIPMAP_NEAREST, WebGl2RenderingContext::NEAREST),
     };
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MIN_FILTER, min_filter as i32);
     gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_MAG_FILTER, mag_filter as i32);

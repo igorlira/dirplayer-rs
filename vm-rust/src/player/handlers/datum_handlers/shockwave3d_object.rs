@@ -2278,6 +2278,74 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                   } else if s3d_ref.object_type == BuiltInSymbol::Texture
+                      && prop_name.eq_ignore_ascii_case("renderFormat")
+                  {
+                    // 3D property (Director 11.5 Scripting Dictionary,
+                    // `renderFormat`): the pixel format for THIS texture, one of
+                    // `#default`, `#rgba8888`, `#rgba8880`, `#rgba5650`,
+                    // `#rgba5550`, `#rgba5551`, `#rgba4444`. Setting it
+                    // overrides the renderer-wide `textureRenderFormat`;
+                    // `#default` defers back to it.
+                    //
+                    // Previously a getter returning a constant `#rgba8880` with
+                    // no setter, so a movie could never read back what it wrote
+                    // — and Rasterwerks writes it about fifty times, Age of
+                    // Speed 2 walks every shader's textureList setting it, and
+                    // AreaZero bakes its text at `#rgba4444`.
+                    //
+                    // DELIBERATE DIVERGENCE: the value is stored and reported
+                    // but does NOT change upload precision. Director's smaller
+                    // formats exist to save video RAM at a cost in fidelity;
+                    // this renderer always uploads at full RGBA8888, so
+                    // honouring `#rgba4444` would throw away colour accuracy to
+                    // emulate a constraint that does not apply here.
+                    let f = match value {
+                        Datum::Symbol(sym) => Some(*sym),
+                        Datum::String(st) => Some(Symbol::from_str(st)),
+                        _ => None,
+                    };
+                    if let Some(f) = f {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    scene.texture_render_format.insert(s3d_ref.name, f);
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                  } else if s3d_ref.object_type == BuiltInSymbol::Texture
+                      && prop_name.eq_ignore_ascii_case("quality")
+                  {
+                    // 3D texture property (Director 11.5 Scripting Dictionary,
+                    // `quality`): the level of mipmapping — `#low` none,
+                    // `#medium` bilinear, `#high` trilinear, default `#low`.
+                    // Previously a getter returning `#default`, which is not one
+                    // of the documented values, with no setter behind it.
+                    //
+                    // Stored verbatim so a script reads back what it wrote,
+                    // including the undocumented `#lowFiltered` family.
+                    let q = match value {
+                        Datum::Symbol(sym) => Some(*sym),
+                        Datum::String(st) => Some(Symbol::from_str(st)),
+                        _ => None,
+                    };
+                    if let Some(q) = q {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    scene.texture_quality.insert(s3d_ref.name, q);
+                                    // Sampler state lives on the uploaded GPU
+                                    // texture, so force this one to re-upload.
+                                    *scene.texture_write_versions.entry(s3d_ref.name).or_insert(0) += 1;
+                                    scene.texture_content_version =
+                                        scene.texture_content_version.wrapping_add(1);
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                  } else if s3d_ref.object_type == BuiltInSymbol::Texture
                       && prop_name.eq_ignore_ascii_case("nearFiltering")
                   {
                     // 3D texture property (Director 11.5 Scripting Dictionary,
@@ -8199,8 +8267,18 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(texture_name.to_string()))),
             "type" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("fromFile")))),
-            "renderFormat" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("rgba8880")))),
-            "quality" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("default")))),
+            // Director 11.5: report what the movie set; absent means #default,
+            // which defers to getRendererServices().textureRenderFormat.
+            "renderFormat" => {
+                let f = scene.texture_render_format(&texture_name);
+                Ok(player.alloc_datum(Datum::Symbol(f)))
+            },
+            // Director 11.5: #low | #medium | #high, default #low. Report what
+            // the movie set rather than the non-existent `#default`.
+            "quality" => {
+                let q = scene.texture_quality(&texture_name);
+                Ok(player.alloc_datum(Datum::Symbol(q)))
+            },
             "width" | "height" => {
                 // Look up actual texture dimensions from scene data
                 let dim = get_texture_dimensions(scene, texture_name.as_str());

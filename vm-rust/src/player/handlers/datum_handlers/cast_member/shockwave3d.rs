@@ -3043,7 +3043,9 @@ impl Shockwave3dMemberHandlers {
                         let mut empty_scene = W3dScene {
                             materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
                             lights: Vec::new(), texture_images: HashMap::new(),
-                            texture_near_filtering: HashMap::new(), texture_infos: Vec::new(),
+                            texture_near_filtering: HashMap::new(),
+                            texture_quality: HashMap::new(),
+                            texture_render_format: HashMap::new(), texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,

@@ -500,6 +500,20 @@ pub struct W3dScene {
     /// and ignoring it left the in-game controls list soft enough to be
     /// unreadable wherever it crossed bright scene geometry.
     pub texture_near_filtering: HashMap<Symbol, bool>,
+    /// Per-texture `quality` (Director 11.5 Scripting Dictionary, 3D texture
+    /// property): the level of MIPMAPPING applied — `#low` none, `#medium`
+    /// bilinear, `#high` trilinear; documented default `#low`. Stored as the
+    /// symbol the movie set, including the undocumented `#lowFiltered` /
+    /// `#mediumFiltered` / `#highFiltered` spellings that appear in the wild,
+    /// so a script reads back exactly what it wrote.
+    pub texture_quality: HashMap<Symbol, Symbol>,
+    /// Per-texture `renderFormat` (Director 11.5 Scripting Dictionary, 3D
+    /// property): the pixel format the renderer uses for this texture, one of
+    /// `#default`, `#rgba8888`, `#rgba8880`, `#rgba5650`, `#rgba5550`,
+    /// `#rgba5551`, `#rgba4444`. `#default` means "use
+    /// `getRendererServices().textureRenderFormat`"; anything else OVERRIDES
+    /// that global for this texture alone.
+    pub texture_render_format: HashMap<Symbol, Symbol>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
@@ -558,6 +572,23 @@ impl W3dScene {
     /// `texture_write_versions` (which texture changed) and
     /// `texture_content_version` (whether ANY texture changed) in step, and the
     /// renderer relies on both to decide what to re-upload.
+    /// `renderFormat` for a texture. Absent means `#default`, i.e. defer to the
+    /// renderer-wide `textureRenderFormat`.
+    pub fn texture_render_format(&self, name: &Symbol) -> Symbol {
+        self.texture_render_format
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("default"))
+    }
+
+    /// `quality` for a texture, defaulting to Director's documented `#low`.
+    pub fn texture_quality(&self, name: &Symbol) -> Symbol {
+        self.texture_quality
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("low"))
+    }
+
     /// `nearFiltering` for a texture, defaulting to Director's documented TRUE.
     pub fn texture_near_filtering(&self, name: &Symbol) -> bool {
         self.texture_near_filtering.get(name).copied().unwrap_or(true)
