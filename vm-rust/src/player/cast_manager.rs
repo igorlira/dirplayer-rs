@@ -517,6 +517,18 @@ impl CastManager {
             (Datum::String(name), None) => self
                 .find_member_ref_by_name(name)
                 .map(|member_ref| Ok(Some(member_ref))),
+            // A string chunk (`str.item[k]`) names a member too.
+            (Datum::StringChunk(_, _, name), Some(cast_lib)) => {
+                cast_lib.find_member_by_name(name).map(|member| {
+                    Ok(Some(CastMemberRef {
+                        cast_lib: cast_lib.number as i32,
+                        cast_member: member.number as i32,
+                    }))
+                })
+            }
+            (Datum::StringChunk(_, _, name), None) => self
+                .find_member_ref_by_name(name)
+                .map(|member_ref| Ok(Some(member_ref))),
             (Datum::Int(num), Some(cast_lib)) => {
                 cast_lib.find_member_by_number(*num as u32).map(|member| {
                     Ok(Some(CastMemberRef {
