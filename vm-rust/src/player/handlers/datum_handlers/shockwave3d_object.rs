@@ -4378,7 +4378,61 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
-                "isInWorld" => Ok(player.alloc_datum(Datum::Int(1))),
+                "isInWorld" => {
+                    // Director 11.5 Scripting Dictionary, `isInWorld()`: TRUE when
+                    // the object's PARENT HIERARCHY TERMINATES IN THE WORLD —
+                    // for a model, camera, light or group alike. It was a
+                    // constant TRUE, so a movie that branches on it to decide
+                    // whether to `addToWorld` skipped that branch and the object
+                    // silently never appeared.
+                    //
+                    // Same rule the raycast exclusion walk already applies
+                    // (`shockwave3d.rs`): detached itself or via any ancestor is
+                    // out, an empty parent terminates OUTSIDE the world, and
+                    // reaching `world` terminates inside it.
+                    let member_ref = CastMemberRef {
+                        cast_lib: s3d_ref.cast_lib,
+                        cast_member: s3d_ref.cast_member,
+                    };
+                    let in_world = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .and_then(|m| m.member_type.as_shockwave3d())
+                        .map(|w3d| {
+                            if w3d.runtime_state.detached_nodes.contains(&s3d_ref.name) {
+                                return false;
+                            }
+                            let Some(scene) = w3d.parsed_scene.as_deref() else { return true };
+                            // Cameras and lights are not always carried in
+                            // `nodes`; for anything this engine does not model as
+                            // a node, "not detached" is the best answer available
+                            // and preserves the previous behaviour.
+                            let Some(node) = scene.nodes.iter().find(|n| n.name == s3d_ref.name)
+                            else {
+                                return true;
+                            };
+                            let mut parent = &node.parent_name;
+                            for _ in 0..64 {
+                                if parent.is_empty() {
+                                    return false;
+                                }
+                                if *parent == BuiltInSymbol::World {
+                                    return true;
+                                }
+                                if w3d.runtime_state.detached_nodes.contains(parent) {
+                                    return false;
+                                }
+                                match scene.nodes.iter().find(|n| n.name == *parent) {
+                                    Some(pn) => parent = &pn.parent_name,
+                                    None => return false,
+                                }
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    Ok(player.alloc_datum(Datum::Int(if in_world { 1 } else { 0 })))
+                },
                 // ─── Camera methods ───
                 "modelUnderLoc" => {
                     // Same-frame freshness as modelsUnderLoc — see the note there.
