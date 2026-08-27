@@ -129,6 +129,21 @@ impl ArithmeticsBytecodeHandler {
                 Datum::Void => &Datum::Int(0),
                 other => other,
             };
+            // Numeric strings coerce, as they do for the other operators.
+            let as_number = |d: &Datum| -> Datum {
+                match d {
+                    Datum::String(s) | Datum::StringChunk(_, _, s) => {
+                        let t = s.trim();
+                        if let Ok(i) = t.parse::<i32>() { Datum::Int(i) }
+                        else if let Ok(f) = t.parse::<f64>() { Datum::Float(f) }
+                        else { d.clone() }
+                    }
+                    other => other.clone(),
+                }
+            };
+            let left_num = as_number(left);
+            let right_num = as_number(right);
+            let (left, right) = (&left_num, &right_num);
 
             let result = match (left, right) {
                 (Datum::Int(left), Datum::Int(right)) => {
@@ -271,6 +286,16 @@ impl ArithmeticsBytecodeHandler {
                     Datum::List(list_type, negated_items, sorted)
                 }
                 Datum::Void => Datum::Int(0),
+                Datum::String(ref s) | Datum::StringChunk(_, _, ref s) => {
+                    let t = s.trim();
+                    if let Ok(i) = t.parse::<i32>() {
+                        Datum::Int(-i)
+                    } else if let Ok(f) = t.parse::<f64>() {
+                        Datum::Float(-f)
+                    } else {
+                        return Err(ScriptError::new(format!("Cannot inv non-numeric string: {:?}", s)));
+                    }
+                }
                 _ => {
                     return Err(ScriptError::new(format!(
                         "Cannot inv non-numeric value: {}",
