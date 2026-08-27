@@ -1159,6 +1159,29 @@ impl BuiltInHandlerManager {
                                 player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
                             });
                             ruffle_play(sn);
+                        } else if reserve_player_ref(|player| {
+                            matches!(player.get_datum(&args[0]), Datum::CastMember(_))
+                        }) {
+                            // `play member("x")` — queue and play a sound member on
+                            // channel 1. Director documents `member("Real").play()`
+                            // for RealMedia / SWA (streaming audio) members, and the
+                            // bare command form means the same thing.
+                            //
+                            // This silently did NOTHING before: the branch returned
+                            // Void for anything that was not a Flash sprite, and the
+                            // sound implementation that existed over in the SYNC
+                            // dispatcher could never run — `play` is registered in
+                            // `is_async_handler`, so it never reaches that match at
+                            // all. No error, no sound, nothing to see.
+                            return reserve_player_mut(|player| {
+                                let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
+                                SoundChannelDatumHandlers::call(
+                                    player,
+                                    &channel_datum,
+                                    Symbol::builtin(BuiltInSymbol::Play),
+                                    args,
+                                )
+                            });
                         }
                     }
                     Ok(DatumRef::Void)
@@ -1981,16 +2004,6 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),
             Some(BuiltInSymbol::FrameReady) => Self::frame_ready(args),
             Some(BuiltInSymbol::Marker) => Self::marker(args),
-            Some(BuiltInSymbol::Play) => {
-                // play member("name") - play a sound on channel 1
-                if args.is_empty() {
-                    return Ok(DatumRef::Void);
-                }
-                reserve_player_mut(|player| {
-                    let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
-                    SoundChannelDatumHandlers::call(player, &channel_datum, Symbol::builtin(BuiltInSymbol::Play), args)
-                })
-            }
             Some(BuiltInSymbol::SpriteBox) => {
                 // spriteBox(sprite, left, top, right, bottom)
                 if args.len() < 5 {
