@@ -144,6 +144,7 @@ struct Shader3d {
     u_alpha_threshold: Option<WebGlUniformLocation>,
     u_diffuse_tex: Option<WebGlUniformLocation>,
     u_has_texture: Option<WebGlUniformLocation>,
+    u_flat_shading: Option<WebGlUniformLocation>,
     u_texture_unlit: Option<WebGlUniformLocation>,
     u_lightmap_tex: Option<WebGlUniformLocation>,
     u_has_lightmap: Option<WebGlUniformLocation>,
@@ -508,6 +509,9 @@ uniform float u_opacity;
 uniform float u_alpha_threshold;
 uniform sampler2D u_diffuse_tex;
 uniform int u_has_texture;
+// `shader.flat` — one normal per FACE instead of the interpolated per-vertex
+// normal (Director 11.5 Scripting Dictionary, #standard shader property).
+uniform int u_flat_shading;
 uniform int u_texture_unlit;   // 1 = #replace first layer: show texture as-is (unlit)
 uniform sampler2D u_lightmap_tex;
 uniform int u_has_lightmap;       // blend mode: 0=none, 1=multiply, 2=add, 3=replace, 4=decal
@@ -626,6 +630,20 @@ void main() {
     // opacity 0.5 is untouched.)
     if (u_opacity < 0.004) discard;
     vec3 N = normalize(v_normal);
+    // Flat shading: derive the face normal from the screen-space derivatives of
+    // the world position, which is constant across a triangle. Preferred over a
+    // `flat` varying qualifier because GL ES takes those from the PROVOKING
+    // vertex — the LAST one, and not selectable in WebGL2 — whereas Director
+    // documents flat shading as using the face's FIRST vertex. The geometric
+    // normal sidesteps the disagreement entirely. Sign is irrelevant here: the
+    // one-sided lighting below already flips the shading normal to face the
+    // viewer.
+    if (u_flat_shading > 0) {
+        vec3 fdx = dFdx(v_position);
+        vec3 fdy = dFdy(v_position);
+        vec3 fn = cross(fdx, fdy);
+        if (dot(fn, fn) > 1e-12) N = normalize(fn);
+    }
     vec3 V = normalize(u_camera_pos - v_position);
     // Director/IFX lighting is ONE-SIDED (max(0,N·L)) — surfaces facing away from a
     // light fall into shadow, which is what carves the directional shading. Flip the
@@ -880,6 +898,7 @@ void main() {
             u_alpha_threshold: u("u_alpha_threshold"),
             u_diffuse_tex: u("u_diffuse_tex"),
             u_has_texture: u("u_has_texture"),
+            u_flat_shading: u("u_flat_shading"),
             u_texture_unlit: u("u_texture_unlit"),
             u_lightmap_tex: u("u_lightmap_tex"),
             u_has_lightmap: u("u_has_lightmap"),
@@ -2766,6 +2785,7 @@ void main() {
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
             gl.uniform1f(shader.u_opacity.as_ref(), (overlay.blend / 100.0) as f32);
+            gl.uniform1i(shader.u_flat_shading.as_ref(), 0);
 
             let x = overlay.loc[0] as f32;
             let y = overlay.loc[1] as f32;
@@ -2968,6 +2988,7 @@ void main() {
             gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
             gl.uniform1i(shader.u_has_texture.as_ref(), 1);
             gl.uniform1f(shader.u_opacity.as_ref(), (backdrop.blend / 100.0) as f32);
+            gl.uniform1i(shader.u_flat_shading.as_ref(), 0);
 
             let x = backdrop.loc[0] as f32;
             let y = backdrop.loc[1] as f32;
@@ -5038,6 +5059,13 @@ void main() {
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 }
+                // `shader.flat`. Written on EVERY mesh draw, never only when
+                // true: this program is shared, and a uniform left set by the
+                // previous draw is exactly how a stale-uniform bug starts.
+                gl.uniform1i(
+                    shader.u_flat_shading.as_ref(),
+                    if w3d_shader.map(|s| s.flat).unwrap_or(false) { 1 } else { 0 },
+                );
                 // IFX default: white diffuse for textured models unless useDiffuseWithTexture
                 let use_diffuse = w3d_shader.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
                 if !use_diffuse {

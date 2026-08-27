@@ -94,6 +94,11 @@ pub struct W3dShader {
     pub render_pass: u32,
     pub texture_layers: Vec<W3dTextureLayer>,
     pub shader_type: W3dShaderType,
+    /// `shader.flat` (Director 11.5 Scripting Dictionary, #standard shader
+    /// property): TRUE renders the mesh with FLAT shading — one colour per
+    /// face — instead of Gouraud, which interpolates across the face. Default
+    /// FALSE.
+    pub flat: bool,
     /// When true, textured models use actual diffuse color for lighting.
     /// When false (default), textured models use white (1,1,1) for lighting.
     pub use_diffuse_with_texture: bool,

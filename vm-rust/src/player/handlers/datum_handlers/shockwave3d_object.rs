@@ -1855,6 +1855,29 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
+                "flat" => {
+                    // 3D #standard shader property (Director 11.5 Scripting
+                    // Dictionary, `flat`): TRUE renders the mesh with FLAT
+                    // shading — one colour per face — instead of Gouraud, which
+                    // interpolates a colour per vertex across the face. Default
+                    // FALSE. Get and set.
+                    //
+                    // The getter used to answer a constant 0 with no setter at
+                    // all, so a movie could neither turn flat shading on nor
+                    // read back that it had.
+                    if s3d_ref.object_type != BuiltInSymbol::Shader { return Ok(()); }
+                    let on = value.int_value().map(|v| v != 0).unwrap_or(false);
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            if let Some(scene) = w3d.scene_mut() {
+                                if let Some(sh) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                    sh.flat = on;
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
                 "blend" => {
                     // For overlay / backdrop refs, write through to the
                     // CameraOverlay.blend field. Without this, the script
@@ -1980,8 +2003,9 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                     Ok(())
                 },
-                "shininess" | "flat" => {
-                    // Accept these shader properties silently
+                "shininess" => {
+                    // Accept this shader property silently. `flat` used to be
+                    // swallowed here too; it has a real setter above now.
                     Ok(())
                 },
                 "useDiffuseWithTexture" | "usediffusewithtexture" => {
@@ -7319,7 +7343,28 @@ impl Shockwave3dObjectDatumHandlers {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(shader_name.to_string()))),
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("shader")))),
-            "type" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("standard")))),
+            // Director 11.5 Scripting Dictionary, `newShader`: a shader's type is
+            // one of #standard, #painter, #engraver, #newsprint (this engine also
+            // carries #inker, #particle and the script-only #normalMap). It was a
+            // constant #standard, so a movie branching on shader type — the
+            // dictionary is explicit that standard properties like
+            // diffuseLightMap are IGNORED by the non-standard types — always
+            // took the standard path.
+            "type" => {
+                use crate::director::chunks::w3d::types::W3dShaderType;
+                let t = match shader.map(|s| s.shader_type) {
+                    Some(W3dShaderType::Painter) => "painter",
+                    Some(W3dShaderType::Inker) => "inker",
+                    Some(W3dShaderType::Engraver) => "engraver",
+                    Some(W3dShaderType::Newsprint) => "newsprint",
+                    Some(W3dShaderType::Particle) => "particle",
+                    Some(W3dShaderType::NormalMap) => "normalMap",
+                    // `LitTexture` is this engine's spelling of the default
+                    // photorealistic shader, which Lingo calls #standard.
+                    Some(W3dShaderType::LitTexture) | None => "standard",
+                };
+                Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(t))))
+            },
             "diffuse" => {
                 let c = material.map(|m| m.diffuse).unwrap_or(default_diffuse);
                 Ok(player.alloc_datum(color_to_datum(c)))
@@ -7358,7 +7403,12 @@ impl Shockwave3dObjectDatumHandlers {
                 let sym = match style { 1 => "wire", 2 => "point", _ => "fill" };
                 Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&sym.to_string()))))
             },
-            "flat" => Ok(player.alloc_datum(Datum::Int(0))),
+            // Director 11.5: #standard shader property, default FALSE. Report
+            // the stored value rather than a constant.
+            "flat" => {
+                let f = shader.map(|s| s.flat).unwrap_or(false);
+                Ok(player.alloc_datum(Datum::Int(if f { 1 } else { 0 })))
+            },
             "useDiffuseWithTexture" => {
                 let val = shader.map(|s| s.use_diffuse_with_texture).unwrap_or(false);
                 Ok(player.alloc_datum(Datum::Int(if val { 1 } else { 0 })))
@@ -8248,6 +8298,13 @@ impl Shockwave3dObjectDatumHandlers {
                 let dur = motion.map(|m| m.duration()).unwrap_or(0.0);
                 Ok(player.alloc_datum(Datum::Float((dur * 1000.0) as f64))) // ms
             },
+            // UNVERIFIED, deliberately left constant. `motion.type` is not
+            // documented in the 11.5 Scripting Dictionary or its addendum (the
+            // `type` entries there are the PhysX rigid-body and character-
+            // controller ones), and `W3dMotion` carries only a name and tracks,
+            // so there is nothing to derive a real answer from. Inventing a
+            // rule here is how the constants this replaced got written; if a
+            // movie is found to branch on it, derive the value then.
             "type" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("bones")))),
             _ => {
                 log(&format!("[W3D] motion(\"{}\").{} (stub)", motion_name, prop));
