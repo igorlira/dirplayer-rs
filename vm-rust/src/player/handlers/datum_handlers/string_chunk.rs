@@ -550,6 +550,55 @@ impl StringChunkUtils {
 }
 
 impl StringChunkHandlers {
+    /// `chunk.setProp(#char|#word|#item|#line, start[, end], value)` —
+    /// Director MX dot-syntax assignment into a sub-chunk of a chunk-typed
+    /// receiver. Resolves the inner range against the receiver's current
+    /// text, splices the value in, and writes the receiver back so the
+    /// change lands in the originating String or member. Mirrors
+    /// `get_prop_inner`'s argument parsing.
+    pub fn set_prop_call(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.len() < 3 {
+            return Err(ScriptError::new(
+                "setProp on a string chunk requires (chunkType, index[, last], value)".to_string(),
+            ));
+        }
+        let datum = datum.clone();
+        reserve_player_mut(|player| {
+            let (source, outer_expr, text) = match player.get_datum(&datum) {
+                Datum::StringChunk(s, e, t) => (s.clone(), e.clone(), t.clone()),
+                _ => {
+                    return Err(ScriptError::new(
+                        "setProp: receiver is not a string chunk".to_string(),
+                    ))
+                }
+            };
+            let prop_name = player.get_datum(&args[0]).symbol_value()?;
+            let start = player.get_datum(&args[1]).int_value()?;
+            let (end, value_ref) = if args.len() >= 4 {
+                (player.get_datum(&args[2]).int_value()?, &args[3])
+            } else {
+                (start, &args[2])
+            };
+            let value = player.get_datum(value_ref).string_value()?;
+            let inner = StringChunkExpr {
+                chunk_type: StringChunkType::from(prop_name),
+                start,
+                end,
+                item_delimiter: player.movie.item_delimiter,
+            };
+            let (cs, ce) = Self::resolve_chunk_char_range(&text, &inner);
+            let (bs, be) = char_range_to_byte_range(&text, cs, ce);
+            let mut new_text = text.clone();
+            new_text.replace_range(bs..be, &value);
+            // `set_contents`, not `set_value`: `set_value` ignores the chunk
+            // expression and replaces the entire source, which would truncate
+            // the field to just the chunk being written. `set_contents`
+            // splices `new_text` into the outer chunk range of the full source.
+            StringChunkUtils::set_contents(player, &source, &outer_expr, new_text)?;
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let value = player.get_datum(datum).string_value()?;
@@ -1124,6 +1173,7 @@ impl StringChunkHandlers {
                 }
             }
             Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
+            Some(BuiltInSymbol::SetProp) => Self::set_prop_call(datum, args),
             Some(BuiltInSymbol::Delete) => Self::delete(datum, args),
             Some(BuiltInSymbol::SetContents) => Self::set_contents(datum, args),
             Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(datum, args),
