@@ -617,20 +617,26 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(bp) => compute_motion_t_bp(motion, bp),
                                     None => compute_motion_t(motion, &w3d.runtime_state),
                                 };
-                                let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
-                                let bone_m = matrices.get(bone_idx).copied()?;
-                                // Relativize by the idle-pose root to MATCH the renderer's
-                                // skin (scene3d setup_skinning), so a weapon attached via
-                                // bone[].worldTransform lines up with the relativized body.
-                                // Only biped actors have an idle-rest motion; others unchanged.
-                                let idle = scene.motions.iter()
-                                    .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
-                                    .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
-                                    .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
-                                match idle {
-                                    Some(im) if !im.is_empty() => Some(mat4_mul_f32(&invert_transform_f32(&im[0]), &bone_m)),
-                                    _ => Some(bone_m),
-                                }
+                                // Same space the renderer skins in — root stripped when the
+                                // tick carries it on the model node, then relativized by the
+                                // biped COM. A script that pins a model to a bone (Agent Free
+                                // Ride's jetpack flames, ClubMarian's head) must land on the
+                                // geometry that is actually drawn.
+                                let root_lock = bp.map(|b| b.root_lock)
+                                    .unwrap_or(w3d.runtime_state.root_lock);
+                                let prefix = format!("{}:", model_name.to_ascii_lowercase());
+                                let overrides: std::collections::HashMap<usize, [f32; 16]> =
+                                    w3d.runtime_state.bone_transform_overrides.iter()
+                                        .filter_map(|(k, v)| k.strip_prefix(&prefix)
+                                            .and_then(|i| i.parse::<usize>().ok())
+                                            .map(|i| (i, *v)))
+                                        .collect();
+                                let matrices = crate::director::chunks::w3d::skeleton::posed_bone_world_matrices(
+                                    scene, skeleton, motion, t, root_lock, bp.is_some(),
+                                    if overrides.is_empty() { None } else { Some(&overrides) },
+                                    model_name,
+                                );
+                                matrices.get(bone_idx).copied()
                             });
                         if let Some(m) = bone_matrix {
                             let m64: [f64; 16] = [
@@ -672,20 +678,26 @@ impl Shockwave3dObjectDatumHandlers {
                                     Some(bp) => compute_motion_t_bp(motion, bp),
                                     None => compute_motion_t(motion, &w3d.runtime_state),
                                 };
-                                let matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, motion, t);
-                                let bone_m = matrices.get(bone_idx).copied()?;
-                                // Relativize by the idle-pose root to MATCH the renderer's
-                                // skin (scene3d setup_skinning), so a weapon attached via
-                                // bone[].worldTransform lines up with the relativized body.
-                                // Only biped actors have an idle-rest motion; others unchanged.
-                                let idle = scene.motions.iter()
-                                    .find(|m| m.name.to_ascii_lowercase().contains("idle_rest"))
-                                    .or_else(|| scene.motions.iter().find(|m| m.name.to_ascii_lowercase().contains("idle")))
-                                    .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
-                                match idle {
-                                    Some(im) if !im.is_empty() => Some(mat4_mul_f32(&invert_transform_f32(&im[0]), &bone_m)),
-                                    _ => Some(bone_m),
-                                }
+                                // Same space the renderer skins in — root stripped when the
+                                // tick carries it on the model node, then relativized by the
+                                // biped COM. A script that pins a model to a bone (Agent Free
+                                // Ride's jetpack flames, ClubMarian's head) must land on the
+                                // geometry that is actually drawn.
+                                let root_lock = bp.map(|b| b.root_lock)
+                                    .unwrap_or(w3d.runtime_state.root_lock);
+                                let prefix = format!("{}:", model_name.to_ascii_lowercase());
+                                let overrides: std::collections::HashMap<usize, [f32; 16]> =
+                                    w3d.runtime_state.bone_transform_overrides.iter()
+                                        .filter_map(|(k, v)| k.strip_prefix(&prefix)
+                                            .and_then(|i| i.parse::<usize>().ok())
+                                            .map(|i| (i, *v)))
+                                        .collect();
+                                let matrices = crate::director::chunks::w3d::skeleton::posed_bone_world_matrices(
+                                    scene, skeleton, motion, t, root_lock, bp.is_some(),
+                                    if overrides.is_empty() { None } else { Some(&overrides) },
+                                    model_name,
+                                );
+                                matrices.get(bone_idx).copied()
                             });
                         if let Some(bone_m) = bone_matrix {
                             let model_world = get_node_transform(player, member_ref, model_name);

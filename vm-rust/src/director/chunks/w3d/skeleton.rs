@@ -325,6 +325,39 @@ pub fn root_relativizer(
     }
 }
 
+/// Posed bone world matrices in the SAME space the renderer skins in — see
+/// `scene3d::setup_skinning_for_resource`. Root translation is stripped when the
+/// animation tick carries it on the model node instead, and the result is
+/// relativized by the recorded biped COM.
+///
+/// Scripts pin things to bones through `bonesPlayer.bone[i].worldTransform`, so
+/// that value has to agree with what is drawn. Agent Free Ride places its jetpack
+/// flames with
+///   `parent.getWorldTransform() * bone[spine1].worldTransform * vector(-6, ±12, 16)`
+/// and the raw motion matrices still carry the root translation the renderer had
+/// already moved onto the model node — counted twice, the flames ended up hundreds
+/// of units above the rider instead of at the pack's nozzles.
+///
+/// `tick_carries_root` is the renderer's condition for handing root motion to the
+/// node: this model has a per-model `bonesPlayer` with a motion playing.
+pub fn posed_bone_world_matrices(
+    scene: &W3dScene,
+    skeleton: &W3dSkeleton,
+    motion: Option<&W3dMotion>,
+    time: f32,
+    root_lock: bool,
+    tick_carries_root: bool,
+    overrides: Option<&HashMap<usize, [f32; 16]>>,
+    model_name: Symbol,
+) -> Vec<[f32; 16]> {
+    let strips_root = !root_lock
+        && tick_carries_root
+        && motion.map(|m| motion_has_root_translation(skeleton, m)).unwrap_or(false);
+    let world = build_bone_matrices_ex(skeleton, motion, time, root_lock || strips_root, overrides);
+    let relinv = root_relativizer(scene, skeleton, model_name, skeleton.name);
+    world.iter().map(|m| multiply_matrix(&relinv, m)).collect()
+}
+
 /// Final per-bone skinning matrices: `root_relinv * world[b] * inv_bind[b]`.
 /// This is the transform a skinned vertex is pushed through, so applying it to
 /// the mesh gives the geometry that is actually on screen.
