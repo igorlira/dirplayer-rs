@@ -1854,6 +1854,19 @@ impl DirPlayer {
         }
     }
 
+    /// The palette the movie is currently displaying in — the last entry the
+    /// score's palette (effects) channel set at or before the playhead, falling
+    /// back to the system default when the movie never sets one.
+    ///
+    /// Every *sprite-level* palette index — `the stageColor`, a sprite's
+    /// foreColor/backColor, a shape's colours — is an index into THIS palette,
+    /// not into the system palette and not into whatever palette a source
+    /// bitmap happens to carry. Only an indexed bitmap's own pixels are read
+    /// through the bitmap's own palette.
+    pub fn current_movie_palette(&self) -> crate::player::bitmap::bitmap::PaletteRef {
+        self.movie.score.get_frame_palette(self.movie.current_frame)
+    }
+
     pub fn get_hydrated_globals(&self) -> FxHashMap<Symbol, &Datum> {
         self.globals
             .iter()

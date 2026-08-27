@@ -1275,10 +1275,14 @@ impl WebGL2Renderer {
     /// Get stage background color as normalized floats
     fn get_stage_bg_color(&self, player: &DirPlayer) -> (f32, f32, f32) {
         let palettes = player.movie.cast_manager.palettes();
+        // `the stageColor` is a palette INDEX into the movie palette the score's
+        // palette channel is currently holding — not into the system palette.
+        // 15 Love sets stageColor 31, blue in its movie palette (member 166) and a
+        // hot orange in the system one, so its whole intro drew orange.
         let (r, g, b) = resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &player.current_movie_palette(),
             8, // bit depth
         );
         (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)

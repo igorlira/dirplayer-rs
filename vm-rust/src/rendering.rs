@@ -488,13 +488,14 @@ pub fn render_preview_bitmap(
                 0,
                 PaletteRef::BuiltIn(get_system_default_palette()),
             );
+            let movie_palette = player.current_movie_palette();
             let palettes = &player.movie.cast_manager.palettes();
             bitmap.fill_relative_rect(
                 0, 0, 0, 0,
                 resolve_color_ref(
                     &palettes,
                     &player.bg_color,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
+                    &movie_palette,
                     original_bit_depth,
                 ),
                 palettes,
@@ -1878,10 +1879,14 @@ pub fn render_score_to_bitmap_with_offset(
         dest_rect.top,
         dest_rect.right,
         dest_rect.bottom,
+        // `the stageColor` is a palette INDEX into the movie palette the score's
+        // palette channel is currently holding — not into the system palette. 15 Love
+        // sets stageColor 31, which is blue in its movie palette (member 166) and a
+        // hot orange in the system palette; the whole intro drew orange.
         resolve_color_ref(
             &palettes,
             &player.bg_color,
-            &PaletteRef::BuiltIn(get_system_default_palette()),
+            &player.current_movie_palette(),
             bitmap.original_bit_depth,
         ),
         &palettes,
