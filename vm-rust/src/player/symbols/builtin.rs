@@ -439,6 +439,7 @@ define_builtin_symbols! {
     "preloadBuffer" => PreloadBuffer,
     "unloadMember" => UnloadMember,
     "beep" => Beep,
+    "flushInputEvents" => FlushInputEvents,
     "offset" => Offset,
     "param" => Param,
     "createMask" => CreateMask,

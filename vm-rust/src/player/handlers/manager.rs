@@ -1137,6 +1137,9 @@ impl BuiltInHandlerManager {
             // synchronously up front, so there is nothing to (un)cache. Accept
             // as no-ops (netjack startMovie calls preLoadCast).
             Some(BuiltInSymbol::MoveToFront | BuiltInSymbol::PreloadMember | BuiltInSymbol::PreloadBuffer | BuiltInSymbol::UnloadMember | BuiltInSymbol::Beep | BuiltInSymbol::PreLoadCast | BuiltInSymbol::UnLoadCast | BuiltInSymbol::PreLoadMovie | BuiltInSymbol::UnLoad) => Ok(DatumRef::Void),
+            // Director's flushInputEvents() discards queued mouse/key events;
+            // the browser player has no such queue to flush.
+            Some(BuiltInSymbol::FlushInputEvents) => Ok(DatumRef::Void),
             Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(args),
             Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(args),
             Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(args),
