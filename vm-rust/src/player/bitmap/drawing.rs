@@ -18,6 +18,37 @@ use super::{
     palette_map::PaletteMap,
 };
 
+/// Re-express a sprite's foreColor/backColor for a draw of `src`.
+///
+/// A sprite colour held as a palette INDEX is an index into the movie palette
+/// — the one the score's palette (effects) channel is currently holding — not
+/// into whatever palette the source member carries. That distinction only bites
+/// for a DIRECT-COLOUR source: an indexed source wants its own palette, so that
+/// a background-transparent key against index N matches source index N exactly,
+/// but a >8bpp bitmap has no palette of its own and the `palette_ref` it reports
+/// is leftover authoring metadata. Resolving through that stale palette made
+/// Fish's 32-bit "Line" key backColor 231 to (0,85,0) instead of the movie
+/// palette's (16,66,206) — the colour actually filling the bitmap — so nothing
+/// keyed out and the fishing line drew as a solid blue bar.
+///
+/// Returns an RGB `ColorRef` in that case and the colour unchanged otherwise,
+/// so downstream index-based logic (the `bg_index` transparency rule, which only
+/// applies to indexed sources) is untouched.
+pub fn sprite_color_for_source(
+    palettes: &PaletteMap,
+    color: &ColorRef,
+    src: &Bitmap,
+    movie_palette: &PaletteRef,
+) -> ColorRef {
+    match color {
+        ColorRef::PaletteIndex(_) if src.original_bit_depth > 8 => {
+            let (r, g, b) = resolve_color_ref(palettes, color, movie_palette, src.original_bit_depth);
+            ColorRef::Rgb(r, g, b)
+        }
+        _ => color.clone(),
+    }
+}
+
 pub struct CopyPixelsParams<'a> {
     pub blend: i32,
     pub ink: u32,

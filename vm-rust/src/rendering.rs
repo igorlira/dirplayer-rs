@@ -18,7 +18,7 @@ use crate::{
     player::{
         bitmap::{
             bitmap::{self, get_system_default_palette, resolve_color_ref, Bitmap, PaletteRef},
-            drawing::{should_matte_sprite, CopyPixelsParams},
+            drawing::{should_matte_sprite, sprite_color_for_source, CopyPixelsParams},
             mask::BitmapMask,
             palette_map::PaletteMap,
         },
@@ -2032,6 +2032,10 @@ pub fn render_score_to_bitmap_with_offset(
                     None
                 };
 
+                // Taken before the mutable bitmap borrow below. Sprite fore/back colours
+                // held as palette indices resolve through the MOVIE palette when the
+                // source is direct-colour — see `sprite_color_for_source`.
+                let movie_palette = player.current_movie_palette();
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -2104,8 +2108,8 @@ pub fn render_score_to_bitmap_with_offset(
                 let mut params = CopyPixelsParams {
                     blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
-                    color: sprite.color.clone(),
-                    bg_color: sprite.bg_color.clone(),
+                    color: sprite_color_for_source(&palettes, &sprite.color, src_bitmap, &movie_palette),
+                    bg_color: sprite_color_for_source(&palettes, &sprite.bg_color, src_bitmap, &movie_palette),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
                     mask_image: None,

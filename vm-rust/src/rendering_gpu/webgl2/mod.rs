@@ -3646,7 +3646,23 @@ impl WebGL2Renderer {
             TextureSource::Bitmap { image_ref, .. } => {
                 match player.bitmap_manager.get_bitmap(*image_ref) {
                     Some(bitmap) => {
-                        (bitmap.palette_ref.clone(), bitmap.original_bit_depth, bitmap.use_alpha)
+                        // Which palette the SPRITE's foreColor/backColor indices are
+                        // read through. For an indexed source that is the bitmap's
+                        // own palette, so an index keys against the identical index
+                        // in the pixels. A direct-colour source (>8bpp) has no
+                        // palette of its own — whatever `palette_ref` it carries is
+                        // leftover authoring metadata — so its sprite colours are
+                        // indices into the MOVIE palette, like every other
+                        // sprite-level colour. Fish's 32-bit "Line" keys its blue
+                        // out with backColor 231: (16,66,206) in the movie palette,
+                        // (0,85,0) in the SystemMac palette the member happens to
+                        // name, so the key missed and the line drew as a solid bar.
+                        let sprite_color_palette = if bitmap.original_bit_depth > 8 {
+                            player.current_movie_palette()
+                        } else {
+                            bitmap.palette_ref.clone()
+                        };
+                        (sprite_color_palette, bitmap.original_bit_depth, bitmap.use_alpha)
                     }
                     None => (PaletteRef::BuiltIn(get_system_default_palette()), 8, false),
                 }
