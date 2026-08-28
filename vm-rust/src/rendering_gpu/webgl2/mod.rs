@@ -2218,6 +2218,33 @@ impl WebGL2Renderer {
                     // member): resolve the source bitmap + region to tile.
                     let custom_tile = {
                         let pat = shape_member.shape_info.pattern;
+                        // The phase the tile pattern starts on. It is a MOVIE
+                        // coordinate, because the shape below is rasterized at
+                        // the sprite's movie size (`sprite_width` x
+                        // `sprite_height`) and the quad magnifies that texture.
+                        // `sprite_rect` is the RENDER rect (see the aliased
+                        // import at the top of the file), so it only agrees with
+                        // the movie grid at scale 1; on a scaled stage it is
+                        // `drawRect.left + left * scale`, and every tiled shape
+                        // then started its pattern at a phase of its own, so
+                        // neighbouring regions stopped lining up. Summer
+                        // Resort's map is a mosaic of adjacent tiled shapes, so
+                        // in fullscreen the whole room came apart even though
+                        // every sprite rect was exactly where it belonged.
+                        //
+                        // Recomputed here rather than carried alongside
+                        // `sprite_rect`: `get_concrete_sprite_rect` is not free
+                        // and only tiled shapes need the unscaled answer.
+                        let tile_origin = if pat >= 57 && pat <= 64 {
+                            player.movie.score.get_sprite(channel_num)
+                                .map(|s| {
+                                    let r = crate::player::score::get_concrete_sprite_rect(player, s);
+                                    (r.left, r.top)
+                                })
+                                .unwrap_or((sprite_rect.left, sprite_rect.top))
+                        } else {
+                            (0, 0)
+                        };
                         if pat >= 57 && pat <= 64 {
                             player.movie.score.custom_tiles
                                 .get((pat - 57) as usize)
@@ -2232,7 +2259,7 @@ impl WebGL2Renderer {
                                         .and_then(|ir| player.bitmap_manager.get_bitmap(ir).cloned())
                                         .map(|src| (src, crate::player::geometry::IntRect::from(
                                             t.left as i32, t.top as i32, t.right as i32, t.bottom as i32),
-                                            (sprite_rect.left, sprite_rect.top)))
+                                            tile_origin))
                                 })
                         } else { None }
                     };
@@ -4377,6 +4404,8 @@ impl WebGL2Renderer {
                             // VWTL custom tile (a bitmap region) takes precedence.
                             // The shape is a local texture (0,0,w,h), so phase the
                             // tile by the sprite's stage origin.
+                            // That origin is in MOVIE units — see `tile_origin`
+                            // where the custom tile is resolved.
                             if let Some((src, tile_rect, origin)) = custom_tile.as_ref() {
                                 shape_bitmap.fill_rect_custom_tile(
                                     &palettes, src, tile_rect.clone(),
