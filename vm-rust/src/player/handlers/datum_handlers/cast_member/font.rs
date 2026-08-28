@@ -2476,7 +2476,7 @@ impl FontMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
                     };
 
                     bitmap.draw_text(
@@ -2646,7 +2646,7 @@ impl FontMemberHandlers {
                                     original_dst_rect: None,
                                     bg_color_explicit: false,
                                     fore_color_explicit: false,
-                                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
                                 };
 
                                 if let Some(mask) = mask {

@@ -1094,7 +1094,7 @@ impl TextMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -1377,7 +1377,7 @@ impl TextMemberHandlers {
                                 original_dst_rect: params.original_dst_rect.clone(),
                                 bg_color_explicit: false,
                                 fore_color_explicit: false,
-                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(

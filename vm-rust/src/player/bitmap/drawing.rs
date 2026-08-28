@@ -76,6 +76,13 @@ pub struct CopyPixelsParams<'a> {
     /// (mask_reg - src_reg). Director allows mask bitmaps to be larger or
     /// smaller than the source — alignment is by registration point.
     pub ink9_mask_offset: (i32, i32),
+    /// True when the ink reached us as an explicit `#ink: 2` / `#ink: 6`
+    /// (Reverse / Not Reverse) in a Lingo `copyPixels` param list, which has to
+    /// XOR (see `blend_pixel`). Sprite rendering also reaches this code with
+    /// `ink == 2`, but there it is long-standing shorthand for the colour-key
+    /// path shared with ink 36, so the two cases are kept apart rather than
+    /// changing how every ink-2 sprite in every movie draws.
+    pub reverse_ink: bool,
 }
 
 impl CopyPixelsParams<'_> {
@@ -96,6 +103,7 @@ impl CopyPixelsParams<'_> {
             original_dst_rect: None,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            reverse_ink: false,
         }
     }
 }
@@ -159,6 +167,7 @@ fn blend_pixel(
     bg_color: (u8, u8, u8),
     blend_alpha: f32, // This is params.blend / 100.0
     src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
+    reverse_ink: bool, // params.reverse_ink — see the `2 | 6` arm below
 ) -> (u8, u8, u8) {
     // Calculate the effective alpha: combination of native source alpha and blend parameter
     let effective_alpha = src_alpha * blend_alpha;
@@ -176,6 +185,37 @@ fn blend_pixel(
                 }
             } else {
                 director_blend_ink0(dst, src, src_alpha, blend_alpha)
+            }
+        }
+        // 2 = Reverse, 6 = Not Reverse (Scripting Dictionary, "ink").
+        // Director's Reverse is QuickDraw's `srcXor`, and QuickDraw XORs in BIT
+        // space, where a SET bit is black — so a black source pixel inverts the
+        // destination and a white one leaves it untouched. Per RGB channel that
+        // is `dst ^ (255 - src)`, which agrees with both ends of that rule and
+        // interpolates between them; Not Reverse is the same with the source
+        // inverted first, i.e. plain `dst ^ src`.
+        //
+        // This is how a movie draws a selection highlight without owning the
+        // art underneath: Coke Studios' jukebox fills a row-sized image with
+        // black and `copyPixels`es it over the rendered list with `[#ink: 2]`,
+        // expecting the song name to come back as white-on-black. Copying it
+        // straight (the old fallback) painted the row solid black instead and
+        // took the song title with it.
+        2 | 6 if reverse_ink => {
+            let xor_src = if ink == 2 {
+                (255 - src.0, 255 - src.1, 255 - src.2)
+            } else {
+                src
+            };
+            let reversed = (
+                dst.0 ^ xor_src.0,
+                dst.1 ^ xor_src.1,
+                dst.2 ^ xor_src.2,
+            );
+            if effective_alpha >= 0.999 {
+                reversed
+            } else {
+                blend_color_alpha(dst, reversed, effective_alpha)
             }
         }
         // ... (other ink modes use effective_alpha too, just like 'Copy')
@@ -1672,6 +1712,10 @@ impl Bitmap {
             params.insert("ink".into(), Datum::Int(sprite.ink as i32));
             params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
             params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+            // This ink is a SPRITE ink, not a Lingo `copyPixels` one, so it
+            // keeps the colour-key reading of ink 2 the rest of sprite
+            // rendering uses (see `CopyPixelsParams::reverse_ink`).
+            params.insert("sprite_ink".into(), Datum::Int(1));
 
             self.copy_pixels(
                 palettes,
@@ -1939,6 +1983,9 @@ impl Bitmap {
             original_dst_rect,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            reverse_ink: !is_text_rendering
+                && !param_list.contains_key("sprite_ink")
+                && (ink == 2 || ink == 6),
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -2520,6 +2567,7 @@ impl Bitmap {
                 && matte_mask.is_none()
                 && no_colorize
                 && (ink == 0 || ink == 2 || ink == 36)
+                && !params.reverse_ink
             {
                 // For color-key inks, precompute which source indices resolve to
                 // the transparent background color (mirrors the per-pixel
@@ -2814,7 +2862,7 @@ impl Bitmap {
                 }
 
                 // Indexed bitmap (1-8 bit) ink 36 color-key transparency
-                if (ink == 2 || ink == 36) && is_indexed {
+                if (ink == 2 || ink == 36) && is_indexed && !params.reverse_ink {
                     let color_ref = src.get_pixel_color_ref(sx, sy);
                     let ColorRef::PaletteIndex(i) = color_ref else {
                         let (sr, sg, sb) = match &color_ref {
@@ -2907,7 +2955,7 @@ impl Bitmap {
 
                 // 16-bit bitmap ink 36 color-key transparency
                 // 16-bit is stored as 32-bit RGB, so compare RGB values directly
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 16 && !params.reverse_ink {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip pixel if it matches the sprite's bgColor (with tolerance
@@ -2934,7 +2982,7 @@ impl Bitmap {
 
                 // 32-bit bitmap ink 36 color-key transparency
                 // PFR font bitmaps are decoded to 32-bit RGBA; background is white, glyphs are black.
-                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && src.original_bit_depth == 32 && !params.reverse_ink {
                     let (r, g, b, a) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     // Skip fully transparent pixels (use_alpha bitmaps like text member images)
@@ -3343,7 +3391,7 @@ impl Bitmap {
                 // ----------------------------------------------------------
                 // Director ink 36 (Blend) alpha semantics
                 // ----------------------------------------------------------
-                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 {
+                if (ink == 2 || ink == 36) && sa == 0 && src.original_bit_depth == 32 && !params.reverse_ink {
                     if (sr, sg, sb) == bg_color_resolved {
                         continue;
                     }
@@ -3357,6 +3405,7 @@ impl Bitmap {
                 if !params.is_text_rendering
                     && sa == 255
                     && (ink == 2 || ink == 36)
+                    && !params.reverse_ink
                     && (sr, sg, sb) == bg_color_resolved
                 {
                     continue; // This pixel is background → transparent
@@ -3510,6 +3559,7 @@ impl Bitmap {
                             bg_color_resolved,
                             alpha,
                             sa as f32 / 255.0,
+                            params.reverse_ink,
                         );
                         self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
                     }
@@ -3566,6 +3616,7 @@ impl Bitmap {
                     bg_color_resolved,
                     alpha,
                     src_alpha,
+                    params.reverse_ink,
                 );
 
                 self.set_pixel_fast(dst_x, dst_y, blended, &dst_palette_cache);
@@ -3590,6 +3641,9 @@ impl Bitmap {
         let mut params = HashMap::new();
         params.insert("blend".to_owned(), Datum::Int((alpha * 100.0) as i32));
         params.insert("ink".to_owned(), Datum::Int(ink as i32));
+        // A SPRITE ink, not a Lingo `copyPixels` one — see
+        // `CopyPixelsParams::reverse_ink`.
+        params.insert("sprite_ink".to_owned(), Datum::Int(1));
         params.insert(
             "bgColor".to_owned(),
             Datum::ColorRef(ColorRef::Rgb(bg_color.0, bg_color.1, bg_color.2)),
@@ -4298,6 +4352,9 @@ impl Bitmap {
             params.insert("ink".into(), Datum::Int(sprite.ink as i32));
             params.insert("color".into(), Datum::ColorRef(sprite.color.clone()));
             params.insert("bgColor".into(), Datum::ColorRef(sprite.bg_color.clone()));
+            // A SPRITE ink, not a Lingo `copyPixels` one — see
+            // `CopyPixelsParams::reverse_ink`.
+            params.insert("sprite_ink".into(), Datum::Int(1));
 
             self.copy_pixels(
                 palettes,
