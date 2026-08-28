@@ -27,6 +27,9 @@ pub fn is_xtra_registered(name: &str) -> bool {
         || name_lower == "fileio"
         || name_lower == "curl"
         || name_lower == "movecursor"
+        // Its own Xtra (baMoveCursor.x32), not a BudAPI handler. Served by
+        // MoveCursorXtra — see that module's `baMoveCursor` note.
+        || name_lower == "bamovecursor"
         || name_lower == "enhancer"
         || name_lower == "openurl"
         || name_lower == "sysmenu"
@@ -41,6 +44,9 @@ pub fn get_registered_xtra_names() -> Vec<String> {
         "FileIO".to_string(),
         "Curl".to_string(),
         "MoveCursor".to_string(),
+        // PHOSPHOR / Lost Maps gates mouselook on
+        // `FindXtra("baMoveCursor") <> 0`, a prefix match against these names.
+        "baMoveCursor".to_string(),
         // C_Input.FindXtra matches on `pXtraList[I].name.char[1..len]`, so the
         // name here has to START with what the movie asks for ("Enhancer").
         "Enhancer".to_string(),
@@ -234,7 +240,8 @@ pub fn create_xtra_instance(
         // static-only — `new` still hands back
         // an opaque instance id for parity with the real Xtras, but the id
         // is never consulted by any handler.
-        "movecursor" | "openurl" | "sysmenu" | "budapi" | "leechprotectionremovalhelp" => Ok(0),
+        "movecursor" | "bamovecursor" | "openurl" | "sysmenu" | "budapi"
+        | "leechprotectionremovalhelp" => Ok(0),
         // Enhancer is instance-based in the movie (`pEX = xtra("enhancer").new(serial)`
         // and then `pEX.set_resolution(...)`), but it holds no per-instance
         // state of its own — the one thing it owns, the fullscreen request,

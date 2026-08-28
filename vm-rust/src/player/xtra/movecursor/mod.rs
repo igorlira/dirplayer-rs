@@ -34,6 +34,25 @@
 //! Behavior sourced from `MoveCursor.x32_export.json` (IDA). The native handler
 //! maps the point through the movie's coordinate services, then `ClientToScreen`
 //! + `SetCursorPos`; it returns an HRESULT to the Xtra host, so Lingo sees VOID.
+//!
+//! ## baMoveCursor
+//!
+//! `baMoveCursor.x32` is a SEPARATE, single-purpose Xtra (despite the Buddy API
+//! "ba" prefix it is not part of BuddyAPI) exposing one global:
+//!
+//! ```text
+//! * baMoveCursor integer X, integer Y
+//! ```
+//!
+//! It does exactly what `move_cursor` does, so it is served from here rather
+//! than from a module of its own. It has to be listed in `the xtraList` under
+//! its own name as well: PHOSPHOR's `C_Input.new` only ever calls
+//! `InitBaMoveCursor`, which gates `pbMouseLook` on
+//! `FindXtra("baMoveCursor") <> 0` — a scan of `the xtraList` for an entry
+//! whose `name` STARTS with "baMoveCursor". With no such entry `pbMouseLook`
+//! stayed 0, so `CaptureMouse` exited at its first line: the cursor was never
+//! hidden, the recentre never ran, `wants_pointer_lock` never went up, and
+//! Lost Maps started with a camera you could not aim.
 
 use crate::player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError};
 
@@ -41,7 +60,12 @@ pub struct MoveCursorXtra;
 
 impl MoveCursorXtra {
     pub fn has_handler(name: &str) -> bool {
-        matches_ci(name, "register") || matches_ci(name, "move_cursor")
+        matches_ci(name, "register")
+            || matches_ci(name, "move_cursor")
+            // Checked BEFORE BudApiXtra in the manager's dispatch chain, which
+            // claims every "ba"-prefixed name — so this arm has to exist here
+            // or the warp silently becomes a BudAPI no-op.
+            || matches_ci(name, "baMoveCursor")
     }
 
     pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -55,7 +79,7 @@ impl MoveCursorXtra {
                 player.alloc_datum(crate::director::lingo::datum::Datum::Int(1))
             }));
         }
-        if matches_ci(name, "move_cursor") {
+        if matches_ci(name, "move_cursor") || matches_ci(name, "baMoveCursor") {
             return move_cursor(args);
         }
         Err(ScriptError::new(format!("MoveCursor: no handler {}", name)))
