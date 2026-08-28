@@ -48,6 +48,30 @@ impl SnapshotOutput {
         }
     }
 
+    /// Decode to raw RGBA once.
+    ///
+    /// [`pixel`] decodes the whole PNG per call on the browser harness, so a
+    /// test that samples more than a handful of points must decode once and
+    /// index the result instead.
+    pub fn to_rgba(&self) -> Self {
+        match self {
+            SnapshotOutput::Rgba { .. } => self.clone(),
+            SnapshotOutput::Base64Png(b64) => {
+                use base64::Engine;
+                let png_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64).expect("Invalid base64 in snapshot");
+                let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
+                    .expect("Failed to decode PNG snapshot")
+                    .to_rgba8();
+                SnapshotOutput::Rgba {
+                    width: img.width(),
+                    height: img.height(),
+                    data: img.into_raw(),
+                }
+            }
+        }
+    }
+
     /// Read one pixel as (r, g, b, a). Returns `None` outside the image.
     ///
     /// Lets a test assert about the COMPOSITED stage — what the renderer
