@@ -370,6 +370,13 @@ pub struct DirPlayer {
     /// (vector DatumRef, parent transform DatumRef, sub-property name)
     pub transform_sub_refs: Vec<(DatumRef, DatumRef, Symbol)>,
     pub last_mouse_down_time: i64,
+    /// Where the click `last_mouse_down_time` belongs to landed, in movie
+    /// coordinates. Director takes `the doubleClick` from the platform's own
+    /// double-click detection, which pairs two clicks only when the second one
+    /// falls inside the double-click RECTANGLE as well as inside the time
+    /// (Windows: `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`, 4 px by default), so the
+    /// position has to be remembered alongside the time.
+    pub last_mouse_down_loc: (i32, i32),
     pub is_double_click: bool,
     pub mouse_down_sprite: i16,
     pub drag_offset: (i32, i32),
@@ -841,6 +848,7 @@ impl DirPlayer {
             cursor_is_hidden: false,
             transform_sub_refs: Vec::new(),
             last_mouse_down_time: 0,
+            last_mouse_down_loc: (i32::MIN, i32::MIN),
             is_double_click: false,
             mouse_down_sprite: 0,
             drag_offset: (0, 0),

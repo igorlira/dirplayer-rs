@@ -39,6 +39,14 @@ use super::{
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, PLAYER_TX,
 };
 
+/// Half-extent, in movie pixels, of the rectangle the second click of a double
+/// click has to land in. Windows' own double-click box is `SM_CXDOUBLECLK` x
+/// `SM_CYDOUBLECLK`, 4x4 px by default (so +/-2); this is a little wider
+/// because a browser synthesises the mouse events for a TOUCH tap and a finger
+/// does not come down twice on the same pixel. Still far tighter than one row
+/// of any list a movie draws, which is what the gate is for.
+const DOUBLE_CLICK_SLOP: i32 = 4;
+
 #[allow(dead_code)]
 pub enum PlayerVMCommand {
     LoadMovieFromFile(String, bool),
@@ -633,12 +641,36 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
             // matching Director behavior.
             reserve_player_mut(|player| {
-                let is_double_click = (click_now - player.last_mouse_down_time) < 500;
+                // `the doubleClick` mirrors the platform's double-click
+                // detection (Scripting Dictionary, "doubleClick"): two clicks
+                // pair up only when the second one is inside the double-click
+                // TIME *and* the double-click RECTANGLE, and once a pair has
+                // been made the next click starts a fresh one — a triple click
+                // is a double click followed by a single click, not two
+                // doubles. Both halves matter on a touch screen, where taps
+                // arrive in quick bursts landing wherever the finger went:
+                // without them Coke Studios' jukebox took two taps on
+                // different rows of its catalogue as a double click and
+                // descended two levels at once, rendering the level above's
+                // strings through the `#songs` branch of `cataloglist`'s
+                // `createimg` ("Invalid string built-in property songName").
+                let (lx, ly) = player.last_mouse_down_loc;
+                let is_double_click = (click_now - player.last_mouse_down_time) < 500
+                    && x.saturating_sub(lx).saturating_abs() <= DOUBLE_CLICK_SLOP
+                    && y.saturating_sub(ly).saturating_abs() <= DOUBLE_CLICK_SLOP;
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = true;
                 player.movie.click_loc = (x, y);
                 player.is_double_click = is_double_click;
-                player.last_mouse_down_time = click_now;
+                if is_double_click {
+                    // Pair consumed: the click after this one is a single click
+                    // again however fast it follows.
+                    player.last_mouse_down_time = 0;
+                    player.last_mouse_down_loc = (i32::MIN, i32::MIN);
+                } else {
+                    player.last_mouse_down_time = click_now;
+                    player.last_mouse_down_loc = (x, y);
+                }
 
                 // "the clickOn" should return the topmost sprite at the click point
                 // regardless of whether it has a script — use unscripted lookup.
