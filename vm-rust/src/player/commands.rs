@@ -51,6 +51,7 @@ pub enum PlayerVMCommand {
     SetMoviePathLabel(String),
     SetSystemFontPath(String),
     SetStageSize(u32, u32),
+    SetStagePixelRatio(f64),
     TimeoutTriggered(TimeoutRef),
     PrintMemberBitmapHex(CastMemberRef),
     /// Dev UI sound preview: play a sound member through channel 1 (the real
@@ -116,6 +117,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::SetMoviePathOverride(path) => format!("SetMoviePathOverride({})", path),
         PlayerVMCommand::SetMoviePathLabel(path) => format!("SetMoviePathLabel({})", path),
         PlayerVMCommand::SetSystemFontPath(path) => format!("SetSystemFontPath({})", path),
+        PlayerVMCommand::SetStagePixelRatio(ratio) => {
+            format!("SetStagePixelRatio({})", ratio)
+        }
         PlayerVMCommand::SetStageSize(width, height) => {
             format!("SetStageSize({}, {})", width, height)
         }
@@ -373,7 +377,7 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             reserve_player_mut(|player| {
                 player.external_params = params;
                 crate::player::stage::apply_stage_draw_rect(player);
-                let (w, h) = crate::player::stage::stage_canvas_dims(player);
+                let (w, h) = crate::player::stage::stage_css_dims(player);
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
             });
         }
@@ -429,11 +433,22 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
                 }
             }
         }
+        PlayerVMCommand::SetStagePixelRatio(ratio) => {
+            reserve_player_mut(|player| {
+                if (player.stage_pixel_ratio - ratio).abs() < 1e-6 {
+                    return;
+                }
+                player.stage_pixel_ratio = ratio;
+                crate::player::stage::apply_stage_draw_rect(player);
+                let (w, h) = crate::player::stage::stage_css_dims(player);
+                crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
+            });
+        }
         PlayerVMCommand::SetStageSize(width, height) => {
             reserve_player_mut(|player| {
                 player.stage_size = (width, height);
                 crate::player::stage::apply_stage_draw_rect(player);
-                let (w, h) = crate::player::stage::stage_canvas_dims(player);
+                let (w, h) = crate::player::stage::stage_css_dims(player);
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
             });
         }

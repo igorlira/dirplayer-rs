@@ -343,6 +343,18 @@ pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
 }
 
+/// Report the display's `devicePixelRatio` so the stage canvas is rendered at
+/// the resolution it is actually SHOWN at rather than at CSS-pixel size.
+///
+/// Without this a phone (873x393 CSS behind 2400x1080 physical) renders the
+/// movie into an 873x393 buffer that the compositor then blows up nearly 3x —
+/// see `player::stage::stage_layout`. `width`/`height` in `set_stage_size` stay
+/// in CSS pixels; so do the coordinates of every pointer event.
+#[wasm_bindgen]
+pub fn set_stage_pixel_ratio(ratio: f64) {
+    player_dispatch(PlayerVMCommand::SetStagePixelRatio(ratio));
+}
+
 #[wasm_bindgen]
 pub fn trigger_timeout(name: &str) {
     player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
@@ -931,7 +943,7 @@ pub fn set_fullscreen_active(active: bool) {
         }
         player.fullscreen_active = active;
         crate::player::stage::apply_stage_draw_rect(player);
-        let (w, h) = crate::player::stage::stage_canvas_dims(player);
+        let (w, h) = crate::player::stage::stage_css_dims(player);
         crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
     });
 }
@@ -2501,7 +2513,7 @@ pub fn set_stage_scale_snap_integer(enabled: bool) {
         // is rasterised at) is derived from it, so the frame has to be rebuilt
         // rather than just repositioned.
         crate::player::stage::apply_stage_draw_rect(player);
-        let (w, h) = crate::player::stage::stage_canvas_dims(player);
+        let (w, h) = crate::player::stage::stage_css_dims(player);
         crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
     });
 }

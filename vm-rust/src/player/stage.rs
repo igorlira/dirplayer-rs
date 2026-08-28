@@ -149,7 +149,19 @@ fn compute_stage_layout(
     }
 }
 
-pub fn stage_layout(player: &DirPlayer) -> StageLayout {
+/// How many DEVICE pixels the canvas gets per CSS pixel of the stage
+/// container. 1.0 unless the frontend has reported a hi-DPI display.
+///
+/// Clamped rather than trusted: `devicePixelRatio` is whatever the page says it
+/// is, and a nonsense value here would size a GPU texture.
+pub fn stage_pixel_ratio(player: &DirPlayer) -> f64 {
+    let r = player.stage_pixel_ratio;
+    if r.is_finite() && r > 0.0 { r.clamp(1.0, 4.0) } else { 1.0 }
+}
+
+/// The stage layout in CSS pixels — the unit `stage_size` arrives in and the
+/// unit the page lays the canvas out in.
+fn stage_layout_css(player: &DirPlayer) -> StageLayout {
     if let Some(r) = player.stage_draw_rect {
         let width = (r[2] - r[0]).max(1.0) as u32;
         let height = (r[3] - r[1]).max(1.0) as u32;
@@ -171,10 +183,56 @@ pub fn stage_layout(player: &DirPlayer) -> StageLayout {
     }
 }
 
-/// Dimensions of the stage canvas: explicit drawRect if Lingo set one,
-/// otherwise the effective layout derived from `swStretchStyle`.
+/// The stage layout the RENDERER works in: the CSS layout above in device
+/// pixels.
+///
+/// A phone hands the page ~873x393 CSS pixels and puts two or three physical
+/// pixels behind each one. Sizing the canvas in CSS pixels throws that away:
+/// the movie is rendered into an 873x393 buffer and the compositor blows it up
+/// to the 2400x1080 the screen actually has, so a 760x520 movie is first
+/// MINIFIED to 0.756 and then magnified back — nothing the renderer can
+/// re-rasterise (text, 3D) ever sees the resolution it is being shown at, and
+/// anything the movie composes itself into a bitmap (the Coke Studios navigator
+/// room list) is baked at 0.756 and unreadable. Rendering at the device size
+/// instead turns that same phone into a 2.08x MAGNIFICATION, which is a scale
+/// every part of the pipeline already handles.
+///
+/// `stage_rect` is deliberately NOT scaled: it is what Lingo sees as
+/// `the stage.rect`, and every script-facing coordinate is in movie units.
+pub fn stage_layout(player: &DirPlayer) -> StageLayout {
+    let layout = stage_layout_css(player);
+    let dpr = stage_pixel_ratio(player);
+    if (dpr - 1.0).abs() < 1e-6 {
+        return layout;
+    }
+    StageLayout {
+        canvas_width: ((layout.canvas_width as f64 * dpr).round() as u32).max(1),
+        canvas_height: ((layout.canvas_height as f64 * dpr).round() as u32).max(1),
+        stage_rect: layout.stage_rect,
+        draw_rect: [
+            layout.draw_rect[0] * dpr,
+            layout.draw_rect[1] * dpr,
+            layout.draw_rect[2] * dpr,
+            layout.draw_rect[3] * dpr,
+        ],
+    }
+}
+
+/// Dimensions of the stage canvas' BACKING STORE, in device pixels: explicit
+/// drawRect if Lingo set one, otherwise the effective layout derived from
+/// `swStretchStyle`.
 pub fn stage_canvas_dims(player: &DirPlayer) -> (u32, u32) {
     let layout = stage_layout(player);
+    (layout.canvas_width, layout.canvas_height)
+}
+
+/// Dimensions the canvas must be LAID OUT at, in CSS pixels. On a hi-DPI
+/// display this is smaller than `stage_canvas_dims` by the pixel ratio, and it
+/// is what the frontend sizes `#stage_canvas_container` to — without it the
+/// canvas would take its intrinsic device-pixel size as its CSS size and
+/// overflow the viewport by that same ratio.
+pub fn stage_css_dims(player: &DirPlayer) -> (u32, u32) {
+    let layout = stage_layout_css(player);
     (layout.canvas_width, layout.canvas_height)
 }
 
@@ -214,10 +272,21 @@ pub fn apply_stage_draw_rect(player: &DirPlayer) {
     if draw_w <= 1 && draw_h <= 1 {
         return;
     }
+    let (css_w, css_h) = stage_css_dims(player);
     with_renderer_mut(|renderer_opt| {
         if let Some(renderer) = renderer_opt {
             use crate::rendering_gpu::Renderer;
             renderer.set_size(draw_w, draw_h);
+            // `set_size` sets the BACKING STORE. On a hi-DPI display that is
+            // larger than the canvas' CSS box by the pixel ratio, and a canvas
+            // with no CSS size lays itself out at its backing size — so without
+            // this the stage would overflow its container by exactly the ratio
+            // that was supposed to make it sharper.
+            if css_w != draw_w || css_h != draw_h {
+                let style = renderer.canvas().style();
+                let _ = style.set_property("width", &format!("{css_w}px"));
+                let _ = style.set_property("height", &format!("{css_h}px"));
+            }
         }
     });
 }
@@ -225,7 +294,15 @@ pub fn apply_stage_draw_rect(player: &DirPlayer) {
 /// Convert host-canvas pixel coords to movie-space coords, inverting the
 /// drawRect scaling so Lingo's mouseH/mouseV and script-facing APIs see the
 /// authored coordinate system.
+///
+/// `x`/`y` are CSS pixels — a pointer event's position within the canvas
+/// element, which is what every caller gets from the DOM. `draw_rect` is in
+/// device pixels, so the ratio between the two has to go in here; this is the
+/// only place canvas coordinates enter the player, so it is the only place that
+/// needs it.
 pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) {
+    let dpr = stage_pixel_ratio(player);
+    let (x, y) = (x * dpr, y * dpr);
     let layout = stage_layout(player);
     let draw_w = (layout.draw_rect[2] - layout.draw_rect[0]).max(1.0);
     let draw_h = (layout.draw_rect[3] - layout.draw_rect[1]).max(1.0);

@@ -278,6 +278,12 @@ pub struct DirPlayer {
     /// how every Lingo handler executes, so it is opt-in until measured.
     pub ir_enabled: bool,
     pub stage_size: (u32, u32),
+    /// Physical pixels the browser puts behind one CSS pixel of the stage
+    /// container (`window.devicePixelRatio`). `stage_size` and every coordinate
+    /// that arrives from the DOM stay in CSS pixels; this is the one factor
+    /// that turns them into the DEVICE pixels the canvas is actually rendered
+    /// at. See `stage::stage_layout`.
+    pub stage_pixel_ratio: f64,
     pub bitmap_manager: bitmap::manager::BitmapManager,
     pub cursor: CursorRef,
     pub start_time: chrono::DateTime<chrono::Local>,
@@ -812,6 +818,7 @@ impl DirPlayer {
             // still toggles it at runtime for A/B measurement.
             ir_enabled: true,
             stage_size: (100, 100),
+            stage_pixel_ratio: 1.0,
             bitmap_manager: bitmap::manager::BitmapManager::new(),
             cursor: CursorRef::System(0),
             start_time: now, // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
@@ -1560,7 +1567,7 @@ impl DirPlayer {
             });
         }
 
-        let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
+        let (stage_w, stage_h) = crate::player::stage::stage_css_dims(self);
         crate::js_api::JsApi::dispatch_stage_size_changed(stage_w, stage_h, self.center_stage);
 
         JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
@@ -3747,7 +3754,7 @@ impl DirPlayer {
             Some(BuiltInSymbol::CenterStage) => {
                 self.center_stage = value.int_value()? != 0;
                 crate::player::stage::apply_stage_draw_rect(self);
-                let (w, h) = crate::player::stage::stage_canvas_dims(self);
+                let (w, h) = crate::player::stage::stage_css_dims(self);
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, self.center_stage);
                 Ok(())
             },
