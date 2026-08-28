@@ -2,6 +2,7 @@ import { useMeasure } from "@uidotdev/usehooks";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   set_stage_size,
+  set_stage_pixel_ratio,
   player_create_canvas,
   mouse_move,
   mouse_move_delta,
@@ -340,6 +341,38 @@ export default function Stage({
     }
   }, [outerWidth, outerHeight]);
 
+  // Tell the VM how many physical pixels the display puts behind one CSS
+  // pixel, so the stage canvas is RENDERED at the size it is shown at instead
+  // of being drawn small and blown up by the compositor. A phone hands the page
+  // 873x393 CSS pixels over a 2400x1080 screen: without this a 760x520 movie is
+  // rasterised at 0.756 and magnified back nearly 3x, which is why text the
+  // movie bakes into a bitmap itself (the Coke Studios room list) came out
+  // unreadable while ordinary text sprites — re-rasterised per frame — did not.
+  //
+  // `devicePixelRatio` changes when the window moves between monitors or the
+  // page is zoomed; the matchMedia trick is the standard way to hear about it
+  // (the query has to be rebuilt each time because it is pinned to the value
+  // that was current when it was created).
+  useEffect(() => {
+    let media: MediaQueryList | null = null;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled) return;
+      const dpr = window.devicePixelRatio || 1;
+      set_stage_pixel_ratio(dpr);
+      media?.removeEventListener("change", apply);
+      media = window.matchMedia(`(resolution: ${dpr}dppx)`);
+      media.addEventListener("change", apply);
+    };
+    apply();
+    return () => {
+      cancelled = true;
+      media?.removeEventListener("change", apply);
+    };
+  }, []);
+
+  // CSS pixels — `set_stage_pixel_ratio` above is what turns these into the
+  // canvas' device-pixel size, and pointer coordinates stay in this same unit.
   useEffect(() => {
     if (!outerWidth || !outerHeight) return;
     set_stage_size(outerWidth, outerHeight);
