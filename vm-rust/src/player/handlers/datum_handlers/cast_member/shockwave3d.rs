@@ -2312,9 +2312,21 @@ impl Shockwave3dMemberHandlers {
                         } else { Symbol::empty() };
 
                         // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type),
-                        // newShader(name, #type)
+                        // newShader(name, #type).
+                        //
+                        // NOT newMesh: it takes no type at all —
+                        // `newMesh(name, numFaces, numVertices, numNormals, numColors,
+                        // numTextureCoordinates)` (Director 11.5 Scripting Dictionary),
+                        // so args[1] is a face COUNT. Reading it here stringified the
+                        // count into `primitive_type`, e.g. Some("7938") for Intel's
+                        // ChickenChasin terrain, which made every newMesh resource look
+                        // like a PRIMITIVE to the renderer. `bind_material_for_mesh`
+                        // then took the untextured-primitive path and bound Director's
+                        // default checkerboard — and a newMesh built without texture
+                        // coordinates has every UV at (0,0), so the whole surface
+                        // sampled one texel and the terrain drew a flat dark slab
+                        // instead of grass green, whatever its material said.
                         let new_res_type = if (handler_name.eq_builtin(BuiltInSymbol::NewModelResource)
-                            || handler_name.eq_builtin(BuiltInSymbol::NewMesh)
                             || handler_name.eq_builtin(BuiltInSymbol::NewLight)
                             || handler_name.eq_builtin(BuiltInSymbol::NewShader)) && args.len() >= 2
                         {
