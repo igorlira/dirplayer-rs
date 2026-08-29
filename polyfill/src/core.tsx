@@ -350,14 +350,54 @@ function parseObjectExternalParams(params: Record<string, string | null>): Recor
   return externalParams;
 }
 
-function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Record<string, string | null> } {
+function readObjectParams(object: HTMLObjectElement): Record<string, string | null> {
   const paramTags = object.getElementsByTagName('param');
-  const params: Record<string, string | null> = Array.from(paramTags).reduce((acc, param) => {
+  return Array.from(paramTags).reduce((acc, param) => {
     const name = param.getAttribute('name') || '';
     const value = param.getAttribute('value');
     acc[name] = value;
     return acc;
   }, {} as Record<string, string | null>);
+}
+
+// Plugin parameters are strings, and pages spell their booleans every which way
+// ("true", "TRUE", "1"). A bare attribute (`<embed disableFullscreenButton>`)
+// arrives as the empty string and means "present, therefore on".
+const TRUTHY_PARAM_VALUES = new Set(['', 'true', '1', 'yes', 'on']);
+
+function isParamTrue(value: string | null | undefined): boolean {
+  return value != null && TRUTHY_PARAM_VALUES.has(value.trim().toLowerCase());
+}
+
+/**
+ * Is a boolean player option set, in any of the spellings a host might use?
+ *
+ * `data-foo-bar` on any of `elements` (the polyfill's own spelling), a bare
+ * `fooBar` attribute on them (what Shockwave `<embed>`s used), or a `<param
+ * name="fooBar">` in `params`. Checking all three in one place is what keeps
+ * the `<object>`/`<embed>` paths from disagreeing: an `<embed>` nested in an
+ * `<object>` is replaced by `replaceDirEmbed`, which used to see only
+ * attributes and never the sibling `<param>` tags.
+ */
+function elementFlag(
+  name: string,
+  elements: (Element | null | undefined)[],
+  params: Record<string, string | null>
+): boolean {
+  const dataName = `data-${name.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`;
+  for (const element of elements) {
+    if (!element) continue;
+    // getAttribute is case-insensitive for HTML elements, so this covers
+    // disablefullscreenbutton / DisableFullscreenButton alike.
+    if (element.hasAttribute(dataName) || isParamTrue(element.getAttribute(name))) {
+      return true;
+    }
+  }
+  return isParamTrue(getCaseInsensitiveValue(params, name));
+}
+
+function checkDirObject(object: HTMLObjectElement): { isDirObject: boolean; params: Record<string, string | null> } {
+  const params = readObjectParams(object);
   const src = getCaseInsensitiveValue(params, 'src');
   const classId = (object.getAttribute('classid') || '').toLowerCase();
   const type = (object.getAttribute('type') || '').toLowerCase();
@@ -637,24 +677,28 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   const externalParams: Record<string, string> = parseEmbedExternalParams(element);
   Object.assign(externalParams, parseDataExternalParams(element));
 
-  const enableGestures = element.hasAttribute('data-enable-gestures')
-    || (element.parentElement?.tagName === 'OBJECT' && element.parentElement.hasAttribute('data-enable-gestures'))
-    || undefined;
+  const objectForFlags = element.parentElement?.tagName === 'OBJECT'
+    ? (element.parentElement as HTMLObjectElement)
+    : null;
+  const objectParams = objectForFlags ? readObjectParams(objectForFlags) : {};
+
+  // Same three spellings as everywhere else — including the <param> tags, which
+  // this path used not to read at all.
+  const enableGestures = elementFlag('enableGestures', [element, objectForFlags], objectParams) || undefined;
 
   // On by default, opted OUT — the inverse of gestures, which are off until a
   // page asks for them. A fullscreen button cannot change how a movie reads
   // input, so there is no reason to make every host opt in.
   //
   // Three tiers, most specific first: an explicit per-element opt-IN wins, then
-  // any per-element opt-out (on the embed or the object wrapping it), then the
-  // page-wide default the host set on the polyfill <script> tag.
-  const object = element.parentElement?.tagName === 'OBJECT' ? element.parentElement : null;
-  const showFullscreenButton = (element.hasAttribute('data-enable-fullscreen-button')
-      || !!object?.hasAttribute('data-enable-fullscreen-button'))
+  // any per-element opt-out, then the page-wide default the host set on the
+  // polyfill <script> tag. Each tier looks at the embed, the <object> wrapping
+  // it, AND that object's <param> tags — this path runs whenever the embed is
+  // what identifies the movie, so the params are ours to honour too.
+  const showFullscreenButton = elementFlag('enableFullscreenButton', [element, objectForFlags], objectParams)
     ? true
     : !(config.disableFullscreenButton
-      || element.hasAttribute('data-disable-fullscreen-button')
-      || !!object?.hasAttribute('data-disable-fullscreen-button'));
+      || elementFlag('disableFullscreenButton', [element, objectForFlags], objectParams));
 
   let size = resolveReplacementSize(element);
   const newElement = document.createElement('div');
@@ -686,17 +730,13 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
   const externalParams: Record<string, string> = parseObjectExternalParams(params);
   Object.assign(externalParams, parseDataExternalParams(element));
 
-  const enableGestures = element.hasAttribute('data-enable-gestures')
-    || getCaseInsensitiveValue(params, 'enableGestures') === 'true'
-    || undefined;
+  const enableGestures = elementFlag('enableGestures', [element], params) || undefined;
 
   // See replaceDirEmbed — on by default, opted out, page-wide default last.
-  const showFullscreenButton = (element.hasAttribute('data-enable-fullscreen-button')
-      || getCaseInsensitiveValue(params, 'enableFullscreenButton') === 'true')
+  const showFullscreenButton = elementFlag('enableFullscreenButton', [element], params)
     ? true
     : !(config.disableFullscreenButton
-      || element.hasAttribute('data-disable-fullscreen-button')
-      || getCaseInsensitiveValue(params, 'disableFullscreenButton') === 'true');
+      || elementFlag('disableFullscreenButton', [element], params));
 
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
