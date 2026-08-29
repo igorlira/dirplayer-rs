@@ -142,10 +142,20 @@ function init() {
   }
 
   const requireClick = polyfillScript?.hasAttribute('data-require-click') ?? false;
+
+  // Page-wide "no fullscreen button". The per-embed attribute of the same name
+  // is fine for one movie, but a host that never wants the chrome would have to
+  // repeat it on every element — and on pages whose markup it does not own
+  // (archives, mirrors) it cannot. Setting it here covers every movie the
+  // polyfill mounts; an individual embed can still opt back in with
+  // data-enable-fullscreen-button.
+  const disableFullscreenButton = polyfillScript?.hasAttribute('data-disable-fullscreen-button') ?? false;
+
   const config = {
     wasmUrl: getEmbeddedWasmUrl(),
     systemFontUrl: getEmbeddedFontUrl(),
     requireClickToPlay: requireClick,
+    disableFullscreenButton,
   };
 
   // Register ownership SYNCHRONOUSLY, before any async work (like loadRuffle).

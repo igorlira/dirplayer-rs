@@ -20,6 +20,12 @@ export interface PolyfillConfig {
   wasmUrl: string;
   systemFontUrl: string;
   requireClickToPlay?: boolean;
+  // Page-wide default for the stage's fullscreen button. Set by the host once
+  // (the polyfill <script> tag's data-disable-fullscreen-button) so a page does
+  // not have to mark up every single embed. An individual element can still opt
+  // back in with data-enable-fullscreen-button / a truthy enableFullscreenButton
+  // <object> param.
+  disableFullscreenButton?: boolean;
 }
 
 function compareSemver(a: string, b: string): number {
@@ -638,9 +644,17 @@ function replaceDirEmbed(config: PolyfillConfig, element: HTMLEmbedElement) {
   // On by default, opted OUT — the inverse of gestures, which are off until a
   // page asks for them. A fullscreen button cannot change how a movie reads
   // input, so there is no reason to make every host opt in.
-  const showFullscreenButton = !(element.hasAttribute('data-disable-fullscreen-button')
-    || (element.parentElement?.tagName === 'OBJECT'
-        && element.parentElement.hasAttribute('data-disable-fullscreen-button')));
+  //
+  // Three tiers, most specific first: an explicit per-element opt-IN wins, then
+  // any per-element opt-out (on the embed or the object wrapping it), then the
+  // page-wide default the host set on the polyfill <script> tag.
+  const object = element.parentElement?.tagName === 'OBJECT' ? element.parentElement : null;
+  const showFullscreenButton = (element.hasAttribute('data-enable-fullscreen-button')
+      || !!object?.hasAttribute('data-enable-fullscreen-button'))
+    ? true
+    : !(config.disableFullscreenButton
+      || element.hasAttribute('data-disable-fullscreen-button')
+      || !!object?.hasAttribute('data-disable-fullscreen-button'));
 
   let size = resolveReplacementSize(element);
   const newElement = document.createElement('div');
@@ -676,9 +690,13 @@ function replaceDirObject(config: PolyfillConfig, element: HTMLObjectElement, pa
     || getCaseInsensitiveValue(params, 'enableGestures') === 'true'
     || undefined;
 
-  // See replaceDirEmbed — on by default, opted out.
-  const showFullscreenButton = !(element.hasAttribute('data-disable-fullscreen-button')
-    || getCaseInsensitiveValue(params, 'disableFullscreenButton') === 'true');
+  // See replaceDirEmbed — on by default, opted out, page-wide default last.
+  const showFullscreenButton = (element.hasAttribute('data-enable-fullscreen-button')
+      || getCaseInsensitiveValue(params, 'enableFullscreenButton') === 'true')
+    ? true
+    : !(config.disableFullscreenButton
+      || element.hasAttribute('data-disable-fullscreen-button')
+      || getCaseInsensitiveValue(params, 'disableFullscreenButton') === 'true');
 
   const newElement = document.createElement('div');
   element.replaceWith(newElement);
