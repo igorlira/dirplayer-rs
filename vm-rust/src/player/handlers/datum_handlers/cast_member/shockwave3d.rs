@@ -3512,6 +3512,37 @@ impl Shockwave3dMemberHandlers {
                     }
                 })
             }
+            // `member.modelCount()` is absent from both the 11.5 Scripting
+            // Dictionary and its addendum â€” the documented spelling is
+            // `member.model.count`, which this file already answers through
+            // get_3d_collection_count. Intel's own ChickenChasin sample uses
+            // the method form to walk the scene it just LoadFile()d:
+            //     pModelCount = pSprite.member.modelCount()
+            //     repeat with i = 1 to pModelCount
+            //       if not (pSprite.member.model(i).name = "terrainmesh") then
+            // so it is the count that indexes model(1..N) â€” the same number,
+            // and the loop bound for reparenting the whole yard under a group.
+            // Inferred from that usage, not specified.
+            BuiltInSymbol::ModelCount => {
+                reserve_player_mut(|player| {
+                    let member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
+                    };
+                    let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                        .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
+                    let w3d = cast_member.member_type.as_shockwave3d()
+                        .ok_or_else(|| ScriptError::new("Not a 3D member".to_string()))?;
+                    let count = match w3d.parsed_scene.as_ref() {
+                        Some(scene) => Self::get_3d_collection_count(
+                            scene,
+                            Symbol::builtin(BuiltInSymbol::Model),
+                        ),
+                        None => 0,
+                    };
+                    Ok(player.alloc_datum(Datum::Int(count)))
+                })
+            }
             _ => Err(ScriptError::new(format!(
                 "No Shockwave3D member handler for '{}'", handler_name
             ))),
