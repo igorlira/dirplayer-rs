@@ -5753,8 +5753,19 @@ void main() {
         // `has_movie_light` counted a fallback as a real movie light.
         let is_fallback_light = |name: &str| matches!(name,
             "defaultambient" | "defaultdirectional" | "uiambient" | "uidirectional");
+        // `uidirectional` is NOT suppressed. The parser injects it exactly where
+        // Director does — the member's parse-time default camera rotated -45 deg
+        // about world X (measured on two movies, see parser.rs) — and Director
+        // KEEPS it even once the movie adds directionals of its own: its
+        // ChickenChasin light list is UIAmbient, UIDirectional, omni01, omni02
+        // and three "default max light"s, all live. Suppressing it there dropped
+        // the only light with a meaningful +Y and left the runtime-generated
+        // terrain lit by ambient alone. `defaultdirectional` is a different
+        // thing — dirplayer's own empty-scene invention, which Director has no
+        // equivalent of — so that one is still suppressed when the movie lights
+        // itself.
         let is_fallback_directional = |name: &str| matches!(name,
-            "defaultdirectional" | "uidirectional");
+            "defaultdirectional");
         let has_movie_light = scene.lights.iter().any(|l|
             l.enabled && !is_fallback_light(l.name.as_lower_str())
             && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));

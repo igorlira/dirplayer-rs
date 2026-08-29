@@ -191,12 +191,48 @@ impl W3dFileParser {
                 attenuation: [1.0, 0.0, 0.0],
                 ..Default::default()
             });
-            // Only the Z axis (columns 8/9/10) is read for a directional light's
-            // orientation; X/Y axes and position are unused but kept sane.
-            let mut t = [0.0f32; 16];
-            t[0] = 1.0; t[5] = 1.0;
-            t[8] = 0.8543; t[9] = -0.0015; t[10] = 0.5198;
-            t[12] = -397.3754; t[13] = 714.7632; t[14] = -538.8293;
+            // Director places this light by taking the member's DEFAULT CAMERA
+            // transform and rotating it -45 degrees about the WORLD X axis — a key
+            // light 45 degrees up over the camera's shoulder. Measured in
+            // Director's message window on two movies, and it reproduces both to
+            // 5 decimal places:
+            //
+            //   Havok "Properties"  camera zAxis (0.16222,-0.97333, 0.16222)
+            //                        -> light zAxis (0.16222,-0.57354, 0.80296)
+            //                       camera pos   (50,-50,-100)
+            //                        -> light pos  (50,-106.06602,-35.35534)
+            //   ChickenChasin       camera pos   (0,0,250)
+            //                        -> light pos  (0, 176.77669, 176.77669)
+            //                        -> light zAxis (0, 0.70711, 0.70711)
+            //
+            // The orientation therefore differs PER MOVIE, which is why a single
+            // hardcoded transform could not work: the old constant here was
+            // measured off `estate` and had a Y component of -0.0015, so it could
+            // never light an up-facing surface at all. ChickenChasin's runtime
+            // terrain is exactly that case and rendered unlit.
+            //
+            // Rotation by -45 deg about world X, applied to every row (the three
+            // basis vectors and the translation):
+            //     y' = (y + z) * cos45      z' = (z - y) * cos45
+            const C: f32 = std::f32::consts::FRAC_1_SQRT_2;
+            let cam = self.scene.nodes.iter()
+                .find(|n| n.node_type == W3dNodeType::View)
+                .map(|n| n.transform);
+            let mut t = match cam {
+                Some(c) => c,
+                None => {
+                    // No camera to derive from — keep an identity-ish frame.
+                    let mut d = [0.0f32; 16];
+                    d[0] = 1.0; d[5] = 1.0; d[10] = 1.0; d[15] = 1.0;
+                    d
+                }
+            };
+            for row in 0..4 {
+                let y = t[row * 4 + 1];
+                let z = t[row * 4 + 2];
+                t[row * 4 + 1] = (y + z) * C;
+                t[row * 4 + 2] = (z - y) * C;
+            }
             t[15] = 1.0;
             self.scene.nodes.push(W3dNode {
                 name: Symbol::from_str(&"UIDirectional".to_string()),
