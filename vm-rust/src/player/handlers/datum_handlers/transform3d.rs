@@ -205,7 +205,18 @@ impl Transform3dDatumHandlers {
             "prescale" => Self::scale(datum, args, false),
             "inverse" => Self::inverse(datum),
             "invert" => Self::invert(datum),
-            "duplicate" => Self::duplicate(datum),
+            // `duplicate` is the Scripting Dictionary's name for copying a transform
+            // (11.5, `transform (property)`: "t = ...model("Moon1").transform.duplicate()").
+            // `clone` is NOT documented on a transform — the dictionary lists it only for
+            // model/group/light/camera — but Intel's own sample movies, shipped with the
+            // Shockwave 3D asset Intel authored, call it on a transform and cannot work
+            // otherwise: Carousel's `init` opens with
+            //     gInitCameraTrans = member(1).camera(1).transform.clone()
+            // and its Zoom button clones the camera transform before writing `.position`,
+            // so a VOID answer would break the Reset and Zoom buttons outright.
+            // Inferred, not specified; a transform is a value object, so the only thing
+            // `clone` can mean here is the independent copy `duplicate` already returns.
+            "duplicate" | "clone" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
             "interpolate" => Self::interpolate(datum, args),
             "interpolateto" => Self::interpolate_to(datum, args),
