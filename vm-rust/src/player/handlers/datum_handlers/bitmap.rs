@@ -208,7 +208,22 @@ impl BitmapDatumHandlers {
             } else {
                 let x = player.get_datum(&args[0]).int_value()?;
                 let y = player.get_datum(&args[1]).int_value()?;
-                (x, y, false)
+                // `#integer` is documented on BOTH overloads — Director 11.5
+                // Scripting Dictionary, getPixel(): "imageObjRef.getPixel(x, y
+                // {, #integer})" as well as the point() form handled above.
+                // Only the point form read it, so the x/y form handed back a
+                // color object and any arithmetic on it raised. Intel's
+                // ChickenChasin builds its terrain from a heightmap with
+                //     tHeight = float(aHeightMap.getPixel(x, pHeight-y-1, #integer))/255
+                // which failed with "Cannot convert datum of type color_ref to
+                // float" before the terrain mesh could be generated at all.
+                let return_integer = if args.len() > 2 {
+                    let flag = player.get_datum(&args[2]).string_value().unwrap_or_default();
+                    flag.eq_ignore_ascii_case("integer")
+                } else {
+                    false
+                };
+                (x, y, return_integer)
             };
             let color = bitmap.get_pixel_color_ref(x as u16, y as u16);
             if return_integer {
