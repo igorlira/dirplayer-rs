@@ -4976,6 +4976,15 @@ void main() {
                     } else {
                         gl.uniform1i(shader.u_has_texture.as_ref(), 0);
                     }
+                } else if !tex_bound {
+                    // An untextured, non-primitive mesh on the OVERRIDE path left
+                    // `u_has_texture` at whatever the previous draw set, so it
+                    // sampled a stale texture belonging to another model. The
+                    // non-override path below already writes the 0 explicitly;
+                    // this branch simply did not exist. A uniform set only on some
+                    // paths is the same stale-uniform trap `u_flat_shading` and
+                    // `u_projection` hit before in this renderer.
+                    gl.uniform1i(shader.u_has_texture.as_ref(), 0);
                 }
                 // IFX default: white diffuse for textured models unless useDiffuseWithTexture
                 if tex_bound && !w3d_shader.use_diffuse_with_texture {
