@@ -100,6 +100,7 @@ impl W3dScene {
         let mut material_renames: HashMap<Symbol, Symbol> = HashMap::new();
         let mut texture_renames: HashMap<Symbol, Symbol> = HashMap::new();
         let mut node_renames: HashMap<Symbol, Symbol> = HashMap::new();
+        let mut motion_renames: HashMap<Symbol, Symbol> = HashMap::new();
 
         if generate_unique_names {
             // Model resources and raw meshes share one namespace: a node's
@@ -193,6 +194,30 @@ impl W3dScene {
                     motion.name = Symbol::from_str(&format!("{}-Key", new.as_str()));
                 }
             }
+            // Motions get their own namespace, and it has to be planned AFTER the
+            // "<node>-Key" pass above, which may already have moved a clip's name.
+            //
+            // Without this a motion-only .w3d silently OVERWROTE the clip it
+            // collided with instead of arriving alongside it, because merge_named
+            // replaces a same-named entry. Intel's ChickenChasin loads six files
+            // and reads the newest clip back as the LAST motion in the scene —
+            //     tCount = pSprite.member.motion.count
+            //     gWaveMotion = pSprite.member.motion(tCount).name
+            // with the comment "The name of the new motion is determined
+            // procedurally", i.e. Director renames the incoming clip rather than
+            // dropping the old one. kid_boy_wave.w3d and kid_boy_cheer.w3d each
+            // carry a clip named for the same rig as kid_boy.w3d, so both were
+            // swallowed: motion.count never grew, and the movie picked up the
+            // PREVIOUS file's clip ("Chicken-Key" as the wave, "Feather10-Key" as
+            // the cheer) instead of the wave and cheer animations.
+            let mut taken_motions: HashSet<Symbol> =
+                self.motions.iter().map(|m| m.name).collect();
+            let motion_names: Vec<Symbol> = src.motions.iter().map(|m| m.name).collect();
+            plan_renames(motion_names, &mut taken_motions, &mut motion_renames);
+            for motion in &mut src.motions {
+                remap(&mut motion.name, &motion_renames);
+            }
+
             // Keyed collections have to be rebuilt under the new keys.
             src.model_resources = src
                 .model_resources
