@@ -2832,6 +2832,12 @@ impl Shockwave3dMemberHandlers {
                                                 // Flash members are rendered off-screen via Ruffle
                                                 // (flash_dispatch above), not the synchronous bitmap path.
                                                 CastMemberType::Flash(_) => None,
+                                                // A TEXT member is a legal source: the dictionary says
+                                                // only "#fromCastMember (a cast member)", with no
+                                                // bitmap restriction, and Director rasterises it the
+                                                // same way the member's own `.image` does. Resolved
+                                                // after this block, which only has a shared borrow.
+                                                CastMemberType::Text(_) => None,
                                                 _ => {
                                                     console_warn!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): member {}:{} '{}' is {} not Bitmap",
@@ -2842,6 +2848,51 @@ impl Shockwave3dMemberHandlers {
                                                 }
                                             }
                                         })
+                                    };
+                                    // Intel's ChickenChasin draws its score with
+                                    //     member(4).newTexture("mytex", #fromCastMember, member("score"))
+                                    //     sprite(1).camera.addOverlay(...)
+                                    // The "not Bitmap" bail above left the texture VOID, so the
+                                    // overlay was created with no source and "Score: 0" never
+                                    // appeared. Rasterise a text member through the very same
+                                    // path its `.image` getter uses.
+                                    let rgba_data = match rgba_data {
+                                        Some(v) => Some(v),
+                                        None => {
+                                            let td = player.movie.cast_manager
+                                                .find_member_by_ref(&src_ref)
+                                                .and_then(|m| match &m.member_type {
+                                                    CastMemberType::Text(t) => Some(t.clone()),
+                                                    _ => None,
+                                                });
+                                            match td {
+                                                Some(td) => match crate::player::handlers::datum_handlers::cast_member::text::TextMemberHandlers::render_text_image(player, &src_ref, &td) {
+                                                    Ok(bmp) => {
+                                                        let (w, h) = (bmp.width, bmp.height);
+                                                        let palettes = player.movie.cast_manager.palettes();
+                                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                                        for y in 0..h as usize {
+                                                            for x in 0..w as usize {
+                                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                                let i = (y * w as usize + x) * 4;
+                                                                rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
+                                                                // Keep the rasterised alpha, unlike the
+                                                                // bitmap arm above: a text member's image is
+                                                                // glyphs over a TRANSPARENT ground, and this
+                                                                // texture's whole purpose is to be composited
+                                                                // as a camera overlay. Forcing it opaque drew
+                                                                // the score as a solid black bar across the
+                                                                // top of the stage instead of bare lettering.
+                                                                rgba[i + 3] = a;
+                                                            }
+                                                        }
+                                                        Some((w, h, rgba))
+                                                    }
+                                                    Err(_) => None,
+                                                },
+                                                None => None,
+                                            }
+                                        }
                                     };
                                     if let Some((w, h, rgba)) = rgba_data {
                                         let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
@@ -3541,14 +3592,14 @@ impl Shockwave3dMemberHandlers {
                 })
             }
             // `member.modelCount()` is absent from both the 11.5 Scripting
-            // Dictionary and its addendum â€” the documented spelling is
+            // Dictionary and its addendum — the documented spelling is
             // `member.model.count`, which this file already answers through
             // get_3d_collection_count. Intel's own ChickenChasin sample uses
             // the method form to walk the scene it just LoadFile()d:
             //     pModelCount = pSprite.member.modelCount()
             //     repeat with i = 1 to pModelCount
             //       if not (pSprite.member.model(i).name = "terrainmesh") then
-            // so it is the count that indexes model(1..N) â€” the same number,
+            // so it is the count that indexes model(1..N) — the same number,
             // and the loop bound for reparenting the whole yard under a group.
             // Inferred from that usage, not specified.
             BuiltInSymbol::ModelCount => {

@@ -424,7 +424,7 @@ impl TextMemberHandlers {
     /// twin described on `Bitmap::hi_res`. It reads `text_data` and nothing
     /// else about the member, which is what makes the second run possible —
     /// pass it a metric-scaled copy and it lays the same text out larger.
-    fn render_text_image(
+    pub fn render_text_image(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
         text_data: &TextMember,
