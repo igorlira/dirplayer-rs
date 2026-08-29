@@ -6401,8 +6401,52 @@ pub fn get_concrete_sprite_rect(player: &DirPlayer, sprite: &Sprite) -> IntRect 
             // the indicator's opaque label area run off the far side of the stage
             // (Rasterwerks PHOSPHOR settings: Mute / Positional / Spectator each drew
             // as a black bar across the panel).
-            let btn_w = if rect_w > 0 { rect_w + extras } else { sprite.width.max(0) };
-            let btn_h = if rect_h > 0 { rect_h + extras } else { sprite.height.max(0) };
+            // A button member carries no art of its own: Director draws the
+            // pushbutton chrome into the SPRITE's rect, and the member's stored
+            // initialRect is only the default size used when it is first dragged
+            // to the stage. Authors resize the sprite afterwards and the stored
+            // rect goes stale, so for a #pushButton the score is the authority.
+            //
+            // Measured across three movies (all four of Carousel's, both of the
+            // Havok "Properties" demo's, and Lore's), the score agrees on a
+            // uniform button height while the stored initialRects disagree
+            // wildly and are plainly stale:
+            //
+            //   Carousel  Start / Ride / Zoom in / Reset View   score 16 each,
+            //                                        initialRect 8 / 32 / 16 / 12
+            //   Havok     Friction / Restitution               score 16 each,
+            //                                        initialRect 13 / 26
+            //
+            // Director draws one row of identical buttons in both (see the
+            // Carousel reference capture); honouring the initialRect gave four
+            // different heights and clipped "Start" to a sliver of its own
+            // label. Widths agree either way in every case above.
+            //
+            // Scoped to #pushButton deliberately. A #checkBox / #radioButton
+            // box is the INDICATOR plus a label area that Director may wrap, so
+            // its score box is not a chrome rect and is not interchangeable with
+            // the member rect — those keep the existing behaviour untouched,
+            // including the negative-width case noted below.
+            //
+            // Only a POSITIVE score dimension is taken, so the -4 that Director
+            // writes for an empty-label indicator still falls through to the
+            // clamped path (Rasterwerks PHOSPHOR settings).
+            let is_push_button = matches!(
+                button_member.button_type,
+                super::cast_member::ButtonType::PushButton
+            );
+            let score_w = if is_push_button && sprite.width > 0 { Some(sprite.width) } else { None };
+            let score_h = if is_push_button && sprite.height > 0 { Some(sprite.height) } else { None };
+            let btn_w = match score_w {
+                Some(w) => w,
+                None if rect_w > 0 => rect_w + extras,
+                None => sprite.width.max(0),
+            };
+            let btn_h = match score_h {
+                Some(h) => h,
+                None if rect_h > 0 => rect_h + extras,
+                None => sprite.height.max(0),
+            };
             // For checkbox/radio, add 16px width for the indicator
             let extra_w = match button_member.button_type {
                 super::cast_member::ButtonType::CheckBox | super::cast_member::ButtonType::RadioButton => 16,
