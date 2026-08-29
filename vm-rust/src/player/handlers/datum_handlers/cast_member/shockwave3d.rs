@@ -2282,6 +2282,19 @@ impl Shockwave3dMemberHandlers {
                         let mesh_num_faces = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 2 {
                             player.get_datum(&args[1]).int_value().unwrap_or(0) as u32
                         } else { 0 };
+                        // numVertices (arg 3). Director 11.5, newMesh: "you must
+                        // set values for at least the vertexList and
+                        // face[index].vertices properties of the new mesh,
+                        // followed by a call to its build()". Movies do that by
+                        // INDEXING the pre-sized list — Intel's ChickenChasin
+                        // fills a 64x64 terrain with
+                        //     meshres.vertexList[i*mapWidth+j] = vector(...)
+                        // so the list has to exist at its full length the moment
+                        // newMesh returns, or every write lands out of bounds and
+                        // build() sees no geometry at all.
+                        let mesh_num_verts = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 3 {
+                            player.get_datum(&args[2]).int_value().unwrap_or(0).max(0) as u32
+                        } else { 0 };
                         // newMesh(name, faces, vertices, normals, colors,
                         // textureCoordinates, textureLayers) — the 7th argument.
                         // Kept so `face[i].textureLayer[n]` can offer the right
@@ -2599,6 +2612,9 @@ impl Shockwave3dMemberHandlers {
                                             mesh_build_layer_count = mesh_num_tex_layers;
                                             let mut mesh_info = ClodMeshInfo::default();
                                             mesh_info.num_faces = num_faces;
+                                            if mesh_num_verts > 0 {
+                                                mesh_info.num_vertices = mesh_num_verts;
+                                            }
                                             // Store primitive type so dimension setters can regenerate
                                             let prim_type = if !new_res_type.is_empty() {
                                                 Some(new_res_type.clone())

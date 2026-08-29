@@ -6446,13 +6446,48 @@ impl Shockwave3dObjectDatumHandlers {
                     let dbg_had_face_list = face_list_ref.is_some();
 
                     // 2. Read build data (vertexList, textureCoordinateList, etc.)
-                    let build_data = {
+                    let mut build_data = {
                         let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                         member.and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| w3d.runtime_state.mesh_build_data.get(&res_name))
                             .cloned()
                             .unwrap_or_default()
                     };
+
+                    // A movie may fill the vertices EITHER by assigning the whole
+                    // list (`res.vertexList = [...]`, handled by the setter, which
+                    // is what lands in mesh_build_data) or by writing into the
+                    // persistent list element by element
+                    // (`res.vertexList[i] = vector(...)`, Intel's ChickenChasin
+                    // terrain). Both are documented; take the per-element list
+                    // when it carries anything, since the whole-list setter is
+                    // what seeds mesh_build_data and the two cannot both be the
+                    // freshest source.
+                    let vl_key = Symbol::from_str(&format!("vertexList:{}", res_name));
+                    let vl_ref = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                        member.and_then(|m| m.member_type.as_shockwave3d())
+                            .and_then(|w3d| w3d.runtime_state.shader_texture_lists.get(&vl_key))
+                            .cloned()
+                    };
+                    if let Some(vl_ref) = vl_ref {
+                        if let Datum::List(_, items, _) = player.get_datum(&vl_ref).clone() {
+                            let verts: Vec<[f32; 3]> = items.iter().map(|r| {
+                                match player.get_datum(r) {
+                                    Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                                    _ => [0.0, 0.0, 0.0],
+                                }
+                            }).collect();
+                            // All-zero means the movie never wrote it (the list is
+                            // seeded with zero vectors), so don't clobber a
+                            // whole-list assignment with placeholder geometry.
+                            let any_written = verts.iter().any(|v| v != &[0.0, 0.0, 0.0]);
+                            if any_written {
+                                build_data.vertex_list = verts;
+                            }
+                        }
+                    }
+                    let build_data = build_data;
 
                     // 3. Extract face vertex/texcoord/color indices and shader assignments
                     struct FaceData {
@@ -8061,9 +8096,35 @@ impl Shockwave3dObjectDatumHandlers {
             "resolution" => Ok(player.alloc_datum(Datum::Int(
                 res.map(|r| r.primitive_resolution as i32).unwrap_or(0)))),
             "vertexList" => {
-                // For meshes built via newMesh()+build(), the positions live
-                // in scene.clod_meshes keyed by the resource name. Director
-                // exposes this list as `modelResource(name).vertexList`.
+                // Director exposes a mesh resource's positions as
+                // `modelResource(name).vertexList`, and the documented way to
+                // fill a newMesh is to write into it BY INDEX
+                // (11.5, newMesh: "you must set values for at least the
+                // vertexList and face[index].vertices properties ... followed by
+                // a call to its build()"). That only works if every read hands
+                // back the SAME list datum, exactly as `face` below does — this
+                // used to rebuild a throwaway list from scene.clod_meshes on
+                // every access, which is empty until build() runs, so
+                // `count(vertexList)` was 0 and every indexed write was
+                // discarded. Intel's ChickenChasin builds its whole 64x64
+                // terrain that way and got a resource with 7938 faces and no
+                // vertices, i.e. no visible ground at all.
+                //
+                // Cached under a "vertexList:" key alongside the face list, so
+                // build() can read back whatever the movie wrote.
+                let vl_key = Symbol::from_str(&format!("vertexList:{}", resource_name));
+                let existing_ref = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.shader_texture_lists.get(&vl_key))
+                        .cloned()
+                };
+                if let Some(list_ref) = existing_ref {
+                    return Ok(list_ref);
+                }
+                // Seed from the built geometry when there is any, otherwise from
+                // the vertex count newMesh reserved (zero vectors, which is what
+                // Director starts a new mesh's vertexList as).
                 let mut items = VecDeque::new();
                 if let Some(meshes) = scene.clod_meshes.get(&resource_name) {
                     for mesh in meshes {
@@ -8074,9 +8135,23 @@ impl Shockwave3dObjectDatumHandlers {
                         }
                     }
                 }
-                Ok(player.alloc_datum(Datum::List(
+                if items.is_empty() {
+                    let reserved: u32 = res
+                        .map(|r| r.mesh_infos.iter().map(|m| m.num_vertices).sum())
+                        .unwrap_or(0);
+                    for _ in 0..reserved {
+                        items.push_back(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])));
+                    }
+                }
+                let list_ref = player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List, items, false,
-                )))
+                ));
+                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                        w3d.runtime_state.shader_texture_lists.insert(vl_key, list_ref.clone());
+                    }
+                }
+                Ok(list_ref)
             },
             "face.count" | "faceCount" => {
                 let count: u32 = res.map(|r| r.mesh_infos.iter().map(|m| m.num_faces).sum()).unwrap_or(0);
