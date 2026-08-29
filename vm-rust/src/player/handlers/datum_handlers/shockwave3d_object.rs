@@ -1750,6 +1750,55 @@ impl Shockwave3dObjectDatumHandlers {
                         Datum::String(s) => Symbol::from_str(s),
                         _ => Symbol::empty(),
                     };
+                    // "Setting the textureList property to VOID disables texturing
+                    // for all layers. The default value is VOID." (Director 11.5
+                    // Scripting Dictionary, `textureList`.) `texture` is the
+                    // layer-1 shortcut, so a VOID there clears that layer.
+                    //
+                    // This used to fall through the `!tex_name.is_empty()` guard
+                    // below and do nothing at all, so a shader kept whatever
+                    // texture it had. Intel's ChickenChasin builds its terrain
+                    // shader with
+                    //     tShader.texture = Void
+                    //     tShader.diffuse = rgb(64,192,54)
+                    // to get flat grass-green; the no-op left the shader on
+                    // "defaulttexture", and since a newMesh terrain has no
+                    // texture coordinates every vertex sampled the same texel and
+                    // the whole hillside drew black instead of green.
+                    let clearing = matches!(value, Datum::Void);
+                    if clearing && s3d_ref.object_type == BuiltInSymbol::Shader {
+                        let clear_all = prop_name.eq_ignore_ascii_case("textureList");
+                        let list_ref = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .and_then(|w3d| w3d.runtime_state.shader_texture_lists.get(&s3d_ref.name))
+                                .cloned()
+                        };
+                        if let Some(list_ref) = list_ref {
+                            let void_ref = player.alloc_datum(Datum::Void);
+                            if let Datum::List(_, items, _) = player.get_datum_mut(&list_ref) {
+                                if clear_all {
+                                    for it in items.iter_mut() { *it = void_ref.clone(); }
+                                } else if !items.is_empty() {
+                                    items[0] = void_ref;
+                                }
+                            }
+                        }
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    if let Some(shader) = scene.shaders.iter_mut().find(|s| s.name == s3d_ref.name) {
+                                        if clear_all {
+                                            shader.texture_layers.clear();
+                                        } else if !shader.texture_layers.is_empty() {
+                                            shader.texture_layers.remove(0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
                     if !tex_name.is_empty() && s3d_ref.object_type == BuiltInSymbol::Shader {
                         // Get persistent textureList ref if it exists (read before mutable borrow)
                         let list_ref = {
