@@ -2866,9 +2866,24 @@ impl Shockwave3dObjectDatumHandlers {
                                                                 pos.push([-sl * r, y, cl * r]);
                                                                 nrm.push([-sl, 0.0, cl]);
                                                                 // pre-centre to cancel the shader CLOD remap; final UV
-                                                                // is (u, ring): v=0 at the top ring, v=1 at the bottom
-                                                                // edge (where GTEX bakes its black sawtooth).
-                                                                uvs.push([u - 0.5, 0.5 - ring as f32]);
+                                                                // is (u_wrap, ring): v=0 at the top ring, v=1 at the
+                                                                // bottom edge (where GTEX bakes its black sawtooth).
+                                                                //
+                                                                // U RUNS THE OTHER WAY ON AN OUTWARD-FACING WALL.
+                                                                // IFX builds the wall by sweeping the arc and writing
+                                                                // `u` per radial step, then `OrientPrimitiveToBeta4`
+                                                                // rewrites every texcoord as `u = 1 - u` on the way
+                                                                // into Director's axes. The sweep's own direction is
+                                                                // chosen by the primitive's FACING byte
+                                                                // (CIFXPrimitiveGenerator::MeshBuilder): facing #back
+                                                                // walks u UP from 0, every other facing walks it DOWN
+                                                                // from 1 — so after the flip the two end up opposite.
+                                                                // We only ever emitted the #back spelling, which is why
+                                                                // SweeTarts' `#cylinder, #back` sky wall is correct and
+                                                                // its `#cylinder, #front` candy roll wore its wrapper
+                                                                // mirrored.
+                                                                let u_wrap = if facing == "back" { u } else { 1.0 - u };
+                                                                uvs.push([u_wrap - 0.5, 0.5 - ring as f32]);
                                                             }
                                                         }
                                                         // segs quads connect slice i→i+1; a full sweep's last vertex
