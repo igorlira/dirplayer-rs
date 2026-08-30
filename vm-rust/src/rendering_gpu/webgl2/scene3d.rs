@@ -261,6 +261,9 @@ struct OutlineShader {
     u_view: Option<WebGlUniformLocation>,
     u_projection: Option<WebGlUniformLocation>,
     u_outline_width: Option<WebGlUniformLocation>,
+    u_outline_pixels: Option<WebGlUniformLocation>,
+    u_far_only: Option<WebGlUniformLocation>,
+    u_viewport: Option<WebGlUniformLocation>,
     u_outline_color: Option<WebGlUniformLocation>,
 }
 
@@ -2670,16 +2673,20 @@ void main() {
             }
         }
 
-        // Render ShaderInker outlines (after geometry, before particles)
-        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, runtime_state);
+        // Render particles (after opaque geometry), alpha-blended.
+        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
 
-        // Re-activate main shader after outline pass (particles need it or their own shader)
+        // #inker outlines, LAST. The inverted hull needs the inked model's own depth to
+        // clip it, and a translucent model wrote none (the transparent pass runs
+        // depth_mask(false)), so the pass lays that depth down itself. Drawing it after the
+        // particles keeps those extra depth writes from occluding anything: nothing but
+        // post-processing follows.
+        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, (width, height), runtime_state);
+
+        // Re-activate main shader after the outline pass.
         if let Some(ref shader) = self.shader {
             gl.use_program(Some(&shader.program));
         }
-
-        // Render particles (after opaque geometry), alpha-blended.
-        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
 
         // Note: overlays are rendered AFTER all camera passes, not per-camera
 
@@ -4284,18 +4291,56 @@ uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
 uniform float u_outline_width;
+uniform float u_outline_pixels;
+uniform vec2 u_viewport;
+
+out float v_facing;
 
 void main() {
-    // Expand vertex along normal for outline thickness
+    // Model-space expansion — what the #inker SHADER TYPE's `outline_width` means.
     vec3 expanded = a_position + a_normal * u_outline_width;
-    gl_Position = u_projection * u_view * u_model * vec4(expanded, 1.0);
+    vec4 clip = u_projection * u_view * u_model * vec4(expanded, 1.0);
+
+    // Which side of the surface this vertex is on, geometrically. The classic inverted
+    // hull wants the model's FAR side, and selects it by winding (cull_face). That breaks
+    // the moment a mesh is two-sided: a resource authored #both carries reverse-wound
+    // copies of every face, so the NEAR surface appears as a back face too and gets drawn
+    // — and because the hull is expanded OUTWARD, its fragment at a given pixel comes from
+    // a point nearer the silhouette centre and is therefore NEARER than the model, so no
+    // depth test can reject it. SweeTarts' bubble (#sphere, #both) filled solid white.
+    // dot(N, eye→fragment) > 0 means the surface faces away from the camera, which is the
+    // far side whatever the winding says.
+    vec3 nv = normalize(mat3(u_view * u_model) * a_normal);
+    vec3 pv = (u_view * u_model * vec4(expanded, 1.0)).xyz;
+    v_facing = dot(nv, normalize(pv));
+
+    // Screen-space expansion — what the #inker MODIFIER needs. Director's inker draws a
+    // thin line of CONSTANT width; a model-space offset would instead scale with the
+    // model and shrink with distance. Push the clip-space position along the projected
+    // normal by a fixed number of pixels: multiplying by clip.w undoes the perspective
+    // divide, so the offset survives it as an exact pixel count.
+    if (u_outline_pixels > 0.0) {
+        vec2 n_clip = (u_projection * vec4(nv, 0.0)).xy;
+        if (dot(n_clip, n_clip) > 1e-12) {
+            clip.xy += normalize(n_clip) * (u_outline_pixels * 2.0 / u_viewport) * clip.w;
+        }
+    }
+    gl_Position = clip;
 }
 "#;
         let fs = r#"#version 300 es
 precision mediump float;
 uniform vec4 u_outline_color;
+in float v_facing;
+uniform float u_far_only;
 out vec4 frag_color;
 void main() {
+    // Keep only the far side (see the note in the vertex shader) — but ONLY for the hull
+    // itself. The DEPTH PREPASS runs through this same program and must record the
+    // NEAREST surface; discarding the near side there left it holding the far side's
+    // depth, so the hull was no longer clipped by the model and the sphere's far pole
+    // showed as a white triangle at the centre of the bubble.
+    if (u_far_only > 0.5 && v_facing <= 0.0) { discard; }
     frag_color = u_outline_color;
 }
 "#;
@@ -4310,14 +4355,32 @@ void main() {
             u_view: u("u_view"),
             u_projection: u("u_projection"),
             u_outline_width: u("u_outline_width"),
+            u_outline_pixels: u("u_outline_pixels"),
+            u_far_only: u("u_far_only"),
+            u_viewport: u("u_viewport"),
             u_outline_color: u("u_outline_color"),
             program,
         });
         Ok(())
     }
 
-    /// Render outlines for models using ShaderInker.
-    /// Called after the main geometry pass, draws back-faces expanded along normals.
+    /// Director's #inker draws a thin line of CONSTANT width - see the reference capture
+    /// of SweeTarts' level-3 bubble: a ~1px white circle around a ~130px sphere. The
+    /// modifier exposes no width property at all, so this is a fixed pixel count.
+    const INKER_LINE_PIXELS: f32 = 1.5;
+
+    /// Render outlines for models carrying the #inker modifier, or wearing a shader whose
+    /// TYPE is #inker.
+    ///
+    /// Classic inverted hull: draw the model's FAR faces expanded outward and let the
+    /// model's own near surface occlude them, so only the rim survives.
+    ///
+    /// Two ways in: a shader whose TYPE is #inker, or a model carrying the #inker
+    /// MODIFIER (`model.addModifier(#inker)`), which keeps its ordinary shader and holds
+    /// its own lineColor/silhouettes/lineOffset. Only the first was ever handled - and it
+    /// never fired either, since no corpus movie uses that shader type, which is how the
+    /// culling bug below survived unnoticed. SweeTarts 3D's level-3 bubble is a plain
+    /// #sphere whose white rim comes entirely from the modifier.
     fn render_inker_outlines(
         &mut self,
         context: &WebGL2Context,
@@ -4325,52 +4388,13 @@ void main() {
         member_key: &(i32, i32),
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
+        viewport: (u32, u32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
     ) -> Result<(), JsValue> {
         use crate::director::chunks::w3d::types::W3dShaderType;
 
-        // Two ways in: a shader whose TYPE is #inker, or a model carrying the #inker
-        // MODIFIER (`model.addModifier(#inker)`), which keeps its ordinary shader and
-        // holds its own lineColor/silhouettes/lineOffset. Only the first was handled, so
-        // a movie that inks a model the documented way got no outline at all —
-        // SweeTarts 3D's level-3 bubble is a plain #sphere whose white rim comes entirely
-        // from the modifier.
-        // The #inker MODIFIER is parsed, stored and scriptable (see `InkerState`), but it
-        // does NOT draw here — only the #inker SHADER TYPE does. This expanded-back-face
-        // pass yields a rim only while the model occludes its own hull, and SweeTarts'
-        // level-3 bubble is drawn in the transparent pass, which writes no depth: wiring
-        // the modifier in painted it as a solid WHITE DISC. Measured with the pass off,
-        // its centre reads (144, 255, 255) — its own cyan emissive — so the white was
-        // provably the hull. A depth-only prepass of the model plus an explicit
-        // `enable(DEPTH_TEST)` did NOT clip it either, so something else about this pass's
-        // depth state is wrong and needs finding before the modifier can use it. A
-        // per-fragment N·V rim would sidestep the depth buffer entirely.
-        let has_modifier = false;
-        let has_inker = has_modifier || scene.nodes.iter().any(|n| {
-            if n.node_type != W3dNodeType::Model { return false; }
-            let shader_name = runtime_state
-                .and_then(|rs| Self::node_shader_override(rs, n.name, None).copied())
-                .unwrap_or(n.shader_name);
-            Self::find_shader_ci(&scene.shaders, shader_name)
-                .map(|s| s.shader_type == W3dShaderType::Inker)
-                .unwrap_or(false)
-        });
-        if !has_inker { return Ok(()); }
-
-        self.ensure_outline_shader(context)?;
-        let gl = context.gl();
-        let outline = self.outline_shader.as_ref().unwrap();
-
-        gl.use_program(Some(&outline.program));
-        gl.uniform_matrix4fv_with_f32_array(outline.u_view.as_ref(), false, view_matrix);
-        gl.uniform_matrix4fv_with_f32_array(outline.u_projection.as_ref(), false, projection_matrix);
-
-        // Render back-faces only (front-face culling gives outline effect)
-        gl.enable(WebGl2RenderingContext::CULL_FACE);
-        gl.cull_face(WebGl2RenderingContext::BACK); // Cull back = draw front → flip for outline
-        // Actually for outline: cull FRONT faces, draw BACK faces expanded outward
-        gl.cull_face(WebGl2RenderingContext::FRONT);
-
+        // (node, model-space width, screen-space width in px, colour, depth bias)
+        let mut inked: Vec<(&W3dNode, f32, f32, [f32; 4], Option<f32>)> = Vec::new();
         for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
             let ink = runtime_state.and_then(|rs| rs.inker_state.get(&model_node.name));
             let shader_name = runtime_state
@@ -4380,66 +4404,135 @@ void main() {
                 Some(s) if s.shader_type == W3dShaderType::Inker => Some(s),
                 _ => None,
             };
-            // The modifier only draws while it has something to draw: `silhouettes` is
-            // the property that outlines the model's border, which is what this
-            // expanded-back-face pass approximates.
-            //
-            // ...but only for an OPAQUE model. The technique relies on the model itself
-            // occluding the expanded hull so that just the rim survives, and this pass
-            // runs after the transparent pass, which draws with `depth_mask(false)`. A
-            // translucent model therefore writes no depth and the hull paints its whole
-            // silhouette solid — SweeTarts' level-3 bubble came out as a flat white disc
-            // instead of a see-through bubble with a sharp white rim. Skipping it leaves
-            // the bubble correct apart from the missing rim, which is the better of the
-            // two wrong answers. Doing this properly means a rim that does not depend on
-            // the depth buffer (a depth-only prepass for inked transparent models, or a
-            // per-fragment N·V rim) — a bigger change than this pass.
+            // `silhouettes` outlines the model's border and `boundary` the edge of an open
+            // surface; both are what this hull approximates. `creases` needs per-edge
+            // dihedral-angle detection and has no implementation - a model with ONLY
+            // creases on draws nothing rather than a wrong silhouette.
             let modifier_draws = ink.map(|i| i.silhouettes || i.boundary).unwrap_or(false);
-            if inker_shader.is_none() && !modifier_draws { continue; }
-
-            let (width, color) = match (ink, inker_shader) {
-                (Some(i), _) => {
-                    // `lineOffset` is "where lines are drawn relative to the surface being
-                    // shaded and the camera" over -100..+100; a negative value pushes the
-                    // line outward, which is exactly this pass's hull expansion. Map its
-                    // magnitude onto the same small model-space width the shader path uses.
-                    let w = (i.line_offset.abs() / 100.0).max(0.004);
-                    let c = [i.line_color.0 as f32 / 255.0, i.line_color.1 as f32 / 255.0,
-                             i.line_color.2 as f32 / 255.0, 1.0];
-                    (w, c)
+            match (ink, inker_shader) {
+                (Some(i), _) if modifier_draws => {
+                    let color = [i.line_color.0 as f32 / 255.0, i.line_color.1 as f32 / 255.0,
+                                 i.line_color.2 as f32 / 255.0, 1.0];
+                    // `lineOffset` is documented as "where lines are drawn relative to the
+                    // surface being shaded and the camera" - a depth bias, NOT a width, and
+                    // one that applies only while `useLineOffset` is TRUE. Reading it as a
+                    // hull thickness scaled the line by an arbitrary movie value (this
+                    // movie's -10 on a radius-25 sphere came out a 0.4% hairline).
+                    let bias = if i.use_line_offset { Some(i.line_offset) } else { None };
+                    inked.push((model_node, 0.0, Self::INKER_LINE_PIXELS, color, bias));
                 }
-                (None, Some(s)) => (
-                    if s.outline_width > 0.0 { s.outline_width } else { 0.02 },
-                    s.outline_color,
-                ),
-                (None, None) => continue,
-            };
-            gl.uniform1f(outline.u_outline_width.as_ref(), width);
-            gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
+                (_, Some(s)) => {
+                    let w = if s.outline_width > 0.0 { s.outline_width } else { 0.02 };
+                    inked.push((model_node, w, 0.0, s.outline_color, None));
+                }
+                _ => {}
+            }
+        }
+        if inked.is_empty() { return Ok(()); }
 
+        self.ensure_outline_shader(context)?;
+        let gl = context.gl();
+        let outline = self.outline_shader.as_ref().unwrap();
+
+        gl.use_program(Some(&outline.program));
+        gl.uniform_matrix4fv_with_f32_array(outline.u_view.as_ref(), false, view_matrix);
+        gl.uniform_matrix4fv_with_f32_array(outline.u_projection.as_ref(), false, projection_matrix);
+        gl.uniform2f(outline.u_viewport.as_ref(), viewport.0.max(1) as f32, viewport.1.max(1) as f32);
+
+        gl.disable(WebGl2RenderingContext::BLEND);
+        gl.enable(WebGl2RenderingContext::DEPTH_TEST);
+        gl.depth_func(WebGl2RenderingContext::LEQUAL);
+        gl.enable(WebGl2RenderingContext::CULL_FACE);
+
+        for (model_node, model_w, px, color, bias) in inked {
             let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
             gl.uniform_matrix4fv_with_f32_array(outline.u_model.as_ref(), false, &world_matrix);
+            gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
 
             let resource = if !model_node.model_resource_name.is_empty() {
                 &model_node.model_resource_name
             } else {
                 &model_node.resource_name
             };
+            let has_group = self.member_data.get(member_key)
+                .map(|d| d.mesh_groups.contains_key(resource)).unwrap_or(false);
+            if !has_group { continue }
 
-            if let Some(gpu_data) = self.member_data.get(member_key) {
-                if let Some(mesh_group) = gpu_data.mesh_groups.get(resource) {
-                    for mesh_buf in mesh_group {
-                        mesh_buf.bind(gl);
-                        mesh_buf.draw(gl);
-                        mesh_buf.unbind(gl);
-                    }
-                }
+
+            // PASS A - depth only. The hull is clipped by the model itself, and a
+            // TRANSLUCENT model never wrote any depth: the transparent pass draws with
+            // `depth_mask(false)`, so the far hull passed the depth test everywhere and
+            // painted the bubble as a solid white disc. Lay the model's near surface into
+            // the depth buffer first, writing no colour. This whole pass runs after the
+            // particles for exactly this reason - the extra depth must not occlude
+            // anything still to be drawn.
+            gl.color_mask(false, false, false, false);
+            gl.depth_mask(true);
+            // Culling OFF, not cull_face(FRONT): a resource authored #both (SweeTarts'
+            // bubble) carries reverse-wound inner faces, so front-culling no longer
+            // isolates the near surface and the prepass laid down the FAR depth - the
+            // hull stopped being clipped and the bubble went back to a solid white disc.
+            // Depth-only with the depth test does the right thing for one- and two-sided
+            // meshes alike: whatever the winding, the buffer keeps the nearest fragment.
+            gl.disable(WebGl2RenderingContext::CULL_FACE);
+            gl.uniform1f(outline.u_outline_width.as_ref(), 0.0);
+            gl.uniform1f(outline.u_outline_pixels.as_ref(), 0.0);
+            gl.uniform1f(outline.u_far_only.as_ref(), 0.0);
+            self.draw_mesh_group(gl, member_key, resource);
+
+            // PASS B - the expanded hull's FAR faces.
+            //
+            // This pass used to `cull_face(FRONT)` "to draw back faces expanded". But this
+            // renderer's projection is Y-flipped, so cull_face(FRONT)/front_face(CCW) is
+            // already its global default for ORDINARY geometry (see the camera setup, and
+            // `visibility = #back` - draw only far faces - implemented as cull_face(BACK)).
+            // The pass was therefore drawing the model's NEAR faces expanded outward: in
+            // front of the model at every pixel, a solid disc no matter what the depth
+            // buffer held, which is why a depth prepass and an explicit DEPTH_TEST both
+            // changed nothing on their own. The far side is BACK here.
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(false);
+            // No culling: the shader's N.V discard selects the far side, which is correct
+            // whether or not the mesh carries reverse-wound duplicates.
+            gl.disable(WebGl2RenderingContext::CULL_FACE);
+            // LESS, not LEQUAL. The hull is expanded in SCREEN space, which does not
+            // change its depth, so a face coincident with the one the prepass recorded
+            // must be REJECTED - otherwise a two-sided mesh's reverse-wound near faces
+            // (which cull_face(BACK) also selects) pass at exactly the prepass depth and
+            // fill the silhouette solid. Only geometry genuinely in front of what the
+            // depth buffer holds - i.e. the rim, outside the model - should draw.
+            gl.depth_func(WebGl2RenderingContext::LESS);
+            gl.uniform1f(outline.u_outline_width.as_ref(), model_w);
+            gl.uniform1f(outline.u_outline_pixels.as_ref(), px);
+            gl.uniform1f(outline.u_far_only.as_ref(), 1.0);
+            if let Some(units) = bias {
+                gl.enable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+                gl.polygon_offset(0.0, units);
+            }
+            self.draw_mesh_group(gl, member_key, resource);
+            if bias.is_some() {
+                gl.disable(WebGl2RenderingContext::POLYGON_OFFSET_FILL);
+                gl.polygon_offset(0.0, 0.0);
             }
         }
 
-        // Restore culling for main shader
-        gl.cull_face(WebGl2RenderingContext::FRONT); // Back to Y-flipped culling
+        gl.depth_mask(true);
+        gl.depth_func(WebGl2RenderingContext::LEQUAL); // the renderer's default
+        gl.cull_face(WebGl2RenderingContext::FRONT); // back to the Y-flipped default
         Ok(())
+    }
+
+    /// Draw every mesh of a model resource with whatever program/state is already bound.
+    fn draw_mesh_group(&self, gl: &WebGl2RenderingContext, member_key: &(i32, i32), resource: &Symbol) {
+        if let Some(mesh_group) = self.member_data.get(member_key)
+            .and_then(|d| d.mesh_groups.get(resource))
+        {
+            for mesh_buf in mesh_group {
+                mesh_buf.bind(gl);
+                mesh_buf.draw(gl);
+                mesh_buf.unbind(gl);
+            }
+        }
     }
 
     /// Director's red/white checkerboard is the placeholder for a shader that has NO
