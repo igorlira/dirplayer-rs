@@ -371,6 +371,19 @@ impl TypeUtils {
     }
 }
 
+
+/// Director clamps an out-of-range colour component into 0..255 — Scripting
+/// Dictionary, `color()`: "Valid values range from 0 to 255. All other values are
+/// truncated." A plain `as u8` WRAPS instead, and scripts routinely overshoot on
+/// the last step of a fade: SweeTarts 3D ramps its menu backdrop with
+/// `gtimer = gtimer + 5 … shader.emissive = rgb(gtimer, gtimer, gtimer)` and only
+/// then tests `gtimer > 255`, so the final write is `rgb(260, 260, 260)`. Wrapped
+/// that is `rgb(4, 4, 4)` and the menu snapped to black at the exact moment the
+/// fade-up finished.
+fn clamp_color_component(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
 impl TypeHandlers {
     pub fn objectp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -1053,9 +1066,9 @@ impl TypeHandlers {
     pub fn rgb(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             if args.len() == 3 {
-                let r = player.get_datum(&args[0]).int_value()? as u8;
-                let g = player.get_datum(&args[1]).int_value()? as u8;
-                let b = player.get_datum(&args[2]).int_value()? as u8;
+                let r = clamp_color_component(player.get_datum(&args[0]).int_value()?);
+                let g = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                let b = clamp_color_component(player.get_datum(&args[2]).int_value()?);
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
             } else {
                 let first_arg = player.get_datum(&args[0]);
@@ -1574,7 +1587,7 @@ impl TypeHandlers {
             match args.len() {
                 1 => {
                     // color(paletteIndex) - single argument is palette index
-                    let index = player.get_datum(&args[0]).int_value()? as u8;
+                    let index = clamp_color_component(player.get_datum(&args[0]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                 }
                 2 => {
@@ -1590,7 +1603,7 @@ impl TypeHandlers {
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                             }
                             Some(BuiltInSymbol::PaletteIndex) => {
-                                let index = player.get_datum(&args[1]).int_value()? as u8;
+                                let index = clamp_color_component(player.get_datum(&args[1]).int_value()?);
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                             }
                             _ => Err(ScriptError::new(format!(
@@ -1606,16 +1619,16 @@ impl TypeHandlers {
                 }
                 3 => {
                     // color(r, g, b)
-                    let r = player.get_datum(&args[0]).int_value()? as u8;
-                    let g = player.get_datum(&args[1]).int_value()? as u8;
-                    let b = player.get_datum(&args[2]).int_value()? as u8;
+                    let r = clamp_color_component(player.get_datum(&args[0]).int_value()?);
+                    let g = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                    let b = clamp_color_component(player.get_datum(&args[2]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 4 => {
                     // color(#rgb, r, g, b) - first argument is symbol, skip it
-                    let r = player.get_datum(&args[1]).int_value()? as u8;
-                    let g = player.get_datum(&args[2]).int_value()? as u8;
-                    let b = player.get_datum(&args[3]).int_value()? as u8;
+                    let r = clamp_color_component(player.get_datum(&args[1]).int_value()?);
+                    let g = clamp_color_component(player.get_datum(&args[2]).int_value()?);
+                    let b = clamp_color_component(player.get_datum(&args[3]).int_value()?);
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 _ => Err(ScriptError::new(format!(
