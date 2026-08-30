@@ -556,6 +556,27 @@ impl Shockwave3dObjectDatumHandlers {
                     _ => Ok(player.alloc_datum(Datum::Void)),
                 })
             },
+            BuiltInSymbol::Inker => {
+                // #inker modifier properties (Director 11.5 Scripting Dictionary).
+                let ink = {
+                    let member = player.movie.cast_manager.find_member_by_ref(member_ref);
+                    member.and_then(|m| m.member_type.as_shockwave3d())
+                        .and_then(|w3d| w3d.runtime_state.inker_state.get(&s3d_ref.name))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                match_ci!(prop_name, {
+                    "lineColor" => Ok(player.alloc_datum(Datum::ColorRef(
+                        crate::player::sprite::ColorRef::Rgb(ink.line_color.0, ink.line_color.1, ink.line_color.2)))),
+                    "silhouettes" => Ok(player.alloc_datum(Datum::Int(ink.silhouettes as i32))),
+                    "creases" => Ok(player.alloc_datum(Datum::Int(ink.creases as i32))),
+                    "creaseAngle" => Ok(player.alloc_datum(Datum::Float(ink.crease_angle as f64))),
+                    "boundary" => Ok(player.alloc_datum(Datum::Int(ink.boundary as i32))),
+                    "lineOffset" => Ok(player.alloc_datum(Datum::Float(ink.line_offset as f64))),
+                    "useLineOffset" => Ok(player.alloc_datum(Datum::Int(ink.use_line_offset as i32))),
+                    _ => Ok(player.alloc_datum(Datum::Void)),
+                })
+            },
             BuiltInSymbol::Sds => {
                 // Subdivision Surface modifier properties
                 let sds = {
@@ -2286,6 +2307,30 @@ impl Shockwave3dObjectDatumHandlers {
                                 }
                               }
                             }
+                        }
+                    }
+                    Ok(())
+                  } else if s3d_ref.object_type == BuiltInSymbol::Inker {
+                    // #inker modifier set properties
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            let ink = w3d.runtime_state.inker_state
+                                .entry(s3d_ref.name.clone())
+                                .or_insert_with(crate::player::cast_member::InkerState::default);
+                            match_ci!(prop_name, {
+                                "lineColor" => {
+                                    if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = &value {
+                                        ink.line_color = (*r, *g, *b);
+                                    }
+                                },
+                                "silhouettes" => ink.silhouettes = value.int_value().unwrap_or(1) != 0,
+                                "creases" => ink.creases = value.int_value().unwrap_or(1) != 0,
+                                "creaseAngle" => ink.crease_angle = value.to_float().unwrap_or(0.01) as f32,
+                                "boundary" => ink.boundary = value.int_value().unwrap_or(1) != 0,
+                                "lineOffset" => ink.line_offset = value.to_float().unwrap_or(-2.0) as f32,
+                                "useLineOffset" => ink.use_line_offset = value.int_value().unwrap_or(0) != 0,
+                                _ => {},
+                            })
                         }
                     }
                     Ok(())
@@ -4486,6 +4531,17 @@ impl Shockwave3dObjectDatumHandlers {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     w3d.runtime_state.sds_state.entry(s3d_ref.name.clone())
                                         .or_insert_with(crate::player::cast_member::SdsState::default);
+                                }
+                            }
+                        } else if mod_name == "inker" {
+                            // Register default #inker modifier state so `model.inker.*`
+                            // resolves and the outline pass picks the model up even
+                            // before any inker property is set.
+                            let member_ref = CastMemberRef { cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member };
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    w3d.runtime_state.inker_state.entry(s3d_ref.name.clone())
+                                        .or_insert_with(crate::player::cast_member::InkerState::default);
                                 }
                             }
                         } else if mod_name == "collision" {
@@ -7008,6 +7064,16 @@ impl Shockwave3dObjectDatumHandlers {
                     name: model_name,
                 })))
             },
+            "inker" => {
+                // #inker modifier — return an object ref carrying the model name.
+                use crate::director::lingo::datum::Shockwave3dObjectRef;
+                Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    cast_lib: member_ref.cast_lib,
+                    cast_member: member_ref.cast_member,
+                    object_type: BuiltInSymbol::Inker,
+                    name: model_name,
+                })))
+            },
             "lod" => {
                 // LOD modifier — return LOD object ref
                 use crate::director::lingo::datum::Shockwave3dObjectRef;
@@ -8839,6 +8905,7 @@ fn model_modifier_list(
         for (registered, name) in [
             (rs.lod_state.contains_key(&model_name), "lod"),
             (rs.sds_state.contains_key(&model_name), "sds"),
+            (rs.inker_state.contains_key(&model_name), "inker"),
             (rs.collision_modifiers.contains_key(&model_name), "collision"),
             (rs.mesh_deform.contains_key(&model_name), "meshDeform"),
         ] {

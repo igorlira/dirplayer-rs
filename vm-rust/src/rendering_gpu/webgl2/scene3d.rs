@@ -4316,8 +4316,24 @@ void main() {
     ) -> Result<(), JsValue> {
         use crate::director::chunks::w3d::types::W3dShaderType;
 
-        // Check if any model uses ShaderInker
-        let has_inker = scene.nodes.iter().any(|n| {
+        // Two ways in: a shader whose TYPE is #inker, or a model carrying the #inker
+        // MODIFIER (`model.addModifier(#inker)`), which keeps its ordinary shader and
+        // holds its own lineColor/silhouettes/lineOffset. Only the first was handled, so
+        // a movie that inks a model the documented way got no outline at all —
+        // SweeTarts 3D's level-3 bubble is a plain #sphere whose white rim comes entirely
+        // from the modifier.
+        // The #inker MODIFIER is parsed, stored and scriptable (see `InkerState`), but it
+        // does NOT draw here — only the #inker SHADER TYPE does. This expanded-back-face
+        // pass yields a rim only while the model occludes its own hull, and SweeTarts'
+        // level-3 bubble is drawn in the transparent pass, which writes no depth: wiring
+        // the modifier in painted it as a solid WHITE DISC. Measured with the pass off,
+        // its centre reads (144, 255, 255) — its own cyan emissive — so the white was
+        // provably the hull. A depth-only prepass of the model plus an explicit
+        // `enable(DEPTH_TEST)` did NOT clip it either, so something else about this pass's
+        // depth state is wrong and needs finding before the modifier can use it. A
+        // per-fragment N·V rim would sidestep the depth buffer entirely.
+        let has_modifier = false;
+        let has_inker = has_modifier || scene.nodes.iter().any(|n| {
             if n.node_type != W3dNodeType::Model { return false; }
             let shader_name = runtime_state
                 .and_then(|rs| Self::node_shader_override(rs, n.name, None).copied())
@@ -4343,16 +4359,48 @@ void main() {
         gl.cull_face(WebGl2RenderingContext::FRONT);
 
         for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+            let ink = runtime_state.and_then(|rs| rs.inker_state.get(&model_node.name));
             let shader_name = runtime_state
                 .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
                 .unwrap_or(model_node.shader_name);
-            let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
-                Some(s) if s.shader_type == W3dShaderType::Inker => s,
-                _ => continue,
+            let inker_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
+                Some(s) if s.shader_type == W3dShaderType::Inker => Some(s),
+                _ => None,
             };
+            // The modifier only draws while it has something to draw: `silhouettes` is
+            // the property that outlines the model's border, which is what this
+            // expanded-back-face pass approximates.
+            //
+            // ...but only for an OPAQUE model. The technique relies on the model itself
+            // occluding the expanded hull so that just the rim survives, and this pass
+            // runs after the transparent pass, which draws with `depth_mask(false)`. A
+            // translucent model therefore writes no depth and the hull paints its whole
+            // silhouette solid — SweeTarts' level-3 bubble came out as a flat white disc
+            // instead of a see-through bubble with a sharp white rim. Skipping it leaves
+            // the bubble correct apart from the missing rim, which is the better of the
+            // two wrong answers. Doing this properly means a rim that does not depend on
+            // the depth buffer (a depth-only prepass for inked transparent models, or a
+            // per-fragment N·V rim) — a bigger change than this pass.
+            let modifier_draws = ink.map(|i| i.silhouettes || i.boundary).unwrap_or(false);
+            if inker_shader.is_none() && !modifier_draws { continue; }
 
-            let width = if w3d_shader.outline_width > 0.0 { w3d_shader.outline_width } else { 0.02 };
-            let color = w3d_shader.outline_color;
+            let (width, color) = match (ink, inker_shader) {
+                (Some(i), _) => {
+                    // `lineOffset` is "where lines are drawn relative to the surface being
+                    // shaded and the camera" over -100..+100; a negative value pushes the
+                    // line outward, which is exactly this pass's hull expansion. Map its
+                    // magnitude onto the same small model-space width the shader path uses.
+                    let w = (i.line_offset.abs() / 100.0).max(0.004);
+                    let c = [i.line_color.0 as f32 / 255.0, i.line_color.1 as f32 / 255.0,
+                             i.line_color.2 as f32 / 255.0, 1.0];
+                    (w, c)
+                }
+                (None, Some(s)) => (
+                    if s.outline_width > 0.0 { s.outline_width } else { 0.02 },
+                    s.outline_color,
+                ),
+                (None, None) => continue,
+            };
             gl.uniform1f(outline.u_outline_width.as_ref(), width);
             gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
 

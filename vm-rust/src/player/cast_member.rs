@@ -1498,6 +1498,8 @@ pub struct Shockwave3dRuntimeState {
 
     // ─── Subdivision Surface (SDS) state ───
     pub sds_state: std::collections::HashMap<Symbol, SdsState>,
+    /// `#inker` modifier state, keyed by model node name.
+    pub inker_state: std::collections::HashMap<Symbol, InkerState>,
 
     // ─── Reset tracking ───
     pub world_reset: bool,
@@ -1723,6 +1725,51 @@ pub struct LodState {
 impl Default for LodState {
     fn default() -> Self {
         Self { level: 100, auto_mode: true, bias: 100.0 }
+    }
+}
+
+/// `#inker` MODIFIER state, per model node (Director 11.5 Scripting Dictionary,
+/// "#inker modifier properties"): "adds silhouettes, creases, and boundary edges to an
+/// existing model".
+///
+/// Distinct from the `#inker` SHADER TYPE the renderer already handled — a movie adds
+/// this with `model.addModifier(#inker)` and keeps its ordinary #standard shader.
+/// SweeTarts 3D's level-3 bubble is exactly that: a #sphere with a reflection map, then
+/// `addModifier(#inker)` / `lineColor = rgb(255,255,255)` / `silhouettes = 1` /
+/// `lineOffset = -10` for the white rim that makes it read as a bubble.
+#[derive(Clone, Debug)]
+pub struct InkerState {
+    /// Colour of the lines the inker draws. Dictionary default rgb(0, 0, 0).
+    pub line_color: (u8, u8, u8),
+    /// Lines along the border of the model, outlining its shape.
+    pub silhouettes: bool,
+    /// Lines in creases. Dictionary default TRUE.
+    pub creases: bool,
+    /// Crease-detection sensitivity, range -1.0..+1.0. Dictionary default 0.01.
+    pub crease_angle: f32,
+    /// Lines around the boundary of the surface. Dictionary default TRUE.
+    pub boundary: bool,
+    /// Where lines are drawn relative to the surface and the camera, range
+    /// -100.0..+100.0. Dictionary default -2.0.
+    pub line_offset: f32,
+    /// Whether `line_offset` is applied at all. Dictionary default FALSE.
+    pub use_line_offset: bool,
+}
+
+impl Default for InkerState {
+    fn default() -> Self {
+        Self {
+            line_color: (0, 0, 0),
+            // The dictionary states defaults for boundary/creases/creaseAngle/lineOffset/
+            // useLineOffset but not for silhouettes; TRUE matches its siblings and is what
+            // the modifier is chiefly for.
+            silhouettes: true,
+            creases: true,
+            crease_angle: 0.01,
+            boundary: true,
+            line_offset: -2.0,
+            use_line_offset: false,
+        }
     }
 }
 

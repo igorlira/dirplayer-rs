@@ -1026,6 +1026,7 @@ define_builtin_symbols! {
     "meshDeformMesh" => MeshDeformMesh,
     "meshDeformFace" => MeshDeformFace,
     "sds" => Sds,
+    "inker" => Inker,
     "lod" => Lod,
     "synchronized" => Synchronized,
     "exponential" => Exponential,
