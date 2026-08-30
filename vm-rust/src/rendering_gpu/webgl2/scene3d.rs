@@ -885,12 +885,25 @@ void main() {
     // Reflection / environment map on an untextured surface — e.g. tinted glass:
     // material diffuse colour with a sphere-mapped sky reflection mixed in at the
     // #constant blend factor (reflectionMap helper, u_layer2_blend == 5).
+    float refl_alpha = 1.0;
     if (u_layer2_blend >= 5) {
-        vec3 refl = texture(u_layer2_tex, sphere_map_uv(N, v_position)).rgb;
+        vec4 refl4 = texture(u_layer2_tex, sphere_map_uv(N, v_position));
+        vec3 refl = refl4.rgb;
         if (u_layer2_blend == 6) {
             result = min(result + refl, vec3(1.0));
         } else if (u_layer2_blend == 7) {
             result *= refl;
+            // A #multiply layer multiplies the surface's ALPHA as well as its colour:
+            // where the layer's texel is transparent it contributes nothing and leaves
+            // the surface transparent there. SweeTarts' level-3 mascot is a sphere with
+            // NO diffuse texture whose only layer is a "transcrome" reflection map at
+            // #multiply — in Director you see the level straight through it with just a
+            // few bright chrome highlights, which is what makes it read as a bubble.
+            // Ignoring the layer's alpha rendered it as a flat opaque cyan disc.
+            // Deliberately limited to #multiply: #add and #blend composite colour at a
+            // ratio and say nothing about coverage (Agent Free Ride's #add coins would
+            // start punching holes in themselves).
+            refl_alpha = refl4.a;
         } else if (u_layer2_blend == 8) {
             result = refl;
         } else {
@@ -909,7 +922,7 @@ void main() {
     // drawn before it — AreaZero's enemy health bar (shader.blend 90, a flat red
     // quad with no texture layers) came out as a washed-out pink smear that faded
     // in and out with the draw order instead of a solid red bar.
-    float alpha = u_opacity * u_diffuse_color.a;
+    float alpha = u_opacity * u_diffuse_color.a * refl_alpha;
     frag_color = vec4(result, alpha);
 }
 "#;
