@@ -4429,6 +4429,20 @@ void main() {
         Ok(())
     }
 
+    /// Director's red/white checkerboard is the placeholder for a shader that has NO
+    /// texture on it AT ALL — it is what a freshly created primitive shows until something
+    /// is put on it. A shader carrying ANY texture layer is textured, even when that layer
+    /// is not the diffuse one.
+    ///
+    /// SweeTarts 3D's level-3 mascot is the case that exposed this: a `#sphere` shader with
+    /// `texture = VOID` and a "transcrome" REFLECTION MAP on layer 3. The reflection map is
+    /// applied by a separate pass, so the diffuse scan found nothing, the primitive fallback
+    /// fired, and the bubble rendered as an opaque red/white checker sphere instead of a
+    /// translucent bubble.
+    fn shader_has_any_texture(shader: &W3dShader) -> bool {
+        shader.texture_layers.iter().any(|l| !l.name.is_empty())
+    }
+
     /// Case-insensitive shader lookup (W3D files have inconsistent casing).
     fn find_shader_ci<'a>(shaders: &'a [W3dShader], name: Symbol) -> Option<&'a W3dShader> {
         shaders.iter().find(|s| s.name == name)
@@ -5100,7 +5114,7 @@ void main() {
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
                 let is_prim = res_info.and_then(|r| r.primitive_type.as_ref()).is_some();
-                if !tex_bound && is_prim {
+                if !tex_bound && is_prim && !Self::shader_has_any_texture(w3d_shader) {
                     // Fall back to Director's default checkerboard for primitives only
                     if let Some(tex) = &self.default_checker_texture {
                         gl.active_texture(WebGl2RenderingContext::TEXTURE0);
@@ -5314,7 +5328,14 @@ void main() {
 
         // No textured binding found — use best material.  Apply Director's
         // default checker only for newModelResource primitives (box/sphere/etc).
-        let is_primitive = res_info.primitive_type.is_some();
+        // Same rule as the override path: a shader that carries any texture layer — a
+        // reflection map included — is textured, and must not get the placeholder.
+        let inked_by_any_layer = candidate_names.iter().any(|n| {
+            Self::resolve_shader_candidate_ci(scene, *n)
+                .map(Self::shader_has_any_texture)
+                .unwrap_or(false)
+        });
+        let is_primitive = res_info.primitive_type.is_some() && !inked_by_any_layer;
         if let Some(mat) = best_material {
             self.set_material_uniforms(gl, shader, mat);
             if is_primitive {
