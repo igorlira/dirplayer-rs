@@ -1752,6 +1752,8 @@ impl Shockwave3dMemberHandlers {
                                         // Copy materials referenced by copied shaders.
                                         // Check both shader.material_name and shader.name as material key,
                                         // since the renderer falls back to finding materials by shader name.
+                                        // Shaders whose material was renamed alongside them, to repoint below.
+                                        let mut material_repoints: Vec<Symbol> = Vec::new();
                                         for shader in &src_shaders {
                                             if !used_shader_names.contains(&shader.name) { continue; }
                                             for mat in &src_materials {
@@ -1769,7 +1771,34 @@ impl Shockwave3dMemberHandlers {
                                                     if !scene.materials.iter().any(|m| m.name == mat_to_push.name) {
                                                         scene.materials.push(mat_to_push);
                                                     }
+                                                    // A shader renamed on collision gets its material renamed with
+                                                    // it — and must be REPOINTED at that copy. The cloned shader
+                                                    // still carried the SOURCE `material_name`, so every colour
+                                                    // written to a later clone walked that name and landed on the
+                                                    // FIRST clone's material instead of its own.
+                                                    //
+                                                    // SweeTarts 3D is the proof. The level geometry is cloned in
+                                                    // first, so it owns plain `Material01`/`Material02`; the six
+                                                    // collectible letters clone in after it as
+                                                    // `Material01-clone1..6`, each still pointing at `Material01`,
+                                                    // and each does `shader.diffuse = <its colour>` on creation.
+                                                    // Every one of those writes recoloured the TRACK, which ended up
+                                                    // wearing the last letter's grey — its authored wood brown
+                                                    // (0.541, 0.376, 0.196) replaced by (0.345, 0.345, 0.345). The
+                                                    // sides of the walkway, which have no texture layer and so are
+                                                    // nothing but that colour, went flat grey.
+                                                    if let Some(mapped) = shader_name_map.get(&shader.name) {
+                                                        material_repoints.push(*mapped);
+                                                    }
                                                 }
+                                            }
+                                        }
+
+                                        // The renamed material carries the renamed SHADER's name, so the
+                                        // repoint is name-to-itself.
+                                        for name in material_repoints {
+                                            if let Some(sh) = scene.shaders.iter_mut().find(|s| s.name == name) {
+                                                sh.material_name = name;
                                             }
                                         }
 
@@ -1857,18 +1886,26 @@ impl Shockwave3dMemberHandlers {
                                                 scene.raw_meshes.push(cloned);
                                             }
                                         }
-                                        // Copy lights from source scene
-                                        for light in &src_lights {
-                                            if !scene.lights.iter().any(|l| l.name == light.name) {
-                                                scene.lights.push(light.clone());
-                                            }
-                                        }
-                                        // Copy light nodes from source scene
-                                        for node in &src_light_nodes {
-                                            if !scene.nodes.iter().any(|n| n.name == node.name) {
-                                                scene.nodes.push(node.clone());
-                                            }
-                                        }
+                                        // Lights are NOT copied. `cloneModelFromCastmember`
+                                        // clones a MODEL; the destination keeps its own
+                                        // lighting. Measured on SweeTarts 3D, whose world
+                                        // member clones a level, a door, a mascot and six
+                                        // letters out of other members and still reports
+                                        // `light.count -- 2` (UIAmbient, UIDirectional) in
+                                        // Director's message window.
+                                        //
+                                        // Importing them was actively harmful: every source
+                                        // member here carries the IFX default light — node
+                                        // "DefaultLight" on resource "DefaultLightResource",
+                                        // a white directional aimed flat along +Z — so the
+                                        // first clone dropped two horizontal white lights
+                                        // into the world AND, because the renderer drops a
+                                        // light named "defaultdirectional" as soon as any
+                                        // other directional exists, took away the only
+                                        // well-aimed one. Up-facing surfaces got N·L = 0 from
+                                        // everything that was left and the whole level
+                                        // walkway rendered black.
+                                        let _ = (&src_lights, &src_light_nodes);
                                         // Copy the skeleton that BELONGS to the source model
                                         // (named after its resource), not just the first skeleton
                                         // in the source scene — which may be a DIFFERENT model's
