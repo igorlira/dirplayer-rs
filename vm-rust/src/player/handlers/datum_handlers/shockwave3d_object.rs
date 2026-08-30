@@ -2994,26 +2994,53 @@ impl Shockwave3dObjectDatumHandlers {
                                                     // game-over `back` wall showed its opaque side toward the camera
                                                     // and filled the view; `front`'s banner was on the culled side).
                                                     // Emit -Z FIRST (shaderList[1]) then +Z (shaderList[2]).
-                                                    vec![
-                                                        ClodDecodedMesh {
-                                                            name: s3d_ref.name.clone(),
-                                                            positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
-                                                            normals: vec![[0.0,0.0,-1.0]; 4],
-                                                            tex_coords: vec![vec![[0.5,-0.5],[-0.5,-0.5],[-0.5,0.5],[0.5,0.5]]],
-                                                            faces: vec![[0,2,1],[0,3,2]],
-                                                            diffuse_colors: vec![], specular_colors: vec![],
-                                                            bone_indices: vec![], bone_weights: vec![],
-                                                        },
-                                                        ClodDecodedMesh {
-                                                            name: s3d_ref.name.clone(),
-                                                            positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
-                                                            normals: vec![[0.0,0.0,1.0]; 4],
-                                                            tex_coords: vec![vec![[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]]],
-                                                            faces: vec![[0,1,2],[0,2,3]],
-                                                            diffuse_colors: vec![], specular_colors: vec![],
-                                                            bone_indices: vec![], bone_weights: vec![],
-                                                        },
-                                                    ]
+                                                    //
+                                                    // …and only the sheet the FACING asked for.
+                                                    // `CIFXPlanePrimitive::GenerateMesh` builds ONE sheet and picks
+                                                    // its normal from the facing byte — two meshes are the
+                                                    // no-facing (two-sided) case alone. This rebuild used to emit
+                                                    // both unconditionally, so a `#plane, #front` silently became
+                                                    // two-sided the moment a script set width/length, which is the
+                                                    // normal case. SweeTarts 3D builds its sky box as a `#cylinder,
+                                                    // #back` wall with two `#plane, #front` caps sized 12000x12000:
+                                                    // the CEILING cap came back visible from ABOVE, and since the
+                                                    // intro fly-around starts the camera at y~3600 looking down at
+                                                    // the level, every level opened on a flat sheet of ceiling
+                                                    // instead of fading in through black fog.
+                                                    //
+                                                    // WHICH sheet #front is, is measured, not assumed. Both caps are
+                                                    // authored the same way — ceiling `rotate(-90,0,0)`, ground
+                                                    // `rotate(90,0,0)` — and Director shows the ceiling only from
+                                                    // inside the box and the ground only from above. That is the
+                                                    // sheet whose visible side is -Z here, i.e. the FIRST one below.
+                                                    // Consistent with IFX: `OrientPrimitiveToBeta4` reverses the
+                                                    // winding of every face on the way into Director's axes, after
+                                                    // the generator has already chosen the normal.
+                                                    let facing = res.primitive_facing.as_str();
+                                                    let back_sheet = ClodDecodedMesh {
+                                                        name: s3d_ref.name.clone(),
+                                                        positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
+                                                        normals: vec![[0.0,0.0,-1.0]; 4],
+                                                        tex_coords: vec![vec![[0.5,-0.5],[-0.5,-0.5],[-0.5,0.5],[0.5,0.5]]],
+                                                        faces: vec![[0,2,1],[0,3,2]],
+                                                        diffuse_colors: vec![], specular_colors: vec![],
+                                                        bone_indices: vec![], bone_weights: vec![],
+                                                    };
+                                                    let front_sheet = ClodDecodedMesh {
+                                                        name: s3d_ref.name.clone(),
+                                                        positions: vec![[-hw,-hl,0.0],[hw,-hl,0.0],[hw,hl,0.0],[-hw,hl,0.0]],
+                                                        normals: vec![[0.0,0.0,1.0]; 4],
+                                                        tex_coords: vec![vec![[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]]],
+                                                        faces: vec![[0,1,2],[0,2,3]],
+                                                        diffuse_colors: vec![], specular_colors: vec![],
+                                                        bone_indices: vec![], bone_weights: vec![],
+                                                    };
+                                                    match facing {
+                                                        "front" => vec![back_sheet],
+                                                        "back" => vec![front_sheet],
+                                                        // "" (no facing) and #both stay two-sided.
+                                                        _ => vec![back_sheet, front_sheet],
+                                                    }
                                                 },
                                                 _ => vec![],
                                             };
