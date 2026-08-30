@@ -477,7 +477,30 @@ void main() {
     } else {
         base_uv = vec2(a_texcoord.x + 0.5, 0.5 - a_texcoord.y);  // CLOD remap
     }
-    v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
+    if (u_uv_proj_mode == 5 || u_skinning_enabled == -1) {
+        // #wrapPlanar projects in model space, overlays already carry [0, 1] UVs; for
+        // both the matrix is a tweak in that same space.
+        v_texcoord = (u_tex_transform * vec4(base_uv, 0.0, 1.0)).xy;
+    } else {
+        // The texture matrix belongs in DIRECTOR's UV space, and the V flip comes after.
+        //
+        // A CLOD mesh stores `director_uv - 0.5` in BOTH components — measured by
+        // dumping SweeTarts' exit-gate mesh through `meshDeform.textureCoordinateList`
+        // in Director and against the same mesh here: Director (-0.4114, -0.4046)
+        // where we store (-0.91138, -0.90457), and Director 0..1 on the other mesh
+        // where we store ±0.503. So `base_uv` above is (director_u, 1 - director_v):
+        // right for sampling, because GL's texture origin is the other corner, but the
+        // WRONG space to transform in. Director rotates about UV (0, 0) — that gate's
+        // swirl mesh is authored with its UVs centred on zero precisely so the rotation
+        // lands in the middle of the quad — while a flipped V puts our origin at
+        // director_v = 1, one whole texture away. The swirl orbited off its quad
+        // instead of spinning in place.
+        //
+        // Identity is a no-op either way, so untransformed meshes are unaffected.
+        vec2 director_uv = a_texcoord + 0.5;
+        vec2 t = (u_tex_transform * vec4(director_uv, 0.0, 1.0)).xy;
+        v_texcoord = vec2(t.x, 1.0 - t.y);
+    }
     if (u_skinning_enabled == -1) {
         v_texcoord2 = a_texcoord2;  // overlay: pass through as-is
     } else if (u_texcoord2_direct > 0) {
