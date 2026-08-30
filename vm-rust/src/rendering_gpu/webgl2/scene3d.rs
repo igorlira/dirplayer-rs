@@ -3174,6 +3174,43 @@ void main() {
         result
     }
 
+    /// World-space bounding radius of a model whose resource is a RUNTIME PRIMITIVE
+    /// (`newModelResource(name, #box/#sphere/#cylinder/#plane/…)`), whose dimensions
+    /// the script set and we therefore know exactly. `None` for parsed CLOD meshes,
+    /// where the vertices live on the GPU and there is no cheap extent to read.
+    fn primitive_world_radius(res_info: Option<&ModelResourceInfo>, world: &[f32; 16]) -> Option<f32> {
+        let info = res_info?;
+        let kind = info.primitive_type.as_deref()?;
+        // Half-extents in the resource's own space, per Director's primitive
+        // dimension properties (width/length/height are FULL sizes; radius is not).
+        let (w, l, h) = (
+            0.5 * info.primitive_width.abs(),
+            0.5 * info.primitive_length.abs(),
+            0.5 * info.primitive_height.abs(),
+        );
+        let half = match kind {
+            "box" => w.max(l).max(h),
+            "plane" => w.max(l),
+            "sphere" => info.primitive_radius.abs(),
+            "cylinder" => info.primitive_radius.abs()
+                .max(info.primitive_top_radius.abs())
+                .max(h),
+            // #particle and anything else has no meaningful authored extent.
+            _ => return None,
+        };
+        // The largest axis scale in the world matrix — a sphere of this radius in
+        // model space cannot exceed one of `half * scale` in world space.
+        let axis = |c: usize| {
+            (world[c * 4] * world[c * 4]
+                + world[c * 4 + 1] * world[c * 4 + 1]
+                + world[c * 4 + 2] * world[c * 4 + 2])
+                .sqrt()
+        };
+        let scale = axis(0).max(axis(1)).max(axis(2));
+        let r = half * scale;
+        if r.is_finite() { Some(r) } else { None }
+    }
+
     /// Draw a single model node (extracted for opaque/transparent pass reuse).
     fn draw_model_node(
         &self,
@@ -3200,8 +3237,35 @@ void main() {
         // render inside-out (no cull), camera-centered, past the normal far plane —
         // otherwise the box's inner faces are culled/clipped and the starfield
         // background is missing (only the foreground galaxy plane shows).
-        let is_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.as_lower_str().contains("skybox"))
+        let named_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.as_lower_str().contains("skybox"))
             || model_node.name.as_lower_str().contains("skybox");
+        // …but the treatment is a RESCUE for geometry authored so far out that the
+        // camera's real far plane clips it away, not something the name alone earns.
+        // A movie is free to call an ordinary world object "skybox": SweeTarts 3D
+        // builds `newModelResource("skybox", #cylinder, #back)` with radius 6000 —
+        // well inside its camera's yon of 10000 — translates it to (0, -1000, 0),
+        // parents the ground and ceiling caps to it and then, in the "mrseasick"
+        // level, tilts the whole thing. Camera-centring that cylinder decoupled it
+        // from its own caps, and the depth-mask-off pass stopped it occluding them,
+        // so the 12000-unit ground plane's corners (which sit OUTSIDE the 6000 wall
+        // and are meant to be hidden by it) drew straight over the jungle backdrop.
+        // Only take over a model the camera's own far plane could not show.
+        let is_skybox = named_skybox && {
+            let world = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+            match Self::primitive_world_radius(res_info, &world) {
+                // Deliberately compared against the model's own extent and NOT its
+                // distance from the eye: a camera-position-dependent test would flip
+                // the model between the two treatments as the camera roams, popping
+                // the backdrop mid-frame.
+                Some(radius) => {
+                    let far = projection_matrix[14] / (projection_matrix[10] + 1.0);
+                    !(far.is_finite() && far > 0.0 && radius < far)
+                }
+                // Parsed (non-primitive) geometry has no cheap extent here, so keep
+                // the historical behaviour — that is the Rasterwerks/unicraft case.
+                None => true,
+            }
+        };
         let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
