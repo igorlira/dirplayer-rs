@@ -1079,16 +1079,27 @@ impl Shockwave3dMemberHandlers {
                         if preset >= 1 && preset <= 9 {
                             let t = crate::player::cast_member::TextMember::directional_preset_to_transform_3d(preset);
 
-                            // Update the scene's DefaultDirectional light node transform (authoritative)
-                            // and also the runtime_state.node_transforms so the renderer picks it up.
-                            if let Some(scene) = w3d.scene_mut() {
-                                if let Some(light_node) = scene.nodes.iter_mut()
-                                    .find(|n| n.name == Symbol::builtin(BuiltInSymbol::DefaultDirectional))
-                                {
-                                    light_node.transform = t;
+                            // Update the scene's UIDirectional light node transform
+                            // (authoritative) and the runtime_state.node_transforms so the
+                            // renderer picks it up. Keyed off the node that is ACTUALLY
+                            // there: this used to insert a runtime override under a
+                            // hard-coded "DefaultDirectional" whether or not such a node
+                            // existed, which silently orphaned the override for any member
+                            // whose key light is named anything else.
+                            let key = w3d.parsed_scene.as_ref().and_then(|scene| {
+                                scene.nodes.iter()
+                                    .find(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light
+                                        && n.name.as_str().eq_ignore_ascii_case("UIDirectional"))
+                                    .map(|n| n.name)
+                            });
+                            if let Some(key) = key {
+                                if let Some(scene) = w3d.scene_mut() {
+                                    if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == key) {
+                                        light_node.transform = t;
+                                    }
                                 }
+                                w3d.runtime_state.node_transforms.insert(key, t);
                             }
-                            w3d.runtime_state.node_transforms.insert(Symbol::builtin(BuiltInSymbol::DefaultDirectional), t);
                         }
                     }
                 }

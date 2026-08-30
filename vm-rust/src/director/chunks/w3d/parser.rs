@@ -148,9 +148,9 @@ impl W3dFileParser {
 
         // Director always creates a "UIAmbient" light (black ambient, no visual contribution)
         // so Lingo scripts can reference it by name.
-        if !self.scene.lights.iter().any(|l| l.name == Symbol::from_str("UIAmbient")) {
+        if !self.scene.lights.iter().any(|l| l.name == Symbol::builtin(BuiltInSymbol::UIAmbient)) {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str("UIAmbient"),
+                name: Symbol::builtin(BuiltInSymbol::UIAmbient),
                 light_type: W3dLightType::Ambient,
                 color: [0.0, 0.0, 0.0],
                 enabled: true,
@@ -159,7 +159,7 @@ impl W3dFileParser {
                 ..Default::default()
             });
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str("UIAmbient"),
+                name: Symbol::builtin(BuiltInSymbol::UIAmbient),
                 node_type: W3dNodeType::Light,
                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                 ..Default::default()
@@ -183,7 +183,7 @@ impl W3dFileParser {
         ));
         if !has_aimed_key_light {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: Symbol::builtin(BuiltInSymbol::UIDirectional),
                 light_type: W3dLightType::Directional,
                 color: [1.0, 1.0, 1.0],
                 enabled: true,
@@ -235,7 +235,7 @@ impl W3dFileParser {
             }
             t[15] = 1.0;
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: Symbol::builtin(BuiltInSymbol::UIDirectional),
                 node_type: W3dNodeType::Light,
                 parent_name: Symbol::from_str(&"World".to_string()),
                 transform: t,

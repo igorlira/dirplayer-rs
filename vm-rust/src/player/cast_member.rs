@@ -547,17 +547,17 @@ impl TextMember {
         }
 
         // Update directional light color from TextInfo
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultDirectional) {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name.as_str().eq_ignore_ascii_case("UIDirectional")) {
             light.color = [dir_r as f32 / 255.0, dir_g as f32 / 255.0, dir_b as f32 / 255.0];
         }
-        if let Some(light) = scene.lights.iter_mut().find(|l| l.name == BuiltInSymbol::DefaultAmbient) {
+        if let Some(light) = scene.lights.iter_mut().find(|l| l.name.as_str().eq_ignore_ascii_case("UIAmbient")) {
             light.color = [amb_r as f32 / 255.0, amb_g as f32 / 255.0, amb_b as f32 / 255.0];
         }
 
         // Apply directionalPreset to light node transform (3D Z-up version)
         if let Some(ti) = ti {
             if ti.directional_preset > 0 && ti.directional_preset <= 9 {
-                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name == BuiltInSymbol::DefaultDirectional) {
+                if let Some(light_node) = scene.nodes.iter_mut().find(|n| n.name.as_str().eq_ignore_ascii_case("UIDirectional")) {
                     light_node.transform = Self::directional_preset_to_transform_3d(ti.directional_preset);
                 }
             }
@@ -667,7 +667,7 @@ impl TextMember {
         }));
     }
 
-    /// Build a rotation matrix for the DefaultDirectional light node
+    /// Build a rotation matrix for the UIDirectional light node
     /// from a directionalPreset value (1-9).
     ///
     /// The mesh front-face normal is (0,0,-1) and edge normals are inverted
@@ -4604,9 +4604,20 @@ impl CastMember {
             screen_height: 480,
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,100.0,1.0],
         });
-        // Default ambient light
+        // An empty 3D member's two lights. Director calls them UIAmbient / UIDirectional
+        // and reports exactly two — MEASURED in the message window on SweeTarts 3D's
+        // script-built world member (`light.count -- 2`) and on the Havok "Properties"
+        // demo. Movies address them by INDEX, so the order matters as much as the names.
+        //
+        // The COLOURS and the AIM are still dirplayer's own (Director's Properties dump
+        // says UIAmbient rgb(17,17,17), and aims UIDirectional by the member's default
+        // CAMERA rotated -45 deg about world X). Both were tried and both made Properties
+        // darker than the render it has a reference for — under this renderer's one-sided
+        // `max(N·L, 0)` the camera-derived Z axis has a negative Y and lights nothing
+        // facing up — so they need a Director RENDER to check against, not a property
+        // read. Only the naming is corrected here.
         scene.lights.push(W3dLight {
-            name: BuiltInSymbol::DefaultAmbient.into(),
+            name: BuiltInSymbol::UIAmbient.into(),
             light_type: W3dLightType::Ambient,
             color: [0.3, 0.3, 0.3],
             enabled: true,
@@ -4614,9 +4625,9 @@ impl CastMember {
             attenuation: [1.0, 0.0, 0.0],
             ..Default::default()
         });
-        // Default directional light (IFX default: 0.75)
+        // Directional key light (IFX default intensity: 0.75)
         scene.lights.push(W3dLight {
-            name: BuiltInSymbol::DefaultDirectional.into(),
+            name: BuiltInSymbol::UIDirectional.into(),
             light_type: W3dLightType::Directional,
             color: [0.75, 0.75, 0.75],
             enabled: true,
@@ -4626,10 +4637,10 @@ impl CastMember {
         });
         // Light node for the directional light — rotated to point from upper-right
         scene.nodes.push(W3dNode {
-            name: BuiltInSymbol::DefaultDirectional.into(),
+            name: BuiltInSymbol::UIDirectional.into(),
             node_type: W3dNodeType::Light,
             parent_name: BuiltInSymbol::World.into(),
-            resource_name: BuiltInSymbol::DefaultDirectional.into(),
+            resource_name: BuiltInSymbol::UIDirectional.into(),
             model_resource_name: Symbol::empty(),
             shader_name: Symbol::empty(),
             visibility: 1,
@@ -4923,7 +4934,7 @@ impl CastMember {
                     number, xm.raw_data.len()
                 );
                 let w3d_data = xm.raw_data.clone();
-                let parsed_scene = if !w3d_data.is_empty() {
+                let mut built_scene = if !w3d_data.is_empty() {
                     match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
                         Ok(mut scene) => {
                             debug!("W3D parsed: {} materials, {} nodes, {} meshes",
@@ -4935,15 +4946,15 @@ impl CastMember {
                                     ..Default::default()
                                 });
                             }
-                            Some(std::rc::Rc::new(scene))
+                            scene
                         }
                         Err(e) => {
                             warn!("W3D parse error: {}", e);
-                            Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                            Self::create_empty_w3d_scene()
                         }
                     }
                 } else {
-                    Some(std::rc::Rc::new(Self::create_empty_w3d_scene()))
+                    Self::create_empty_w3d_scene()
                 };
                 let info = Shockwave3dInfo::from(&chunk.specific_data_raw)
                     .unwrap_or(Shockwave3dInfo {
@@ -4953,6 +4964,14 @@ impl CastMember {
                         camera_position: None, camera_rotation: None,
                         bg_color: None, ambient_color: None,
                     });
+                // NOT seeded from `info.ambient_color`, though Director's Havok
+                // "Properties" dump reports `UIAmbient ambient rgb(17,17,17)` against a
+                // 3DPR ambient that says the same. Dropping our 0.3 grey to that darkened
+                // the demo well past its reference, and the same dump exposes a second,
+                // deeper disagreement (see the UIDirectional note in `from_info`) — the
+                // two have to be settled together, against a Director RENDER rather than
+                // a property read.
+                let parsed_scene = Some(std::rc::Rc::new(built_scene));
                 let source_scene = parsed_scene.clone();
                 return Some(CastMember {
                     number,

@@ -963,8 +963,11 @@ define_builtin_symbols! {
     "world" => World,
     "MainA" => MainA,
     "DefaultView" => DefaultView,
-    "DefaultDirectional" => DefaultDirectional,
-    "DefaultAmbient" => DefaultAmbient,
+    // Director's own light pair for a 3D member — an empty one has exactly these two,
+    // and movies address them by index. dirplayer used to invent them under the names
+    // "DefaultDirectional"/"DefaultAmbient", which Director has no counterpart for.
+    "UIDirectional" => UIDirectional,
+    "UIAmbient" => UIAmbient,
     "TextMaterial" => TextMaterial,
     "DefaultShader" => DefaultShader,
     "<world>" => _Angle_World,
