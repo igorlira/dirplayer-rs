@@ -1999,25 +1999,27 @@ impl Shockwave3dRuntimeState {
             fog_mode: 1, // 0=linear, 1=exp, 2=exp2
             ..Default::default()
         };
-        // Seed camera transform from 3DPR camera position/rotation.
-        // When stored position has x=0 and y=0, Director auto-computes the camera
-        // to center the member's default_rect in the viewport using the default FOV.
-        let camera_position = info.camera_position.map(|(px, py, pz)| {
-            if px == 0.0 && py == 0.0 {
-                let w = (info.default_rect.2 - info.default_rect.0) as f32;
-                let h = (info.default_rect.3 - info.default_rect.1) as f32;
-                if w > 0.0 && h > 0.0 {
-                    let default_fov = 34.516_f32;
-                    let aspect = w / h;
-                    let h_half_fov = ((default_fov / 2.0).to_radians().tan() * aspect).atan();
-                    ((w / 2.0), (h / 2.0), (w / 2.0) / h_half_fov.tan())
-                } else {
-                    (px, py, pz)
-                }
-            } else {
-                (px, py, pz)
-            }
-        });
+        // Seed the camera transform from the 3DPR camera position/rotation, VERBATIM.
+        //
+        // This used to reinterpret any stored position with x=0 and y=0 as "unset"
+        // and replace it with a frame-the-default-rect camera at
+        // (w/2, h/2, (w/2)/tan(hFov/2)). That rule belongs to EXTRUDED 3D TEXT, whose
+        // glyphs are laid out in the member's pixel rect and which is framed from
+        // `TextInfo` on the conversion path above — that path computes the same value
+        // itself and hands `from_info` a position whose x is already w/2, so it never
+        // depended on this copy.
+        //
+        // Applied here it hit real W3D worlds, and (0, 0, 250) is Director's DEFAULT
+        // camera position — i.e. exactly what a member whose camera was never moved in
+        // the authoring tool stores. SweeTarts 3D is the proof: `initnumbers` parents the
+        // HUD planes to camera[1] at world (x, 42, 188) with the default `addChild`
+        // (#preserveWorld), so the offset the HUD keeps for the rest of the game is
+        // `inverse(cameraWorld) * thatWorld`, frozen at that instant. With the authored
+        // (0, 0, 250) that is (x, 42, -62) — 62 units in front, filling the top corners
+        // at the fieldOfView 75 the game settles on. With the synthesised
+        // (300, 250, 804.7) it became (x - 335, -208, -616.7): behind and below, off
+        // screen, and "LEVEL 1" and the score never appeared.
+        let camera_position = info.camera_position;
         if let Some((px, py, pz)) = camera_position {
             let (rx, ry, rz) = info.camera_rotation.unwrap_or((0.0, 0.0, 0.0));
             // Build camera transform from position + Euler rotation (degrees)
