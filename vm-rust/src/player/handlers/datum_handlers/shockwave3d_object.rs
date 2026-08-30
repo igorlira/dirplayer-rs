@@ -2784,6 +2784,10 @@ impl Shockwave3dObjectDatumHandlers {
                                                     let mut nrm = Vec::new();
                                                     let mut uvs = Vec::new();
                                                     let mut faces = Vec::new();
+                                                    // Gate on the FACING byte alone, not on a partial sweep: an open
+                                                    // sweep (Pacman's mouth, the ghost dome) is authored with the
+                                                    // default facing and has always rendered single-sided here.
+                                                    let two_sided = matches!(res.primitive_facing.as_str(), "back" | "both");
                                                     for i in 0..=stacks {
                                                         let phi = PI * i as f32 / stacks as f32; // 0 = +Y pole .. PI = -Y pole
                                                         let (sp, cp) = (phi.sin(), phi.cos());
@@ -2818,6 +2822,23 @@ impl Shockwave3dObjectDatumHandlers {
                                                             // leaving the mouth/section open.
                                                             faces.push([a, a + 1, b]);
                                                             faces.push([a + 1, b + 1, b]);
+                                                            // A resource authored #back/#both must render its INNER
+                                                            // surface too, the same way the #cylinder and #plane
+                                                            // generators already honour their facing byte - the
+                                                            // #sphere one ignored it and always emitted a
+                                                            // single-sided shell. SweeTarts' level-3 mascot is
+                                                            // `newModelResource("bubble", #sphere, #both)`: Director
+                                                            // composites its translucent reflection through BOTH
+                                                            // hemispheres, so the far side shows through the near one
+                                                            // and the highlights read as broad soft haloes. With one
+                                                            // shell we composited once and got isolated hard dots -
+                                                            // MEASURED against Director's own coverage map (solved
+                                                            // from a capture pair with the surface blacked out), ours
+                                                            // was missing most of the mid-range coverage.
+                                                            if two_sided {
+                                                                faces.push([a, b, a + 1]);
+                                                                faces.push([a + 1, b, b + 1]);
+                                                            }
                                                         }
                                                     }
                                                     vec![ClodDecodedMesh {
