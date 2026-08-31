@@ -1941,17 +1941,45 @@ impl WebGL2Renderer {
                                 .get_sprite(channel_num)
                                 .and_then(|s| s.flash_asserted_frame)
                                 .unwrap_or(-1);
-                            JsApi::dispatch_flash_member_loaded(
-                                channel_num as i32,
-                                member_ref.cast_lib,
-                                member_ref.cast_member,
-                                &data,
-                                w,
-                                h,
-                                paused_at_start,
-                                asserted_frame,
-                            );
-                            player.flash_sprite_loaded.insert(dispatch_key);
+                            if !player.is_playing {
+                                // The movie is NOT playing yet — this render is the
+                                // load-time `begin_all_sprites` stage preview. A LOAD
+                                // here would bind + autoplay the SWF ahead of the
+                                // Director playhead: rifleman's intro ran its whole
+                                // 3-frame timeline (sound included) before PLAY was
+                                // ever clicked, and the frame-1 gate then waited
+                                // forever on an `isLoaded` nothing could re-raise —
+                                // permanent black screen. Create it WARM instead
+                                // (parked at frame 1, unbound, silent); the first
+                                // PLAYING frame's load pass binds it fresh, so the
+                                // SWF starts when Director starts. Deliberately NOT
+                                // inserted into `flash_sprite_loaded` — the bind
+                                // dispatch must still happen.
+                                if !player.flash_sprite_warmed.contains(&dispatch_key) {
+                                    JsApi::dispatch_flash_member_warm(
+                                        channel_num as i32,
+                                        member_ref.cast_lib,
+                                        member_ref.cast_member,
+                                        &data,
+                                        w,
+                                        h,
+                                        paused_at_start,
+                                    );
+                                    player.flash_sprite_warmed.insert(dispatch_key);
+                                }
+                            } else {
+                                JsApi::dispatch_flash_member_loaded(
+                                    channel_num as i32,
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    &data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                    asserted_frame,
+                                );
+                                player.flash_sprite_loaded.insert(dispatch_key);
+                            }
                         }
                     }
                 }

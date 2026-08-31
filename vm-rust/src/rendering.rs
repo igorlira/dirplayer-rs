@@ -3192,17 +3192,38 @@ pub fn render_score_to_bitmap_with_offset(
                             .map(|fi| fi.paused_at_start)
                             .unwrap_or(false);
                         let asserted_frame = sprite.flash_asserted_frame.unwrap_or(-1);
-                        JsApi::dispatch_flash_member_loaded(
-                            channel_num as i32,
-                            member_ref.cast_lib,
-                            member_ref.cast_member,
-                            &flash_member.data,
-                            w,
-                            h,
-                            paused_at_start,
-                            asserted_frame,
-                        );
-                        player.flash_sprite_loaded.insert(dispatch_key);
+                        if !player.is_playing {
+                            // Movie not playing yet (load-time stage preview): a LOAD
+                            // would bind + autoplay the SWF ahead of the Director
+                            // playhead (rifleman's intro ran to its stop, with sound,
+                            // before PLAY — then the frame-1 gate hung forever).
+                            // WARM it instead; the first playing frame binds it fresh.
+                            // See the webgl2 twin of this dispatch for the full story.
+                            if !player.flash_sprite_warmed.contains(&dispatch_key) {
+                                JsApi::dispatch_flash_member_warm(
+                                    channel_num as i32,
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    &flash_member.data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                );
+                                player.flash_sprite_warmed.insert(dispatch_key);
+                            }
+                        } else {
+                            JsApi::dispatch_flash_member_loaded(
+                                channel_num as i32,
+                                member_ref.cast_lib,
+                                member_ref.cast_member,
+                                &flash_member.data,
+                                w,
+                                h,
+                                paused_at_start,
+                                asserted_frame,
+                            );
+                            player.flash_sprite_loaded.insert(dispatch_key);
+                        }
                     }
                 }
             }
