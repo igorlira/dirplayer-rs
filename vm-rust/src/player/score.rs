@@ -3972,7 +3972,31 @@ pub fn sprite_get_prop(
         // Flash (SWF) sprite properties — keyed by sprite_num because
         // each Flash sprite has its own dedicated Ruffle instance.
         Some(BuiltInSymbol::Playing) => {
-            if sprite.and_then(|s| s.member.as_ref()).is_some() {
+            if let Some(mref) = sprite.and_then(|s| s.member.as_ref()) {
+                // A Flash sprite whose Ruffle instance hasn't even been
+                // BIND-DISPATCHED yet (movie-load warm instance awaiting its
+                // first playing frame's load pass, or plain not-created-yet)
+                // must NOT read as stopped: Director has no "instance still
+                // wiring up" state — the sprite just began and is PLAYING
+                // unless the member is authored `pausedAtStart`. eds_kart_attack
+                // is the trap: its "Wait for Flash" behavior advances the
+                // INSTANT `sprite(1).playing = 0`, and a single not-yet-bound
+                // read on the first exitFrame skipped the whole intro.
+                let dispatch_key = (sprite_id, mref.cast_lib, mref.cast_member);
+                if !player.flash_sprite_loaded.contains(&dispatch_key) {
+                    if let Some(member) = player.movie.cast_manager.find_member_by_ref(mref) {
+                        if let crate::player::cast_member::CastMemberType::Flash(f) = &member.member_type {
+                            if crate::rendering::has_swf_signature(&f.data) {
+                                let paused_at_start = f
+                                    .flash_info
+                                    .as_ref()
+                                    .map(|fi| fi.paused_at_start)
+                                    .unwrap_or(false);
+                                return Ok(datum_bool(!paused_at_start));
+                            }
+                        }
+                    }
+                }
                 Ok(datum_bool(ruffle_is_playing(sprite_id as i32)))
             } else {
                 Ok(datum_bool(false))
