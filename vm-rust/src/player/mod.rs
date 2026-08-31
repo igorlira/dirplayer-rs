@@ -469,6 +469,19 @@ pub struct DirPlayer {
     /// duplicate `createFlashInstance` calls every frame before the
     /// instance's first pixels arrive.
     pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
+    /// One-shot latch for the movie-load Flash warm-up: on the first
+    /// `pre_dispatch_flash_members` after a (re)load, the whole score is walked
+    /// and every distinct (channel, castLib, castMember) Flash triple gets an
+    /// unbound Ruffle instance pre-created (`warm_up_flash_instances`), so
+    /// playback never pays the Ruffle-creation + AS-init cost mid-game.
+    pub flash_warmup_done: bool,
+    /// Triples the render path has already dispatched a WARM create for while
+    /// the movie was NOT yet playing (load-time `begin_all_sprites` renders the
+    /// stage preview). Guards against re-cloning the SWF bytes across the wasm
+    /// boundary on every paused render frame. Distinct from
+    /// `flash_sprite_loaded`: a warmed triple must still get its LOAD dispatch
+    /// (the bind) once playback starts.
+    pub flash_sprite_warmed: HashSet<(i16, i32, i32)>,
     /// Sprites whose Ruffle instance has been confirmed loaded + AS-initialized
     /// at least once. Flash interop (getVariable/setVariable/callFunction/
     /// setCallback) takes the SYNC fast path for these; only the FIRST access to
@@ -893,6 +906,8 @@ impl DirPlayer {
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
+            flash_warmup_done: false,
+            flash_sprite_warmed: HashSet::new(),
             flash_ready_sprites: HashSet::new(),
             flash_lc_connections: std::collections::HashMap::new(),
             flash_lc_callbacks: std::collections::HashMap::new(),
@@ -984,6 +999,17 @@ impl DirPlayer {
                 nested_flash_key(active, ch)
             }
         };
+        // Movie-load WARM-UP (docs/flash-instance-warmup-handoff.md §5): once
+        // per movie load, pre-create an unbound Ruffle instance for every
+        // distinct Flash triple the score will ever show, so playback never
+        // pays Ruffle creation + AS-init mid-game. Host player only — a nested
+        // `#movie` sub-player's Flash set is small and its lifecycle is owned
+        // by its own pre-dispatch.
+        if active == 0 && !self.flash_warmup_done {
+            self.flash_warmup_done = true;
+            self.warm_up_flash_instances();
+        }
+
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -1169,6 +1195,82 @@ impl DirPlayer {
                 ruffle_stop(cn as i32);
             }
             self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
+        }
+    }
+
+    /// Movie-load Flash warm-up (docs/flash-instance-warmup-handoff.md §5.2):
+    /// walk the whole score's per-frame channel data, collect every distinct
+    /// (channel, castLib, castMember) Flash triple, and pre-create an UNBOUND
+    /// Ruffle instance for each via `onFlashMemberWarm`. The JS side parks them
+    /// at frame 1, stopped and capturing nothing; when the playhead reaches a
+    /// triple, the normal load dispatch finds the warm instance and binds it
+    /// near-instantly. The frame loop's `is_flash_loading` gate holds the movie
+    /// while warm creations are in flight — load-time waiting, so playback
+    /// never waits. Script-created sprites (puppet `member =` swaps) are not in
+    /// the score and still cold-load, exactly as before.
+    fn warm_up_flash_instances(&mut self) {
+        let mut seen: HashSet<(i16, i32, i32)> = HashSet::new();
+        let mut warm_list: Vec<(i16, i32, i32, u32, u32)> = Vec::new();
+        for (_frame, channel_idx, data) in self.movie.score.channel_initialization_data.iter() {
+            if data.cast_member == 0 {
+                continue;
+            }
+            let channel_number =
+                crate::player::score::get_channel_number_from_index(*channel_idx as u32);
+            if channel_number < 1 {
+                continue; // frame-script / effects channels
+            }
+            // Same cast_lib resolution as the score's span-init pass: 65535 is
+            // a "relative cast" ref (stage → cast 1), 0 is D5's "default cast".
+            let cast_lib = if data.cast_lib == 65535 || data.cast_lib == 0 {
+                1
+            } else {
+                data.cast_lib as i32
+            };
+            let triple = (channel_number as i16, cast_lib, data.cast_member as i32);
+            if !seen.insert(triple) {
+                continue;
+            }
+            let w = data.width.max(1) as u32;
+            let h = data.height.max(1) as u32;
+            warm_list.push((triple.0, triple.1, triple.2, w, h));
+        }
+        for (ch, cl, cm, w, h) in warm_list {
+            // Skip triples the channel is showing RIGHT NOW: the load pass in
+            // this very same call dispatches those, and firing both a warm and
+            // a load create for one triple in the same tick started TWO Ruffle
+            // players on the same key (the first's `finally` then marked the
+            // second's record ready before its AS init finished — rifleman's
+            // intro gate never opened).
+            let cur = self
+                .movie
+                .score
+                .get_sprite(ch)
+                .and_then(|s| s.member.as_ref())
+                .map(|m| (m.cast_lib, m.cast_member));
+            if cur == Some((cl, cm)) {
+                continue;
+            }
+            let member_ref = CastMemberRef { cast_lib: cl, cast_member: cm };
+            let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) else {
+                continue;
+            };
+            let CastMemberType::Flash(flash_member) = &member.member_type else {
+                continue;
+            };
+            if !crate::rendering::has_swf_signature(&flash_member.data) {
+                continue;
+            }
+            let paused_at_start = flash_member
+                .flash_info
+                .as_ref()
+                .map(|fi| fi.paused_at_start)
+                .unwrap_or(false);
+            debug!(
+                "[Flash] Warming sprite#{} {}:{} ({}x{}, {} bytes)",
+                ch, cl, cm, w, h, flash_member.data.len(),
+            );
+            JsApi::dispatch_flash_member_warm(ch as i32, cl, cm, &flash_member.data, w, h, paused_at_start);
         }
     }
 
@@ -2035,6 +2137,14 @@ impl DirPlayer {
         // so switching movies doesn't leave old sounds looping or leak players.
         self.sound_manager.stop_all();
         self.flash_frame_buffers.clear();
+        // The next movie's score gets its own warm-up pass (all JS instances
+        // are torn down by the reset-all right below). The load bookkeeping
+        // must be cleared with them: reset-all destroys every JS instance, so a
+        // stale `flash_sprite_loaded` entry would make the load pass skip the
+        // re-dispatch and the sprite would never get an instance again.
+        self.flash_warmup_done = false;
+        self.flash_sprite_loaded.clear();
+        self.flash_sprite_warmed.clear();
         JsApi::dispatch_flash_reset_all();
         // JS-Lingo runtimes live in a thread_local map, not on the player, so
         // they survive both this reset and a full player drop — clear them here.

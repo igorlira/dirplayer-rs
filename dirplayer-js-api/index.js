@@ -138,6 +138,14 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
   }
 }
 
+export function onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart) {
+  if (vmCallbacks?.onFlashMemberWarm) {
+    vmCallbacks.onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart);
+  } else {
+    console.log('Flash member warm:', 'sprite#' + spriteNum, castLib, castMember, width, height, swfData.length, 'bytes', 'pausedAtStart=' + pausedAtStart);
+  }
+}
+
 export function onFlashMemberUnloaded(spriteNum) {
   if (vmCallbacks?.onFlashMemberUnloaded) {
     vmCallbacks.onFlashMemberUnloaded(spriteNum);
