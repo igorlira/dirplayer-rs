@@ -627,74 +627,37 @@ impl HavokPhysicsMemberHandlers {
                 }
             };
 
-            match handler_name {
-                "initialize" | "Initialize" => Self::initialize(player, &member_ref, args),
-                "shutdown" | "shutDown" | "Shutdown" => Self::shutdown(player, &member_ref),
+            match_ci!(handler_name, {
+                "initialize" => Self::initialize(player, &member_ref, args),
+                "shutDown" => Self::shutdown(player, &member_ref),
                 "step" => Self::step(player, &member_ref, args),
-
                 "reset" => Self::reset(player, &member_ref),
-                "rigidBody" | "rigidbody" => Self::get_rigid_body(player, &member_ref, args),
+                "rigidBody" => Self::get_rigid_body(player, &member_ref, args),
                 "spring" => Self::get_spring(player, &member_ref, args),
-                "linearDashpot" | "lineardashpot" => {
-                    Self::get_linear_dashpot(player, &member_ref, args)
-                }
-                "angularDashpot" | "angulardashpot" => {
-                    Self::get_angular_dashpot(player, &member_ref, args)
-                }
-                "makeMovableRigidBody" | "makemovablerigidbody" => {
-                    Self::make_movable_rigid_body(player, &member_ref, args)
-                }
-                "makeFixedRigidBody" | "makefixedrigidbody" => {
-                    Self::make_fixed_rigid_body(player, &member_ref, args)
-                }
-                "makeSpring" | "makespring" => Self::make_spring(player, &member_ref, args),
-                "makeLinearDashpot" | "makelineardashpot" => {
-                    Self::make_linear_dashpot(player, &member_ref, args)
-                }
-                "makeAngularDashpot" | "makeangulardashpot" => {
-                    Self::make_angular_dashpot(player, &member_ref, args)
-                }
-                "deleteRigidBody" | "deleterigidbody" => {
-                    Self::delete_rigid_body(player, &member_ref, args)
-                }
-                "deleteSpring" | "deletespring" => {
-                    Self::delete_spring(player, &member_ref, args)
-                }
-                "deleteLinearDashpot" | "deletelineardashpot" => {
-                    Self::delete_linear_dashpot(player, &member_ref, args)
-                }
-                "deleteAngularDashpot" | "deleteangulardashpot" => {
-                    Self::delete_angular_dashpot(player, &member_ref, args)
-                }
-                "registerInterest" | "registerinterest" => {
-                    Self::register_interest(player, &member_ref, args)
-                }
-                "removeInterest" | "removeinterest" => {
-                    Self::remove_interest(player, &member_ref, args)
-                }
-                "registerStepCallback" | "registerstepcallback" => {
-                    Self::register_step_callback(player, &member_ref, args)
-                }
-                "removeStepCallback" | "removestepcallback" => {
-                    Self::remove_step_callback(player, &member_ref, args)
-                }
-                "enableCollision" | "enablecollision" => {
-                    Self::enable_collision(player, &member_ref, args)
-                }
-                "disableCollision" | "disablecollision" => {
-                    Self::disable_collision(player, &member_ref, args)
-                }
-                "enableAllCollisions" | "enableallcollisions" => {
-                    Self::enable_all_collisions(player, &member_ref, args)
-                }
-                "disableAllCollisions" | "disableallcollisions" => {
-                    Self::disable_all_collisions(player, &member_ref, args)
-                }
+                "linearDashpot" => Self::get_linear_dashpot(player, &member_ref, args),
+                "angularDashpot" => Self::get_angular_dashpot(player, &member_ref, args),
+                "makeMovableRigidBody" => Self::make_movable_rigid_body(player, &member_ref, args),
+                "makeFixedRigidBody" => Self::make_fixed_rigid_body(player, &member_ref, args),
+                "makeSpring" => Self::make_spring(player, &member_ref, args),
+                "makeLinearDashpot" => Self::make_linear_dashpot(player, &member_ref, args),
+                "makeAngularDashpot" => Self::make_angular_dashpot(player, &member_ref, args),
+                "deleteRigidBody" => Self::delete_rigid_body(player, &member_ref, args),
+                "deleteSpring" => Self::delete_spring(player, &member_ref, args),
+                "deleteLinearDashpot" => Self::delete_linear_dashpot(player, &member_ref, args),
+                "deleteAngularDashpot" => Self::delete_angular_dashpot(player, &member_ref, args),
+                "registerInterest" => Self::register_interest(player, &member_ref, args),
+                "removeInterest" => Self::remove_interest(player, &member_ref, args),
+                "registerStepCallback" => Self::register_step_callback(player, &member_ref, args),
+                "removeStepCallback" => Self::remove_step_callback(player, &member_ref, args),
+                "enableCollision" => Self::enable_collision(player, &member_ref, args),
+                "disableCollision" => Self::disable_collision(player, &member_ref, args),
+                "enableAllCollisions" => Self::enable_all_collisions(player, &member_ref, args),
+                "disableAllCollisions" => Self::disable_all_collisions(player, &member_ref, args),
                 "getProp" => {
                     let prop = player.get_datum(&args[0]).string_value()?;
                     let result = Self::get_prop(player, &member_ref, &prop)?;
                     Ok(player.alloc_datum(result))
-                }
+                },
                 "count" => {
                     // count(#rigidBody) etc.
                     let prop = player.get_datum(&args[0]).string_value()?;
@@ -704,7 +667,7 @@ impl HavokPhysicsMemberHandlers {
                     } else {
                         Ok(player.alloc_datum(Datum::Int(0)))
                     }
-                }
+                },
                 "getAt" | "getPropRef" => {
                     // member("havok").rigidBody[i] — getAt dispatches here
                     let prop = player.get_datum(&args[0]).string_value()?;
@@ -724,12 +687,12 @@ impl HavokPhysicsMemberHandlers {
                     } else {
                         Ok(player.alloc_datum(list_datum))
                     }
-                }
+                },
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for Havok member",
                     handler_name
-                ))),
-            }
+                )))
+            })
         })
     }
 

@@ -605,6 +605,23 @@ impl CastLib {
                     state: crate::player::cast_member::PhysXPhysicsState::default(),
                 }),
             )),
+            // `new(#havok)` creates an EMPTY Havok physics member. Like `#physics`
+            // above, the member carries no authored state — the world is built
+            // entirely at runtime, and Burnin' Rubber's `[PS] Havok` does exactly
+            // that for every track:
+            //     pNR = castLib("Main").findEmpty()
+            //     gHavokMember = new(#havok, member(pNR, "Main"))
+            //     pHavok.Initialize(sprite(pSprite).member, 0.1, 1.0)
+            //     pHavok.makeFixedRigidBody(...)
+            // Authored Havok members arrive as `MemberType::Ole` and are converted
+            // on load; this is the runtime-constructed twin, so it starts with no
+            // HKE payload.
+            "havok" => Ok(CastMember::new(
+                number,
+                CastMemberType::HavokPhysics(
+                    crate::player::cast_member::HavokPhysicsMember::new(Vec::new()),
+                ),
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",
                 member_type
