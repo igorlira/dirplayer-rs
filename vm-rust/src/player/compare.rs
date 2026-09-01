@@ -483,6 +483,31 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             Ok(string_number_ordering(left, *right, &right.to_string()).is_gt())
         }
 
+        // Vector ordering is LEXICOGRAPHIC: compare x, and only when it ties move
+        // on to y, then z — the same way Director orders lists. Measured in
+        // Director 11.5 itself (Message window), which is the only oracle here:
+        // the dictionary's `<` entry lists "strings, integers, floating-point
+        // numbers, rects, and points" and never mentions vectors at all.
+        //
+        //   vector(0.9, 0.9, 0.9) < vector(1, 1, 1)  -- 1
+        //   vector(0.5, 0.5, 2.0) < vector(1, 1, 1)  -- 1   <- rules out "every
+        //                                                      component must
+        //                                                      satisfy it"
+        //   vector(2, 0.5, 0.5)   < vector(1, 1, 1)  -- 0   <- rules out "any
+        //                                                      component"
+        //   vector(1, 2, 0.5)     < vector(1, 1, 1)  -- 0   <- ties fall through
+        //                                                      to the next axis
+        //   vector(2, 2, 2)       > vector(1, 1, 1)  -- 1
+        //
+        // Without an arm here the pair hit the catch-all and was ALWAYS false, so
+        // Burnin' Rubber's 3-2-1-GO countdown never ended: `CountDownScaler`
+        // shrinks `iface_cntdown3` a step at a time and stops on
+        // `if pmodel.transform.scale <= vector(1.0, 1.0, 1.0)`, so `StartRace`
+        // was never reached and the race sat in "prerace" forever.
+        (Datum::Vector(left_v), Datum::Vector(right_v)) => {
+            Ok(vector_ordering(left_v, right_v).is_gt())
+        }
+
         // Point comparisons
         (Datum::Point(left_vals, _), Datum::Point(right_vals, _)) => {
             let left_x = left_vals[0] as i32;
@@ -543,6 +568,20 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             Ok(false)
         }
     }
+}
+
+/// Lexicographic ordering of two vectors: x first, then y, then z on ties.
+/// Measured against Director 11.5 — see the truth table in `datum_greater_than`.
+/// NaN components compare as equal so an ordering is always produced.
+#[inline]
+fn vector_ordering(a: &[f64; 3], b: &[f64; 3]) -> std::cmp::Ordering {
+    for i in 0..3 {
+        match a[i].partial_cmp(&b[i]) {
+            Some(std::cmp::Ordering::Equal) | None => continue,
+            Some(other) => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 /// Case-insensitive lexicographic `<`, without allocating.
@@ -631,6 +670,12 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         (Datum::Void, Datum::Int(_)) => Ok(true),
         (Datum::Void, Datum::Float(_)) => Ok(true),
         
+        // Vector comparisons — lexicographic; see `datum_greater_than` for the
+        // Director-measured truth table this mirrors.
+        (Datum::Vector(left_v), Datum::Vector(right_v)) => {
+            Ok(vector_ordering(left_v, right_v).is_lt())
+        }
+
         // Point comparisons
         (Datum::Point(left_vals, _), Datum::Point(right_vals, _)) => {
             let left_x = left_vals[0] as i32;
