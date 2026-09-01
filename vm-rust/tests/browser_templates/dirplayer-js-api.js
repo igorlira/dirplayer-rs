@@ -108,6 +108,13 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
       ?.catch?.(e => console.error('createFlashInstance failed:', e));
   });
 }
+export function onFlashMemberWarm(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart) {
+  const copy = new Uint8Array(swfData);
+  flashManager().then(m => {
+    m.warmFlashInstance?.(spriteNum, castLib, castMember, copy, width, height, pausedAtStart)
+      ?.catch?.(e => console.error('warmFlashInstance failed:', e));
+  });
+}
 export function onFlashMemberUnloaded(spriteNum) {
   flashManager().then(m => m.destroyFlashInstance?.(spriteNum));
 }
