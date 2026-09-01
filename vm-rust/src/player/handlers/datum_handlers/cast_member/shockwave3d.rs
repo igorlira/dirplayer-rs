@@ -2751,6 +2751,34 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
 
+                        // `newTexture(name)` with NO type/source is a documented form —
+                        // Director 11.5 Scripting Dictionary, `newTexture`: "typeIndicator
+                        // Optional. … If omitted, the new texture is created with no
+                        // specific type", with `member("3D World").newTexture("Blank")` as
+                        // the dictionary's own example. Register the name so
+                        // `member.texture(name)` resolves; the source arrives later through
+                        // the `texture.member` / `texture.image` setters.
+                        //
+                        // Burnin' Rubber builds EVERY texture this way (its Event Manager's
+                        // `CreateTexture` does `newTexture(f)` then `texture(f).member =
+                        // member(f)`), so without the placeholder every texture lookup
+                        // returned VOID, the assignment went nowhere, and the whole game —
+                        // menu, garage and track — rendered untextured.
+                        if handler_name.eq_builtin(BuiltInSymbol::NewTexture) && !obj_name.is_empty() {
+                            let obj_sym = Symbol::from_str(&obj_name);
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    if let Some(scene) = w3d.scene_mut() {
+                                        if !scene.texture_images.contains_key(&obj_sym) {
+                                            // Empty data = "declared, no pixels yet". The GPU
+                                            // upload skips zero-length entries.
+                                            scene.put_texture_image(obj_sym, Vec::new());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // For newTexture(name, #fromImageObject/#fromCastMember, source)
                         if handler_name.eq_builtin(BuiltInSymbol::NewTexture) && args.len() >= 3 {
                             let tex_type = player.get_datum(&args[1]).string_value().unwrap_or_default();
@@ -2952,6 +2980,8 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.put_texture_image(obj_sym, tex_data);
+                                                    scene.texture_types.insert(
+                                                        obj_sym, Symbol::from_str("fromCastMember"));
                                                     log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
                                                         obj_name, w, h
@@ -3054,6 +3084,8 @@ impl Shockwave3dMemberHandlers {
                                                     tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                                     tex_data.extend_from_slice(&rgba);
                                                     scene.put_texture_image(obj_sym, tex_data);
+                                                    scene.texture_types.insert(
+                                                        obj_sym, Symbol::from_str("fromImageObject"));
                                                     // Log pixel stats
                                                     let total = rgba.len() / 4;
                                                     let alpha_lt255 = rgba.chunks(4).filter(|p| p[3] < 255).count();
@@ -3172,7 +3204,9 @@ impl Shockwave3dMemberHandlers {
                             lights: Vec::new(), texture_images: HashMap::new(),
                             texture_near_filtering: HashMap::new(),
                             texture_quality: HashMap::new(),
-                            texture_render_format: HashMap::new(), texture_infos: Vec::new(),
+                            texture_render_format: HashMap::new(),
+                            texture_types: HashMap::new(),
+                            texture_infos: Vec::new(),
                             skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
                             clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
                             mesh_content_version: 0,

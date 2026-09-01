@@ -519,6 +519,19 @@ pub struct W3dScene {
     /// `getRendererServices().textureRenderFormat`"; anything else OVERRIDES
     /// that global for this texture alone.
     pub texture_render_format: HashMap<Symbol, Symbol>,
+    /// Per-texture `type` (Director 11.5 Scripting Dictionary, 3D texture
+    /// property): `#importedFromFile` for a texture that came with the W3D,
+    /// `#fromCastMember` for one built from a bitmap member, `#fromImageObject`
+    /// for one built from a Lingo image. Absent = came from the file.
+    ///
+    /// Movies branch on it. Burnin' Rubber's `[PS] LightManager` reads the road's
+    /// lightmap through `case ttexture.type of … #fromCastMember: tmember =
+    /// member(ttexture.name); tWidth = tmember.width`, and uses those dimensions
+    /// to map the ray-cast hit into lightmap pixels; the colour it samples there
+    /// becomes the CAR's `shader.emissive` every frame. Reporting a type outside
+    /// the documented three matched no case arm, so the mapping collapsed and the
+    /// cars raced unlit.
+    pub texture_types: HashMap<Symbol, Symbol>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
@@ -579,6 +592,14 @@ impl W3dScene {
     /// renderer relies on both to decide what to re-upload.
     /// `renderFormat` for a texture. Absent means `#default`, i.e. defer to the
     /// renderer-wide `textureRenderFormat`.
+    /// `type` for a texture. Absent means it was parsed from the W3D file.
+    pub fn texture_type(&self, name: &Symbol) -> Symbol {
+        self.texture_types
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| Symbol::from_str("importedFromFile"))
+    }
+
     pub fn texture_render_format(&self, name: &Symbol) -> Symbol {
         self.texture_render_format
             .get(name)

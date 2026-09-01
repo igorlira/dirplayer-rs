@@ -1341,6 +1341,24 @@ impl Default for BonesPlayerState {
     }
 }
 
+/// One camera's fog settings (Director: `camera.fog`).
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFog {
+    pub enabled: bool,
+    pub near: f32,
+    pub far: f32,
+    pub color: (f32, f32, f32),
+    /// 0 = #linear, 1 = #exponential, 2 = #exponential2
+    pub mode: u8,
+}
+
+impl Default for CameraFog {
+    fn default() -> Self {
+        // Director's documented camera fog defaults.
+        Self { enabled: false, near: 0.0, far: 1000.0, color: (1.0, 1.0, 1.0), mode: 0 }
+    }
+}
+
 /// Mutable runtime state for a Shockwave 3D member (animation, transforms, etc.)
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
@@ -1435,11 +1453,20 @@ pub struct Shockwave3dRuntimeState {
     pub ambient_color: Option<(f32, f32, f32)>,
 
     // ─── Fog ───
+    // Member-level fallback, used by any camera that has no own entry in
+    // `camera_fog` (and by the pre-per-camera call sites).
     pub fog_enabled: bool,
     pub fog_near: f32,
     pub fog_far: f32,
     pub fog_color: (f32, f32, f32),
     pub fog_mode: u8, // 0=linear, 1=exp, 2=exp2
+    /// Per-camera fog. Director's `fog` is a property of the CAMERA
+    /// ("camera(whichCamera).fog.enabled", Scripting Dictionary 11.5), not of
+    /// the world: two cameras rendering the same member fog independently.
+    /// Burnin' Rubber's menu is exactly that — `CameraFire` (the tunnel) is
+    /// fogged to white while the orthographic `CameraMenu` that draws the whole
+    /// UI on top is not, so a member-wide fog whited out the entire menu.
+    pub camera_fog: std::collections::HashMap<Symbol, CameraFog>,
 
     // ─── Post-processing effects ───
     pub bloom_enabled: bool,
@@ -1956,6 +1983,7 @@ impl Shockwave3dRuntimeState {
         self.camera_root_nodes.retain(|k, _| !doomed.contains(k));
         self.camera_clear_at_render.retain(|k, _| !doomed.contains(k));
         self.camera_clear_values.retain(|k, _| !doomed.contains(k));
+        self.camera_fog.retain(|k, _| !doomed.contains(k));
         self.camera_overlays.retain(|k, _| !doomed.contains(k));
         self.camera_backdrops.retain(|k, _| !doomed.contains(k));
         self.render_targets.retain(|k, _| !doomed.contains(k));

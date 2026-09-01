@@ -354,24 +354,15 @@ impl Shockwave3dObjectDatumHandlers {
             BuiltInSymbol::Texture => Self::get_texture_prop(player, scene, s3d_ref.name, prop_name),
             BuiltInSymbol::Camera => Self::get_camera_prop(player, scene, s3d_ref.name, prop_name, member_ref),
             BuiltInSymbol::Fog => {
-                // s3d_ref.name is the owning camera name; fog state is per-W3D-member.
-                let rs = player.movie.cast_manager.find_member_by_ref(member_ref)
-                    .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| (
-                        w3d.runtime_state.fog_enabled,
-                        w3d.runtime_state.fog_near,
-                        w3d.runtime_state.fog_far,
-                        w3d.runtime_state.fog_color,
-                        w3d.runtime_state.fog_mode,
-                    ))
-                    .unwrap_or((false, 1.0, 1000.0, (0.5, 0.5, 0.5), 0));
+                // s3d_ref.name is the owning CAMERA — fog is a camera property.
+                let rs = camera_fog_of(player, member_ref, s3d_ref.name);
                 match_ci!(prop_name, {
-                    "enabled" => Ok(player.alloc_datum(Datum::Int(if rs.0 { 1 } else { 0 }))),
-                    "near" => Ok(player.alloc_datum(Datum::Float(rs.1 as f64))),
-                    "far" => Ok(player.alloc_datum(Datum::Float(rs.2 as f64))),
-                    "color" => Ok(player.alloc_datum(color_to_datum([rs.3.0, rs.3.1, rs.3.2, 1.0]))),
+                    "enabled" => Ok(player.alloc_datum(Datum::Int(if rs.enabled { 1 } else { 0 }))),
+                    "near" => Ok(player.alloc_datum(Datum::Float(rs.near as f64))),
+                    "far" => Ok(player.alloc_datum(Datum::Float(rs.far as f64))),
+                    "color" => Ok(player.alloc_datum(color_to_datum([rs.color.0, rs.color.1, rs.color.2, 1.0]))),
                     "decayMode" => {
-                        let sym = match rs.4 { 1 => "exponential", 2 => "exponential2", _ => "linear" };
+                        let sym = match rs.mode { 1 => "exponential", 2 => "exponential2", _ => "linear" };
                         Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(sym))))
                     },
                     _ => Ok(player.alloc_datum(Datum::Void)),
@@ -1179,31 +1170,35 @@ impl Shockwave3dObjectDatumHandlers {
             if s3d_ref.object_type == BuiltInSymbol::Fog {
                 let lower = prop_name.to_ascii_lowercase();
                 if matches!(lower.as_str(), "near" | "far" | "enabled" | "color" | "decaymode") {
+                    // Per CAMERA (s3d_ref.name), not per member — see camera_fog.
+                    let base = camera_fog_of(player, &member_ref, s3d_ref.name);
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            let e = w3d.runtime_state.camera_fog
+                                .entry(s3d_ref.name).or_insert(base);
                             match lower.as_str() {
                                 "near" => {
-                                    w3d.runtime_state.fog_near = match value {
+                                    e.near = match value {
                                         Datum::Float(f) => *f as f32,
                                         Datum::Int(i) => *i as f32,
                                         _ => 1.0,
                                     };
                                 }
                                 "far" => {
-                                    w3d.runtime_state.fog_far = match value {
+                                    e.far = match value {
                                         Datum::Float(f) => *f as f32,
                                         Datum::Int(i) => *i as f32,
                                         _ => 1000.0,
                                     };
                                 }
                                 "enabled" => {
-                                    w3d.runtime_state.fog_enabled = match value {
+                                    e.enabled = match value {
                                         Datum::Int(v) => *v != 0,
                                         _ => false,
                                     };
                                 }
                                 "color" => {
-                                    w3d.runtime_state.fog_color = match value {
+                                    e.color = match value {
                                         Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) => {
                                             (*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0)
                                         }
@@ -1211,7 +1206,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     };
                                 }
                                 "decaymode" => {
-                                    w3d.runtime_state.fog_mode = match value {
+                                    e.mode = match value {
                                         Datum::Symbol(s) => match s.into_builtin() {
                                             Some(BuiltInSymbol::Exponential) => 1,
                                             Some(BuiltInSymbol::Exponential2) => 2,
@@ -1736,29 +1731,33 @@ impl Shockwave3dObjectDatumHandlers {
                 // bytecode that flattens the chain). The two-step form
                 // `camera.fog → fog ref; fog.near = X` lands in the "near"/"far"/...
                 // arms further down with object_type == "fog".
-                "fog.enabled" => {
-                    let enabled = match value { Datum::Int(v) => *v != 0, _ => false };
+                // Flattened `camera.fog.x = v`. s3d_ref is the CAMERA, so the
+                // write lands on THAT camera's fog, not on the whole member's.
+                "fog.enabled" | "fog.near" | "fog.far" | "fog.color" | "fog.decayMode" => {
+                    let base = camera_fog_of(player, &member_ref, s3d_ref.name);
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.fog_enabled = enabled;
-                        }
-                    }
-                    Ok(())
-                },
-                "fog.near" => {
-                    let v = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 1.0 };
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.fog_near = v;
-                        }
-                    }
-                    Ok(())
-                },
-                "fog.far" => {
-                    let v = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 1000.0 };
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                            w3d.runtime_state.fog_far = v;
+                            let e = w3d.runtime_state.camera_fog
+                                .entry(s3d_ref.name).or_insert(base);
+                            match prop_name.to_ascii_lowercase().as_str() {
+                                "fog.enabled" => e.enabled = match value { Datum::Int(v) => *v != 0, _ => false },
+                                "fog.near" => e.near = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 1.0 },
+                                "fog.far" => e.far = match value { Datum::Float(f) => *f as f32, Datum::Int(i) => *i as f32, _ => 1000.0 },
+                                "fog.color" => e.color = match value {
+                                    Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) =>
+                                        (*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0),
+                                    _ => e.color,
+                                },
+                                "fog.decaymode" => e.mode = match value {
+                                    Datum::Symbol(sym) => match sym.into_builtin() {
+                                        Some(BuiltInSymbol::Exponential) => 1,
+                                        Some(BuiltInSymbol::Exponential2) => 2,
+                                        _ => 0,
+                                    },
+                                    _ => e.mode,
+                                },
+                                _ => {}
+                            }
                         }
                     }
                     Ok(())
@@ -2376,6 +2375,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         let h = bmp.height;
                                         let palettes = player.movie.cast_manager.palettes();
                                         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                        let mut any_opaque = false;
                                         for y in 0..h as usize {
                                             for x in 0..w as usize {
                                                 let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
@@ -2384,6 +2384,25 @@ impl Shockwave3dObjectDatumHandlers {
                                                 rgba[idx + 1] = g;
                                                 rgba[idx + 2] = b;
                                                 rgba[idx + 3] = a;
+                                                if a != 0 { any_opaque = true; }
+                                            }
+                                        }
+                                        // Same rule as the `newTexture(name, #fromCastMember, …)`
+                                        // path: a 32-bit cast bitmap whose alpha channel is
+                                        // DISABLED (`image.useAlpha` = 0) or entirely zero is an
+                                        // opaque texture — Director ignores the channel rather
+                                        // than rendering the surface away. Only the constructor
+                                        // form did this, so movies that build a texture the other
+                                        // documented way — `newTexture(name)` then
+                                        // `texture(name).member = bitmap` — got the raw bytes.
+                                        //
+                                        // Burnin' Rubber's garage is exactly that: `Garage_Texture`
+                                        // is 32-bit with useAlpha off and zeroed alpha, so the whole
+                                        // showroom rendered fully transparent, and the car bodies
+                                        // (partial alpha) came out as translucent ghosts.
+                                        if !bmp.use_alpha || !any_opaque {
+                                            for px in 0..(w as usize) * (h as usize) {
+                                                rgba[px * 4 + 3] = 255;
                                             }
                                         }
                                         Some((w, h, rgba))
@@ -2401,6 +2420,11 @@ impl Shockwave3dObjectDatumHandlers {
                                         tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&rgba);
                                         scene.put_texture_image(s3d_ref.name.clone(), tex_data);
+                                        // The texture now has a cast member behind it.
+                                        scene.texture_types.insert(
+                                            s3d_ref.name,
+                                            Symbol::from_str("fromCastMember"),
+                                        );
                                     }
                                 }
                             }
@@ -2583,6 +2607,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         tex_data.extend_from_slice(&(h as u32).to_le_bytes());
                                         tex_data.extend_from_slice(&rgba);
                                         scene.put_texture_image(s3d_ref.name.clone(), tex_data);
+                                        scene.texture_types.insert(s3d_ref.name, Symbol::from_str("fromImageObject"));
                                     }
                                 }
                             }
@@ -8019,11 +8044,14 @@ impl Shockwave3dObjectDatumHandlers {
                     name: camera_name,
                 })))
             },
-            "fog.enabled" => Ok(player.alloc_datum(Datum::Int(0))),
-            "fog.near" => Ok(player.alloc_datum(Datum::Float(1.0))),
-            "fog.far" => Ok(player.alloc_datum(Datum::Float(1000.0))),
-            "fog.color" => {
-                Ok(player.alloc_datum(color_to_datum([0.5, 0.5, 0.5, 1.0])))
+            "fog.enabled" | "fog.near" | "fog.far" | "fog.color" => {
+                let f = camera_fog_of(player, member_ref, camera_name);
+                match prop.to_ascii_lowercase().as_str() {
+                    "fog.enabled" => Ok(player.alloc_datum(Datum::Int(if f.enabled { 1 } else { 0 }))),
+                    "fog.near" => Ok(player.alloc_datum(Datum::Float(f.near as f64))),
+                    "fog.far" => Ok(player.alloc_datum(Datum::Float(f.far as f64))),
+                    _ => Ok(player.alloc_datum(color_to_datum([f.color.0, f.color.1, f.color.2, 1.0]))),
+                }
             },
             "overlay" | "backdrop" => {
                 // Return overlay/backdrop list — each item is an overlay object ref.
@@ -8588,7 +8616,11 @@ impl Shockwave3dObjectDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(texture_name.to_string()))),
-            "type" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("fromFile")))),
+            // Director 11.5 Scripting Dictionary, `type` (3D texture): exactly one
+            // of #fromCastMember, #fromImageObject, #importedFromFile. This used to
+            // answer "#fromFile", which is none of them, so a movie's `case
+            // texture.type of` matched no arm at all.
+            "type" => Ok(player.alloc_datum(Datum::Symbol(scene.texture_type(&texture_name)))),
             // Director 11.5: report what the movie set; absent means #default,
             // which defers to getRendererServices().textureRenderFormat.
             "renderFormat" => {
@@ -10282,4 +10314,32 @@ fn build_perspective_f32(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32
         0.0,        0.0, (far + near) * nf, -1.0,
         0.0,        0.0, 2.0 * far * near * nf, 0.0,
     ]
+}
+
+/// One camera's effective fog (Director: `camera(x).fog`). Falls back to the
+/// member-level `fog_*` fields — what the 3DPR chunk parsed and what a movie
+/// that only ever touched one camera has been writing — so a camera the script
+/// never fogged keeps behaving as before.
+pub fn camera_fog_of(
+    player: &crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+    camera: Symbol,
+) -> crate::player::cast_member::CameraFog {
+    use crate::player::cast_member::CameraFog;
+    player
+        .movie
+        .cast_manager
+        .find_member_by_ref(member_ref)
+        .and_then(|m| m.member_type.as_shockwave3d())
+        .map(|w3d| {
+            let rs = &w3d.runtime_state;
+            rs.camera_fog.get(&camera).copied().unwrap_or(CameraFog {
+                enabled: rs.fog_enabled,
+                near: rs.fog_near,
+                far: rs.fog_far,
+                color: rs.fog_color,
+                mode: rs.fog_mode,
+            })
+        })
+        .unwrap_or_default()
 }
