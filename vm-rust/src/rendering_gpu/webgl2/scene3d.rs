@@ -1549,6 +1549,14 @@ void main() {
                     if all_same && !mesh.positions.is_empty() {
                         tc_data = generate_uvs_by_mode(&mesh.positions, uv_gen_mode);
                         Some(tc_data.as_slice())
+                    } else if tcs.len() < mesh.positions.len() {
+                        // Same rule as the 2nd set below: a short attribute buffer
+                        // kills the whole draw call in WebGL, so pad it out.
+                        let mut v = tcs.clone();
+                        let fill = *tcs.last().unwrap_or(&[0.0, 0.0]);
+                        v.resize(mesh.positions.len(), fill);
+                        tc_data = v;
+                        Some(tc_data.as_slice())
                     } else {
                         Some(tcs.as_slice())
                     }
@@ -1558,9 +1566,32 @@ void main() {
                 } else {
                     None
                 };
-                // Get 2nd UV set if available (for lightmap/shadow textures)
+                // Get 2nd UV set if available (for lightmap/shadow textures).
+                //
+                // It must cover EVERY vertex. A short attribute buffer makes WebGL
+                // reject the draw outright ("attempt to access out of range vertices
+                // in attribute N") and the mesh silently disappears — the whole draw
+                // call, not just the missing vertices.
+                //
+                // Runtime-supplied UV sets routinely come up short: Burnin' Rubber's
+                // garage feeds its lightmap channel from a baked table in a TEXT
+                // member (`CopyTextureCoordinates` reading "GarageLightmap"), and that
+                // table carries 4152 coordinates against the 4164 vertices our CLOD
+                // decode produces — so the entire showroom vanished while the cars,
+                // which have no second UV set, kept rendering. Pad instead: Director
+                // simply leaves the uncovered vertices unlit by the lightmap.
+                let tc2_padded;
                 let tc2 = if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
-                    Some(mesh.tex_coords[1].as_slice())
+                    let uv2 = &mesh.tex_coords[1];
+                    if uv2.len() < mesh.positions.len() {
+                        let mut v = uv2.clone();
+                        let fill = *uv2.last().unwrap_or(&[0.0, 0.0]);
+                        v.resize(mesh.positions.len(), fill);
+                        tc2_padded = v;
+                        Some(tc2_padded.as_slice())
+                    } else {
+                        Some(&uv2[..mesh.positions.len().min(uv2.len())])
+                    }
                 } else {
                     None
                 };
@@ -1686,6 +1717,10 @@ void main() {
         let mut alpha_textures = std::collections::HashSet::new();
         let mut soft_alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
+            // A texture declared by `newTexture(name)` with no source carries no
+            // pixels yet (Director's "Blank" texture). It exists as a name until a
+            // `.member` / `.image` assignment fills it in — nothing to upload.
+            if image_data.is_empty() { continue; }
             let lower = tex_name.as_lower_str();
             // The SkyLine* textures in this game are authored vertically inverted in
             // the W3D (the JPEGs are stored upside-down, while houses/buildings/icons
@@ -2200,14 +2235,28 @@ void main() {
         gl.uniform1i(shader.u_shader_mode.as_ref(), 0);     // default: phong
         gl.uniform1f(shader.u_toon_steps.as_ref(), 3.0);    // default toon steps
 
-        // Apply fog from runtime state or default off
+        // Apply fog from runtime state or default off. Fog belongs to the CAMERA
+        // this pass renders through, not to the member: Burnin' Rubber's menu
+        // fogs `CameraFire` (the tunnel) to white and draws the whole UI over it
+        // through an unfogged orthographic `CameraMenu`, so a member-wide fog
+        // whited out the menu as well. `camera_fog` falls back to the member's
+        // fog_* fields for any camera the movie never fogged.
         if let Some(rs) = runtime_state {
-            if rs.fog_enabled {
+            let fog = self.active_camera.as_ref()
+                .and_then(|c| rs.camera_fog.get(c).copied())
+                .unwrap_or(crate::player::cast_member::CameraFog {
+                    enabled: rs.fog_enabled,
+                    near: rs.fog_near,
+                    far: rs.fog_far,
+                    color: rs.fog_color,
+                    mode: rs.fog_mode,
+                });
+            if fog.enabled {
                 gl.uniform1i(shader.u_fog_enabled.as_ref(), 1);
-                gl.uniform1f(shader.u_fog_near.as_ref(), rs.fog_near);
-                gl.uniform1f(shader.u_fog_far.as_ref(), rs.fog_far);
-                gl.uniform3f(shader.u_fog_color.as_ref(), rs.fog_color.0, rs.fog_color.1, rs.fog_color.2);
-                gl.uniform1i(shader.u_fog_mode.as_ref(), rs.fog_mode as i32);
+                gl.uniform1f(shader.u_fog_near.as_ref(), fog.near);
+                gl.uniform1f(shader.u_fog_far.as_ref(), fog.far);
+                gl.uniform3f(shader.u_fog_color.as_ref(), fog.color.0, fog.color.1, fog.color.2);
+                gl.uniform1i(shader.u_fog_mode.as_ref(), fog.mode as i32);
             } else {
                 gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
             }
@@ -2230,9 +2279,14 @@ void main() {
                 // `camera.colorBuffer.clearValue` overrides the member's bgColor for
                 // the camera this pass renders (Director 11.5 Scripting Dictionary,
                 // "clearValue").
-                let cam_clear = scene.nodes.iter()
-                    .find(|n| n.node_type == W3dNodeType::View)
-                    .and_then(|n| rs.camera_clear_values.get(&n.name).copied());
+                // The camera THIS pass renders through — not merely the first
+                // View node in the scene, which is a different camera as soon as
+                // a sprite carries more than one.
+                let cam_clear = self.active_camera.as_ref()
+                    .and_then(|c| rs.camera_clear_values.get(c).copied())
+                    .or_else(|| scene.nodes.iter()
+                        .find(|n| n.node_type == W3dNodeType::View)
+                        .and_then(|n| rs.camera_clear_values.get(&n.name).copied()));
                 let (r, g, b) = cam_clear
                     .or(rs.background_color)
                     .unwrap_or((0, 0, 0));
@@ -5089,7 +5143,9 @@ void main() {
         let mut seen = false;
         for n in names.iter().filter(|n| !n.is_empty()) {
             if let Some(sh) = Self::find_shader_ci(&scene.shaders, *n) {
-                let bf = Self::effective_blend_func(sh);
+                // Classifier path: opacity is applied by the caller's own
+                // `is_additive` gate, so leave the promotion unconditional here.
+                let bf = Self::effective_blend_func(sh, 0.0);
                 if bf == 1 {
                     return 1;
                 }
@@ -5120,11 +5176,43 @@ void main() {
     /// AreaZero's muzzle flash, bullet streaks, sparks and smoke never appeared
     /// (defect 3.2). If ANY layer is `#add` (IFX blend func 1) the surface is
     /// additive.
-    fn effective_blend_func(shader: &crate::director::chunks::w3d::types::W3dShader) -> u8 {
-        if shader.texture_layers.iter().any(Self::layer_forces_additive) {
+    /// The blend function the SURFACE composites with. `opacity` is the material
+    /// opacity for this draw; pass 0.0 where it isn't known and the additive
+    /// promotion should stay unconditional.
+    fn effective_blend_func(
+        shader: &crate::director::chunks::w3d::types::W3dShader,
+        opacity: f32,
+    ) -> u8 {
+        // An `#add` layer only makes the whole SURFACE additive in Director's
+        // additive-FX idiom, where the layers UNDERNEATH contribute nothing: the
+        // base layer is `#blend` at constant 0 (AreaZero's MenuCharacter FX) or
+        // the material is driven to zero opacity. When the base layer is a real
+        // diffuse — `#replace` or `#multiply` over an actual texture — the `#add`
+        // layer is a light-ADD MAP that combines with the layers below it INSIDE
+        // the material, exactly as `apply_fog`'s siblings do per fragment.
+        //
+        // Burnin' Rubber's garage is the case that separates the two: its
+        // `AssignTexture` builds `[1] #replace` (the concrete diffuse),
+        // `[2] #add` (GarageLightmapAdd) and `[3] #multiply` (the lightmap) at
+        // full opacity. Promoting that to a framebuffer-additive surface drew the
+        // whole showroom — and every car — as a washed-out white haze over the
+        // camera clear.
+        if shader.texture_layers.iter().any(Self::layer_forces_additive)
+            && (opacity < 0.999 || !Self::base_layer_contributes(shader))
+        {
             return 1;
         }
         shader.texture_layers.first().map(|l| l.blend_func).unwrap_or(0)
+    }
+
+    /// Whether the shader's FIRST texture layer puts any colour on the surface.
+    /// `#blend` (3) at a blend constant of 0 is Director's "base contributes
+    /// nothing" spelling — the additive idiom's marker.
+    fn base_layer_contributes(shader: &crate::director::chunks::w3d::types::W3dShader) -> bool {
+        match shader.texture_layers.first() {
+            None => false,
+            Some(l) => !(l.blend_func == 3 && l.blend_const.abs() <= 0.001),
+        }
     }
 
     /// Whether a texture layer makes the whole SURFACE composite additively
@@ -5247,8 +5335,8 @@ void main() {
                 }
                 // effective_blend_func, not layer 0: Director's additive idiom puts
                 // the #add on a LATER layer (layer 0 is #blend at constant 0).
-                let first_bf = Self::effective_blend_func(w3d_shader);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                let first_bf = Self::effective_blend_func(w3d_shader, opacity);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
@@ -5371,7 +5459,7 @@ void main() {
                 // See effective_blend_func: an #add layer anywhere makes the
                 // surface additive, and it is never layer 0 in Director's idiom.
                 best_blend_func = w3d_shader
-                    .map(|s| Self::effective_blend_func(s))
+                    .map(|s| Self::effective_blend_func(s, mat.map(|m| m.opacity).unwrap_or(1.0)))
                     .unwrap_or(0);
             }
 
@@ -5405,10 +5493,10 @@ void main() {
                 // `#blend` at constant 0 with the `#add` on layer 1. Reading layer 0
                 // gave 3, so the additive branch never ran and the muzzle flash,
                 // bullet streaks and sparks drew nothing.
-                let first_bf = w3d_shader
-                    .map(|s| Self::effective_blend_func(s))
-                    .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
+                let first_bf = w3d_shader
+                    .map(|s| Self::effective_blend_func(s, opacity))
+                    .unwrap_or(0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
                 return Some(MeshMatInfo { opacity, blend_func: first_bf, diffuse_name });
             }
@@ -5487,6 +5575,12 @@ void main() {
         // not by mislabelling IFX_MODULATE as "#replace". Treating blend_func==2 as
         // unlit flattened every ordinary textured model (e.g. the Dummy character,
         // whose whole face is IFX_MODULATE), so `u_texture_unlit` stays off here.
+        //
+        // Deriving "unlit" from SELECT_ARG0 (0) alone is not the answer either:
+        // Burnin' Rubber authors its cars `#replace` and then has [PS] LightManager
+        // set them back to `#multiply` at race start, precisely so they take the
+        // dynamic light it paints. A movie that wants full-bright says so with
+        // emissive / ambient.
         let _ = first_layer_blend_func;
         gl.uniform1i(shader.u_texture_unlit.as_ref(), 0);
         // Director's additive idiom sets `shader.blend = 0` so the BASE layer
