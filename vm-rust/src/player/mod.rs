@@ -3391,13 +3391,32 @@ impl DirPlayer {
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
             },
             BuiltInSymbol::XtraList => {
+                // Each entry carries BOTH keys. `the xtraList` (Movie property,
+                // Director 11.5 Scripting Dictionary) is documented on
+                // `#filename` — "specifies the filename of the Xtra extension on
+                // the current platform" — while `xtraList` (Player) is the
+                // `#name` form; movies read whichever they were written against.
+                //
+                // PHOSPHOR's `M_Util.FindXtra` reads BOTH, picking by execution
+                // style:
+                //     case the scriptExecutionStyle of
+                //       9:  if gXtraList[I].name.char[1..n] = aXtraName
+                //       10: if gXtraList[I].fileName.char[1..n] = aXtraName
+                // so with `#fileName` absent the style-10 branch compared against
+                // VOID, `FindXtra("Multiusr")` returned 0, and C_NetLobby halted
+                // the game with "Multiuser Xtra not installed".
                 let xtra_names = xtra::manager::get_registered_xtra_names();
                 let xtra_list: VecDeque<DatumRef> = xtra_names
                     .iter()
                     .map(|name| {
                         let name_key = self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
                         let name_val = self.alloc_datum(Datum::String(name.to_string()));
-                        self.alloc_datum(Datum::PropList(VecDeque::from(vec![(name_key, name_val)]), false))
+                        let file_key = self.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
+                        let file_val = self.alloc_datum(Datum::String(format!("{}.x32", name)));
+                        self.alloc_datum(Datum::PropList(
+                            VecDeque::from(vec![(name_key, name_val), (file_key, file_val)]),
+                            false,
+                        ))
                     })
                     .collect();
                 Ok(self.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, xtra_list, false)))
