@@ -522,27 +522,27 @@ impl CastManager {
 
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
             (Datum::String(name), Some(cast_lib)) => {
-                // A NAME that the named cast does not hold falls back to the
-                // movie-wide search ("Director searches all cast libraries in a
-                // movie from first to last" — 11.5 Scripting Dictionary, Member).
-                // The cast argument narrows the search; it does not turn a name
-                // the movie can otherwise resolve into a dead reference.
+                // Director 11.5, `member()`: with BOTH arguments the call is
+                // "a specific reference to both a cast library and a member
+                // within it"; the all-libraries search is documented for when
+                // castNameOrNum is OMITTED ("If omitted, member() searches all
+                // cast libraries until a match is found"). So a name the named
+                // cast does not hold is a MISS, not a cue to look elsewhere.
                 //
-                // Burnin' Rubber's Event Manager needs this: `CreateTexture`
-                // ends with `texture.member = member(fileName, pCast)` where
-                // pCast defaults to `pMember.cast.name` — the cast the 3D MEMBER
-                // lives in. Its garage UI panel (member "GarageMenu", castLib
-                // "Garage") is skinned from bitmaps that live in castLib "Main",
-                // so the qualified lookup found nothing, the texture stayed
-                // blank, and the panel covered the whole showroom in opaque
-                // white.
+                // Habbo v26's FUSE Resource Manager depends on exactly that: it
+                // discovers which libraries carry an index field by walking them
+                // all and testing the qualified lookup —
+                //     repeat with tCastLib = 1 to <n>
+                //       if member(tClsIndex, tCastLib).number > 0 then
+                //         getObject(#classes).dump(member(tClsIndex, tCastLib).number)
+                // — so a movie-wide fallback made EVERY library report the same
+                // index and dump it over and over, and the client never came up.
                 cast_lib
                     .find_member_by_name(name)
                     .map(|member| CastMemberRef {
                         cast_lib: cast_lib.number as i32,
                         cast_member: member.number as i32,
                     })
-                    .or_else(|| self.find_member_ref_by_name(name))
                     .map(|member_ref| Ok(Some(member_ref)))
             }
             (Datum::String(name), None) => self
