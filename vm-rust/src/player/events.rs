@@ -2231,11 +2231,30 @@ pub async fn dispatch_system_event_to_timeouts(
     handler_name: BuiltInSymbol,
     args: &Vec<DatumRef>,
 ) {
-    // Get all timeout targets that are currently scheduled
+    // Get all timeout targets that are currently scheduled.
+    //
+    // Only a CHILD OBJECT target receives the relay. Director 11.5 Scripting
+    // Dictionary, "Relaying system events with Timeout objects": "When you
+    // create Timeout objects that target specific child objects, you enable
+    // those child objects to receive system events" — and, under "Associating
+    // custom properties with Timeout objects", a target that is anything other
+    // than a script instance is plain DATA handed to the timeout handler
+    // (`tTO = timeout("betaData").new(50, #targetHandler, tData)`), not a
+    // receiver. Relaying to those too meant Burnin' Rubber 2's
+    //     timeout().new("DelayEventTimeOut…", pDelay, #DelayEventTimeOut, pEvent)
+    // — whose target is the event NAME, a string — was sent prepareFrame and
+    // exitFrame every single frame, each one failing with "No handler
+    // prepareFrame for string datum".
     let timeout_targets = reserve_player_ref(|player| {
         let mut targets = Vec::new();
         for (_timeout_name, timeout) in player.timeout_manager.timeouts.iter() {
-            if timeout.is_scheduled {
+            if !timeout.is_scheduled {
+                continue;
+            }
+            if matches!(
+                player.get_datum(&timeout.target_ref),
+                crate::director::lingo::datum::Datum::ScriptInstanceRef(_)
+            ) {
                 targets.push(timeout.target_ref.clone());
             }
         }
