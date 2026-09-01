@@ -1689,6 +1689,12 @@ impl CastMemberRefHandlers {
             }
             Some(BuiltInSymbol::Type) => Ok(Datum::Symbol(Symbol::from_str(member_type.symbol_string()?))),
             Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
+            // `member.cast` (Director 11.5 Scripting Dictionary, Cast member
+            // property) — the cast library OBJECT the member belongs to, not its
+            // number; `.name` off it is the usual use. Burnin' Rubber's
+            // `GetModelList` opens with `pMember.cast.name`, and without this the
+            // per-member-type getter was reached and errored out.
+            Some(BuiltInSymbol::Cast) => Ok(Datum::CastLib(cast_member_ref.cast_lib as u32)),
             Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(color)),
             Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(bg_color)),
             Some(BuiltInSymbol::Loaded) => Ok(Datum::Int(1)),

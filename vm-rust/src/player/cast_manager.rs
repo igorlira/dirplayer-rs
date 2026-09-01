@@ -522,12 +522,28 @@ impl CastManager {
 
         let member_ref = match (&member_name_or_num, cast_lib.as_ref()) {
             (Datum::String(name), Some(cast_lib)) => {
-                cast_lib.find_member_by_name(name).map(|member| {
-                    Ok(Some(CastMemberRef {
+                // A NAME that the named cast does not hold falls back to the
+                // movie-wide search ("Director searches all cast libraries in a
+                // movie from first to last" — 11.5 Scripting Dictionary, Member).
+                // The cast argument narrows the search; it does not turn a name
+                // the movie can otherwise resolve into a dead reference.
+                //
+                // Burnin' Rubber's Event Manager needs this: `CreateTexture`
+                // ends with `texture.member = member(fileName, pCast)` where
+                // pCast defaults to `pMember.cast.name` — the cast the 3D MEMBER
+                // lives in. Its garage UI panel (member "GarageMenu", castLib
+                // "Garage") is skinned from bitmaps that live in castLib "Main",
+                // so the qualified lookup found nothing, the texture stayed
+                // blank, and the panel covered the whole showroom in opaque
+                // white.
+                cast_lib
+                    .find_member_by_name(name)
+                    .map(|member| CastMemberRef {
                         cast_lib: cast_lib.number as i32,
                         cast_member: member.number as i32,
-                    }))
-                })
+                    })
+                    .or_else(|| self.find_member_ref_by_name(name))
+                    .map(|member_ref| Ok(Some(member_ref)))
             }
             (Datum::String(name), None) => self
                 .find_member_ref_by_name(name)
