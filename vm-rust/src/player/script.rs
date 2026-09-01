@@ -683,8 +683,48 @@ pub fn get_obj_prop(
     }
 
     match obj_clone {
-        Datum::CastLib(cast_lib) => {
-            let cast_lib = player.movie.cast_manager.get_cast(cast_lib as u32)?;
+        Datum::CastLib(cast_lib_num) => {
+            // `castLib(x).member` with NO index — the cast library's member
+            // COLLECTION. Director 11.5 Scripting Dictionary, `member (Cast)`:
+            // "Cast library property; provides indexed or named access to the
+            // members of a cast library." `castLib(x).member[i]` compiles to
+            // getPropRef(#member, i) and is answered in CastLibDatumHandlers;
+            // the bare form lands here, and scripts walk it as a collection:
+            //     pcount = _movie.castLib("Engine").member.count
+            //     repeat with i = 1 to pcount
+            //       pMember = _movie.castLib("Engine").member[i]
+            // (Burnin' Rubber 2's `[M] Event Manager Functions.AddModule`, and
+            // the dictionary's own `put(castLib(n).name && "contains" &&
+            // castLib(n).member.count && "cast members.")`).
+            //
+            // Hand back one entry per member SLOT, 1..highest-in-use, so the
+            // list's own indices are the member numbers `member[i]` resolves —
+            // the same reasoning `numberOfCastMembers` already documents below:
+            // casts have gaps, and a walk keyed off `.count` must still reach
+            // every populated slot. Raising "Cannot get castLib property
+            // member" instead aborted both AddScript and AddModule on their
+            // very first statement.
+            if prop_name.eq_builtin(BuiltInSymbol::Member) {
+                let max_id = player
+                    .movie
+                    .cast_manager
+                    .get_cast(cast_lib_num as u32)?
+                    .max_member_id();
+                let items: std::collections::VecDeque<DatumRef> = (1..=max_id)
+                    .map(|n| {
+                        player.alloc_datum(Datum::CastMember(CastMemberRef {
+                            cast_lib: cast_lib_num as i32,
+                            cast_member: n as i32,
+                        }))
+                    })
+                    .collect();
+                return Ok(player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    items,
+                    false,
+                )));
+            }
+            let cast_lib = player.movie.cast_manager.get_cast(cast_lib_num as u32)?;
             Ok(player.alloc_datum(cast_lib.get_prop(prop_name)?))
         }
         Datum::CastMember(member_ref) => {

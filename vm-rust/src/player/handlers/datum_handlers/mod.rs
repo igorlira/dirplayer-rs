@@ -369,15 +369,59 @@ pub async fn player_call_datum_handler(
                         // the <_movie> wording) — callers use that code to decide
                         // whether to keep searching; a genuine failure *inside* a
                         // known handler must keep its own error.
-                        BuiltInHandlerManager::call_handler(handler_name, &args).map_err(|e| {
-                            if e.message.starts_with("No built-in handler:") {
-                                ScriptError::new_code(
+                        BuiltInHandlerManager::call_handler(handler_name, &args).or_else(|e| {
+                            if !e.message.starts_with("No built-in handler:") {
+                                return Err(e);
+                            }
+                            // Director's dot syntax lets a READ-ONLY movie property be
+                            // written with empty parentheses: the compiler emits a call,
+                            // and the runtime answers it with the property's value.
+                            // Burnin' Rubber 2's `[M] Event Manager Functions.CheckMarker`
+                            // is written that way:
+                            //     pcount = _movie.markerlist().count
+                            //     pMarkerToCheck = _movie.markerlist()[i]
+                            // `markerList` is a Movie property (Director 11.5 Scripting
+                            // Dictionary: "contains a script property list of the markers
+                            // in the Score. Read-only", of the form frameNumber:
+                            // "markerName"), so the parenthesised form has to resolve to
+                            // exactly the same list the bare `_movie.markerList` yields —
+                            // otherwise every marker lookup raises and the movie dies
+                            // before it can leave its first frame.
+                            if !args.is_empty() {
+                                return Err(ScriptError::new_code(
                                     ScriptErrorCode::HandlerNotFound,
                                     format!("No handler {handler_name} for datum <_movie>"),
-                                )
-                            } else {
-                                e
+                                ));
                             }
+                            // Only a LIST-valued property answers here. A scalar
+                            // one would shadow a same-named movie-script handler,
+                            // which still has to win: HandlerNotFound is what
+                            // sends the caller on to search the movie scripts.
+                            // The parenthesised form shows up on the collection
+                            // properties in practice, so that restriction costs
+                            // nothing and removes the whole shadowing class.
+                            reserve_player_mut(|player| {
+                                use crate::director::lingo::datum::Datum;
+                                let prop_datum = player
+                                    .movie
+                                    .get_prop(handler_name)
+                                    .or_else(|_| {
+                                        player
+                                            .get_movie_prop(handler_name)
+                                            .map(|r| player.get_datum(&r).clone())
+                                    })
+                                    .ok()
+                                    .filter(|d| {
+                                        matches!(d, Datum::List(..) | Datum::PropList(..))
+                                    });
+                                match prop_datum {
+                                    Some(d) => Ok(player.alloc_datum(d)),
+                                    None => Err(ScriptError::new_code(
+                                        ScriptErrorCode::HandlerNotFound,
+                                        format!("No handler {handler_name} for datum <_movie>"),
+                                    )),
+                                }
+                            })
                         })
                     }
                 }
