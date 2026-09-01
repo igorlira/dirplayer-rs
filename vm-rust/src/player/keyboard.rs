@@ -13,6 +13,15 @@ pub struct KeyboardManager {
     /// pressed since the movie started. Used by `the lastKey` to compute
     /// ticks since the last key event.
     pub last_key_time: Option<chrono::DateTime<chrono::Local>>,
+    /// The most recently PRESSED key, retained after its release. `the key` and
+    /// `the keyCode` are documented as "the last key pressed" (Director 11.5
+    /// Scripting Dictionary, `key` / `keyCode` — both read-only), not "the key
+    /// currently held: an `on keyUp` handler must still be able to read the key
+    /// it was called for. Burnin' Rubber's whole menu is driven from
+    /// `on keyUp me` → `case _key.keyCode of`, and with the code cleared on
+    /// release every branch missed and the menu was dead to the keyboard.
+    /// `keyPressed()` is the polling accessor and stays tied to `down_keys`.
+    pub last_key: Option<KeyboardKey>,
 }
 
 impl KeyboardManager {
@@ -20,6 +29,7 @@ impl KeyboardManager {
         Self {
             down_keys: Vec::new(),
             last_key_time: None,
+            last_key: None,
         }
     }
 
@@ -36,6 +46,11 @@ impl KeyboardManager {
             "Backspace" => "\x08".to_string(),
             _ => key,
         };
+
+        self.last_key = Some(KeyboardKey {
+            key: mapped_key.clone(),
+            code: mapped_code,
+        });
 
         // Check if this code is already in the down_keys list
         if !self.down_keys.iter().any(|x| x.code == mapped_code) {
@@ -86,12 +101,10 @@ impl KeyboardManager {
     }
 
     pub fn key_code(&self) -> u16 {
-        if self.down_keys.len() == 0 {
-            return 0;
+        match self.down_keys.last().or(self.last_key.as_ref()) {
+            Some(key) => key.code,
+            None => 0,
         }
-
-        let key = self.down_keys.last().unwrap();
-        key.code
     }
 
     /// Translate a stored browser key name (e.g. `e.key` = "ArrowLeft") to the
@@ -112,10 +125,10 @@ impl KeyboardManager {
     }
 
     pub fn key(&self) -> String {
-        if self.down_keys.is_empty() {
-            return "".to_string();
-        }
-        let key = &self.down_keys.last().unwrap().key;
+        let key = match self.down_keys.last().or(self.last_key.as_ref()) {
+            Some(k) => &k.key,
+            None => return "".to_string(),
+        };
         if let Some(ch) = Self::director_char_for(key) {
             return ch.to_string();
         }
