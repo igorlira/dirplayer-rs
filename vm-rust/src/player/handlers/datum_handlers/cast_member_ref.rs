@@ -1689,12 +1689,31 @@ impl CastMemberRefHandlers {
             }
             Some(BuiltInSymbol::Type) => Ok(Datum::Symbol(Symbol::from_str(member_type.symbol_string()?))),
             Some(BuiltInSymbol::CastLibNum) => Ok(Datum::Int(cast_member_ref.cast_lib as i32)),
-            // `member.cast` (Director 11.5 Scripting Dictionary, Cast member
-            // property) — the cast library OBJECT the member belongs to, not its
-            // number; `.name` off it is the usual use. Burnin' Rubber's
-            // `GetModelList` opens with `pMember.cast.name`, and without this the
-            // per-member-type getter was reached and errored out.
-            Some(BuiltInSymbol::Cast) => Ok(Datum::CastLib(cast_member_ref.cast_lib as u32)),
+            // `member.cast` — UNDOCUMENTED: the 11.5 Scripting Dictionary has
+            // `castLibNum` but no `cast` cast-member property. Director answers
+            // it with the MEMBER itself, so `member.cast.name` is the member's
+            // own name, NOT its cast library's. Measured in Director 11.5 on
+            // Burnin' Rubber, with castLib "Garage" linked to GarageData.cct:
+            //
+            //     put member("GarageMenu").cast.name
+            //     -- "GarageMenu"
+            //
+            // This matters because Burnin' Rubber's Event Manager defaults its
+            // cast argument from it — `if pCast = VOID then pCast =
+            // pMember.cast.name` — and then does
+            // `texture.member = member(fileName, pCast)`. Under Director that
+            // qualifies with "GarageMenu", which is not a cast library name at
+            // all, so the cast argument is unresolvable and the lookup degrades
+            // to the ordinary movie-wide by-name search — which is how the
+            // garage panel finds its bitmaps over in castLib "Main".
+            //
+            // Answering with the cast library instead handed the movie the REAL
+            // cast name ("Garage"), which correctly restricts the search (a
+            // qualified miss is VOID — verified in Director:
+            // `put member("MainMenu_Texture", "Garage")` → `<Void>`), so the
+            // panel's textures came back empty and its full-screen quads
+            // painted the whole showroom opaque white.
+            Some(BuiltInSymbol::Cast) => Ok(Datum::CastMember(cast_member_ref.clone())),
             Some(BuiltInSymbol::Color) => Ok(Datum::ColorRef(color)),
             Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(bg_color)),
             Some(BuiltInSymbol::Loaded) => Ok(Datum::Int(1)),
