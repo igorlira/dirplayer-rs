@@ -2070,6 +2070,9 @@ impl Shockwave3dMemberHandlers {
                             .unwrap_or(0);
                         let hops = src_hops + 1;
                         let mut record_hops: Option<(Symbol, u32, [f32; 16])> = None;
+                        // (source name, name actually used) for every cloned descendant —
+                        // read back after the scene borrow ends to record clone provenance.
+                        let mut cloned_child_names: Vec<(Symbol, Symbol)> = Vec::new();
 
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
@@ -2124,13 +2127,53 @@ impl Shockwave3dMemberHandlers {
                                         if let Some(r0) = src_root_com {
                                             record_hops = Some((Symbol::from_str(&obj_name), hops, r0));
                                         }
-                                        // Namespace every descendant's name to avoid collisions
-                                        // with prior clones from the same source.
+                                        // Name each descendant. Director 11.5
+                                        // (`cloneModelFromCastmember`): the command "also copies
+                                        // the children of sourceModelName" — under THEIR OWN
+                                        // names, so a bare `member.model("<childName>")` finds
+                                        // the copy. Namespacing them unconditionally broke that:
+                                        // Burnin' Rubber 2's `SetCheckPoints` clones the
+                                        // "StartFinish" member, then measures the finish line
+                                        // from its child dummies —
+                                        //     GetReferenceType(pMember, "FinishLineDummy_LeftTop")
+                                        //     P1 = pCheckPointLeftTop.worldPosition.x
+                                        // — and with the real children hidden behind
+                                        // "FinishLine_…" that lookup found instead the loose
+                                        // copy `CLONEMODELS` makes when it walks the source's
+                                        // model list, which is parented to the world. Its
+                                        // worldPosition is then its LOCAL offset, so the finish
+                                        // rect landed on the origin — on top of the start line —
+                                        // and the race ended a few metres after the lights went
+                                        // out.
+                                        //
+                                        // The namespace stays as the COLLISION fallback (same
+                                        // rule the resource/mesh names above follow: keep the
+                                        // incoming name unless it is taken), which is what keeps
+                                        // repeated clones of one source apart — dirplayer keys
+                                        // per-node runtime state by NAME, so descendants still
+                                        // have to end up unique.
+                                        let mut taken: std::collections::HashSet<String> = scene
+                                            .nodes
+                                            .iter()
+                                            .map(|n| n.name.to_ascii_lowercase())
+                                            .collect();
                                         let mut node_name_map: std::collections::HashMap<Symbol, Symbol> =
                                             std::collections::HashMap::new();
                                         for child in &src_child_nodes {
-                                            let new_name = Symbol::from_str(&format!("{}{}", ns, child.name));
+                                            let bare = child.name.as_str().to_string();
+                                            let mut candidate = bare.clone();
+                                            if taken.contains(&candidate.to_ascii_lowercase()) {
+                                                candidate = format!("{}{}", ns, bare);
+                                                let mut n = 1;
+                                                while taken.contains(&candidate.to_ascii_lowercase()) {
+                                                    candidate = format!("{}{}{}", ns, bare, n);
+                                                    n += 1;
+                                                }
+                                            }
+                                            taken.insert(candidate.to_ascii_lowercase());
+                                            let new_name = Symbol::from_str(&candidate);
                                             node_name_map.insert(child.name, new_name);
+                                            cloned_child_names.push((child.name, new_name));
                                         }
 
                                         // Clone child nodes from source scene, re-parenting
@@ -2183,11 +2226,10 @@ impl Shockwave3dMemberHandlers {
                                         Symbol::from_str(&obj_name),
                                         Symbol::from_str(&source_model_name),
                                     );
-                                    for child in &src_child_nodes {
-                                        w3d.runtime_state.clone_source.insert(
-                                            Symbol::from_str(&format!("{}{}", ns, child.name)),
-                                            child.name,
-                                        );
+                                    // Same names the nodes were actually pushed under
+                                    // (bare when free, namespaced on collision).
+                                    for (src_name, new_name) in &cloned_child_names {
+                                        w3d.runtime_state.clone_source.insert(*new_name, *src_name);
                                     }
                                 }
                             }
