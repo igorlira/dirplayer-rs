@@ -3037,6 +3037,11 @@ impl Shockwave3dMemberHandlers {
                                                     scene.put_texture_image(obj_sym, tex_data);
                                                     scene.texture_types.insert(
                                                         obj_sym, Symbol::from_str("fromCastMember"));
+                                                    // Remember WHICH member, so `texture.member`
+                                                    // can answer it — see the `"member"` arm of
+                                                    // `get_texture_prop`.
+                                                    scene.texture_source_members.insert(
+                                                        obj_sym, (src_ref.cast_lib, src_ref.cast_member));
                                                     log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
                                                         obj_name, w, h
@@ -3255,6 +3260,7 @@ impl Shockwave3dMemberHandlers {
                         use crate::director::chunks::w3d::types::*;
                         use std::collections::HashMap;
                         let mut empty_scene = W3dScene {
+                            texture_source_members: Default::default(),
                             materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
                             lights: Vec::new(), texture_images: HashMap::new(),
                             texture_near_filtering: HashMap::new(),

@@ -2450,6 +2450,10 @@ impl Shockwave3dObjectDatumHandlers {
                                             s3d_ref.name,
                                             Symbol::from_str("fromCastMember"),
                                         );
+                                        scene.texture_source_members.insert(
+                                            s3d_ref.name,
+                                            (src_ref.cast_lib, src_ref.cast_member),
+                                        );
                                     }
                                 }
                             }
@@ -8765,6 +8769,47 @@ impl Shockwave3dObjectDatumHandlers {
             "nearFiltering" => {
                 let on = scene.texture_near_filtering(&texture_name);
                 Ok(player.alloc_datum(Datum::Int(if on { 1 } else { 0 })))
+            },
+            // Director 11.5 Scripting Dictionary, `member` (3D texture):
+            //
+            //   > if the texture's type is #fromCastMember, this property
+            //   > indicates the cast member that is used as the source for a
+            //   > texture… If the texture's type is #importedFromFile, this
+            //   > property value is void… If the texture's type is
+            //   > #fromImageObject, this property value is void.
+            //
+            // There was no arm at all, so a script could never read back what a
+            // texture was made from. Burnin' Rubber 3 builds every per-car skin
+            // through that round trip (`[M] 3D Textures`):
+            //     tTextureMember = tTexture.member
+            //     tImage         = tTextureMember.image.duplicate()
+            //     newTexture(tag & tTexture.name, #fromImageObject, tImage)
+            // With VOID coming back, every car wore a blank skin and drew as a
+            // flat white silhouette.
+            //
+            // The TYPE GATE is not a detail. `[M] Text` rebuilds an existing
+            // texture with `tTexture.image = tImage`, which makes it
+            // #fromImageObject and drops its member — and the menu's alpha gate
+            // leans on exactly that:
+            //     tmember = tmodel.shader.textureList[1].member   -- VOID
+            //     tImage  = tmember.image                         -- VOID
+            //     ... GetAlphaPixel returns VOID, and `VOID <> color(0)` is TRUE
+            // so a rebuilt texture is simply always solid. Answering the stale
+            // member instead sampled a different bitmap, and every rollover
+            // un-latched `p.button` on the frame after `ButtonEnter` swapped the
+            // texture in — the click's pending `mouseUp` was dropped and the
+            // footer's NEXT stopped working.
+            "member" => {
+                let d = scene
+                    .texture_source_members
+                    .get(&texture_name)
+                    .filter(|_| scene.texture_type(&texture_name).as_str() == "fromCastMember")
+                    .map(|(lib, num)| Datum::CastMember(CastMemberRef {
+                        cast_lib: *lib,
+                        cast_member: *num,
+                    }))
+                    .unwrap_or(Datum::Void);
+                Ok(player.alloc_datum(d))
             },
             _ => {
                 log(&format!("[W3D] texture(\"{}\").{} (stub)", texture_name, prop));

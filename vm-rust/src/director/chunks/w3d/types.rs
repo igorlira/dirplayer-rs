@@ -532,6 +532,8 @@ pub struct W3dScene {
     /// the documented three matched no case arm, so the mapping collapsed and the
     /// cars raced unlit.
     pub texture_types: HashMap<Symbol, Symbol>,
+    /// The `(cast_lib, cast_member)` each `#fromCastMember` texture was bound to.
+    pub texture_source_members: HashMap<Symbol, (i32, i32)>,
     pub texture_infos: Vec<W3dTextureInfo>,
     pub skeletons: Vec<W3dSkeleton>,
     pub motions: Vec<W3dMotion>,
