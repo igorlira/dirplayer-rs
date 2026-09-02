@@ -539,7 +539,7 @@ fn raycast_mesh(
     positions: &[[f32; 3]],
     _normals: &[[f32; 3]],
     faces: &[[u32; 3]],
-    tex_coords: Option<&[[f32; 2]]>,
+    _tex_coords: Option<&[[f32; 2]]>,
     model_name: Symbol,
     mesh_id: u32,
     max_dist: f32,
@@ -594,7 +594,26 @@ fn raycast_mesh(
                         ray.origin[1] + ray.direction[1] * t,
                         ray.origin[2] + ray.direction[2] * t,
                     ];
-                    let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
+                    // Director 11.5 Scripting Dictionary, modelsUnderLoc /
+                    // modelsUnderRay: "#uvCoord is a property list with
+                    // properties #u and #v that represent the u and v
+                    // BARYCENTRIC coordinates of the face." Not the interpolated
+                    // texture coordinate this used to hand back — a different
+                    // quantity, which can be negative or outside [0,1].
+                    //
+                    // Scripts reconstruct the hit point from it, and that only
+                    // works with barycentrics. Burnin' Rubber 3's GetAlphaPixel
+                    // (the alpha gate every #alpha 3D button is clicked through)
+                    // does exactly that against the face's own UV triangle:
+                    //     tUVector = (tLocB - tLocA) * tUVCoord.u
+                    //     tVVector = (tLocC - tLocA) * tUVCoord.V
+                    //     tPos     = tLocA + tUVector + tVVector
+                    //     tAlpha   = tImage.extractAlpha().getPixel(tPos)
+                    // A + u(B-A) + v(C-A) IS the barycentric reconstruction of
+                    // the hit point. Fed texture UVs, tPos landed off the image,
+                    // getPixel raised, and the raise took the whole enterFrame
+                    // with it — so no alpha-tested button ever lit up.
+                    let uv = [u, v];
                     closest = Some(RayHit {
                         model_name: model_name.to_string(),
                         distance: t,
@@ -810,7 +829,8 @@ fn raycast_bvh(
                             ray.origin[1] + ray.direction[1] * t,
                             ray.origin[2] + ray.direction[2] * t,
                         ];
-                        let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
+                        // Barycentric — see the note in raycast_mesh.
+                        let uv = [u, v];
                         closest = Some(RayHit {
                             model_name: model_name.to_string(),
                             distance: t,
@@ -841,21 +861,6 @@ fn raycast_bvh(
             }
         }
     }
-}
-
-/// Interpolate UV coordinates using barycentric coords (u, v) from ray-triangle intersection.
-/// The barycentric weights are: w0 = 1-u-v, w1 = u, w2 = v.
-fn interpolate_uv(tex_coords: Option<&[[f32; 2]]>, i0: usize, i1: usize, i2: usize, u: f32, v: f32) -> [f32; 2] {
-    if let Some(tc) = tex_coords {
-        if i0 < tc.len() && i1 < tc.len() && i2 < tc.len() {
-            let w0 = 1.0 - u - v;
-            return [
-                w0 * tc[i0][0] + u * tc[i1][0] + v * tc[i2][0],
-                w0 * tc[i0][1] + u * tc[i1][1] + v * tc[i2][1],
-            ];
-        }
-    }
-    [0.0, 0.0]
 }
 
 // ─── Vector math helpers ───
