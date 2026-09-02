@@ -107,6 +107,38 @@ impl CastLib {
         0
     }
 
+    /// Director's `findEmpty()`: the first slot at or after `start` that holds
+    /// no member.
+    ///
+    /// Director 11.5 Scripting Dictionary, `findEmpty()`: "Cast library method;
+    /// displays the next empty cast member position or the position after a
+    /// specified cast member." The search belongs to the CAST LIBRARY — there is
+    /// no movie-wide bound on it, and a cast grows on demand.
+    ///
+    /// Both callers used to scan `config.min_member ..= config.max_member` from
+    /// the MOVIE's Config chunk instead, which describes the movie's own
+    /// internal cast and nothing else. Burnin' Rubber 3's movie has 13 internal
+    /// members, so every `findEmpty()` on any library ran 1..=13, found all
+    /// thirteen taken, and fell through to the `max + 1` fallback — answering 14
+    /// forever. Its `CreateTextTexture` allocates one bitmap per text texture
+    /// with
+    ///     tEmpty = castLib("Menu").findEmpty()
+    ///     tTextureMember = new(#bitmap, member(tEmpty, "Menu"))
+    /// so all of them landed on Menu member 14 (a 71-member external cast), each
+    /// overwriting the last. Every menu button then shared one bitmap, and the
+    /// per-car skins `[M] 3D Textures` builds from `texture.member` were
+    /// duplicated off whichever image happened to be there last.
+    ///
+    /// Unlike [`Self::first_free_member_id`] this never answers 0: that one is
+    /// "somewhere to create a member, 0 means the library is full" and its
+    /// callers check for it, whereas `findEmpty()` reports a position.
+    pub fn find_empty_slot(&self, start: u32) -> u32 {
+        let max = self.members.keys().copied().max().unwrap_or(0);
+        (start.max(1)..=max.saturating_add(1))
+            .find(|slot| !self.members.contains_key(slot))
+            .unwrap_or_else(|| max.saturating_add(1))
+    }
+
     pub fn remove_member(&mut self, number: u32) {
         // TODO remove from movie script cache
         self.members.remove(&number);
