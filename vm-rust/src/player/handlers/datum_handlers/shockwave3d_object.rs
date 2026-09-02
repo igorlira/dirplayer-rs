@@ -4805,16 +4805,34 @@ impl Shockwave3dObjectDatumHandlers {
                             use crate::director::chunks::w3d::raycast;
                             use crate::player::score::get_concrete_sprite_rect;
 
-                            let view_node = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View);
+                            // Director 11.5 Scripting Dictionary, `modelUnderLoc`:
+                            // `member(whichCastmember).camera(whichCamera).modelUnderLoc(point)`
+                            // — it is a CAMERA method, so the ray leaves the camera it
+                            // was called on. This used to take the scene's FIRST view
+                            // node unconditionally, so every call cast from
+                            // "DefaultView" no matter which camera the script asked, and
+                            // any movie whose UI camera is not the first one picked
+                            // nothing at all. (`modelsUnderLoc` next door already
+                            // resolves `s3d_ref.name` this way.)
+                            //
+                            // Burnin' Rubber 3 hits it twice over: `[PS] Burnin3 Enter
+                            // Name` finds its name field with
+                            // `member("Main").camera("3D_Camera").modelUnderLoc(...)`,
+                            // and `[PS] Burnin3 Drag n Drop` picks the car parts with
+                            // `member("Hangar").camera("Hangar_Camera").modelUnderLoc(...)`.
+                            // "Main" carries 19 cameras and DefaultView is not the one
+                            // on screen, so neither screen responded to the mouse.
+                            let view_node = scene.nodes.iter()
+                                .find(|n| n.node_type == W3dNodeType::View && n.name == s3d_ref.name)
+                                .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
                             let fov_deg = view_node.map(|n| n.fov).unwrap_or(30.0);
-                            // Use runtime camera transform (set by Lingo) if available
-                            let cam_name = view_node.map(|n| n.name).unwrap_or_else(|| Symbol::from_str("defaultview"));
-                            let cam_transform = runtime_state.node_transforms
-                                .get(&cam_name)
-                                .copied()
-                                .unwrap_or_else(|| view_node.map(|n| n.transform).unwrap_or([
-                                    1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0,
-                                ]));
+                            // Resolve through `get_node_transform` (not a bare
+                            // `node_transforms` lookup) so a camera parented under an
+                            // animated carrier — and one whose transform only exists as
+                            // the persistent Lingo datum — reaches its WORLD placement,
+                            // as the plural path does.
+                            let cam_name = view_node.map(|n| n.name).unwrap_or(s3d_ref.name);
+                            let cam_transform = get_node_transform(player, &member_ref, cam_name);
 
                             // Find the sprite that holds this 3D member for viewport dimensions.
                             // Coordinates are sprite-relative (not stage-relative).
@@ -4833,8 +4851,7 @@ impl Shockwave3dObjectDatumHandlers {
 
                             // An orthographic camera needs PARALLEL rays; the perspective
                             // unprojection would fan them out from the camera point and miss.
-                            let cam_nm = view_node.map(|n| n.name).unwrap_or(s3d_ref.name);
-                            let ray = match camera_ortho_height_if_ortho(player, &member_ref, cam_nm) {
+                            let ray = match camera_ortho_height_if_ortho(player, &member_ref, cam_name) {
                                 Some(oh) => raycast::screen_to_ray_orthographic(
                                     sx, sy, width, height, orig_w, orig_h, oh, &cam_transform),
                                 None => raycast::screen_to_ray_shockwave(
@@ -4911,10 +4928,29 @@ impl Shockwave3dObjectDatumHandlers {
                                 })));
                             }
 
-                            // Fall back to mesh-triangle intersection
+                            // Fall back to mesh-triangle intersection.
+                            //
+                            // The exclusion set is NOT optional: picking must
+                            // skip nodes the script detached with
+                            // `removeFromWorld` (and everything under them),
+                            // exactly as `modelsUnderLoc` next door does. Without
+                            // it the singular form happily reported models that
+                            // are not in the world, and a script that gates on
+                            // the NAME it gets back sees the wrong one.
+                            //
+                            // Burnin' Rubber 3's `[PS] Burnin3 Enter Name` is
+                            // that shape:
+                            //     tmodel = member("Main").camera("3D_Camera").modelUnderLoc(_mouse.mouseLoc)
+                            //     if tmodel.name = "EnterNameText" then p.button = tmodel
+                            // Clicking the name field returned "YesButton" — a
+                            // button belonging to a dialog that had been taken
+                            // out of the world — so the field never armed, no
+                            // name could be typed, and NEXT never appeared.
+                            let excluded = expand_detached_subtrees(
+                                &scene, &runtime_state.detached_nodes);
                             if let Some(hit) = raycast::raycast_scene_multi(
                                 &ray, &scene, 100000.0, 1,
-                                Some(&runtime_state.node_transforms), None, None,
+                                Some(&runtime_state.node_transforms), Some(&excluded), None,
                                 // Bind-pose geometry: this is a picking path, not
                                 // gameplay hit detection. Wire the anim closure in if a
                                 // movie ever needs to click a posed character.
