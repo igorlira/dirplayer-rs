@@ -83,6 +83,10 @@ impl TypeUtils {
             Datum::Transform3d(..) => Ok(vec![BuiltInSymbol::Transform]),
 
             _ => Err(ScriptError::new(format!(
+            // A physics Xtra's rigid bodies, springs and joints are object
+            // handles like any other an Xtra hands out. These had no arm at all,
+            // so both `ilk(rb)` and `rb.ilk` raised.
+            Datum::HavokObjectRef(..) | Datum::PhysXObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
                 "Getting ilk for unknown type: {}",
                 datum.type_str()
             )))?,

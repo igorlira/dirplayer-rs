@@ -20,6 +20,23 @@ impl HavokObjectDatumHandlers {
                 cast_lib: hk_ref.cast_lib,
                 cast_member: hk_ref.cast_member,
             };
+            // `.ilk` is a UNIVERSAL Director property — "Cast member, sprite, and
+            // object property; indicates the type of the specified object" — and
+            // it has to agree with the `ilk()` function form, which answers
+            // `#instance` for the object handles an Xtra hands a script (see
+            // `TypeUtils::get_datum_ilks`, alongside XtraInstance, FlashObjectRef
+            // and the Mixer's sound objects).
+            //
+            // Intercepted before the per-type tables below because those are the
+            // Xtra's OWN property sets and none of them carries `ilk`, so the
+            // universal property fell through to "Unknown rigidBody property:
+            // ilk" and RAISED. Scripts use it as an existence guard —
+            //     if tLinVelOrig.ilk <> void() then p.LinVelOrig = tLinVelOrig
+            // (VOID answers VOID for any property, a real object answers a
+            // symbol) — so the raise killed the handler outright.
+            if prop_name.eq_ignore_ascii_case("ilk") {
+                return Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Instance))));
+            }
             match hk_ref.object_type {
                 BuiltInSymbol::RigidBody => Self::get_rigid_body_prop(player, &member_ref, hk_ref.name, prop_name),
                 BuiltInSymbol::Spring => Self::get_spring_prop(player, &member_ref, hk_ref.name, prop_name),
