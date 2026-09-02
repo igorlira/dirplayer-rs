@@ -3977,7 +3977,44 @@ impl Shockwave3dObjectDatumHandlers {
                         let model_name = s3d_ref.name.clone();
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                w3d.runtime_state.bones_player_mut(model_name).motion_queue.push(queued);
+                                {
+                                    let bp = w3d.runtime_state.bones_player_mut(model_name);
+                                    bp.motion_queue.push(queued);
+                                    // Director 11.5 Scripting Dictionary, `queue() (3D)`:
+                                    // the motion "is executed by the model when all the
+                                    // motions ahead of it in the playlist are finished
+                                    // playing" — so with an EMPTY playList there is
+                                    // nothing ahead of it and it starts at once. It is a
+                                    // complete idiom on its own: nothing has to call
+                                    // `play()` afterwards.
+                                    //
+                                    // dirplayer only ever promoted the queue when a
+                                    // NON-LOOPING current motion ran out (or on an
+                                    // explicit no-arg `play()`), so a movie that drives
+                                    // everything through `queue()` animated nothing.
+                                    // Burnin' Rubber 3's `PlayAllAnimation` is exactly
+                                    // that: for every model in the Logo member it does
+                                    // `addModifier(#keyframePlayer)` and then
+                                    // `keyframePlayer.queue(model.name & "-Key", 0)`. With
+                                    // no promotion, the whole logo intro — including the
+                                    // camera, which is parented under
+                                    // "Dummy Animation Node Logo_Camera" and flies on
+                                    // "Logo_Camera-Key" — stood still at its bind pose,
+                                    // pointing away from the logo. Black screen.
+                                    if bp.current_motion.is_none() {
+                                        let q = bp.motion_queue.remove(0);
+                                        bp.current_motion = Some(q.name);
+                                        bp.animation_playing = true;
+                                        bp.animation_loop = q.looped;
+                                        bp.animation_start_time = q.start_time;
+                                        bp.animation_end_time = q.end_time;
+                                        bp.animation_scale = q.scale;
+                                        bp.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                                        bp.motion_ended = false;
+                                        bp.previous_motion = None;
+                                        bp.blend_weight = 1.0;
+                                    }
+                                }
                                 w3d.runtime_state.sync_legacy_from_bones_player(model_name);
                             }
                         }
