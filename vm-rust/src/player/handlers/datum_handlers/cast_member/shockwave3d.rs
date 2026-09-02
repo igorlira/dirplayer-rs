@@ -957,6 +957,19 @@ impl Shockwave3dMemberHandlers {
                     .unwrap_or_default();
                 Ok(Datum::String(s))
             }
+            // Director's `userData` is documented on a 3D member's NODES — "the
+            // userData property list of a model, group, camera, or light"
+            // (Director 11.5 Scripting Dictionary) — and the MEMBER itself
+            // carries no such list, so reading it answers VOID rather than
+            // raising. Scripts test it exactly that way: Burnin' Rubber 3's
+            // `Create3DText` measures each glyph with
+            //     if tmember.userData <> VOID then
+            //       tWidth = tmember.userData[#fontData][symbol(tChar)][#width]
+            //     else
+            //       tWidth = GetModelWidth(0, tChar3D)
+            // — the VOID branch is the one a member without an authored font
+            // metrics table is supposed to take.
+            BuiltInSymbol::UserData => Ok(Datum::Void),
             _ => {
                 Err(ScriptError::new(format!(
                     "Cannot get Shockwave3D property '{}'", prop

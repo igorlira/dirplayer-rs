@@ -968,6 +968,15 @@ define_builtin_symbols! {
     // "DefaultDirectional"/"DefaultAmbient", which Director has no counterpart for.
     "UIDirectional" => UIDirectional,
     "UIAmbient" => UIAmbient,
+    // `userData` — the per-node property list Director hangs on a model, group,
+    // camera or light. The 3D object getters match property names as STRINGS, so
+    // they never needed it interned; the 3D CAST MEMBER getter resolves through
+    // `into_builtin_or_error` first, and without an entry here it raised
+    // "Symbol 'userData' is not a built-in symbol" before ever reaching a match
+    // arm. Burnin' Rubber 3's `Create3DText` opens every glyph with
+    // `if tmember.userData <> VOID`, so that raise took out the whole 3D-text
+    // menu system.
+    "userData" => UserData,
     "TextMaterial" => TextMaterial,
     "DefaultShader" => DefaultShader,
     "<world>" => _Angle_World,

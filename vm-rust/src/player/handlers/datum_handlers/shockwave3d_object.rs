@@ -337,7 +337,32 @@ impl Shockwave3dObjectDatumHandlers {
                 w3d.parsed_scene.clone()
                     .ok_or_else(|| ScriptError::new("No parsed 3D scene".to_string()))?
             };
-            Self::get_prop_inner(player, &s3d_ref, &member_ref, &scene, prop_name)
+            let result = Self::get_prop_inner(player, &s3d_ref, &member_ref, &scene, prop_name);
+            // `.ilk` is a UNIVERSAL Director property — "Cast member, sprite, and
+            // object property; indicates the type of the specified object"
+            // (Director 11.5 Scripting Dictionary, `ilk`) — and it must agree
+            // with the `ilk()` function form, which answers a 3D object's
+            // `object_type` (see `TypeUtils::get_datum_ilks`). Only a few of the
+            // per-type getters below spell it out, so a model answered VOID for
+            // `model.ilk` while `ilk(model)` answered `#model`.
+            //
+            // Burnin' Rubber 3's whole menu hangs on the property form:
+            // `[PS] Burnin3 Menu`'s `ButtonDown` / `ButtonUp` dispatch on
+            // `p.PreviousButton.ilk = #model`, so with it VOID no 3D button in
+            // the game could ever be pressed — the Logo screen's START button
+            // took its rollover and then swallowed the click.
+            //
+            // Applied as a FALLBACK rather than an early intercept: a model ref
+            // whose name encodes a `meshDeform` face (`split_face_ref_name`)
+            // answers `#list` for `.ilk`, and that must keep winning. The
+            // getters signal "no such property" by answering VOID as often as
+            // by erroring, so both count as unanswered here.
+            if prop_name.eq_ignore_ascii_case("ilk")
+                && result.as_ref().map_or(true, |r| matches!(player.get_datum(r), Datum::Void))
+            {
+                return Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(s3d_ref.object_type))));
+            }
+            result
         })
     }
 
@@ -8047,6 +8072,10 @@ impl Shockwave3dObjectDatumHandlers {
 
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(camera_name.to_string()))),
+            // Director 11.5 Scripting Dictionary, `userData`: a MODEL, GROUP,
+            // CAMERA or LIGHT all carry one. See the group arm in
+            // `get_node_prop` for why this matters.
+            "userData" => Ok(get_or_create_node_user_data(player, member_ref, camera_name)),
             "transform" => {
                 // Use the actual W3D node name (e.g. "defaultview") not the sprite property name ("DefaultView")
                 // so that node_transform_datums keys match what the renderer looks up via node.name
@@ -8202,6 +8231,10 @@ impl Shockwave3dObjectDatumHandlers {
 
         match_ci!(prop, {
             "name" => Ok(player.alloc_datum(Datum::String(light_name.to_string()))),
+            // Director 11.5 Scripting Dictionary, `userData`: a MODEL, GROUP,
+            // CAMERA or LIGHT all carry one. See the group arm in
+            // `get_node_prop` for why this matters.
+            "userData" => Ok(get_or_create_node_user_data(player, member_ref, light_name)),
             "type" => {
                 let sym = match light.map(|l| &l.light_type) {
                     Some(W3dLightType::Ambient) => "ambient",
@@ -8319,6 +8352,21 @@ impl Shockwave3dObjectDatumHandlers {
                     }
                 }
             },
+            // Director 11.5 Scripting Dictionary, `userData`: "returns the
+            // userData property list of a MODEL, GROUP, CAMERA, or LIGHT" — the
+            // usage block spells all four out. Only `get_model_prop` answered
+            // it, so a group/camera/light fell through to the VOID stub and
+            // `group.userData.addProp(#k, v)` died on the VOID.
+            //
+            // Burnin' Rubber 3's `Create3DText` finishes every 3D text block
+            // with `tGroup.userData.addProp(#modelList, …)` /
+            // `.addProp(#shaderList, …)` on the GROUP it just built, so the
+            // whole main menu (and every later menu, all of which are 3D text)
+            // aborted on the first line of text it laid out.
+            //
+            // Same live-reference contract as the model arm: one cached
+            // PropList per node, mutated in place.
+            "userData" => Ok(get_or_create_node_user_data(player, member_ref, node_name)),
             "transform" => {
                 Ok(get_persistent_node_transform(player, member_ref, node_name))
             },
