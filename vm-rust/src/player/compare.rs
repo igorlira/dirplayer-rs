@@ -308,6 +308,33 @@ pub fn datum_equals(
             _ => false
         }),
 
+        // A transform compares by VALUE, over the whole matrix — measured in
+        // Director 11.5's message window:
+        //
+        //   t1 = transform()          t2 = transform()
+        //   put t1 = t2               -- 1   (two independent identities)
+        //   put t1 = t1.duplicate()   -- 1   (a copy, so not identity equality)
+        //   t2.position = vector(1,0,0)
+        //   put t1 = t2               -- 0
+        //   t4 = t1.duplicate()       t4.rotate(0,0,1)
+        //   put t1 = t4               -- 0   (rotation counts too, not just position)
+        //
+        // and it carries through a list, which is what actually matters:
+        //   la = [t1, t3, 50]   lb = [t1, t3, 50]
+        //   put la = lb         -- 1
+        //   l = [la]            l.deleteOne(lb)    put l.count   -- 0
+        //
+        // That last pair is `[M] 3D HandlerList Functions.Interpolator` exactly:
+        // it walks `gSystem.InterPolatorList.duplicate()` and drops a converged
+        // entry with `deleteOne(i)`, where `i` is a DUPLICATE of the entry list
+        // holding the node's transform and its target. Answering false (the old
+        // fallthrough, one warning per entry per frame) meant no entry was ever
+        // removed and the interpolator list only grew.
+        (Transform3d(a), o) | (o, Transform3d(a)) => Ok(match o {
+            Transform3d(b) => a == b,
+            _ => false,
+        }),
+
         (Vector(v), o) | (o, Vector(v)) => Ok(match o {
             Vector(other_v) => v == other_v,
             _ => false
