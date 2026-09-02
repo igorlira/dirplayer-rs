@@ -251,11 +251,21 @@ bin_op     = _{
   | and_op
   | or_op
   | eq_op
+  // PEG alternation is ORDERED and does not backtrack out of a branch that
+  // matched, so every two-character comparison must come before the
+  // one-character operator it starts with. With `lt_op` ("<") ahead of
+  // `le_op` ("<="), `a <= b` matched "<" and then choked on the leftover
+  // "= b" — so `value("-533 <= 2000")` answered VOID. Burnin' Rubber 3's
+  // countdown is driven entirely by that shape:
+  //     AddTrigger {:CountDown} <= 2000  [#event: "PlayCountDownSound"]
+  //     AddTrigger {:CountDown} <= 0     [#event: "StartChallenge"]
+  // and `EvalTriggers` runs each condition through `value()`, so the 3-2-1
+  // never counted down and the race never started.
   | ne_op
-  | lt_op
-  | gt_op
   | le_op
   | ge_op
+  | lt_op
+  | gt_op
   | add
   | subtract
   | multiply
