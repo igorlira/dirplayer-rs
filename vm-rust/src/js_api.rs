@@ -2417,6 +2417,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("shockwave3dObject"));
             map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", s3d_ref.object_type, s3d_ref.name)));
         }
+        Datum::MixerSoundObjectRef(_, name) => {
+            map.str_set("type", &safe_js_string("soundObject"));
+            map.str_set("value", &safe_js_string(name));
+        }
         Datum::Transform3d(_) => {
             map.str_set("type", &safe_js_string("transform"));
         }

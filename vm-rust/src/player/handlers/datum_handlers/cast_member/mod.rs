@@ -23,3 +23,4 @@ pub mod physx_soa_solver;
 pub mod physx_helpers;
 pub mod physx_native;
 pub mod vector_shape;
+pub mod mixer;

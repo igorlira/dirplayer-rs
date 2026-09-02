@@ -1422,6 +1422,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::NetTextResult) => NetHandlers::net_text_result(args),
             Some(BuiltInSymbol::PostNetText) => NetHandlers::post_net_text(args),
             Some(BuiltInSymbol::Rgb) => TypeHandlers::rgb(args),
+            Some(BuiltInSymbol::AudioFilter) => TypeHandlers::audio_filter(args),
             Some(BuiltInSymbol::List) => TypeHandlers::list(args),
             Some(BuiltInSymbol::Image) => TypeHandlers::image(args),
             Some(BuiltInSymbol::Filter) => TypeHandlers::filter(args),

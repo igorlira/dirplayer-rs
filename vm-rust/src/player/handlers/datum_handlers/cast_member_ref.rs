@@ -577,6 +577,10 @@ impl CastMemberRefHandlers {
                 CastMemberType::VectorShape(_) => {
                     VectorShapeMemberHandlers::call(player, datum, handler_name, args)
                 }
+                CastMemberType::Mixer(_) => {
+                    crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                        ::call(datum, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for member type {:?}",
                     handler_name, cast_member.member_type.member_type_id()
@@ -915,6 +919,10 @@ impl CastMemberRefHandlers {
             CastMemberTypeId::Shockwave3d => Shockwave3dMemberHandlers::get_prop(player, cast_member_ref, prop),
             CastMemberTypeId::HavokPhysics => HavokPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop_str),
             CastMemberTypeId::PhysXPhysics => PhysXPhysicsMemberHandlers::get_prop(player, cast_member_ref, prop),
+            CastMemberTypeId::Mixer => {
+                crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                    ::get_prop(player, cast_member_ref, prop_str)
+            }
             CastMemberTypeId::Script => {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
                     .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
@@ -1387,6 +1395,10 @@ impl CastMemberRefHandlers {
             }),
             CastMemberTypeId::Bitmap => BitmapMemberHandlers::set_prop(member_ref, prop, value),
             CastMemberTypeId::Sound => SoundMemberHandlers::set_prop(member_ref, prop, value),
+            CastMemberTypeId::Mixer => reserve_player_mut(|player| {
+                crate::player::handlers::datum_handlers::cast_member::mixer::MixerMemberHandlers
+                    ::set_prop(player, member_ref, prop_str, &value)
+            }),
             CastMemberTypeId::Palette => reserve_player_mut(|player| {
                 PaletteMemberHandlers::set_prop(player, member_ref, prop, value)
             }),

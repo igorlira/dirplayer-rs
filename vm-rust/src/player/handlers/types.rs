@@ -75,18 +75,21 @@ impl TypeUtils {
             Datum::MouseRef => Ok(vec![BuiltInSymbol::Mouse]),
             Datum::XmlRef(..) => Ok(vec![BuiltInSymbol::Xml]),
             Datum::JsObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
+            // A mixer's sound object is an object handle, like any other Xtra
+            // instance Director hands a script.
+            Datum::MixerSoundObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::DateRef(..) => Ok(vec![BuiltInSymbol::Date]),
             Datum::MathRef(..) => Ok(vec![BuiltInSymbol::Math]),
             Datum::VarRef(..) => Ok(vec![BuiltInSymbol::Void]), // VarRef should be dereferenced before checking ilk
             Datum::FlashObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
             Datum::Shockwave3dObjectRef(r) => Ok(vec![r.object_type]),
-            Datum::Transform3d(..) => Ok(vec![BuiltInSymbol::Transform]),
-
-            _ => Err(ScriptError::new(format!(
             // A physics Xtra's rigid bodies, springs and joints are object
             // handles like any other an Xtra hands out. These had no arm at all,
             // so both `ilk(rb)` and `rb.ilk` raised.
             Datum::HavokObjectRef(..) | Datum::PhysXObjectRef(..) => Ok(vec![BuiltInSymbol::Instance]),
+            Datum::Transform3d(..) => Ok(vec![BuiltInSymbol::Transform]),
+
+            _ => Err(ScriptError::new(format!(
                 "Getting ilk for unknown type: {}",
                 datum.type_str()
             )))?,
@@ -588,6 +591,58 @@ impl TypeHandlers {
 
     pub fn void(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         Ok(DatumRef::Void)
+    }
+
+    /// `audioFilter(<symbol> {, <paramList>})` — Director 11.5 Scripting
+    /// Dictionary, "Audio filters":
+    ///
+    /// > <audioFilter Object Reference> audioFilter (<symbol>, <paramList>)
+    /// > Filters return filter objects if their parameters are properly
+    /// > specified.
+    ///
+    /// The filter object is a bag of named, readable AND writable properties —
+    /// each filter's own parameters (`#shift` for PitchShiftFilter, `#echoLevel`
+    /// / `#feedback` for EchoFilter, …) plus the common `enabled`. That is
+    /// exactly a Lingo property list, so one is what this answers: the caller
+    /// can hold it, `filterList.append(...)` it, and read or write its
+    /// parameters by name, which is the whole surface a movie uses.
+    ///
+    /// Burnin' Rubber 3 pitches its engine loop with it every frame:
+    ///     t.sound[#filter] = audioFilter(#PitchShiftFilter, [#shift: t.sound.rate])
+    ///     t.sound.engine.filterList.append(t.sound.filter)
+    ///     …
+    ///     if t.sound.filter.shift <> tRate then t.sound.filter.shift = tRate
+    ///
+    /// NB the returned list carries `#type` so the owner can tell filters apart;
+    /// the audio path does not yet APPLY these filters, so the pitch shift is
+    /// tracked but not heard.
+    pub fn audio_filter(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let kind = match args.first().map(|a| player.get_datum(a)) {
+                Some(Datum::Symbol(s)) => s.to_string(),
+                Some(other) => other.string_value().unwrap_or_default(),
+                None => {
+                    return Err(ScriptError::new(
+                        "audioFilter: a filter type symbol is required".to_string(),
+                    ))
+                }
+            };
+            let mut pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
+            let k = player.alloc_datum(Datum::Symbol(Symbol::from_str("type")));
+            let v = player.alloc_datum(Datum::Symbol(Symbol::from_str(&kind)));
+            pairs.push_back((k, v));
+            let k = player.alloc_datum(Datum::Symbol(Symbol::from_str("enabled")));
+            let v = player.alloc_datum(Datum::Int(1));
+            pairs.push_back((k, v));
+            if let Some(p) = args.get(1) {
+                if let Datum::PropList(src, _) = player.get_datum(p) {
+                    for (pk, pv) in src.clone().iter() {
+                        pairs.push_back((pk.clone(), pv.clone()));
+                    }
+                }
+            }
+            Ok(player.alloc_datum(Datum::PropList(pairs, false)))
+        })
     }
 
     pub fn ilk(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {

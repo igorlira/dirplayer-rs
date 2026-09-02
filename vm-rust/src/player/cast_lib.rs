@@ -654,6 +654,15 @@ impl CastLib {
                     crate::player::cast_member::HavokPhysicsMember::new(Vec::new()),
                 ),
             )),
+            // `new(#Mixer)` creates an empty Director 11 Sound Mixer member.
+            // The script then fills it with `createSoundObject(...)` calls and
+            // drives the lot with `play()` / `stop()` / `mute` — see
+            // `MixerMember`. Burnin' Rubber 3's `[M] Sound Manager.CreateMixer`
+            // builds one per car this way and names it "DynMixer<n>".
+            "mixer" => Ok(CastMember::new(
+                number,
+                CastMemberType::Mixer(crate::player::cast_member::MixerMember::new()),
+            )),
             _ => Err(ScriptError::new(format!(
                 "Cannot create member of type {}",
                 member_type

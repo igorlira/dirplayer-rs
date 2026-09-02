@@ -3323,7 +3323,120 @@ pub enum CastMemberType {
     PhysXPhysics(PhysXPhysicsMember),
     Groove3gm(Groove3gmMember),
     Transition(TransitionMember),
+    Mixer(MixerMember),
     Unknown,
+}
+
+/// A Director 11 Sound Mixer cast member (`new(#mixer)`).
+///
+/// "Audio mixer" in the 11.5 Scripting Dictionary: a container that owns named
+/// SOUND OBJECTS (`createSoundObject` / `getSoundObjectList` /
+/// `deleteSoundObject`), mixes them, and is driven as a unit through
+/// `play()` / `stop()` / `pause()` / `mute` / `unmute` / `reset`.
+///
+/// Burnin' Rubber 3 gives every car one: `[M] Cars` builds a mixer per vehicle
+/// and hangs the engine, tyre and skid loops off it as sound objects, riding
+/// their `volume` and `playRate` per frame from the car's speed and slip.
+#[derive(Clone, Debug)]
+pub struct MixerMember {
+    /// 0-255, "255 indicates full volume and 0 indicates no [sound]"
+    /// (Director 11.5 Scripting Dictionary, `volume (Mixer)`).
+    pub volume: i32,
+    /// Milliseconds of audio the engine processes at a time. "bufferSize is a
+    /// multiple of 10, and its default value is 100" (`bufferSize (Mixer)`).
+    pub buffer_size: i32,
+    pub status: MixerStatus,
+    pub muted: bool,
+    /// Sound objects in creation order. "Sound objects with duplicate names are
+    /// not allowed" (`createSoundObject`).
+    pub objects: Vec<MixerSoundObject>,
+}
+
+impl MixerMember {
+    pub fn new() -> Self {
+        Self {
+            volume: 255,
+            buffer_size: 100,
+            status: MixerStatus::Stopped,
+            muted: false,
+            objects: Vec::new(),
+        }
+    }
+
+    pub fn object(&self, name: &str) -> Option<&MixerSoundObject> {
+        self.objects.iter().find(|o| o.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn object_mut(&mut self, name: &str) -> Option<&mut MixerSoundObject> {
+        self.objects.iter_mut().find(|o| o.name.eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixerStatus {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+impl MixerStatus {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            MixerStatus::Stopped => "stopped",
+            MixerStatus::Playing => "playing",
+            MixerStatus::Paused => "paused",
+        }
+    }
+}
+
+/// One named sound in a mixer. Created by
+/// `mixer.createSoundObject(name, castMem {, startTime, endTime, loopCount,
+/// loopStartTime, loopEndTime, preLoadTime})` — Burnin' Rubber 3 passes the
+/// optional arguments as a PROPERTY LIST (`[#loopCount: 0, #loopStartTime: 135,
+/// …]`), which is the form the dictionary's `proplist` parameter documents.
+#[derive(Clone, Debug)]
+pub struct MixerSoundObject {
+    pub name: String,
+    /// The sound cast member this object plays, when created from `castMem`.
+    pub member: Option<CastMemberRef>,
+    /// The file path, when created from `filepath`.
+    pub file: String,
+    pub start_time: i32,
+    pub end_time: i32,
+    /// 0 = loop forever, which is what every one of BR3's engine loops asks for.
+    pub loop_count: i32,
+    pub loop_start_time: i32,
+    pub loop_end_time: i32,
+    pub volume: i32,
+    /// Playback speed multiplier — BR3 rides this with engine RPM.
+    pub play_rate: f32,
+    /// `filterList`: audio filters attached to this object. Held as the same
+    /// live list datum across reads so `filterList.append(audioFilter(...))`
+    /// sticks, the way `userData` is held for a 3D node.
+    pub filter_list: Option<crate::player::DatumRef>,
+    /// SoundManager channel this object is currently sounding on, if any.
+    pub channel: Option<usize>,
+    pub status: MixerStatus,
+}
+
+impl MixerSoundObject {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            member: None,
+            file: String::new(),
+            start_time: 0,
+            end_time: -1,
+            loop_count: 1,
+            loop_start_time: 0,
+            loop_end_time: -1,
+            volume: 255,
+            play_rate: 1.0,
+            filter_list: None,
+            channel: None,
+            status: MixerStatus::Stopped,
+        }
+    }
 }
 
 /// A score/puppet transition member. Director stores these as raw member-type 14,
@@ -3382,6 +3495,7 @@ pub enum CastMemberTypeId {
     PhysXPhysics,
     Groove3gm,
     Transition,
+    Mixer,
     Unknown,
 }
 
@@ -3439,6 +3553,9 @@ impl fmt::Debug for CastMemberType {
             Self::Transition(_) => {
                 write!(f, "Transition")
             }
+            Self::Mixer(_) => {
+                write!(f, "Mixer")
+            }
             Self::Groove3gm(_) => {
                 write!(f, "Groove3gm")
             }
@@ -3468,6 +3585,7 @@ impl CastMemberTypeId {
             Self::Shockwave3d => Ok("shockwave3d"),
             Self::HavokPhysics => Ok("havok"),
             Self::PhysXPhysics => Ok("physics"),
+            Self::Mixer => Ok("mixer"),
             // Director/Groove report .3GM shape members as #G3D — the Groove
             // Lingo gates shape loading on `member.type = #G3D`
             // (gGroove: LoadShape only if #G3D), so returning #groove made every
@@ -3502,6 +3620,7 @@ impl CastMemberType {
             // No dedicated CastMemberTypeId; transitions are score-driven, not queried
             // via `the type of member`, so Unknown is adequate here.
             Self::Transition(_) => CastMemberTypeId::Transition,
+            Self::Mixer(_) => CastMemberTypeId::Mixer,
             Self::Unknown => CastMemberTypeId::Unknown,
         };
     }
@@ -3526,6 +3645,7 @@ impl CastMemberType {
             Self::PhysXPhysics(_) => "physics",
             Self::Groove3gm(_) => "groove3gm",
             Self::Transition(_) => "transition",
+            Self::Mixer(_) => "mixer",
             _ => "unknown",
         };
     }
@@ -3661,6 +3781,20 @@ impl CastMemberType {
         return match self {
             Self::Movie(data) => { Some(data) }
             _ => { None }
+        }
+    }
+
+    pub fn as_mixer(&self) -> Option<&MixerMember> {
+        match self {
+            Self::Mixer(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_mixer_mut(&mut self) -> Option<&mut MixerMember> {
+        match self {
+            Self::Mixer(m) => Some(m),
+            _ => None,
         }
     }
 

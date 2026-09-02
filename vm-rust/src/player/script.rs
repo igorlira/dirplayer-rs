@@ -610,6 +610,12 @@ pub async fn player_set_obj_prop(
             });
             crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), &value_datum)
         }
+        Datum::MixerSoundObjectRef(..) => {
+            let value_datum = reserve_player_ref(|player| {
+                player.get_datum(value_ref).clone()
+            });
+            crate::player::handlers::datum_handlers::cast_member::mixer::MixerSoundObjectHandlers::set_prop(obj_ref, prop_name.as_str(), &value_datum)
+        }
         Datum::Transform3d(_) => reserve_player_mut(|player| {
             crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
@@ -1254,6 +1260,9 @@ pub fn get_obj_prop(
         }
         Datum::Shockwave3dObjectRef(_) => {
             crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers::get_prop(obj_ref, prop_name.as_str())
+        }
+        Datum::MixerSoundObjectRef(..) => {
+            crate::player::handlers::datum_handlers::cast_member::mixer::MixerSoundObjectHandlers::get_prop(obj_ref, prop_name.as_str())
         }
         Datum::Transform3d(_) => {
             let result = crate::player::handlers::datum_handlers::transform3d::Transform3dDatumHandlers::get_prop(player, obj_ref, prop_name)?;

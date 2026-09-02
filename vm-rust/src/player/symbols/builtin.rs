@@ -285,6 +285,7 @@ define_builtin_symbols! {
     "objectp" => Objectp,
     "voidp" => Voidp,
     "rgb" => Rgb,
+    "audioFilter" => AudioFilter,
     "paletteIndex" => PaletteIndex,
     "grayscale" => Grayscale,
     "pastels" => Pastels,

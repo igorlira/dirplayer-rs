@@ -475,6 +475,7 @@ pub async fn player_call_datum_handler(
         }
         DatumType::FlashObjectRef => FlashObjectDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::Shockwave3dObjectRef => shockwave3d_object::Shockwave3dObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
+        DatumType::MixerSoundObjectRef => cast_member::mixer::MixerSoundObjectHandlers::call(obj_ref, handler_name.as_str(), args),
         DatumType::Transform3d => transform3d::Transform3dDatumHandlers::call(obj_ref, handler_name, args),
         DatumType::HavokObjectRef => havok_object::HavokObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
         DatumType::PhysXObjectRef => physx_object::PhysXObjectDatumHandlers::call(obj_ref, handler_name.as_str(), args),
