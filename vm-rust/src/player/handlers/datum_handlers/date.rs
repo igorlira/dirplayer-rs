@@ -204,6 +204,33 @@ impl DateDatumHandlers {
                     date_obj.timestamp_ms = js_date.get_time() as i64;
                     Ok(DatumRef::Void)
                 }
+                // Chunk access on a date. Director 11.5 Scripting Dictionary,
+                // `date() (System)`: "_system.date() returns the current date in
+                // the system clock… The format Director uses for the date varies,
+                // depending on how the date is formatted on the computer" — and
+                // its own example reads the result as TEXT:
+                //
+                //     if _system.date().char[1..4] = "1/1/" then alert "Happy New Year!"
+                //
+                // So the value indexes like the date string it prints as. dirplayer
+                // models it as a Date object (which is what makes `.year` / `.month`
+                // and date arithmetic work), so route the chunk operators through
+                // that same string rather than raising.
+                //
+                // Burnin' Rubber 3's `SaveData` stamps every save with
+                //     theDate = _system.date()
+                //     month = theDate.char[1..2]  /  day = ...char[4..5]
+                //     year  = theDate.char[9..10]
+                // and died there the moment a player entered their name.
+                Some(BuiltInSymbol::GetProp) | Some(BuiltInSymbol::GetPropRef)
+                | Some(BuiltInSymbol::Count) | Some(BuiltInSymbol::GetAt) => {
+                    let as_string = crate::player::datum_formatting::format_concrete_datum(
+                        &player.get_datum(datum).clone(),
+                        player,
+                    );
+                    let str_datum = player.alloc_datum(Datum::String(as_string));
+                    super::string::StringDatumHandlers::call(&str_datum, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for date",
                     handler_name
