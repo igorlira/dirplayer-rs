@@ -7653,6 +7653,35 @@ async fn player_ext_call<'a>(
     result
 }
 
+/// One ELEMENT of a list being duplicated.
+///
+/// Director 11.5 Scripting Dictionary, `duplicate() (list function)`:
+///
+/// > returns a copy of a list and copies nested lists (list items that also are
+/// > lists) and their contents.
+///
+/// Nested LISTS, and nothing else. Every other element is an object or a value,
+/// and the entry's own note — "when you assign a list to a variable, the
+/// variable contains a reference to the list, not the list itself" — is the
+/// general rule: a copy shares the objects it holds. Duplicating them instead
+/// silently severed every reference a duplicated list carried.
+///
+/// Burnin' Rubber 3's menu slide-in is exactly that shape. `[M] 3D HandlerList
+/// Functions.Interpolator` runs each frame over
+/// `gSystem.InterPolatorList.duplicate()` and moves the node with
+/// `entry[1].interpolateTo(entry[2], pct)`, where `entry[1]` is the node's own
+/// `transform` object. With the transform deep-copied by the duplicate, every
+/// frame interpolated a throwaway: the six menu lines stayed parked at the
+/// x = -1200 offset `AnimateMainIn` had pushed them to, so the whole main menu
+/// sat off-screen while the state machine reported success.
+fn duplicate_list_item(datum: &DatumRef) -> DatumRef {
+    let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
+    match datum_type {
+        DatumType::PropList | DatumType::List => player_duplicate_datum(datum),
+        _ => datum.clone(),
+    }
+}
+
 fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
     let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
     let new_datum = match datum_type {
@@ -7663,8 +7692,8 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             });
             let mut new_props = VecDeque::new();
             for (key, value) in props {
-                let new_key = player_duplicate_datum(&key);
-                let new_value = player_duplicate_datum(&value);
+                let new_key = duplicate_list_item(&key);
+                let new_value = duplicate_list_item(&value);
                 new_props.push_back((new_key, new_value));
             }
             Datum::PropList(new_props, sorted)
@@ -7676,7 +7705,7 @@ fn player_duplicate_datum(datum: &DatumRef) -> DatumRef {
             });
             let mut new_list = VecDeque::new();
             for item in list {
-                let new_item = player_duplicate_datum(&item);
+                let new_item = duplicate_list_item(&item);
                 new_list.push_back(new_item);
             }
             Datum::List(list_type.clone(), new_list, sorted)
