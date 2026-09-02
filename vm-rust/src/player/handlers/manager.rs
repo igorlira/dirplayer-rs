@@ -845,12 +845,21 @@ impl BuiltInHandlerManager {
     /// method-form `member.importFileInto(...)` (forwarded from
     /// `CastMemberRefHandlers::call_async` with the receiver prepended).
     ///
-    /// v1 only handles bitmap members: PNG/JPG/GIF/etc. (anything the
-    /// `image` crate decodes) → a 32-bit RGBA Bitmap that replaces the
-    /// existing BitmapRef. The fetch goes through `NetManager`, so URLs
-    /// are resolved against `base_path` and respect any `override_base_path`
-    /// (the fake-movie-root used by tests). Returns Director's documented
-    /// integer status: 0 = success, negative = failure.
+    /// Handles bitmap, sound and TEXT/FIELD members. Bitmaps: PNG/JPG/GIF/etc.
+    /// (anything the `image` crate decodes) → a 32-bit RGBA Bitmap that replaces
+    /// the existing BitmapRef. The fetch goes through `NetManager`, so URLs are
+    /// resolved against `base_path` and respect any `override_base_path` (the
+    /// fake-movie-root used by tests).
+    ///
+    /// Return value: NON-ZERO on success, negative on failure. The 11.5
+    /// dictionary documents no return for `importFileInto()`, and this used to
+    /// answer 0 for success — but every shipped caller reads it the other way
+    /// round. Burnin' Rubber 3's `[M] Loader.LoadTxt` and its `[PS] Preload
+    /// Data.DownloadDone` both do
+    ///     tImported = tmember.importFileInto(tFile)
+    ///     if tImported <> 0 then HandleTxt(tmember, …) else EraseMember(tmember)
+    /// so a 0 means "erase what you just imported", which cannot be what real
+    /// Director returns for a file that imported fine.
     ///
     /// propertyList properties honored:
     ///   #trimWhiteSpace — non-zero stores `trim_white_space = true` on the
@@ -910,12 +919,23 @@ impl BuiltInHandlerManager {
         enum ImportTarget {
             Bitmap(crate::player::bitmap::manager::BitmapRef),
             Sound,
+            /// Text or field. "Use it to import both RTF and HTML documents into
+            /// text cast members" (Director 11.5 Scripting Dictionary,
+            /// `importFileInto()`) — and plain text likewise. Burnin' Rubber 3
+            /// streams every track's event and data tables this way: each
+            /// `Data/Tracks/<World>/Data/*.txt` lands in a `new(#text)` member
+            /// that `HandleTxt` then parses into `gData.Events`. Without a text
+            /// arm the member stayed empty, so no track ever built its world
+            /// (`"CityTrack1Build does not exist."`) and no car was spawned.
+            Text { is_field: bool },
         }
         let import_target = reserve_player_ref(|player| {
             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
             match member.map(|m| &m.member_type) {
                 Some(CastMemberType::Bitmap(b)) => Some(ImportTarget::Bitmap(b.image_ref)),
                 Some(CastMemberType::Sound(_)) => Some(ImportTarget::Sound),
+                Some(CastMemberType::Text(_)) => Some(ImportTarget::Text { is_field: false }),
+                Some(CastMemberType::Field(_)) => Some(ImportTarget::Text { is_field: true }),
                 _ => None,
             }
         });
@@ -923,7 +943,7 @@ impl BuiltInHandlerManager {
             Some(t) => t,
             None => {
                 warn!(
-                    "importFileInto: member ({}, {}) is not a bitmap or sound (v1 scope)",
+                    "importFileInto: member ({}, {}) is not a bitmap, sound or text member",
                     member_ref.cast_lib, member_ref.cast_member
                 );
                 return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-2))));
@@ -962,6 +982,38 @@ impl BuiltInHandlerManager {
         // defaults until the browser decodes the buffer at play time.
         let existing_bitmap_ref = match import_target {
             ImportTarget::Bitmap(r) => r,
+            ImportTarget::Text { is_field } => {
+                // Director stores CR-delimited lines; a file saved on any
+                // platform must read back as Lingo `line`s, so normalise
+                // CRLF/LF to CR. Text files here are 8-bit: try UTF-8 and fall
+                // back to Mac Roman, the encoding Director authored them in.
+                let text = crate::io::encoding::decode_text_auto_macroman(&bytes);
+                let text = text.replace("\r\n", "\r").replace('\n', "\r");
+                let byte_len = bytes.len();
+                return reserve_player_mut(|player| {
+                    if let Some(member) =
+                        player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                    {
+                        match &mut member.member_type {
+                            CastMemberType::Text(t) => {
+                                t.text = text;
+                                t.html_source.clear();
+                                t.rtf_source.clear();
+                            }
+                            CastMemberType::Field(f) => { f.text = text; }
+                            _ => {}
+                        }
+                    }
+                    let _ = is_field;
+                    name_member_after_file(player, &member_ref, &file_or_url);
+                    debug!(
+                        "importFileInto: imported '{}' ({} bytes) into text member ({}, {})",
+                        file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
+                    );
+                    JsApi::dispatch_cast_member_changed(member_ref.clone());
+                    Ok(player.alloc_datum(Datum::Int(1)))
+                });
+            }
             ImportTarget::Sound => {
                 use crate::director::chunks::sound::SoundChunk;
                 let byte_len = bytes.len();
@@ -973,12 +1025,13 @@ impl BuiltInHandlerManager {
                             s.sound = SoundChunk::new(bytes);
                         }
                     }
+                    name_member_after_file(player, &member_ref, &file_or_url);
                     debug!(
                         "importFileInto: imported '{}' ({} bytes) into sound member ({}, {})",
                         file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
                     );
                     JsApi::dispatch_cast_member_changed(member_ref.clone());
-                    Ok(player.alloc_datum(Datum::Int(0)))
+                    Ok(player.alloc_datum(Datum::Int(1)))
                 });
             }
         };
@@ -1040,8 +1093,9 @@ impl BuiltInHandlerManager {
                 member.reg_point = (w as i32 / 2, h as i32 / 2);
             }
             player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
+            name_member_after_file(player, &member_ref, &file_or_url);
             JsApi::dispatch_cast_member_changed(member_ref.clone());
-            Ok(player.alloc_datum(Datum::Int(0)))
+            Ok(player.alloc_datum(Datum::Int(1)))
         })
     }
 
@@ -3325,4 +3379,58 @@ fn get_datum_script_instance_ids(
         }
     }
     Ok(instance_refs)
+}
+
+/// Name a member after the file `importFileInto` just put in it, when it does
+/// not already have a name.
+///
+/// Director 11.5 Scripting Dictionary, `importFileInto()`: "When downloading
+/// files from the Internet, use it to download the file at a specific URL and
+/// set the filename" — importing gives the member the file's identity, exactly
+/// as the authoring Import dialog does. An ALREADY-NAMED member keeps its name:
+/// the method's job is documented as replacing CONTENT, and a script that named
+/// a member deliberately must not have it renamed under it.
+///
+/// The movies rely on this to route what they just fetched. Burnin' Rubber 3
+/// creates an anonymous text member per downloaded file and then dispatches
+/// purely on the name:
+///     tmember = createMember(EMPTY, [#type: #text, #cast: "Internal"])
+///     tImported = tmember.importFileInto(p.url)
+///     if tImported <> 0 then HandleTxt(tmember, [#Remove: 1])
+///  …
+///     if tmember.name contains "Events" then … AddToData(tmember, …)
+/// With the member left unnamed, every track's event table downloaded and was
+/// then silently dropped — the world had no build event and no cars.
+fn name_member_after_file(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    file_or_url: &str,
+) {
+    let base = file_or_url
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(file_or_url);
+    // Strip a query string before the extension, so ".../CityEvents.txt?v=2"
+    // still names the member "CityEvents".
+    let base = base.split('?').next().unwrap_or(base);
+    let stem = match base.rfind('.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base,
+    };
+    if stem.is_empty() {
+        return;
+    }
+    let renamed = {
+        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) else {
+            return;
+        };
+        if !member.name.is_empty() {
+            return;
+        }
+        member.name = stem.to_string();
+        true
+    };
+    if renamed {
+        player.movie.cast_manager.invalidate_member_name_cache();
+    }
 }
