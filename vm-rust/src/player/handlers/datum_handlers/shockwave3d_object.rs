@@ -4780,6 +4780,18 @@ impl Shockwave3dObjectDatumHandlers {
                         // (looping, per the member's "Animation: Loop" flag) stayed
                         // current, the queued clip landed BEHIND it, and the logo
                         // replayed from the beginning for ever.
+                        // Restricted to the OBJECT-KEYFRAME player, i.e. a node that
+                        // owns no skeleton. A skinned rig's player carries state that
+                        // is not the modifier's to throw away: `root_clearance` records
+                        // the root translation ALREADY written into the model node's
+                        // transform (see the root-motion block in events.rs), so
+                        // zeroing it leaves the node displaced while the next clip
+                        // starts adding its own offset from zero — the model sinks
+                        // further into the floor with every removal — and `root_lock`
+                        // is what a game sets to stop root motion moving the model at
+                        // all. Rasterwerks' player actor is exactly that case: it came
+                        // back from a respawn half-buried in the ground with its
+                        // animations out of step.
                         let stops_animation = {
                             let m = mod_name.trim_start_matches('#');
                             m.eq_ignore_ascii_case("keyframePlayer")
@@ -4789,8 +4801,14 @@ impl Shockwave3dObjectDatumHandlers {
                             let node = s3d_ref.name;
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                    let bp = w3d.runtime_state.bones_player_mut(node);
-                                    *bp = Default::default();
+                                    let skinned = w3d.parsed_scene.as_ref().map_or(false, |sc| {
+                                        crate::director::chunks::w3d::skeleton::skeleton_for_model(sc, node)
+                                            .is_some()
+                                    });
+                                    if !skinned {
+                                        let bp = w3d.runtime_state.bones_player_mut(node);
+                                        *bp = Default::default();
+                                    }
                                 }
                             }
                         }
