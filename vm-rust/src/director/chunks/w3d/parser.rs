@@ -177,11 +177,30 @@ impl W3dFileParser {
         // light and faces the points don't reach fall to the ambient floor and render
         // near-black — the dark "shadows" Shockwave doesn't show. Orientation matches
         // Director's reported default: color rgb(255,255,255), zAxis (0.8543,-0.0015,0.5198).
+        //
+        // NARROWED: only for a member that declares NO light node of its own.
+        // UIAmbient/UIDirectional are the two lights Director gives an EMPTY 3D
+        // member; a member that ships its own lighting keeps exactly what it ships.
+        // Measured in Director's message window on Burnin' Rubber 3, which contradicts
+        // the "point + ambient still gets the default" reading above — every one of its
+        // members answers light.count = 2, its own light plus UIAmbient, and NONE of
+        // them has a UIDirectional:
+        //   Main   -> Direct01(point, 191,191,191) + UIAmbient(0,0,0)
+        //   Logo   -> Omni02(point, 191,191,191)   + UIAmbient
+        //   Car    -> "Default MAX Light"(point)   + UIAmbient
+        //   Hangar -> Direct01(point)              + UIAmbient
+        // The synthetic white key light was adding `diffuse * N·L` on top of a full
+        // emissive and taking the menu bars from orange (255,150,0) to yellow.
+        // (If the `estate` case really does gain one, its own file must carry it.)
+        let has_own_light_node = self.scene.nodes.iter().any(|n| {
+            n.node_type == W3dNodeType::Light
+                && n.name != Symbol::builtin(BuiltInSymbol::UIAmbient)
+        });
         let has_aimed_key_light = self.scene.lights.iter().any(|l| matches!(
             l.light_type,
             W3dLightType::Directional | W3dLightType::Spot
         ));
-        if !has_aimed_key_light {
+        if !has_aimed_key_light && !has_own_light_node {
             self.scene.lights.push(W3dLight {
                 name: Symbol::builtin(BuiltInSymbol::UIDirectional),
                 light_type: W3dLightType::Directional,
@@ -513,20 +532,54 @@ impl W3dFileParser {
         let mut clones: Vec<W3dLight> = Vec::new();
         for node in self.scene.nodes.iter() {
             if node.node_type != W3dNodeType::Light { continue; }
-            if node.resource_name.is_empty() || node.resource_name == node.name {
-                continue;
-            }
             if self.scene.lights.iter().any(|l| l.name == node.name) {
                 continue;
             }
-            if let Some(res) = self.scene.lights.iter()
-                .find(|l| l.name == node.resource_name)
-            {
-                log(&format!(
-                    "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
-                    node.name, node.resource_name
-                ));
-                clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+            let resource = self.scene.lights.iter().find(|l| {
+                l.name == node.resource_name
+                    || (node.resource_name.is_empty() && l.name == node.name)
+            });
+            match resource {
+                Some(res) => {
+                    log(&format!(
+                        "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
+                        node.name, node.resource_name
+                    ));
+                    clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
+                }
+                None => {
+                    // A light NODE whose LIGHT_RESOURCE block is not in this stream
+                    // still lights the scene in Director — the node IS the light, and
+                    // the missing resource just means it keeps the defaults.
+                    //
+                    // Burnin' Rubber 3 ships every menu member that way. `Menu_6_Main`
+                    // as LOADED is the v1 block set (Material v1 / Model Node v1 / Light
+                    // Node v1) and carries ONE light node, "Direct01", naming a resource
+                    // that no block in the stream defines; the Logo member is the same
+                    // with "Omni02" — which `SetupLogo` then drives directly
+                    // (`SetLight Logo [#name: "Omni02", #color: rgb(255,255,255)]` and
+                    // `AddToMimic Logo [#object: "Omni02", #target: "3"]`). Dropping the
+                    // unbound node left EVERY menu member lit by nothing but the black
+                    // UIAmbient and dirplayer's own injected UIDirectional, so the 3D
+                    // logo rendered dim and `light("Omni02")` addressed nothing.
+                    //
+                    // Defaults are Director's for a light with no authored resource,
+                    // as re-serialised by the W3D exporter for exactly these nodes:
+                    // a POINT light, colour 0.75 grey, constant attenuation, enabled.
+                    log(&format!(
+                        "  LightNode \"{}\" has no LIGHT_RESOURCE block (resource \"{}\") — creating a default point light",
+                        node.name, node.resource_name
+                    ));
+                    clones.push(W3dLight {
+                        name: node.name.clone(),
+                        light_type: W3dLightType::Point,
+                        color: [0.75, 0.75, 0.75],
+                        attenuation: [1.0, 0.0, 0.0],
+                        spot_angle: 90.0,
+                        enabled: true,
+                        ..Default::default()
+                    });
+                }
             }
         }
         self.scene.lights.extend(clones);
