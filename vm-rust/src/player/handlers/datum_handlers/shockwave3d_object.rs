@@ -7494,7 +7494,11 @@ impl Shockwave3dObjectDatumHandlers {
             "currentTime" => {
                 let time = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some()).map(|bp| bp.animation_time).unwrap_or(w3d.runtime_state.animation_time))
+                    .map(|w3d| w3d.runtime_state.bones_player(model_name).filter(|b| b.current_motion.is_some())
+                        // Spent player: Director reports 0, not the end of the clip it
+                        // last ran — measured alongside the empty `playList` above.
+                        .map(|bp| if bp.motion_ended && bp.motion_queue.is_empty() { 0.0 } else { bp.animation_time })
+                        .unwrap_or(w3d.runtime_state.animation_time))
                     .unwrap_or(0.0);
                 // Director returns currentTime in milliseconds
                 Ok(player.alloc_datum(Datum::Int((time * 1000.0) as i32)))
@@ -7638,6 +7642,20 @@ impl Shockwave3dObjectDatumHandlers {
                         // "player" motion and drove nothing.
                         let (cur, loop_, start, end, scale, time, queue) =
                             match rs.bones_player(model_name).filter(|b| b.current_motion.is_some()) {
+                                // A FINISHED non-looping motion with nothing behind it is
+                                // no longer "queued for playback", so Director drops it:
+                                // measured in the message window with Burnin' Rubber 3's
+                                // logo settled, `model("3").keyframePlayer.playList` is []
+                                // (and `.currentTime` is 0) even though the letter visibly
+                                // holds its final pose. The dictionary agrees — `playList`
+                                // "returns a linear list ... each representing a motion
+                                // QUEUED FOR PLAYBACK", and `queue()` adds to the end to be
+                                // "executed when all the motions ahead of it are finished".
+                                // Reporting the spent motion for ever made
+                                // `playList.count` read 1 on an idle player.
+                                Some(bp) if bp.motion_ended && bp.motion_queue.is_empty() => {
+                                    (None, false, 0.0, -1.0, 1.0, 0.0, Vec::new())
+                                }
                                 Some(bp) => (bp.current_motion, bp.animation_loop, bp.animation_start_time,
                                     bp.animation_end_time, bp.animation_scale, bp.animation_time,
                                     bp.motion_queue.clone()),
