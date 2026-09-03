@@ -404,21 +404,36 @@ pub fn datum_equals(
 /// returning 1 in Director 11.5. Scripts in the wild (e.g. Trick or Treat
 /// Beat's `getPos(gSingleTileObjNames, member.name)`) rely on this looser
 /// rule even though general `=` would not match.
+///
+/// The Symbol/String leniency does NOT extend to String vs String. The 11.5
+/// Scripting Dictionary is explicit under "Lists" (Operators chapter):
+///
+///   * In linear lists, symbols and strings are case sensitive.
+///   * In property lists, symbols aren't case-sensitive, but strings are
+///     case-sensitive.
+///
+/// so membership is stricter here than the `=` operator, which folds case.
+/// Burnin' Rubber 3 depends on it: `[M] Text`'s `convertToUpperCase` walks the
+/// string and only shifts a character by -32 when
+/// `["a", ..., "z"].getPos(tChar) <> 0`. With a case-folding `getPos` every
+/// character that was ALREADY uppercase matched a lowercase entry and got
+/// shifted too, so "Welcome" came out "7ELCOME" and the player name "Tester"
+/// came out "4%34%2" across the menus and the in-race HUD.
 pub fn datum_equals_member(
     left: &Datum,
     right: &Datum,
     allocator: &DatumAllocator,
 ) -> Result<bool, ScriptError> {
     use Datum::*;
-    let symbol_string_match = match (left, right) {
+    match (left, right) {
         (Symbol(sym), other @ (String(_) | StringChunk(..)))
         | (other @ (String(_) | StringChunk(..)), Symbol(sym)) => {
-            Some(sym.as_str().eq_ignore_ascii_case(&other.string_value_cow()?.as_ref()))
+            return Ok(sym.as_str().eq_ignore_ascii_case(&other.string_value_cow()?.as_ref()));
         }
-        _ => None,
-    };
-    if let Some(matched) = symbol_string_match {
-        return Ok(matched);
+        (a @ (String(_) | StringChunk(..)), b @ (String(_) | StringChunk(..))) => {
+            return Ok(a.string_value_cow()? == b.string_value_cow()?);
+        }
+        _ => {}
     }
     datum_equals(left, right, allocator)
 }

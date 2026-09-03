@@ -10,7 +10,7 @@ use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{
         allocator::{DatumAllocator, DatumAllocatorTrait},
-        compare::{datum_equals, datum_less_than},
+        compare::{datum_equals, datum_equals_member, datum_less_than},
         handlers::types::TypeUtils,
         player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer,
         ScriptError,
@@ -427,7 +427,7 @@ impl ListDatumHandlers {
             let list_vec = player.get_datum(datum).to_list()?;
             let position = list_vec
                 .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
 
             Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
@@ -441,7 +441,7 @@ impl ListDatumHandlers {
             let list_vec = player.get_datum(datum).to_list()?;
             let position = list_vec
                 .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                 .map(|x| x as i32);
             let result = position.unwrap_or(-1) + 1;
 
@@ -459,7 +459,7 @@ impl ListDatumHandlers {
                 let find = player.get_datum(&args[0]);
                 let position = list_vec
                     .iter()
-                    .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
+                    .position(|x| datum_equals_member(player.get_datum(&x), find, &player.allocator).unwrap())
                     .map(|x| x as i32);
                 let result = position.unwrap_or(-1) + 1;
                 Ok(player.alloc_datum(Datum::Int(result)))
@@ -568,7 +568,7 @@ impl ListDatumHandlers {
 
                 // Fallback to value equality for other types
                 let list_item = player.get_datum(list_item_ref);
-                if datum_equals(list_item, item, &player.allocator).unwrap_or(false) {
+                if datum_equals_member(list_item, item, &player.allocator).unwrap_or(false) {
                     Some(i)
                 } else {
                     None
