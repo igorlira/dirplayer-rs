@@ -2166,8 +2166,15 @@ impl WebGL2Renderer {
                                 }
                             }
                         }
+                        // Per-node object-keyframe auto-play is seeded at member LOAD
+                        // (`Shockwave3dRuntimeState::from_info`), so that it precedes any
+                        // script call — see the note there. `auto_play_seeded` records
+                        // whether it claimed this member.
+                        let seeded_any = w3d.runtime_state.auto_play_seeded;
+
                         // Legacy member-level auto-play for non-skinned (keyframe) content.
                         if !any_skinned
+                            && !seeded_any
                             && !w3d.runtime_state.animation_playing
                             && w3d.runtime_state.current_motion.is_none()
                         {

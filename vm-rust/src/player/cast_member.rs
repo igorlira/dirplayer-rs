@@ -1308,6 +1308,16 @@ pub struct BonesPlayerState {
     pub blend_weight: f32,
     pub blend_duration: f32,
     pub blend_elapsed: f32,
+    /// This player's motion came from the member's "Animation: Play" auto-play
+    /// rather than from a script. Director hands auto-play out at member load, so a
+    /// movie that then drives the model itself must be able to TAKE OVER — its
+    /// first `play()`/`queue()` replaces the auto-play clip instead of lining up
+    /// behind it. Burnin' Rubber 3's logo is why: the Menu cast is downloaded at
+    /// runtime, so the member is re-created AFTER `SetupLogo` has already run its
+    /// `ResetAllAnimation`, auto-play re-seeds each letter with the member's LOOPING
+    /// flag, and `PlayAllAnimation`'s `queue("<model>-Key", 0)` then waits behind a
+    /// motion that never ends — the intro replays for ever.
+    pub from_auto_play: bool,
     /// Root motion already pushed onto the model NODE, in node-local units.
     /// IFX strips the root bone's translation out of the posed skeleton and
     /// adds it to the node's scene-graph transform unless `root_lock` is set
@@ -1337,6 +1347,7 @@ impl Default for BonesPlayerState {
             blend_duration: 0.0,
             blend_elapsed: 0.0,
             root_clearance: [0.0; 3],
+            from_auto_play: false,
         }
     }
 }
@@ -1363,6 +1374,16 @@ impl Default for CameraFog {
 #[derive(Clone, Debug, Default)]
 pub struct Shockwave3dRuntimeState {
     // ─── Animation ───
+    /// Whether the member's "Animation: Play" auto-play has already been handed
+    /// out. It is ONE-SHOT: the renderer's auto-play block runs every frame, so
+    /// without this it re-seeds a player the moment anything clears it — and
+    /// `removeModifier(#keyframePlayer)` is exactly a script clearing it. Burnin'
+    /// Rubber 3's `SetupLogo` runs `ResetAllAnimation` (that removal over every
+    /// model) and only then `PlayAllAnimation`, which re-adds the modifier and
+    /// `queue(<model>-Key, 0)` — loop OFF. Re-seeding put the member's own looping
+    /// clip back underneath, the queue landed behind it, and the logo intro
+    /// restarted for ever.
+    pub auto_play_seeded: bool,
     pub animation_time: f32,
     pub animation_playing: bool,
     pub current_motion: Option<Symbol>,
@@ -2139,8 +2160,76 @@ impl Shockwave3dRuntimeState {
                 }
             }
         }
-        // Note: animationEnabled auto-start is handled in the rendering path
-        // when the sprite first appears on stage, not here at parse time.
+        // Per-NODE object-keyframe auto-play, seeded HERE, at member load.
+        //
+        // Director attaches a #keyframePlayer to every object carrying object
+        // keyframes and starts it when the member's "Animation: Play" flag is on,
+        // so a member holding several independently-animated objects runs several
+        // clocks — the single member-level `current_motion` can only carry one.
+        //
+        // It has to happen at LOAD, not at the member's first RENDER, because a
+        // movie's setup runs in between and Director's ordering is load-then-script.
+        // Burnin' Rubber 3's `SetupLogo` does `ResetAllAnimation` — `removeModifier`
+        // over every model in the Logo member — and only then does `PlayAllAnimation`
+        // re-add the modifier and `queue("<model>-Key", 0)`, loop OFF, so the intro
+        // plays once and holds. Seeding at first render landed AFTER that removal:
+        // each letter got the member's own LOOPING clip back and the queued one
+        // waited behind a motion that never ends, so the logo intro replayed for ever.
+        //
+        // Ownership is `keyframe_motion_for_model`'s test — a "<node>-Key" motion, or
+        // a single-track motion whose track NAMES the node — never "the first motion
+        // in the member", which is what seeds foreign clips into a member that scripts
+        // fill at runtime. Gated on more than one motion so a single-clip member keeps
+        // taking the member-level path in the renderer unchanged.
+        if info.animation_enabled {
+            if let Some(scene) = scene {
+                if scene.motions.len() > 1 {
+                    let owned: Vec<(Symbol, bool, Symbol)> = scene
+                        .nodes
+                        .iter()
+                        .filter_map(|n| {
+                            crate::director::chunks::w3d::skeleton::keyframe_motion_for_model(
+                                scene, n.name,
+                            )
+                            .map(|m| {
+                                let is_model = n.node_type
+                                    == crate::director::chunks::w3d::types::W3dNodeType::Model;
+                                (n.name, is_model, m.name)
+                            })
+                        })
+                        .collect();
+                    if !owned.is_empty() {
+                        state.auto_play_seeded = true;
+                        for (node, is_model, motion) in owned {
+                            let bp = state.bones_player_mut(node);
+                            bp.current_motion = Some(motion);
+                            bp.animation_playing = true;
+                            // A NON-MODEL node (camera, light) plays its clip ONCE and
+                            // holds the final frame — never on the member's "Animation:
+                            // Loop" flag.
+                            //
+                            // Director drives such a node from the motion's TRACK, which
+                            // names it, while the #keyframePlayer modifier itself lives on
+                            // a model. Burnin' Rubber 3's logo is the case and it is
+                            // measured, not inferred: "Logo_Camera-Key" is queued by
+                            // `PlayAllAnimation` onto the MODEL carrier "Dummy Animation
+                            // Node Logo_Camera" (loop 0), and its single track names the
+                            // CAMERA "Logo_Camera". Director reports
+                            // `camera.getWorldTransform()` as the dummy-derived pose, yet
+                            // RENDERS the camera further along the flight — so the track
+                            // poses the camera too. Leaving the camera unposed parks the
+                            // logo short of its final framing (~293 px of lettering against
+                            // ~400 in a capture of the real game); letting it LOOP replayed
+                            // the intro for ever, because `PlayAllAnimation` walks
+                            // `member.model[i]` and so can never queue over a camera.
+                            // Playing it once and holding is what the game shows.
+                            bp.animation_loop = is_model && info.loops;
+                            bp.from_auto_play = true;
+                        }
+                    }
+                }
+            }
+        }
         state
     }
 }

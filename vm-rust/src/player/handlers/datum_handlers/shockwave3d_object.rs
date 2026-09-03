@@ -4054,6 +4054,20 @@ impl Shockwave3dObjectDatumHandlers {
                                     // "Dummy Animation Node Logo_Camera" and flies on
                                     // "Logo_Camera-Key" — stood still at its bind pose,
                                     // pointing away from the logo. Black screen.
+                                    // An AUTO-PLAY motion is not something the movie
+                                    // queued, so the movie's first queue() takes over from
+                                    // it rather than lining up behind it. Without this,
+                                    // Burnin' Rubber 3's logo intro replayed for ever: the
+                                    // Menu cast is downloaded at runtime, so the member is
+                                    // re-created after `SetupLogo`'s `ResetAllAnimation`
+                                    // has already run, auto-play re-seeds every letter with
+                                    // the member's LOOPING flag, and `PlayAllAnimation`'s
+                                    // `queue("<model>-Key", 0)` then waited behind a motion
+                                    // that never ends.
+                                    if bp.from_auto_play {
+                                        bp.current_motion = None;
+                                        bp.from_auto_play = false;
+                                    }
                                     if bp.current_motion.is_none() {
                                         let q = bp.motion_queue.remove(0);
                                         bp.current_motion = Some(q.name);
@@ -4730,9 +4744,38 @@ impl Shockwave3dObjectDatumHandlers {
                 "removeModifier" => {
                     if !args.is_empty() {
                         let mod_name = player.get_datum(&args[0]).string_value().unwrap_or_default();
-                        set_modifier_override(player, &CastMemberRef {
+                        let member_ref = CastMemberRef {
                             cast_lib: s3d_ref.cast_lib, cast_member: s3d_ref.cast_member,
-                        }, s3d_ref.name, &mod_name, false);
+                        };
+                        set_modifier_override(player, &member_ref, s3d_ref.name, &mod_name, false);
+                        // The animation player IS the modifier: removing #keyframePlayer
+                        // or #bonesPlayer takes the model's playlist and its clock with
+                        // it, so a later addModifier starts from nothing.
+                        //
+                        // Burnin' Rubber 3's logo intro depends on it. `SetupLogo` runs
+                        // `ResetAllAnimation`, which is exactly this removal over every
+                        // model in the "Logo" member, and only then does
+                        // `PlayAllAnimation` re-add the modifier and
+                        // `queue("<model>-Key", 0)` — loop OFF, so the intro plays once
+                        // and holds on its final frame. With the removal merely recorded
+                        // and the player left running, the member's own auto-play clip
+                        // (looping, per the member's "Animation: Loop" flag) stayed
+                        // current, the queued clip landed BEHIND it, and the logo
+                        // replayed from the beginning for ever.
+                        let stops_animation = {
+                            let m = mod_name.trim_start_matches('#');
+                            m.eq_ignore_ascii_case("keyframePlayer")
+                                || m.eq_ignore_ascii_case("bonesPlayer")
+                        };
+                        if stops_animation {
+                            let node = s3d_ref.name;
+                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                                if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                    let bp = w3d.runtime_state.bones_player_mut(node);
+                                    *bp = Default::default();
+                                }
+                            }
+                        }
                     }
                     Ok(player.alloc_datum(Datum::Void))
                 },
@@ -9193,29 +9236,102 @@ fn keyframe_motion_matrix(
     w3d: &crate::player::cast_member::Shockwave3dMember,
     node_name: Symbol,
 ) -> Option<[f32; 16]> {
-    let bp = w3d.runtime_state.bones_players.get(&node_name)?;
-    if !bp.animation_playing {
+    let rs = &w3d.runtime_state;
+    let scene = w3d.parsed_scene.as_ref()?;
+
+    // The clock and clip to sample. A per-node keyframePlayer owns the node
+    // outright; failing that, the MEMBER-level player counts too.
+    //
+    // The renderer has always driven both. Its per-model branch writes
+    // `motion_replace_transforms[model]`, but its legacy member-level branch writes
+    // `motion_transforms[track.bone_name]` — an object keyframe applied to the node
+    // the single track NAMES. Only the first of those was mirrored here, so a member
+    // animated purely by auto-play moved on screen while every script-side reader saw
+    // the rest pose.
+    //
+    // Burnin' Rubber 3's menu car is that case. The "Car" member holds one motion,
+    // "Car_Camera-Key" (single track, 50 ms, track named "Car_Camera"), nothing ever
+    // calls play(), and the member-level auto-play runs it. `SetupMain` then orbits the
+    // car with `AddToMimic Car [#object: "DefaultView", #target: "Car_Camera"]`, whose
+    // handler copies `Car_Camera.getWorldTransform()` onto the sprite camera every
+    // frame — so it copied a constant and the car stood still.
+    // A NON-MODEL node posed by AUTO-PLAY is renderer-only, deliberately.
+    //
+    // Director drives such a node (a camera, a light) from the motion's TRACK, which
+    // names it, while the #keyframePlayer modifier itself sits on a model — and its
+    // scripting surface reports the node WITHOUT that contribution. Measured on
+    // Burnin' Rubber 3's logo, where the render is unambiguously further along the
+    // flight than the API admits:
+    //     camera.getWorldTransform() -> ...,10.59002,-32.55838,-0.32052
+    //     camera.worldSpaceToSpriteSpace(model("3").worldPosition) -> point(464, 211)
+    // and point(464, 211) is exactly what that reported transform projects to at
+    // fieldOfView 62 taken as the VERTICAL angle. So Lingo must answer the
+    // un-advanced pose even though the renderer draws the advanced one; without this
+    // we answered (15.9130, -16.8747, 0.9633) and diverged from Director.
+    //
+    // The Car member's orbiting "Car_Camera" is NOT affected: that member has a single
+    // parsed motion, so auto-play's `motions.len() > 1` gate skips it and the
+    // member-level branch below still reports its animated pose — which is what
+    // `AddToMimic`'s `getWorldTransform()` copy depends on.
+    let auto_play_non_model = rs
+        .bones_players
+        .get(&node_name)
+        .map_or(false, |bp| bp.from_auto_play)
+        && w3d
+            .parsed_scene
+            .as_ref()
+            .and_then(|sc| sc.nodes.iter().find(|n| n.name == node_name))
+            .map_or(false, |n| {
+                n.node_type != crate::director::chunks::w3d::types::W3dNodeType::Model
+            });
+    let (motion_name, playing, anim_loop, start_time, end_time, anim_time, node_scoped) =
+        match rs.bones_players.get(&node_name).filter(|_| !auto_play_non_model) {
+            Some(bp) => (
+                bp.current_motion,
+                bp.animation_playing,
+                bp.animation_loop,
+                bp.animation_start_time,
+                bp.animation_end_time,
+                bp.animation_time,
+                false,
+            ),
+            None => (
+                rs.current_motion,
+                rs.animation_playing,
+                rs.animation_loop,
+                rs.animation_start_time,
+                rs.animation_end_time,
+                rs.animation_time,
+                // The member-level clip is scene-wide, so it may only pose the node
+                // its own track names — otherwise one member's auto-play would drag
+                // every node in it along.
+                true,
+            ),
+        };
+    if !playing {
         return None;
     }
-    let motion_name = bp.current_motion?;
-    let scene = w3d.parsed_scene.as_ref()?;
+    let motion_name = motion_name?;
     let motion = scene.motions.iter().find(|m| m.name == motion_name)?;
     // Multi-track motions drive bones, not the node — that path stays renderer-side.
     if motion.tracks.len() != 1 {
         return None;
     }
+    if node_scoped && motion.tracks[0].bone_name != node_name {
+        return None;
+    }
     // Same clamp/wrap the renderer uses, so both agree on the pose for this frame.
     let duration = motion.duration();
-    let eff_end = if bp.animation_end_time >= 0.0 { bp.animation_end_time.min(duration) } else { duration };
-    let eff_start = bp.animation_start_time.min(eff_end);
+    let eff_end = if end_time >= 0.0 { end_time.min(duration) } else { duration };
+    let eff_start = start_time.min(eff_end);
     let range = eff_end - eff_start;
     if range <= 0.0 {
         return None;
     }
-    let t = if bp.animation_loop {
-        eff_start + ((bp.animation_time - eff_start) % range + range) % range
+    let t = if anim_loop {
+        eff_start + ((anim_time - eff_start) % range + range) % range
     } else {
-        bp.animation_time.clamp(eff_start, eff_end)
+        anim_time.clamp(eff_start, eff_end)
     };
     let mut kf = motion.tracks[0].evaluate(t);
     if kf.scale_x.abs() < 1e-6 { kf.scale_x = 1.0; }
