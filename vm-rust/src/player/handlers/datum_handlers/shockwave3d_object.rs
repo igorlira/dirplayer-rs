@@ -1503,10 +1503,34 @@ impl Shockwave3dObjectDatumHandlers {
                     if let Datum::Vector(v) = value {
                         // Guard against NaN - skip update if any component is NaN
                         if v[0].is_finite() && v[1].is_finite() && v[2].is_finite() {
+                            // `worldPosition` is world-space on BOTH sides (11.5
+                            // dictionary, camera/light property tables: "Get and set —
+                            // Position ... in world coordinates"), and a node's own
+                            // transform is PARENT-relative. So the value has to be pulled
+                            // back through the parent chain; writing it straight into
+                            // m[12..14] only agreed with the getter for nodes parented to
+                            // the world.
+                            //
+                            // Burnin' Rubber 3's main menu is the case that shows it.
+                            // `[M] 3D Misc`'s SetPosDir is `node.worldPosition =
+                            // node.worldPosition + offset`, a read-modify-write, and every
+                            // menu line hangs under "MainMenuButtons" — which `SetupMain`
+                            // itself places with `worldPosition = vector(0, 0, 40)`. Each
+                            // round trip therefore folded the parent's world offset into
+                            // the CHILD's local transform, leaving each line 40 units below
+                            // the transform `CreateTextButton` had captured. `TextButtonLeave`
+                            // restores that captured position on mouse-out, so every menu
+                            // entry jumped instead of just changing colour.
+                            let parent = get_parent_world_transform(player, &member_ref, s3d_ref.name);
+                            let inv = invert_transform_f32(&parent);
+                            let local = mat4_mul_vec4(
+                                &inv,
+                                &[v[0] as f32, v[1] as f32, v[2] as f32, 1.0],
+                            );
                             let mut m = get_or_init_node_transform(player, &member_ref, s3d_ref.name);
-                            m[12] = v[0] as f32;
-                            m[13] = v[1] as f32;
-                            m[14] = v[2] as f32;
+                            m[12] = local[0];
+                            m[13] = local[1];
+                            m[14] = local[2];
                             set_node_transform(player, &member_ref, s3d_ref.name, m);
                         }
                     }
@@ -9426,6 +9450,52 @@ fn get_node_transform_live(
         }
     }
     get_node_transform(player, member_ref, node_name)
+}
+
+/// The accumulated WORLD transform of a node's PARENT chain (the node's own
+/// local transform excluded). Identity when the node is a child of the world.
+///
+/// This is the frame `worldPosition` is expressed in: setting that property has
+/// to place the node so its WORLD position equals the value, which means the
+/// value must be pulled back through this matrix before it lands in the node's
+/// own (parent-relative) transform.
+fn get_parent_world_transform(
+    player: &crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: Symbol,
+) -> [f32; 16] {
+    let mut result = [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) else {
+        return result;
+    };
+    let Some(w3d) = member.member_type.as_shockwave3d() else { return result };
+    let Some(ref scene) = w3d.parsed_scene else { return result };
+    let Some(node) = scene
+        .nodes
+        .iter()
+        .find(|n| n.name.eq_ignore_ascii_case(node_name.as_str()))
+    else {
+        return result;
+    };
+    let mut current_parent = node.parent_name.clone();
+    for _ in 0..20 {
+        if current_parent.is_empty() || current_parent.eq_ignore_ascii_case("World") {
+            break;
+        }
+        let Some(pn) = scene
+            .nodes
+            .iter()
+            .find(|n| n.name.eq_ignore_ascii_case(&current_parent.as_str()))
+        else {
+            break;
+        };
+        let pt = get_node_transform_live(player, member_ref, pn.name);
+        result = mat4_mul_f32(&pt, &result);
+        current_parent = pn.parent_name.clone();
+    }
+    result
 }
 
 /// Get the accumulated WORLD position for a node by walking the parent chain.
