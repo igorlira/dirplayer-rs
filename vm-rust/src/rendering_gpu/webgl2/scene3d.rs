@@ -5557,10 +5557,39 @@ void main() {
     fn set_material_uniforms(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, mat: &W3dMaterial) {
         gl.uniform4f(shader.u_diffuse_color.as_ref(), mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.diffuse[3]);
         gl.uniform4f(shader.u_ambient_color.as_ref(), mat.ambient[0], mat.ambient[1], mat.ambient[2], mat.ambient[3]);
-        gl.uniform4f(shader.u_specular_color.as_ref(), mat.specular[0], mat.specular[1], mat.specular[2], mat.specular[3]);
         gl.uniform4f(shader.u_emissive_color.as_ref(), mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.emissive[3]);
-        // IFX maps material reflectivity to shader shininess (scaled by 100)
-        let shininess = if mat.shininess > 0.0 { mat.shininess } else { mat.reflectivity * 100.0 };
+        // `reflectivity` is a REFLECTANCE, not a Phong exponent.
+        //
+        // 11.5 dictionary: `reflectivity` is "the percentage of light to be
+        // reflected off the surface of a model", 0.0-100.0, default 0.0 — while
+        // `shininess` is a separate property, "the percentage of shader surface
+        // devoted to highlights", 0-100, default 30. The two are not the same
+        // quantity, and neither of them is the exponent `pow(N·H, e)` wants.
+        //
+        // Feeding reflectivity in as that exponent inverted its meaning: the LESS
+        // reflective the material, the SMALLER the exponent and so the BROADER the
+        // highlight. Burnin' Rubber 3's menu bars are the visible case —
+        // "Orange_Material" is diffuse/emissive orange with WHITE specular and
+        // reflectivity 0.03, i.e. essentially matte. That became `pow(N·H, 3.0)`,
+        // which is ~1 across the whole quad, so a full-strength white highlight was
+        // added over every pixel and the solid orange "WORLD DOMINATION" bar (and
+        // the challenge/cash panels behind it) rendered pale cream.
+        //
+        // So: a material that states a real `shininess` keeps using it as before;
+        // otherwise reflectivity scales the specular CONTRIBUTION and the exponent
+        // falls back to Director's documented default of 30.
+        let (spec_scale, shininess) = if mat.shininess > 0.0 {
+            (1.0, mat.shininess)
+        } else {
+            (mat.reflectivity.clamp(0.0, 1.0), 30.0)
+        };
+        gl.uniform4f(
+            shader.u_specular_color.as_ref(),
+            mat.specular[0] * spec_scale,
+            mat.specular[1] * spec_scale,
+            mat.specular[2] * spec_scale,
+            mat.specular[3],
+        );
         gl.uniform1f(shader.u_shininess.as_ref(), shininess);
         gl.uniform1f(shader.u_opacity.as_ref(), mat.opacity);
     }
