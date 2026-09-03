@@ -4030,6 +4030,24 @@ impl Shockwave3dObjectDatumHandlers {
                         let model_name = s3d_ref.name.clone();
                         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                // Auto-start is for the OBJECT-KEYFRAME player only — a node
+                                // that owns no skeleton. A #bonesPlayer keeps the old
+                                // append-only behaviour, because the established skinned
+                                // idiom is `queue(clip)` FOLLOWED BY a call that decides
+                                // what runs. Rasterwerks' `C_BonesControl` is exactly that
+                                // (`queue(x); playNext()`, see the `playNext` arm below):
+                                // promoting on the queue leaves playNext() discarding the
+                                // motion it was meant to start and finding an empty queue,
+                                // so the actor's animations came back wrong after a respawn
+                                // — and with no clip driving the rig the root-motion
+                                // bookkeeping stopped tracking, sinking the body into the
+                                // floor.
+                                let auto_start = w3d.parsed_scene.as_ref().map_or(true, |sc| {
+                                    crate::director::chunks::w3d::skeleton::skeleton_for_model(
+                                        sc, model_name,
+                                    )
+                                    .is_none()
+                                });
                                 {
                                     let bp = w3d.runtime_state.bones_player_mut(model_name);
                                     bp.motion_queue.push(queued);
@@ -4068,7 +4086,7 @@ impl Shockwave3dObjectDatumHandlers {
                                         bp.current_motion = None;
                                         bp.from_auto_play = false;
                                     }
-                                    if bp.current_motion.is_none() {
+                                    if auto_start && bp.current_motion.is_none() {
                                         let q = bp.motion_queue.remove(0);
                                         bp.current_motion = Some(q.name);
                                         bp.animation_playing = true;
