@@ -1723,6 +1723,10 @@ impl BuiltInHandlerManager {
                 match datum_type {
                     DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
                     DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(datum, args),
+                    // `member(x).char[a..b] = v` compiles to
+                    // setProp(member, #char, a, b, v) â€” a chunk write into the
+                    // member's text, keeping everything outside the range.
+                    DatumType::CastMemberRef => Self::set_member_chunk(datum, args),
                     _ => Err(ScriptError::new(
                         "Cannot setProp on non-prop list or child object".to_string(),
                     )),
@@ -3017,6 +3021,60 @@ impl BuiltInHandlerManager {
             }
         })
     }
+    /// `setProp(member, #char|#word|#item|#line, first, last, value)` â€” the
+    /// compiled form of `member(x).char[a..b] = value`. Replaces exactly that
+    /// range of the member's text and leaves the rest alone. `last` is
+    /// optional: `member(x).char[a] = v` compiles with four arguments.
+    pub fn set_member_chunk(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+        use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
+        use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+        if args.len() < 3 {
+            return Err(ScriptError::new(format!(
+                "setProp on a member needs a chunk kind, a range and a value (got {} args)",
+                args.len()
+            )));
+        }
+        let (member_ref, chunk_type, first, last, replacement) = reserve_player_ref(|player| {
+            let member_ref = match player.get_datum(datum) {
+                Datum::CastMember(r) => r.to_owned(),
+                other => {
+                    return Err(ScriptError::new(format!(
+                        "setProp: expected a cast member, got {}", other.type_str()
+                    )))
+                }
+            };
+            let kind = match player.get_datum(&args[0]) {
+                Datum::Symbol(sym) => sym.clone(),
+                other => {
+                    return Err(ScriptError::new(format!(
+                        "setProp: expected a chunk symbol, got {}", other.type_str()
+                    )))
+                }
+            };
+            let chunk_type = StringChunkType::from(kind);
+            let first = player.get_datum(&args[1]).int_value()?;
+            let (last, value_ref) = if args.len() >= 4 {
+                (player.get_datum(&args[2]).int_value()?, &args[3])
+            } else {
+                (first, &args[2])
+            };
+            let replacement = player.get_datum(value_ref).string_value()?;
+            Ok((member_ref, chunk_type, first, last, replacement))
+        })?;
+        let current = reserve_player_mut(|player| {
+            CastMemberRefHandlers::get_prop(player, &member_ref, Symbol::from_str("text"))
+                .ok()
+                .and_then(|d| d.string_value().ok())
+                .unwrap_or_default()
+        });
+        let item_delimiter = reserve_player_ref(|player| player.movie.item_delimiter);
+        let chunk_expr = StringChunkExpr { chunk_type, start: first, end: last, item_delimiter };
+        let new_text = StringChunkUtils::string_by_putting_into_chunk(&current, &chunk_expr, &replacement)?;
+        CastMemberRefHandlers::set_prop(&member_ref, Symbol::from_str("text"), Datum::String(new_text))?;
+        Ok(DatumRef::Void)
+    }
+
 }
 
 

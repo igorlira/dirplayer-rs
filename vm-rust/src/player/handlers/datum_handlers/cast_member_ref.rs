@@ -225,6 +225,13 @@ impl CastMemberRefHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let handler_name_str = handler_name.as_str();
         match handler_name.into_builtin() {
+            // `member(x).char[a..b] = v` compiles to an object call
+            // setProp(member, #char, a, b, v). Director writes just that range
+            // of the member's text and leaves the rest; without this the call
+            // errored and the member kept whatever the author had typed.
+            Some(BuiltInSymbol::SetProp) => {
+                crate::player::handlers::manager::BuiltInHandlerManager::set_member_chunk(datum, args)
+            }
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
             Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
             Some(BuiltInSymbol::Move) => Self::move_member(datum, args),
