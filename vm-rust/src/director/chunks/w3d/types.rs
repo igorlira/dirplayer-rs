@@ -319,6 +319,14 @@ pub struct W3dNode {
     pub near_plane: f32,
     pub far_plane: f32,
     pub fov: f32,
+    /// View node projection: `true` when the IFX view attributes carry bit 0
+    /// (`IFX_VIEW_ORTHOGRAPHIC_PROJECTION`), Director's `camera.projection =
+    /// #orthographic`.
+    pub projection_ortho: bool,
+    /// World units spanned VERTICALLY by an orthographic view — Director's
+    /// `camera.orthoHeight`. Stored in the view block after the viewport rect
+    /// and the target-node name; 0 when the block was too short to carry it.
+    pub ortho_height: f32,
     pub screen_width: i32,
     pub screen_height: i32,
 }
@@ -337,6 +345,8 @@ impl Default for W3dNode {
             near_plane: 1.0,
             far_plane: 1000.0,
             fov: 30.0,
+            projection_ortho: false,
+            ortho_height: 0.0,
             screen_width: 640,
             screen_height: 480,
         }

@@ -2226,6 +2226,8 @@ impl Shockwave3dMemberHandlers {
                                             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                             screen_width: 640, screen_height: 480,
                                             transform: folded_transform,
+                                            projection_ortho: false,
+                                            ortho_height: 0.0,
                                         });
                                         if let Some(r0) = src_root_com {
                                             record_hops = Some((Symbol::from_str(&obj_name), hops, r0));
@@ -2581,6 +2583,8 @@ impl Shockwave3dMemberHandlers {
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
+                                                projection_ortho: false,
+                                                ortho_height: 0.0,
                                             });
                                         }
                                         BuiltInSymbol::Group => {
@@ -2593,6 +2597,8 @@ impl Shockwave3dMemberHandlers {
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
+                                                projection_ortho: false,
+                                                ortho_height: 0.0,
                                             });
                                         }
                                         BuiltInSymbol::Camera => {
@@ -2605,6 +2611,8 @@ impl Shockwave3dMemberHandlers {
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                                                projection_ortho: false,
+                                                ortho_height: 0.0,
                                             });
                                         }
                                         BuiltInSymbol::Light => {
@@ -2636,6 +2644,8 @@ impl Shockwave3dMemberHandlers {
                                                 near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                                 screen_width: 640, screen_height: 480,
                                                 transform: identity,
+                                                projection_ortho: false,
+                                                ortho_height: 0.0,
                                             });
                                         }
                                         BuiltInSymbol::Shader => {
@@ -3407,6 +3417,8 @@ impl Shockwave3dMemberHandlers {
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                            projection_ortho: false,
+                            ortho_height: 0.0,
                         });
                         empty_scene.nodes.push(W3dNode {
                             name: Symbol::builtin(BuiltInSymbol::DefaultView),
@@ -3420,6 +3432,8 @@ impl Shockwave3dMemberHandlers {
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
                             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
+                            projection_ortho: false,
+                            ortho_height: 0.0,
                         });
                         empty_scene.shaders.push(W3dShader {
                             name: Symbol::builtin(BuiltInSymbol::DefaultShader),

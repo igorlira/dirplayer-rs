@@ -627,6 +627,8 @@ impl TextMember {
             visibility: 1,
             near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
             screen_width: 640, screen_height: 480,
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
 
         let info = Shockwave3dInfo {
@@ -4921,6 +4923,8 @@ impl CastMember {
             screen_width: 640,
             screen_height: 480,
             transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,100.0,1.0],
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
         // An empty 3D member's two lights. Director calls them UIAmbient / UIDirectional
         // and reports exactly two — MEASURED in the message window on SweeTarts 3D's
@@ -4972,6 +4976,8 @@ impl CastMember {
                 0.32, 0.74, 0.59, 0.0,
                 0.0, 0.0, 0.0, 1.0,
             ],
+            projection_ortho: false,
+            ortho_height: 0.0,
         });
         scene
     }

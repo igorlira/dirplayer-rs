@@ -640,9 +640,38 @@ impl W3dFileParser {
             node.fov = r.read_f32()?;
         }
 
+        // IFXView.h `EIFXProjectionMode`: 0 = IFX_VIEW_PERSPECTIVE_PROJECTION,
+        // 1 = IFX_VIEW_ORTHOGRAPHIC_PROJECTION. The mode rides in bit 0 of the
+        // view attributes word — Fly Like A Bird's bird member is the only view
+        // in its three .w3d files with attrs 0x9 instead of 0x8, and Director
+        // reports exactly that camera as `#orthographic`.
+        node.projection_ortho = (view_attrs & 0x1) != 0;
+
+        // `orthoHeight` follows the viewport rect: 4 f32 rect, 11 words, the
+        // target node name, one word, then the height. Measured against the same
+        // member, whose Director `camera.orthoHeight` is 530.7867 — the exact f32
+        // stored at that position, and the only occurrence of that value anywhere
+        // in the file. Every field is guarded, so a shorter or differently-shaped
+        // block simply leaves `ortho_height` at 0 and the renderer falls back to
+        // Director's documented 200.0 default.
+        if r.remaining() >= 16 {
+            let _rect = [r.read_f32()?, r.read_f32()?, r.read_f32()?, r.read_f32()?];
+            if r.remaining() >= 44 {
+                for _ in 0..11 { let _ = r.read_u32()?; }
+                if r.remaining() >= 2 {
+                    let _target = r.read_ifx_string()?;
+                    if r.remaining() >= 8 {
+                        let _ = r.read_u32()?;
+                        node.ortho_height = r.read_f32()?;
+                    }
+                }
+            }
+        }
+
         log(&format!(
-            "  ViewNode: \"{}\" parent=\"{}\" viewAttrs=0x{:X} near={} far={} fov={}\n    pos: ({:.3},{:.3},{:.3})",
+            "  ViewNode: \"{}\" parent=\"{}\" viewAttrs=0x{:X} near={} far={} fov={} ortho={} orthoH={}\n    pos: ({:.3},{:.3},{:.3})",
             node.name, node.parent_name, view_attrs, node.near_plane, node.far_plane, node.fov,
+            node.projection_ortho, node.ortho_height,
             transform[12], transform[13], transform[14],
         ));
 

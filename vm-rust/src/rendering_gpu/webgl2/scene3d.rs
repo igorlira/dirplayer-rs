@@ -6157,15 +6157,21 @@ void main() {
             (34.516f32.to_radians(), 1.0, 10000.0, fbo_aspect)
         };
 
-        // Check for orthographic projection mode
+        // Check for orthographic projection mode. A Lingo assignment wins;
+        // otherwise the view node carries what the .w3d was authored with
+        // (IFX view attributes bit 0), which Director reports through
+        // `camera.projection`. Fly Like A Bird's WELCOME screen orbits an
+        // ORTHOGRAPHIC camera around the bird; drawn in perspective the bird
+        // filled — and overflowed — the sprite.
         let is_ortho = runtime_state
             .and_then(|rs| rs.camera_projection_mode.get(&cam_name))
             .map(|&m| m == 1)
-            .unwrap_or(false);
+            .unwrap_or_else(|| view_node.map(|n| n.projection_ortho).unwrap_or(false));
 
         let stored_ortho_h = runtime_state
             .and_then(|rs| rs.camera_ortho_height.get(&cam_name))
-            .copied();
+            .copied()
+            .or_else(|| view_node.map(|n| n.ortho_height).filter(|h| *h > 0.0));
 
         let mut proj = if is_ortho {
             // Director's documented default orthoHeight is 200.0 world units.

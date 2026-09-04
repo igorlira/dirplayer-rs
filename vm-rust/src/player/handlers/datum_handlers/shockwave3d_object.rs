@@ -4616,6 +4616,8 @@ impl Shockwave3dObjectDatumHandlers {
                                         near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
                                         screen_width: 640, screen_height: 480,
                                         transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                                        projection_ortho: false,
+                                        ortho_height: 0.0,
                                     });
                                 }
                             }
@@ -8308,20 +8310,27 @@ impl Shockwave3dObjectDatumHandlers {
                 Ok(player.alloc_datum(Datum::Vector(wp)))
             },
             "projection" => {
+                // A Lingo assignment wins; otherwise report what the .w3d view
+                // node was authored with (IFX view attributes bit 0).
                 let ortho = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
                     .and_then(|w3d| w3d.runtime_state.camera_projection_mode
-                        .get(&camera_name).copied())
+                        .get(&camera_name).copied()
+                        .or_else(|| view_node_of(w3d, camera_name)
+                            .map(|n| if n.projection_ortho { 1 } else { 0 })))
                     .unwrap_or(0);
                 let sym = if ortho == 1 { "orthographic" } else { "perspective" };
                 Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(sym))))
             },
             "orthoHeight" => {
-                // Default 200.0 world units per the Scripting Dictionary.
+                // Default 200.0 world units per the Scripting Dictionary; the
+                // authored view node overrides that when it carries a height.
                 let v = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
                     .and_then(|w3d| w3d.runtime_state.camera_ortho_height
-                        .get(&camera_name).copied())
+                        .get(&camera_name).copied()
+                        .or_else(|| view_node_of(w3d, camera_name)
+                            .map(|n| n.ortho_height).filter(|h| *h > 0.0)))
                     .unwrap_or(200.0);
                 Ok(player.alloc_datum(Datum::Float(v as f64)))
             },
@@ -10869,6 +10878,20 @@ fn build_perspective_f32(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32
 /// member-level `fog_*` fields — what the 3DPR chunk parsed and what a movie
 /// that only ever touched one camera has been writing — so a camera the script
 /// never fogged keeps behaving as before.
+/// The parsed view node behind a camera name (case-insensitive), falling back
+/// to the scene's first view. Carries what the .w3d authored — projection mode
+/// and orthoHeight — for the getters to report when Lingo has not overridden it.
+fn view_node_of<'a>(
+    w3d: &'a crate::player::cast_member::Shockwave3dMember,
+    camera_name: Symbol,
+) -> Option<&'a crate::director::chunks::w3d::types::W3dNode> {
+    use crate::director::chunks::w3d::types::W3dNodeType;
+    let scene = w3d.parsed_scene.as_ref()?;
+    scene.nodes.iter()
+        .find(|n| n.node_type == W3dNodeType::View && n.name == camera_name)
+        .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View))
+}
+
 pub fn camera_fog_of(
     player: &crate::player::DirPlayer,
     member_ref: &CastMemberRef,
