@@ -3765,9 +3765,41 @@ impl Shockwave3dObjectDatumHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "rotate" => {
-                    let (rx, ry, rz) = read_xyz_args(player, args);
+                    // Director gives `rotate` three forms (11.5 Scripting
+                    // Dictionary): `rotate(xAngle, yAngle, zAngle {, relativeTo})`,
+                    // `rotate(rotationVector {, relativeTo})` and
+                    // `rotate(position, axis, angle {, relativeTo})` — "a rotation
+                    // about an arbitrary axis passing through a point in space".
+                    // Only the two Euler forms were implemented, and the pivot
+                    // form fell into `read_xyz_args`, which read the three
+                    // arguments as x/y/z angles: both vectors answered 0 and the
+                    // ANGLE became a z-rotation. With `#world` that is a rotation
+                    // about the world ORIGIN, so Street Sesh 2's ground alignment
+                    //     my.rotate(my.worldPosition, perpendicularTo(v1, tn), angleBetween(v1, tn), #world)
+                    // never tilted the skater onto the road at all and instead
+                    // swung him around the origin — he spiralled off the street
+                    // within a couple of seconds. The equivalent overload on a
+                    // transform was already implemented (transform3d.rs).
+                    let pivot_form = args.len() >= 3
+                        && matches!(player.get_datum(&args[0]), Datum::Vector(_))
+                        && matches!(player.get_datum(&args[1]), Datum::Vector(_))
+                        && !matches!(player.get_datum(&args[2]), Datum::Vector(_));
                     let world = args_relative_to_world(player, args);
-                    apply_rotation(player, &member_ref, *&s3d_ref.name, rx, ry, rz, world);
+                    if pivot_form {
+                        let pivot = match player.get_datum(&args[0]) {
+                            Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                            _ => [0.0; 3],
+                        };
+                        let axis = match player.get_datum(&args[1]) {
+                            Datum::Vector(v) => [v[0] as f32, v[1] as f32, v[2] as f32],
+                            _ => [0.0, 0.0, 1.0],
+                        };
+                        let angle = player.get_datum(&args[2]).to_float().unwrap_or(0.0) as f32;
+                        apply_pivot_rotation(player, &member_ref, *&s3d_ref.name, pivot, axis, angle, world);
+                    } else {
+                        let (rx, ry, rz) = read_xyz_args(player, args);
+                        apply_rotation(player, &member_ref, *&s3d_ref.name, rx, ry, rz, world);
+                    }
                     Ok(player.alloc_datum(Datum::Void))
                 },
                 "scale" => {
@@ -10352,6 +10384,58 @@ fn apply_rotation(
         result[14] = m[14];
     }
     set_node_transform(player, member_ref, node_name, result);
+}
+
+/// `node.rotate(position, axis, angle {, relativeTo})` — rotate the node by
+/// `angle` degrees about `axis` passing through the point `position`.
+///
+/// The pivot rotation itself is `P = T(p) · R(axis, angle) · T(-p)`; `#world` /
+/// `#parent` express `p` and `axis` in the parent frame (`P · M`), `#self` in
+/// the node's own frame (`M · P`). Like `apply_rotation`, a node whose parent is
+/// not the world treats `#world` as `#parent`.
+///
+/// Note the identity Street Sesh 2 leans on: with `p` = the node's own world
+/// position the translation cancels, so the node turns in place — which is the
+/// difference between aligning the skater to the road and orbiting the origin.
+fn apply_pivot_rotation(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &crate::player::cast_lib::CastMemberRef,
+    node_name: Symbol,
+    pivot: [f32; 3],
+    axis: [f32; 3],
+    angle_deg: f32,
+    world_relative: bool,
+) {
+    // See apply_translation comment — same flush requirement.
+    sync_persistent_transforms(player);
+    let m = get_or_init_node_transform(player, member_ref, node_name);
+    let r = axis_angle_to_matrix_f32(&axis, angle_deg);
+    // P = T(p) · R · T(-p): R with the translation column set to p − R·p.
+    let mut p = r;
+    p[12] = pivot[0] - (r[0] * pivot[0] + r[4] * pivot[1] + r[8] * pivot[2]);
+    p[13] = pivot[1] - (r[1] * pivot[0] + r[5] * pivot[1] + r[9] * pivot[2]);
+    p[14] = pivot[2] - (r[2] * pivot[0] + r[6] * pivot[1] + r[10] * pivot[2]);
+    let result = if world_relative { mat4_mul_f32(&p, &m) } else { mat4_mul_f32(&m, &p) };
+    set_node_transform(player, member_ref, node_name, result);
+}
+
+/// Right-handed rotation of `angle_deg` about `axis`, column-major — the same
+/// convention as `euler_to_matrix_f32` (checked against its z-only case).
+fn axis_angle_to_matrix_f32(axis: &[f32; 3], angle_deg: f32) -> [f32; 16] {
+    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if len < 1e-8 {
+        return IDENTITY;
+    }
+    let (x, y, z) = (axis[0] / len, axis[1] / len, axis[2] / len);
+    let a = angle_deg.to_radians();
+    let (s, c) = (a.sin(), a.cos());
+    let t = 1.0 - c;
+    [
+        t * x * x + c,      t * x * y + s * z,  t * x * z - s * y,  0.0,
+        t * x * y - s * z,  t * y * y + c,      t * y * z + s * x,  0.0,
+        t * x * z + s * y,  t * y * z - s * x,  t * z * z + c,      0.0,
+        0.0,                0.0,                0.0,                1.0,
+    ]
 }
 
 fn apply_scale(
