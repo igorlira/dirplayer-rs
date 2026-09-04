@@ -229,6 +229,14 @@ async fn maybe_hold_dcr_for_preloader(url: &str) {
     if crate::player::reserve_player_ref(|p| p.goto_wait_active || !p.is_playing) {
         return;
     }
+    // Only while a Flash preloader is actually loading. The hold is for DGS,
+    // and unqualified it delayed every movie in every game by three seconds:
+    // in Matematik i Maaneby a scene took 3.4 to 4.7 s to open with its movie
+    // already in Cache Storage, where the bytes come back in about 20 ms, and
+    // `netDone` stayed false for exactly this timeout.
+    if !crate::player::is_flash_loading().unwrap_or(false) {
+        return;
+    }
     let _ = async_std::future::timeout(
         std::time::Duration::from_millis(3000),
         std::future::pending::<()>(),

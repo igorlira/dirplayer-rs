@@ -5885,7 +5885,7 @@ async fn restart_current_movie() {
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_isFlashLoading", catch)]
-    fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
+    pub(crate) fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
 
     /// Resize a live Ruffle instance so it re-renders the vector sharp at the
     /// sprite's current on-stage size (splashes grow, arm swaps dims).
