@@ -294,6 +294,18 @@ pub struct Scene3dRenderer {
     /// movie-space quad fills the same fraction of the viewport at any scale.
     /// 1.0 for every unscaled movie.
     pub stage_scale: f32,
+    /// The sprite compositing this scene uses background-transparent ink (36),
+    /// so the member's background must not be painted: clear the colour buffer
+    /// to alpha 0 and let the 2D compositor blend only what the models wrote.
+    /// Fly Like A Bird's WELCOME screen puts the bird's 3D sprite over a
+    /// half-blended cityscape bitmap and the title banner; an opaque clear
+    /// painted a black rectangle across both.
+    pub transparent_clear: bool,
+    /// Viewport for the pass about to render, in FBO pixels, or `None` to fill
+    /// the sprite. Set per pass by the 2D compositor from
+    /// `sprite(n).camera(i).rect`; only cameras AFTER the first can carry one.
+    /// Fly Like A Bird insets a 100x100 poo-cam at rect(530, 270, 630, 370).
+    pub pass_viewport: Option<(i32, i32, i32, i32)>,
     // Bloom post-processing FBOs (half resolution)
     bloom_fbo_a: Option<WebGlFramebuffer>,
     bloom_tex_a: Option<WebGlTexture>,
@@ -374,6 +386,8 @@ impl Scene3dRenderer {
             fbo_width: 0,
             fbo_height: 0,
             stage_scale: 1.0,
+            transparent_clear: false,
+            pass_viewport: None,
             logged_members: std::collections::HashSet::new(),
             animation_time: 0.0,
             motion_transforms: HashMap::new(),
@@ -2163,6 +2177,16 @@ void main() {
             }
         }
 
+        // The viewport this pass draws into: `sprite(n).camera(i).rect`, already
+        // resolved and scaled by the caller. `None` means "fill the sprite",
+        // which is always the case for camera(1) — Director resets its rect to
+        // the full sprite every time it renders (11.5 Scripting Dictionary,
+        // "rect (camera)").
+        let cam_viewport = self.pass_viewport.filter(|(l, t, r, b)| {
+            *r > *l && *b > *t
+                && !(*l <= 0 && *t <= 0 && *r >= width as i32 && *b >= height as i32)
+        });
+
         let gl = context.gl();
         let shader = self.shader.as_ref().unwrap();
         let fbo = self.fbo.as_ref().unwrap();
@@ -2185,6 +2209,19 @@ void main() {
         gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
         gl.disable(WebGl2RenderingContext::STENCIL_TEST);
         gl.color_mask(true, true, true, true);
+
+        // Narrow this pass to the camera's own rect. Scissor as well as
+        // viewport, so a clearing camera clears only its own inset.
+        if let Some((l, t, r, b)) = cam_viewport {
+            let vw = r - l;
+            let vh = b - t;
+            // The FBO is sampled V-flipped by the 2D compositor, so its GL row 0
+            // is the TOP of the composited sprite — `rect.top` is already the
+            // right GL y, with no bottom-left conversion.
+            gl.viewport(l, t, vw, vh);
+            gl.scissor(l, t, vw, vh);
+            gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
+        }
         gl.depth_mask(true);
         gl.enable(WebGl2RenderingContext::DEPTH_TEST);
         gl.depth_func(WebGl2RenderingContext::LEQUAL);
@@ -2207,7 +2244,13 @@ void main() {
 
         // Set up camera
         let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
+        // The projection aspect follows the viewport this pass actually draws
+        // into, not the whole sprite — an inset camera is otherwise stretched.
+        let pass_aspect = match cam_viewport {
+            Some((l, t, r, b)) if b > t => (r - l) as f32 / (b - t) as f32,
+            _ => width as f32 / height as f32,
+        };
+        let projection_matrix = self.build_projection_matrix(scene, pass_aspect, runtime_state);
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
@@ -2290,7 +2333,8 @@ void main() {
                 let (r, g, b) = cam_clear
                     .or(rs.background_color)
                     .unwrap_or((0, 0, 0));
-                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0);
+                let clear_a = if self.transparent_clear { 0.0 } else { 1.0 };
+                gl.clear_color(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, clear_a);
                 gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT | WebGl2RenderingContext::DEPTH_BUFFER_BIT);
             }
         } else {

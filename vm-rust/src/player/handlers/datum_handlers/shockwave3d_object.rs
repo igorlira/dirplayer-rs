@@ -413,7 +413,7 @@ impl Shockwave3dObjectDatumHandlers {
                         };
                         Ok(player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(rgb.0, rgb.1, rgb.2))))
                     },
-                    "clearAtRender" => {
+                "clearAtRender" => {
                         let val = {
                             let member = player.movie.cast_manager.find_member_by_ref(member_ref);
                             member.and_then(|m| m.member_type.as_shockwave3d())
@@ -2237,6 +2237,24 @@ impl Shockwave3dObjectDatumHandlers {
                             match rgb {
                                 Some(v) => { w3d.runtime_state.camera_clear_values.insert(cam_key, v); }
                                 None => { w3d.runtime_state.camera_clear_values.remove(&cam_key); }
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                "rect" => {
+                    if s3d_ref.object_type != BuiltInSymbol::Camera { return Ok(()); }
+                    // 3D camera property (Director 11.5 Scripting Dictionary,
+                    // "rect (camera)"): the rectangle, relative to the top-left of
+                    // the SPRITE, that this camera renders into. camera(1) is reset
+                    // to the full sprite when it renders; an added camera keeps
+                    // whatever the movie set, unscaled.
+                    if let Datum::Rect(r, _) = value {
+                        let rect = (r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
+                        let cam_key = s3d_ref.name;
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                w3d.runtime_state.camera_rects.insert(cam_key, rect);
                             }
                         }
                     }
@@ -8309,11 +8327,16 @@ impl Shockwave3dObjectDatumHandlers {
             },
             "visible" => Ok(player.alloc_datum(Datum::Int(1))),
             "rect" => {
-                // Camera viewport rect in pixel coordinates.
-                // Default = the member's defaultRect (full sprite area).
+                // Camera viewport rect in pixel coordinates, relative to the
+                // sprite's top-left. A movie-set rect (see the setter) wins;
+                // otherwise report the full sprite area, which is what Director
+                // resets camera(1) to when it renders.
                 let r = player.movie.cast_manager.find_member_by_ref(member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
-                    .map(|w3d| w3d.info.default_rect)
+                    .and_then(|w3d| w3d.runtime_state.camera_rects.get(&camera_name).copied())
+                    .or_else(|| player.movie.cast_manager.find_member_by_ref(member_ref)
+                        .and_then(|m| m.member_type.as_shockwave3d())
+                        .map(|w3d| w3d.info.default_rect))
                     .unwrap_or((0, 0, 320, 240));
                 Ok(player.alloc_datum(Datum::Rect([
                     r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64

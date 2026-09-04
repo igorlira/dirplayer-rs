@@ -1582,6 +1582,14 @@ pub struct Shockwave3dRuntimeState {
     pub camera_root_nodes: std::collections::HashMap<Symbol, Symbol>,
     /// Per-camera colorBuffer.clearAtRender: camera_name -> bool
     pub camera_clear_at_render: std::collections::HashMap<Symbol, bool>,
+    /// `sprite(n).camera(i).rect` — the viewport rectangle, in sprite-local
+    /// pixels, that this camera renders into (Director 11.5 Scripting
+    /// Dictionary, "rect (camera)"). camera(1) always fills the sprite, so
+    /// only the extra cameras a movie adds with `addCamera` need an entry.
+    /// Fly Like A Bird gives its poo-cam `rect(530, 270, 630, 370)` — a 100px
+    /// inset in the bottom-right corner; rendering it full-viewport painted the
+    /// underground view of the bomb camera over the entire game.
+    pub camera_rects: std::collections::HashMap<Symbol, (i32, i32, i32, i32)>,
     /// Per-camera colorBuffer.clearValue: camera_name -> RGB. "The color used to
     /// clear out the color buffer if colorBuffer.clearAtRender is set to TRUE"
     /// (Director 11.5 Scripting Dictionary, "clearValue"). Unset falls back to the
@@ -2014,6 +2022,7 @@ impl Shockwave3dRuntimeState {
         self.camera_ortho_height.retain(|k, _| !doomed.contains(k));
         self.camera_root_nodes.retain(|k, _| !doomed.contains(k));
         self.camera_clear_at_render.retain(|k, _| !doomed.contains(k));
+        self.camera_rects.retain(|k, _| !doomed.contains(k));
         self.camera_clear_values.retain(|k, _| !doomed.contains(k));
         self.camera_fog.retain(|k, _| !doomed.contains(k));
         self.camera_overlays.retain(|k, _| !doomed.contains(k));

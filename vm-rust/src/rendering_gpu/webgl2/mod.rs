@@ -3894,6 +3894,8 @@ impl WebGL2Renderer {
         // averaged (mipmapped) sampling instead of point sampling.
         let mut tex_source_size: Option<(u32, u32)> = None;
 
+        let is_w3d_scene = matches!(texture_source, TextureSource::Shockwave3dScene { .. });
+
         let tex = match texture_source {
             TextureSource::Bitmap { image_ref, is_flash } => {
                 // Pass sprite's bgColor for matte/transparency computation for inks that need it
@@ -4637,6 +4639,11 @@ impl WebGL2Renderer {
                 // into this sprite's already-enlarged render rect, so the 3D
                 // renderer needs the factor to divide its 2D ortho by. 1.0 for
                 // every unscaled movie. See `Scene3dRenderer::stage_scale`.
+                // Background-transparent ink (36) on a 3D sprite: Director does not
+                // paint the member background, it composites only what the scene drew.
+                // Fly Like A Bird's WELCOME screen layers the bird's 3D sprite over a
+                // half-blended cityscape bitmap and the title banner this way.
+                self.scene3d.transparent_clear = ink == 36;
                 self.scene3d.stage_scale = {
                     let (sx, sy) = crate::player::stage::stage_scale(player);
                     sx.min(sy) as f32
@@ -4651,6 +4658,47 @@ impl WebGL2Renderer {
                                 .get(c)
                                 .copied())
                             .unwrap_or(true)
+                    };
+                    // `sprite(n).camera(i).rect` — the sprite-relative rectangle
+                    // this camera renders into (Director 11.5 Scripting Dictionary,
+                    // "rect (camera)"). Only cameras AFTER the first can narrow the
+                    // view: the dictionary is explicit that "when sprite.camera(1) is
+                    // rendered, its rect is reset to rect(0, 0, sprite.width,
+                    // sprite.height) so that the camera fills the screen", and
+                    // Rasterwerks' Phosphor leaves an authored rect on camera(1) that
+                    // would otherwise shrink its whole FPS view into one corner.
+                    //
+                    // Fly Like A Bird is the case the rect matters for: its second
+                    // camera is a 100x100 poo-cam inset at rect(530, 270, 630, 370)
+                    // with clearAtRender = 0. Rendered full-viewport it drew its
+                    // underground view over the entire game.
+                    //
+                    // Coordinates are authored in movie pixels, so they scale by the
+                    // same factor backdrops and overlays use.
+                    self.scene3d.pass_viewport = if i == 0 {
+                        None
+                    } else {
+                        pass.camera.as_ref()
+                            .and_then(|c| pass.runtime_state.camera_rects.get(c).copied())
+                            // Only an INSET rect narrows the view. A rect anchored at
+                            // the sprite origin is the "fill the view" value Director
+                            // itself writes — the dictionary says camera(1) has its rect
+                            // reset to rect(0, 0, sprite.width, sprite.height) on every
+                            // render, and that any later camera's rect.top/rect.left must
+                            // be >= camera(1)'s, i.e. >= 0. Rasterwerks' Phosphor leaves
+                            // a stale rect(0, 0, 320, 240) on the camera that draws its
+                            // whole FPS view, and Director still renders it full-sprite;
+                            // honouring that rect shrank the game into one corner.
+                            .filter(|(l, t, r, b)| r > l && b > t && (*l > 0 || *t > 0))
+                            .map(|(l, t, r, b)| {
+                                // Movie pixels -> FBO pixels. The FBO is the sprite at
+                                // render resolution, which on a scaled stage is several
+                                // times the sprite's movie size.
+                                let sx = if sprite_width > 0 { width as f32 / sprite_width as f32 } else { 1.0 };
+                                let sy = if sprite_height > 0 { height as f32 / sprite_height as f32 } else { 1.0 };
+                                ((l as f32 * sx).round() as i32, (t as f32 * sy).round() as i32,
+                                 (r as f32 * sx).round() as i32, (b as f32 * sy).round() as i32)
+                            })
                     };
                     self.scene3d.active_camera = pass.camera.clone();
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
@@ -4668,6 +4716,13 @@ impl WebGL2Renderer {
                     }
                 }
 
+                // An inset camera pass left its viewport/scissor narrowed;
+                // overlays and the readback below cover the whole sprite.
+                {
+                    let gl = self.context.gl();
+                    gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+                    gl.viewport(0, 0, width as i32, height as i32);
+                }
 
                 // Render overlays on top of everything
                 for pass in &passes {
@@ -4736,12 +4791,16 @@ impl WebGL2Renderer {
         // the BackgroundTransparent shader's color-key discard which would incorrectly
         // hide content pixels that match bgColor.
         let is_ink36_alpha_baked = ink == 36 && bitmap_bit_depth == 32 && bitmap_use_alpha;
+        // A 3D scene rendered with a transparent clear carries its own alpha —
+        // the color-key shader would instead test the CLEARED pixels against the
+        // sprite's backColor and keep them.
+        let is_ink36_w3d = ink == 36 && is_w3d_scene;
         let text_needs_alpha = is_rendered_text && (ink == 36 || ink == 2 || bg_color_rgb == (255, 255, 255));
         let ink_mode = if text_needs_alpha {
             InkMode::Copy
         } else if is_button_alpha_matte {
             InkMode::Copy
-        } else if is_ink36_indexed_baked || is_ink36_alpha_baked {
+        } else if is_ink36_indexed_baked || is_ink36_alpha_baked || is_ink36_w3d {
             // Transparency baked into texture — use Copy shader for reliable discard
             InkMode::Copy
         } else if ink == 9 {
