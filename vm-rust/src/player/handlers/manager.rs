@@ -2675,6 +2675,28 @@ impl BuiltInHandlerManager {
                     &args[0], name, &rest,
                 )
             }
+            // Verb form of the 3D vector commands: `perpendicularTo(v1, v2)`,
+            // `crossProduct(v1, v2)`, `angleBetween(v1, v2)`, `distanceTo(v1, v2)`,
+            // `normalize(v)` … The 11.5 Scripting Dictionary writes them as
+            // `vector1.command(vector2)`, but Director accepts the equivalent
+            // global form for every one of them, and movies use it — Street Sesh's
+            // `_PhysO_groundcollision` aligns the skater with
+            //   my.rotate(my.worldPosition, perpendicularTo(v1, tn), angleBetween(v1, tn), #world)
+            // Delegate to the receiver's own handler so there is one implementation.
+            Some(BuiltInSymbol::PerpendicularTo | BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross
+                | BuiltInSymbol::DotProduct | BuiltInSymbol::Dot | BuiltInSymbol::AngleBetween
+                | BuiltInSymbol::DistanceTo | BuiltInSymbol::Normalize
+                | BuiltInSymbol::GetNormalized)
+                if !args.is_empty()
+                    && reserve_player_ref(|player| {
+                        Ok(matches!(player.get_datum(&args[0]), Datum::Vector(_)))
+                    })? =>
+            {
+                let rest = args[1..].to_vec();
+                crate::player::handlers::datum_handlers::vector::VectorDatumHandlers::call(
+                    &args[0], name, &rest,
+                )
+            }
             _ => {
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
                 if !args.is_empty() {

@@ -1013,6 +1013,7 @@ define_builtin_symbols! {
     "getNormalized" => GetNormalized,
     "normalize" => Normalize,
     "crossProduct" => CrossProduct,
+    "perpendicularTo" => PerpendicularTo,
     "cross" => Cross,
     "dotProduct" => DotProduct,
     "dot" => Dot,

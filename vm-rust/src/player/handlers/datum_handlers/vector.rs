@@ -63,7 +63,10 @@ impl VectorDatumHandlers {
                 }
                 Ok(DatumRef::Void)
             }),
-            Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross) => reserve_player_mut(|player| {
+            // `perpendicularTo` is documented (11.5 Scripting Dictionary) as
+            // "equivalent to the vector crossProduct command", so it shares the
+            // implementation rather than getting an approximate one of its own.
+            Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross | BuiltInSymbol::PerpendicularTo) => reserve_player_mut(|player| {
                 let a = Self::datum_to_vec(player, player.get_datum(datum))?;
                 let b = Self::datum_to_vec(player, player.get_datum(&args[0]))?;
                 Ok(player.alloc_datum(Datum::Vector([
