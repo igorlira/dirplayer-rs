@@ -1590,6 +1590,41 @@ impl Shockwave3dMemberHandlers {
                             (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![])
                         };
 
+                        // A runtime `model.shader = ...` / `model.shaderList = ...` never
+                        // touches the parsed node: the assignment lives in the SOURCE
+                        // member's `runtime_state.node_shaders`. A clone that reads only
+                        // `node.shader_name` therefore hands the copy the shader the model
+                        // was BORN with, not the one the movie put on it.
+                        //
+                        // Fly Like A Bird builds its entire city that way. `startMovie`
+                        // walks member("city") giving every building model a #standard
+                        // shader named after the model with a texture from the same-named
+                        // bitmap; the game then clones 100 of those buildings into
+                        // member("world"). Reading the parsed name alone gave all of them
+                        // the file's white `Material #1`, so the whole city rendered as
+                        // untextured white blocks with no texture in the destination member.
+                        //
+                        // Carry the overrides across, keyed by SOURCE node name; they are
+                        // re-keyed to the destination node names (and mapped through
+                        // `shader_name_map`) once the nodes exist.
+                        let src_node_shaders: Vec<(Symbol, std::collections::HashMap<usize, Symbol>, bool)> =
+                            match source_member_ref.as_ref()
+                                .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                                .and_then(|sm| sm.member_type.as_shockwave3d())
+                            {
+                                Some(sw3d) if obj_type == "model" => {
+                                    let rs = &sw3d.runtime_state;
+                                    let mut names: Vec<Symbol> = vec![Symbol::from_str(&source_model_name)];
+                                    names.extend(src_child_nodes.iter().map(|c| c.name));
+                                    names.iter().filter_map(|n| {
+                                        rs.node_shaders.get(n).map(|m| (
+                                            *n, m.clone(), rs.node_shaders_indexed.contains(n),
+                                        ))
+                                    }).collect()
+                                }
+                                _ => Vec::new(),
+                            };
+
                         // Track shader name remapping for -clone suffix creation
                         let mut shader_name_map: std::collections::HashMap<Symbol, Symbol> = std::collections::HashMap::new();
                         // Track texture name remapping for -clone suffix creation. Director
@@ -1736,6 +1771,18 @@ impl Shockwave3dMemberHandlers {
                                             }
                                             if !child.shader_name.is_empty() {
                                                 used_shader_names.insert(child.shader_name);
+                                            }
+                                        }
+
+                                        // Shaders the movie ASSIGNED to the source model or its
+                                        // children at runtime. They are used by the model just as
+                                        // much as the ones the file bound to it, so they (and their
+                                        // textures) have to travel with the clone.
+                                        for (_, map, _) in &src_node_shaders {
+                                            for name in map.values() {
+                                                if !name.as_str().is_empty() {
+                                                    used_shader_names.insert(*name);
+                                                }
                                             }
                                         }
 
@@ -2277,6 +2324,33 @@ impl Shockwave3dMemberHandlers {
                                 // node, so record where each cloned node came from —
                                 // that is the only way a renamed clone can find its own
                                 // keyframe clip. See `motion_origin_name`.
+                                // Re-key the source model's runtime shader assignments
+                                // onto the nodes just created, mapping each shader through
+                                // any collision rename. Without this the clone keeps the
+                                // shader the source node was born with (see `src_node_shaders`).
+                                if obj_type == "model" && !src_node_shaders.is_empty() {
+                                    let dest_of = |src: Symbol| -> Symbol {
+                                        if src == Symbol::from_str(&source_model_name) {
+                                            Symbol::from_str(&obj_name)
+                                        } else {
+                                            cloned_child_names.iter()
+                                                .find(|(s, _)| *s == src)
+                                                .map(|(_, d)| *d)
+                                                .unwrap_or(src)
+                                        }
+                                    };
+                                    for (src_name, map, indexed) in &src_node_shaders {
+                                        let dest_name = dest_of(*src_name);
+                                        let mapped: std::collections::HashMap<usize, Symbol> = map
+                                            .iter()
+                                            .map(|(i, sh)| (*i, shader_name_map.get(sh).copied().unwrap_or(*sh)))
+                                            .collect();
+                                        w3d.runtime_state.node_shaders.insert(dest_name, mapped);
+                                        if *indexed {
+                                            w3d.runtime_state.node_shaders_indexed.insert(dest_name);
+                                        }
+                                    }
+                                }
                                 if obj_type == "model" {
                                     w3d.runtime_state.clone_source.insert(
                                         Symbol::from_str(&obj_name),
