@@ -2880,8 +2880,23 @@ impl WebGL2Renderer {
                     // texture on every scroll. keep_authored_height is already
                     // forced below for non-#adjust box types, so the bitmap stays
                     // at the box height instead of growing with the content.
-                    let text_scroll_top =
-                        text_member.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0);
+                    //
+                    // …but only for a box type that HAS a scrolling box. The
+                    // dictionary defines scrollTop as "the distance from the top
+                    // of a field cast member to the top of the field that is
+                    // currently visible IN THE SCROLLING BOX"; a #adjust member
+                    // grows to fit its content, so nothing is ever out of view and
+                    // there is nothing to scroll to. Fly Like A Bird's WELCOME
+                    // panel (member "introtextscreen", #adjust 297x272) carries a
+                    // stale scroll_top of 69 in its XMED header — Lingo's own
+                    // `member.scrollTop` getter reports 0 for it — and applying it
+                    // lifted the whole panel 69 px, clipping the first paragraph
+                    // off the top of the sprite.
+                    let text_scroll_top = if text_member.box_type == BuiltInSymbol::Adjust {
+                        0
+                    } else {
+                        text_member.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0)
+                    };
                     let effective_top_spacing = (text_member.top_spacing as i32 - text_scroll_top)
                         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
