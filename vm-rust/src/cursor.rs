@@ -6,8 +6,36 @@ use crate::player::{
     DirPlayer,
 };
 
-/// Cache key for the native cursor: (bitmap_ref, mask_bitmap_ref, reg_point).
-pub type NativeCursorCache = Option<(Option<u32>, Option<u32>, (i16, i16))>;
+/// Cache key for the native cursor: either a cast-member cursor
+/// (bitmap_ref, mask_bitmap_ref, reg_point) or one of Director's numbered
+/// built-ins. Kept so the CSS property is only written when it changes.
+#[derive(PartialEq, Clone, Debug)]
+pub enum CursorCacheKey {
+    Member(Option<u32>, Option<u32>, (i16, i16)),
+    System(i32),
+}
+pub type NativeCursorCache = Option<CursorCacheKey>;
+
+/// Director's numbered cursors, as the CSS keyword that looks the same.
+///
+/// A movie sets these from rollover behaviours: `cursor(280)` on entering a
+/// button and `cursor(0)` on leaving it. Checked against the Windows
+/// projector's live cursor handle: over a button it is a pointing hand from
+/// Director's own bitmap, matching no stock Windows cursor, and over the
+/// backdrop the plain arrow. An unknown number falls back to the arrow.
+fn system_cursor_css(id: i32) -> Option<&'static str> {
+    match id {
+        -1 | 0 => Some("default"),
+        1 => Some("text"),        // I-Beam
+        2 => Some("crosshair"),   // Crosshair
+        3 => Some("cell"),        // Crossbar
+        4 => Some("wait"),        // Watch
+        200 => Some("none"),      // Blank
+        254 => Some("help"),      // Help
+        280 => Some("pointer"),   // Finger
+        _ => Some("default"),
+    }
+}
 
 /// Resolve and apply the custom cursor as a native CSS cursor on `canvas` (and
 /// `document.body` so it persists during pointer-capture drag). Returns without
@@ -25,6 +53,30 @@ pub fn update_native_cursor(
         None
     };
     let cursor_ref = cursor_ref.as_ref().unwrap_or(&player.cursor);
+    // A numbered cursor is a CSS keyword; only a member cursor needs a bitmap
+    // built into a data URL below.
+    if let CursorRef::System(id) = cursor_ref {
+        let key = CursorCacheKey::System(*id);
+        if cache.as_ref() == Some(&key) {
+            return;
+        }
+        match system_cursor_css(*id) {
+            Some("default") => {
+                let _ = canvas.style().remove_property("cursor");
+                set_body_cursor(None);
+            }
+            Some(css) => {
+                let _ = canvas.style().set_property("cursor", css);
+                set_body_cursor(Some(css));
+            }
+            None => {
+                let _ = canvas.style().remove_property("cursor");
+                set_body_cursor(None);
+            }
+        }
+        *cache = Some(key);
+        return;
+    }
     let cursor_list = match cursor_ref {
         CursorRef::Member(ids) => Some(ids),
         _ => None,
@@ -52,7 +104,7 @@ pub fn update_native_cursor(
         }
     };
 
-    let cache_key = (
+    let cache_key = CursorCacheKey::Member(
         Some(cursor_bitmap_member.image_ref),
         cursor_mask_member.as_ref().map(|m| m.image_ref),
         cursor_bitmap_member.reg_point,
