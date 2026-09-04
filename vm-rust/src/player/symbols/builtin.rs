@@ -284,6 +284,7 @@ define_builtin_symbols! {
     "listp" => Listp,
     "objectp" => Objectp,
     "voidp" => Voidp,
+    "vectorp" => Vectorp,
     "rgb" => Rgb,
     "audioFilter" => AudioFilter,
     "paletteIndex" => PaletteIndex,

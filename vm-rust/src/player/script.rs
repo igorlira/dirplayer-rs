@@ -705,6 +705,10 @@ pub fn get_obj_prop(
             let is_void = matches!(obj_clone, Datum::Void);
             return Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })));
         }
+        Some(BuiltInSymbol::Vectorp) => {
+            let is_vector = matches!(obj_clone, Datum::Vector(_));
+            return Ok(player.alloc_datum(Datum::Int(if is_vector { 1 } else { 0 })));
+        }
         _ => {}
     }
 

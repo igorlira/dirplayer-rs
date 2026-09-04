@@ -1264,6 +1264,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(args),
             Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(args),
             Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(args),
+            Some(BuiltInSymbol::Vectorp) => TypeHandlers::vectorp(args),
             Some(BuiltInSymbol::Listp) => TypeHandlers::listp(args),
             Some(BuiltInSymbol::Symbolp) => TypeHandlers::symbolp(args),
             Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(args),

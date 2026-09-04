@@ -418,6 +418,18 @@ impl TypeHandlers {
         })
     }
 
+    /// `vectorP(x)` — 1 when `x` is a vector. The 11.5 Scripting Dictionary
+    /// has no entry for it (the documented test is `ilk(x) = #vector`, and
+    /// `#vector` is in `ilk`'s 3D type table), but Director accepts it as the
+    /// vector member of the `<type>P` family alongside listP/voidP/objectP.
+    /// Inferred from that family, not specified.
+    pub fn vectorp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let is_vector = matches!(player.get_datum(&args[0]), Datum::Vector(_));
+            Ok(player.alloc_datum(datum_bool(is_vector)))
+        })
+    }
+
     pub fn listp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
             let obj = player.get_datum(&args[0]);
