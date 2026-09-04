@@ -3684,6 +3684,41 @@ impl Shockwave3dMemberHandlers {
                         }
                     };
 
+                    // A node the script has just moved may still be carrying its
+                    // new matrix only in its persistent `transform` DATUM:
+                    // `model.transform.position = v` mutates that object in place
+                    // and `sync_persistent_transforms` copies it into
+                    // `node_transforms` once per FRAME. Reading the pending values
+                    // here — without flushing, so nothing else observes a mid-frame
+                    // state change and the dirty set still reaches the real sync —
+                    // lets a ray answer from the positions the script actually set.
+                    //
+                    // Fly Like A Bird builds its city inside ONE beginSprite: it
+                    // clones 100 buildings, drops each to z = -1550 through
+                    // `model.transform.position`, and then casts a ray straight down
+                    // from z = 500 to place the bag of chips on the ground. Against
+                    // the unflushed transforms that ray hit the buildings at their
+                    // authored height, so the chips were parked 1555 units up in the
+                    // air with nothing under them.
+                    let pending: Vec<(Symbol, DatumRef)> = {
+                        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                        member.and_then(|m| m.member_type.as_shockwave3d())
+                            .map(|w3d| w3d.runtime_state.node_transform_datums.iter()
+                                .map(|(k, v)| (*k, v.clone())).collect())
+                            .unwrap_or_default()
+                    };
+                    let node_transforms = node_transforms.map(|mut t| {
+                        for (name, datum_ref) in &pending {
+                            if let Datum::Transform3d(m64) = player.get_datum(datum_ref) {
+                                let m32: [f32; 16] = m64.map(|v| v as f32);
+                                if m32.iter().all(|v| v.is_finite()) {
+                                    t.insert(*name, m32);
+                                }
+                            }
+                        }
+                        t
+                    });
+
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
                         use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
