@@ -896,9 +896,6 @@ impl Shockwave3dMemberHandlers {
             BuiltInSymbol::BackgroundColor => {
                 Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(50, 50, 50)))
             }
-            BuiltInSymbol::AmbientColor => {
-                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(25, 25, 25)))
-            }
             BuiltInSymbol::Renderer | BuiltInSymbol::RendererDeviceList => Ok(Datum::Symbol(BuiltInSymbol::OpenGL.into())),
             BuiltInSymbol::ColorBufferDepth => Ok(Datum::Int(32)),
             BuiltInSymbol::DepthBufferDepth => Ok(Datum::Int(24)),
@@ -970,6 +967,30 @@ impl Shockwave3dMemberHandlers {
             // — the VOID branch is the one a member without an authored font
             // metrics table is supposed to take.
             BuiltInSymbol::UserData => Ok(Datum::Void),
+
+            // "3D cast member property; indicates the RGB color of the default
+            // ambient light of the cast member. The default value for this
+            // property is rgb(0, 0, 0). This adds no light to the scene."
+            // (Director 11.5 Scripting Dictionary, `ambientColor`.)
+            //
+            // That default ambient light is the one the parser injects as
+            // "UIAmbient" — black, contributing nothing — so the member property
+            // is just that light's color under another name, and reading it back
+            // has to see whatever `member.ambientColor = ...` last wrote.
+            BuiltInSymbol::AmbientColor => {
+                let (r, g, b) = scene_data
+                    .as_ref()
+                    .and_then(|scene| scene.lights.iter()
+                        .find(|l| l.name.as_str().eq_ignore_ascii_case("UIAmbient")))
+                    .map(|l| (
+                        (l.color[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (l.color[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (l.color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+                    ))
+                    .or(info.ambient_color)
+                    .unwrap_or((0, 0, 0));
+                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)))
+            }
             _ => {
                 Err(ScriptError::new(format!(
                     "Cannot get Shockwave3D property '{}'", prop
@@ -1136,6 +1157,28 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
                         Self::rebuild_native_text_mesh(w3d);
+                    }
+                }
+                Ok(())
+            }
+            // See the `ambientColor` getter above: the member's "default ambient
+            // light" is the injected UIAmbient light, so setting the property
+            // recolors that light. Street Sesh 2's `initGFX` opens with
+            // `gWorld.ambientColor = rgb(128, 128, 128)` and died on it, which
+            // aborted `_game.new()` and left the whole game unbuilt.
+            "ambientColor" | "ambientcolor" => {
+                if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = value {
+                    let rgb = [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0];
+                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                            w3d.info.ambient_color = Some((*r, *g, *b));
+                            if let Some(scene) = w3d.scene_mut() {
+                                if let Some(light) = scene.lights.iter_mut()
+                                    .find(|l| l.name.as_str().eq_ignore_ascii_case("UIAmbient")) {
+                                    light.color = rgb;
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(())
