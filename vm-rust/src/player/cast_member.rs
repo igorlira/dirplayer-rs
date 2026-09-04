@@ -1433,6 +1433,17 @@ pub struct Shockwave3dRuntimeState {
     /// `model_root_com` table (that only holds originally-parsed models), so the
     /// matrix has to travel with the clone or the second hop has nothing to fold.
     pub clone_hop_count: std::collections::HashMap<Symbol, (u32, [f32; 16])>,
+    /// Nodes whose biped-COM fold a script has DESTROYED by replacing the node's
+    /// own transform outright (`model.transform = t`, or a chained
+    /// `model.transform.rotation = v` flushed by `sync_persistent_transforms`).
+    ///
+    /// A clone carries its source's fold in its transform but is deliberately
+    /// absent from `model_root_com`, so the renderer has to decide whether the
+    /// node still holds that fold before stripping it from the skin. Composing
+    /// operations — `translate`, `rotate`, `pointAt`, and `addChild`'s
+    /// re-parent — KEEP the fold and are deliberately not recorded here; only a
+    /// wholesale replacement of the matrix loses it.
+    pub broken_root_com_fold: std::collections::HashSet<Symbol>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<Symbol, crate::player::DatumRef>,

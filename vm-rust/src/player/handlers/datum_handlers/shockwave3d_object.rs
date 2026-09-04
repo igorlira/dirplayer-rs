@@ -1366,6 +1366,7 @@ impl Shockwave3dObjectDatumHandlers {
                             ));
                         }
                         set_node_transform(player, &member_ref, s3d_ref.name, m32);
+                        note_root_com_fold_broken(player, &member_ref, s3d_ref.name);
                     }
                     Ok(())
                 },
@@ -10013,6 +10014,13 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                     w3d.runtime_state.node_transforms.insert(node_name, m32);
+                    // A chained write — `model.transform.rotation = vector(-90, 90, 0)`
+                    // — replaces the node's matrix just as an outright
+                    // `transform =` does, and so destroys any biped-COM fold the
+                    // node was carrying. AreaZero's `[M] FPS Weapon.setup_Elite`
+                    // is exactly that, and it is why the renderer must not strip
+                    // the cloned Elite's fold from its skin.
+                    w3d.runtime_state.broken_root_com_fold.insert(node_name);
                 }
             }
         }
@@ -10776,4 +10784,18 @@ pub fn camera_fog_of(
             })
         })
         .unwrap_or_default()
+}
+
+/// Record that `node_name`'s biped-COM fold has been destroyed by a wholesale
+/// transform assignment — see `Shockwave3dRuntimeState::broken_root_com_fold`.
+fn note_root_com_fold_broken(
+    player: &mut crate::player::DirPlayer,
+    member_ref: &CastMemberRef,
+    node_name: Symbol,
+) {
+    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
+        if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+            w3d.runtime_state.broken_root_com_fold.insert(node_name);
+        }
+    }
 }

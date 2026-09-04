@@ -5845,9 +5845,42 @@ void main() {
         // the two sides from drifting apart.
         let folded_com = scene.model_root_com.get(&model_name.to_ascii_lowercase())
             .or_else(|| scene.model_root_com.get(&resource_name.to_ascii_lowercase()));
-        let root_relinv = match (folded_com, &idle_root_mats) {
-            (Some(r0), _) => affine_inv(r0),
-            (None, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
+        // A CLONE is deliberately absent from `model_root_com` (its fold can be
+        // destroyed by a script assigning `transform`, and recording it there
+        // blanked AreaZero's FPS weapon), but `clone_hop_count` carries the exact
+        // r0 the hop applied. When the idle tier is about to fire for such a
+        // model, strip THAT matrix instead of re-deriving one from a clip: the
+        // whole point of recording r0 is that the fold and the strip must be the
+        // same matrix, and for a clone they demonstrably are not.
+        //
+        // Street Sesh clones its skater out of "player_mike" — a member holding
+        // the rig and no clips, so the parser folded its REST root, r0 =
+        // (0, 4.42, -0.87) — and only afterwards clones `player_idle` & co into
+        // the world member. `idle_reference_motion` then found `cpy_player2_idle`,
+        // whose frame-0 root sits at the pelvis, (17.05, 22.48, 105.72), and
+        // stripping that buried the skater to the waist in the plaza.
+        //
+        // Narrow ON PURPOSE: it only ever REPLACES the matrix of a strip that was
+        // already going to happen. A model with no idle motion still gets no
+        // strip, so this cannot introduce one where there was none.
+        // …and ONLY while the node still holds it. A script that replaces the
+        // node's matrix outright destroys the fold, and stripping it then
+        // displaces the mesh instead of cancelling: AreaZero's
+        // `[M] FPS Weapon.setup_Elite` hardcodes
+        // `transform.rotation = vector(-90, 90, 0)` on its cloned "Elite" rig,
+        // and stripping the carried r0 (whose root sits at the biped COM,
+        // z = 104.5, against the idle clip's z = 2.8) threw the first-person
+        // weapon out of frame entirely.
+        let clone_r0 = runtime_state.and_then(|rs| {
+            if rs.broken_root_com_fold.contains(&model_name) {
+                return None;
+            }
+            rs.clone_hop_count.get(&model_name).map(|(_, r0)| *r0)
+        });
+        let root_relinv = match (folded_com, clone_r0, &idle_root_mats) {
+            (Some(r0), _, _) => affine_inv(r0),
+            (None, Some(r0), Some(m)) if !m.is_empty() => affine_inv(&r0),
+            (None, _, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
             // NO clone tier here. A 2026-08-18 attempt added a LAST tier that
             // relativized any cloneModelFromCastmember model by its posed root
             // (`world_matrices[0]`) to strip the biped COM from AreaZero's clip-less
