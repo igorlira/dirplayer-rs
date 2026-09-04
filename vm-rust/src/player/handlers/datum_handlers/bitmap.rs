@@ -1291,12 +1291,16 @@ impl BitmapDatumHandlers {
 
             // Read the filter PropList. Lookup is case-insensitive on symbol /
             // string keys to match Director's convention.
-            let (filter_type, props, filter_color) = match player.get_datum(&args[0]) {
+            let (filter_type, props, filter_color, highlight_color, shadow_color) =
+                match player.get_datum(&args[0]) {
                 Datum::PropList(items, _) => {
                     let mut filter_type: Option<Symbol> = None;
                     let mut props: FxHashMap<Symbol, f64> = FxHashMap::default();
                     // #color is a colour, not a number — glow/dropShadow need it.
                     let mut filter_color: Option<(u8, u8, u8)> = None;
+                    // ...and #bevelFilter carries a PAIR of them.
+                    let mut highlight_color: Option<(u8, u8, u8)> = None;
+                    let mut shadow_color: Option<(u8, u8, u8)> = None;
                     for (k, v) in items.iter() {
                         let key = match player.get_datum(k) {
                             Datum::Symbol(s) => *s,
@@ -1316,13 +1320,31 @@ impl BitmapDatumHandlers {
                                     32,
                                 ));
                             }
+                        } else if key.as_str().eq_ignore_ascii_case("highlightColor")
+                            || key.as_str().eq_ignore_ascii_case("shadowColor")
+                        {
+                            if let Datum::ColorRef(cr) = player.get_datum(v) {
+                                let palettes = player.movie.cast_manager.palettes();
+                                let rgb = crate::player::bitmap::bitmap::resolve_color_ref(
+                                    &palettes, cr,
+                                    &crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
+                                        crate::player::bitmap::bitmap::get_system_default_palette(),
+                                    ),
+                                    32,
+                                );
+                                if key.as_str().eq_ignore_ascii_case("highlightColor") {
+                                    highlight_color = Some(rgb);
+                                } else {
+                                    shadow_color = Some(rgb);
+                                }
+                            }
                         } else {
                             // Numeric properties for AdjustColor.
                             let val = player.get_datum(v).float_value().unwrap_or(0.0);
                             props.insert(key, val);
                         }
                     }
-                    (filter_type, props, filter_color)
+                    (filter_type, props, filter_color, highlight_color, shadow_color)
                 }
                 _ => {
                     return Err(ScriptError::new(
@@ -1387,6 +1409,53 @@ impl BitmapDatumHandlers {
                     apply_glow_shadow_filter(
                         bitmap, color, blur_x, blur_y, quality, strength,
                         off_x.round() as i32, off_y.round() as i32, inner,
+                    );
+                    bitmap.mark_dirty();
+                }
+                // Bevel. Property set per "Bitmap filters" in Using Director 11.5:
+                // `#distance`, `#angle`, `#highlightColor`/`#highlightAlpha`,
+                // `#shadowColor`/`#shadowAlpha`, `#strength`, `#quality`,
+                // `#knockout`, `#inner`, plus `#blurX`/`#blurY` (documented
+                // defaults: blur 6, quality 1, alpha opaque).
+                Some(BuiltInSymbol::BevelFilter) => {
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(*bitmap_ref).ok_or_else(
+                        || ScriptError::new("applyFilter: invalid bitmap".to_string()),
+                    )?;
+                    let blur_x = props.get(&Symbol::from_str("blurx")).copied().unwrap_or(6.0).max(0.0);
+                    let blur_y = props.get(&Symbol::from_str("blury")).copied().unwrap_or(6.0).max(0.0);
+                    let strength = props
+                        .get(&Symbol::from_str("strengthpercent"))
+                        .copied()
+                        .or_else(|| props.get(&Symbol::from_str("strength")).map(|v| v * 100.0))
+                        .unwrap_or(100.0)
+                        / 100.0;
+                    let quality = props.get(&Symbol::from_str("quality")).copied().unwrap_or(1.0).clamp(1.0, 15.0) as u32;
+                    let distance = props.get(&Symbol::from_str("distance")).copied().unwrap_or(4.0);
+                    let angle = props.get(&Symbol::from_str("angle")).copied().unwrap_or(45.0);
+                    // `#highlightAlpha` / `#shadowAlpha` are 0..1 in the documented
+                    // example (`#shadowAlpha: 0.5`), while the shared property table
+                    // quotes alpha as 0-255; accept either by treating >1 as 0-255.
+                    let norm_alpha = |v: f64| if v > 1.0 { v / 255.0 } else { v };
+                    let highlight_alpha = norm_alpha(
+                        props.get(&Symbol::from_str("highlightalpha")).copied().unwrap_or(1.0),
+                    ).clamp(0.0, 1.0);
+                    let shadow_alpha = norm_alpha(
+                        props.get(&Symbol::from_str("shadowalpha")).copied().unwrap_or(1.0),
+                    ).clamp(0.0, 1.0);
+                    let inner = props.get(&Symbol::from_str("inner")).copied().unwrap_or(0.0) != 0.0;
+                    apply_bevel_filter(
+                        bitmap,
+                        highlight_color.unwrap_or((255, 255, 255)),
+                        shadow_color.unwrap_or((0, 0, 0)),
+                        highlight_alpha,
+                        shadow_alpha,
+                        blur_x,
+                        blur_y,
+                        quality,
+                        strength,
+                        distance,
+                        angle,
+                        inner,
                     );
                     bitmap.mark_dirty();
                 }
@@ -1675,6 +1744,169 @@ fn apply_glow_shadow_filter(
                 bitmap.data[di + c] = out_c.round().clamp(0.0, 255.0) as u8;
             }
             bitmap.data[di + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    bitmap.use_alpha = true;
+}
+
+/// Director `filter(#bevelFilter, [...])` — a raised/inset edge built from the
+/// source's own ALPHA, the same way Flash's BevelFilter works.
+///
+/// Property set and defaults from the 11.5 dictionary: `filter()` lists
+/// `#bevelfilter` among the bitmap filters, and "Bitmap filters" in Using
+/// Director 11.5 gives the constructor as
+///   `filter(#BevelFilter, [#distance, #angle, #highlightColor, #highlightAlpha,
+///                          #shadowColor, #shadowAlpha, #strength, #quality,
+///                          #knockout, #inner])`
+/// alongside `#blurX` / `#blurY`, with blur 6, quality 1 and alpha fully opaque
+/// as the documented defaults.
+///
+/// Burnin' Rubber 3 is what this was written for. `[M] Text`'s
+/// `CreateTextTexture` finishes every button and field texture with
+/// `#filters: [BR3Bevel, BR3Glow*]`, where `BR3Bevel` is
+/// `[#blurX: 1, #blurY: 1, #quality: 2, #angle: 115, #distance: -1,
+///   #strengthPercent: 30, #inner: 1]`. Unimplemented, `applyFilter` left the
+/// bitmap untouched and the name-entry field lost the thin light rim that makes
+/// it read as an input box — the "shadow of an input" it looks like without it.
+fn apply_bevel_filter(
+    bitmap: &mut Bitmap,
+    highlight: (u8, u8, u8),
+    shadow: (u8, u8, u8),
+    highlight_alpha: f64,
+    shadow_alpha: f64,
+    blur_x: f64,
+    blur_y: f64,
+    quality: u32,
+    strength: f64,
+    distance: f64,
+    angle_deg: f64,
+    inner: bool,
+) {
+    if bitmap.bit_depth != 32 {
+        log::warn!(
+            "applyFilter(#bevel): bitmap is {}-bit; needs alpha, skipped",
+            bitmap.bit_depth
+        );
+        return;
+    }
+    let w = bitmap.width as usize;
+    let h = bitmap.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let mut a: Vec<f32> = (0..w * h)
+        .map(|i| bitmap.data[i * 4 + 3] as f32 / 255.0)
+        .collect();
+
+    // Same separable box blur (and same radius rule) the glow uses: blurX is the
+    // kernel WIDTH, so the radius is floor(blur/2) and blur 1 is a hard edge.
+    // That is what makes BR3's `blurX: 1` bevel a crisp one-pixel rim rather than
+    // a soft ramp.
+    let rx = (blur_x / 2.0).floor().max(0.0) as usize;
+    let ry = (blur_y / 2.0).floor().max(0.0) as usize;
+    let mut tmp = vec![0.0f32; w * h];
+    for _ in 0..quality.max(1) {
+        if rx > 0 {
+            for y in 0..h {
+                for x in 0..w {
+                    let lo = x.saturating_sub(rx);
+                    let hi = (x + rx).min(w - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi { sum += a[y * w + s]; }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+        if ry > 0 {
+            for x in 0..w {
+                for y in 0..h {
+                    let lo = y.saturating_sub(ry);
+                    let hi = (y + ry).min(h - 1);
+                    let mut sum = 0.0;
+                    for s in lo..=hi { sum += a[s * w + x]; }
+                    tmp[y * w + x] = sum / ((hi - lo + 1) as f32);
+                }
+            }
+            a.copy_from_slice(&tmp);
+        }
+    }
+
+    // Angle is measured clockwise from +x with y pointing DOWN, matching the
+    // drop-shadow arm above. Sampled BILINEARLY rather than rounded to whole
+    // pixels: BR3's distance 1 at 115 degrees is (0.42, -0.91), and rounding
+    // would throw the horizontal component away entirely, leaving a rim on only
+    // two sides of the box.
+    let rad = angle_deg.to_radians();
+    let (dx, dy) = (distance * rad.cos(), distance * rad.sin());
+    let sample = |src: &[f32], fx: f64, fy: f64| -> f32 {
+        let x0 = fx.floor();
+        let y0 = fy.floor();
+        let tx = (fx - x0) as f32;
+        let ty = (fy - y0) as f32;
+        let at = |xi: f64, yi: f64| -> f32 {
+            if xi < 0.0 || yi < 0.0 || xi >= w as f64 || yi >= h as f64 {
+                0.0
+            } else {
+                src[yi as usize * w + xi as usize]
+            }
+        };
+        let v00 = at(x0, y0);
+        let v10 = at(x0 + 1.0, y0);
+        let v01 = at(x0, y0 + 1.0);
+        let v11 = at(x0 + 1.0, y0 + 1.0);
+        v00 * (1.0 - tx) * (1.0 - ty) + v10 * tx * (1.0 - ty)
+            + v01 * (1.0 - tx) * ty + v11 * tx * ty
+    };
+
+    let src = bitmap.data.clone();
+    let (hr, hg, hb) = (highlight.0 as f32, highlight.1 as f32, highlight.2 as f32);
+    let (dr, dg, db) = (shadow.0 as f32, shadow.1 as f32, shadow.2 as f32);
+
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let di = i * 4;
+            // The lit side is sampled UP-light, the shaded side down-light; their
+            // difference is the edge, which is what gives a flat fill a raised rim.
+            let lit = sample(&a, x as f64 - dx, y as f64 - dy);
+            let dim = sample(&a, x as f64 + dx, y as f64 + dy);
+            let mut hl = ((lit - dim).max(0.0) as f64 * strength * highlight_alpha).clamp(0.0, 1.0);
+            let mut sh = ((dim - lit).max(0.0) as f64 * strength * shadow_alpha).clamp(0.0, 1.0);
+            let fa = src[di + 3] as f64 / 255.0;
+            // An INNER bevel lives inside the silhouette, an outer one outside it.
+            if inner {
+                hl *= fa;
+                sh *= fa;
+            } else {
+                hl *= 1.0 - fa;
+                sh *= 1.0 - fa;
+            }
+            if hl <= 0.0 && sh <= 0.0 {
+                continue;
+            }
+            let (cr, cg, cb, ca) = if hl >= sh { (hr, hg, hb, hl) } else { (dr, dg, db, sh) };
+            if inner {
+                // Source-atop: tint the existing pixel, leave its alpha alone.
+                for (c, sc) in [(0usize, cr), (1, cg), (2, cb)] {
+                    let fc = src[di + c] as f64;
+                    bitmap.data[di + c] =
+                        (fc * (1.0 - ca) + sc as f64 * ca).round().clamp(0.0, 255.0) as u8;
+                }
+            } else {
+                // Dest-over: the bevel sits behind the source.
+                let out_a = fa + ca * (1.0 - fa);
+                if out_a <= 0.0 {
+                    continue;
+                }
+                for (c, sc) in [(0usize, cr), (1, cg), (2, cb)] {
+                    let fc = src[di + c] as f64;
+                    bitmap.data[di + c] =
+                        (((fc * fa + sc as f64 * ca * (1.0 - fa)) / out_a)).round().clamp(0.0, 255.0) as u8;
+                }
+                bitmap.data[di + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
         }
     }
     bitmap.use_alpha = true;

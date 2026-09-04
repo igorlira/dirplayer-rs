@@ -821,6 +821,7 @@ define_builtin_symbols! {
     "adjustColorFilter" => AdjustColorFilter,
     "glowFilter" => GlowFilter,
     "dropShadowFilter" => DropShadowFilter,
+    "bevelFilter" => BevelFilter,
     "brightness" => Brightness,
     "contrast" => Contrast,
     "hue" => Hue,
