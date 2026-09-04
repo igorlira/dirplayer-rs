@@ -602,11 +602,12 @@ pub async fn player_set_obj_prop(
             // came from, which is what Director's lvalue chain does. See
             // `DirPlayer::vector_prop_lvalue`.
             let writeback = reserve_player_mut(|player| {
-                Ok(match player.vector_prop_lvalue.take() {
-                    Some((vec_ref, receiver, prop)) if vec_ref == *obj_ref => {
+                Ok(match player.vector_prop_lvalue.iter().rposition(|(v, _, _)| v == obj_ref) {
+                    Some(i) => {
+                        let (_, receiver, prop) = player.vector_prop_lvalue.remove(i);
                         Some((receiver, prop))
                     }
-                    _ => None,
+                    None => None,
                 })
             })?;
             if let Some((receiver, prop)) = writeback {

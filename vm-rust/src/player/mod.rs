@@ -715,7 +715,15 @@ pub struct DirPlayer {
     /// and cleared by any bytecode that STORES the value into a variable — so
     /// it stays confined to the compiler's lvalue-chain shape and
     /// `v = model.worldPosition` followed by `v.z = 5` still mutates only `v`.
-    pub vector_prop_lvalue: Option<(DatumRef, DatumRef, Symbol)>,
+    /// Several may be live at once: the RHS of the assignment is evaluated
+    /// BETWEEN the receiver read and the component write, and it is free to
+    /// read another 3D vector of its own — `my.worldPosition.x = pStartPos.x`
+    /// compiles to `getchainedprop worldPosition / getprop pStartPos /
+    /// getobjprop x / setobjprop x`. A single slot was overwritten by whatever
+    /// the RHS read last, so Street Sesh 2's `_level.new` never moved the
+    /// skater onto the start line. Bounded so a handler that reads many such
+    /// vectors without ever storing one cannot grow it without limit.
+    pub vector_prop_lvalue: Vec<(DatumRef, DatumRef, Symbol)>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     /// Runtime overrides for `the scriptText of member`. Director exposes a
     /// member's Lingo source as a settable string on ANY member type; some
@@ -985,7 +993,7 @@ impl DirPlayer {
             active_stage_message_channels_cache: None,
             active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
-            vector_prop_lvalue: None,
+            vector_prop_lvalue: Vec::new(),
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
             movie_path_label: None,

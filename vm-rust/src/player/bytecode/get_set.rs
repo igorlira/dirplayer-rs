@@ -136,7 +136,7 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
             // `node.<vectorProp>.<component> =` lvalue chain.
-            player.vector_prop_lvalue = None;
+            player.vector_prop_lvalue.clear();
             let (value_ref, receiver, script_ref, cached) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
@@ -509,7 +509,7 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
             // `node.<vectorProp>.<component> =` lvalue chain.
-            player.vector_prop_lvalue = None;
+            player.vector_prop_lvalue.clear();
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
@@ -579,7 +579,7 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
             // `node.<vectorProp>.<component> =` lvalue chain.
-            player.vector_prop_lvalue = None;
+            player.vector_prop_lvalue.clear();
             let slot = (player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier) as usize;
 
@@ -628,7 +628,7 @@ impl GetSetBytecodeHandler {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
             // `node.<vectorProp>.<component> =` lvalue chain.
-            player.vector_prop_lvalue = None;
+            player.vector_prop_lvalue.clear();
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier;
             let (arg_count, arg_index, value_ref) = {
@@ -1293,9 +1293,10 @@ impl GetSetBytecodeHandler {
 
 /// Remember a `node.<vectorProp>` read so a following `setobjprop <component>`
 /// can write the whole vector back onto the node — see
-/// `DirPlayer::vector_prop_lvalue`. A read that is not a vector off a 3D node
-/// CLEARS any pending record, so only the compiler's immediate lvalue chain
-/// (`getchainedprop worldPosition` … `setobjprop z`) can consume one.
+/// `DirPlayer::vector_prop_lvalue`. Records are matched back by datum identity
+/// and dropped wholesale by any bytecode that STORES a value into a variable,
+/// so only the compiler's own lvalue chain (`getchainedprop worldPosition` …
+/// `setobjprop z`) can consume one.
 fn note_vector_prop_lvalue(
     player: &mut DirPlayer,
     obj_ref: &DatumRef,
@@ -1304,9 +1305,17 @@ fn note_vector_prop_lvalue(
 ) {
     let is_lvalue = matches!(player.get_datum(obj_ref), Datum::Shockwave3dObjectRef(_))
         && matches!(player.get_datum(result_ref), Datum::Vector(_));
-    player.vector_prop_lvalue = if is_lvalue {
-        Some((result_ref.clone(), obj_ref.clone(), prop_name))
-    } else {
-        None
-    };
+    if !is_lvalue {
+        // A read that is not a 3D-node vector does NOT end a pending chain: the
+        // RHS of `my.worldPosition.x = pStartPos.x` is evaluated after the
+        // receiver has already been read, and it is exactly such a read.
+        return;
+    }
+    // Bound: the compiler's chain never nests more than a handful deep, and a
+    // variable store clears the whole list.
+    const MAX_PENDING: usize = 8;
+    if player.vector_prop_lvalue.len() >= MAX_PENDING {
+        player.vector_prop_lvalue.remove(0);
+    }
+    player.vector_prop_lvalue.push((result_ref.clone(), obj_ref.clone(), prop_name));
 }
