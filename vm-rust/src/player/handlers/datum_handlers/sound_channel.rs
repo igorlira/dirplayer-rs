@@ -34,6 +34,29 @@ use js_sys::Uint8Array;
 use log::{debug, error, warn};
 use wasm_bindgen_futures::spawn_local;
 
+/// `the soundLevel` (Director 11.5 Scripting Dictionary, Sound property): the
+/// volume of everything played through the speaker, 0 (silent) to 7 (maximum,
+/// the default). It is a MASTER level — the Sound Channel `volume` property
+/// (0..255) is documented as "scaled to that total volume" — so it multiplies
+/// every channel's gain rather than replacing it.
+///
+/// Kept as a process-global rather than on `DirPlayer` because the gain nodes
+/// are set from deep inside async decode/playback callbacks that have no player
+/// borrow available.
+thread_local! {
+    static SOUND_LEVEL: std::cell::Cell<i32> = const { std::cell::Cell::new(7) };
+}
+
+pub fn sound_level() -> i32 {
+    SOUND_LEVEL.with(|l| l.get())
+}
+
+/// Web Audio gain for a channel `volume` (0..255) under the current master
+/// `soundLevel`. Level 0 is documented as "no sound", so it mutes outright.
+pub fn master_gain(volume: f64) -> f32 {
+    ((volume / 255.0) * (sound_level() as f64 / 7.0)) as f32
+}
+
 // Standard IMA ADPCM tables
 const STEP_TABLE: [i32; 89] = [
     7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
@@ -1084,6 +1107,19 @@ impl SoundManager {
     pub fn audio_context(&self) -> Option<Arc<AudioContext>> {
         self.audio_context.clone()
     }
+
+    /// Apply a new master `soundLevel`. Setting it must take effect on sounds
+    /// that are ALREADY playing (the documented use is a mute toggle), so the
+    /// live gain nodes are re-scaled here rather than only at play time.
+    pub fn set_sound_level(&self, level: i32) {
+        SOUND_LEVEL.with(|l| l.set(level.clamp(0, 7)));
+        for channel in &self.channels {
+            let ch = channel.borrow();
+            if let Some(ref gain) = ch.gain_node {
+                gain.gain().set_value(master_gain(ch.volume));
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2059,7 +2095,7 @@ impl SoundChannel {
                         return;
                     }
                 };
-                gain.gain().set_value((volume / 255.0) as f32);
+                gain.gain().set_value(master_gain(volume));
 
                 // Create pan node
                 let pan = match ch.audio_context().create_stereo_panner() {
@@ -2395,7 +2431,7 @@ impl SoundChannel {
             let ch = self_rc.borrow();
             ch.volume
         };
-        gain.gain().set_value((volume / 255.0) as f32);
+        gain.gain().set_value(master_gain(volume));
         debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
 
         // Create pan node if available
@@ -2745,7 +2781,7 @@ impl SoundChannel {
             };
 
             let volume = this.volume;
-            gain.gain().set_value((volume / 255.0) as f32);
+            gain.gain().set_value(master_gain(volume));
 
             // Create pan node
             let pan = match audio_context.create_stereo_panner() {
@@ -3528,7 +3564,7 @@ impl SoundChannel {
         };
 
         let volume = self.volume;
-        gain.gain().set_value((volume / 255.0) as f32);
+        gain.gain().set_value(master_gain(volume));
         debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
 
         let pan = match self.audio_context().create_stereo_panner() {
@@ -4088,7 +4124,7 @@ impl SoundChannel {
             .audio_context.as_ref().unwrap()
             .create_gain()
             .map_err(|e| ScriptError::new(format!("Failed to create gain: {:?}", e)))?;
-        gain.gain().set_value((self.volume / 255.0) as f32);
+        gain.gain().set_value(master_gain(self.volume));
 
         let pan = self.audio_context().create_stereo_panner().ok();
 
@@ -4268,7 +4304,7 @@ impl SoundChannel {
         };
 
         let volume = self.volume;
-        gain.gain().set_value((volume / 255.0) as f32);
+        gain.gain().set_value(master_gain(volume));
         debug!("🔊 Setting gain to {} (volume: {})", volume / 255.0, volume);
 
         // Connect the chain: Source -> Pan -> Gain -> Destination
@@ -4354,7 +4390,7 @@ impl SoundChannel {
     pub fn set_volume(&mut self, volume: f64) -> Result<(), JsValue> {
         self.volume = volume.clamp(0.0, 255.0);
         if let Some(ref gain) = self.gain_node {
-            gain.gain().set_value((self.volume / 255.0) as f32);
+            gain.gain().set_value(master_gain(self.volume));
         }
         Ok(())
     }
@@ -4609,7 +4645,7 @@ impl SoundChannel {
             Ok(g) => g,
             Err(_) => return false,
         };
-        gain.gain().set_value((self.volume / 255.0) as f32);
+        gain.gain().set_value(master_gain(self.volume));
 
         // Connect: source -> gain -> destination
         let _ = source.connect_with_audio_node(&gain);

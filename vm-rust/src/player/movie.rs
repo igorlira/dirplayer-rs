@@ -93,6 +93,11 @@ pub struct Movie {
     /// inherits the intro span's stale `pType`.
     pub frame_script_span_start: Option<u32>,
     pub sound_device: String,
+    /// `the soundLevel` — master speaker volume, 0..7, default 7.
+    pub sound_level: i32,
+    /// `the soundEnabled` — TRUE by default. Gates the output WITHOUT changing
+    /// `sound_level`, per the Scripting Dictionary.
+    pub sound_enabled: bool,
 }
 
 impl Movie {
@@ -143,6 +148,8 @@ impl Movie {
             frame_script_member: None,
             frame_script_span_start: None,
             sound_device: String::new(),
+            sound_level: 7,
+            sound_enabled: true,
         }
     }
 
@@ -416,6 +423,8 @@ impl Movie {
                     ))
                 })
             },
+            BuiltInSymbol::SoundLevel => Ok(Datum::Int(self.sound_level)),
+            BuiltInSymbol::SoundEnabled => Ok(datum_bool(self.sound_enabled)),
             BuiltInSymbol::SoundDevice => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
             BuiltInSymbol::SoundDeviceList => {
                 reserve_player_mut(|player| {
@@ -634,7 +643,6 @@ impl Movie {
                 Ok(())
             },
             BuiltInSymbol::TimeoutPlay
-            | BuiltInSymbol::SoundEnabled | BuiltInSymbol::SoundLevel
             | BuiltInSymbol::BeepOn | BuiltInSymbol::CenterStage | BuiltInSymbol::ExitLock | BuiltInSymbol::FixStageSize
             // soundMixMedia (Director 11.5 Scripting Dictionary: Sound property,
             // read/write) toggles whether Flash cast members mix their audio into the

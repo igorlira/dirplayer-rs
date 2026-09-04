@@ -3908,6 +3908,29 @@ impl DirPlayer {
                     _ => Err(ScriptError::new("actorList must be a list".to_string())),
                 }
             },
+            // `the soundLevel` / `_sound.soundLevel` (Director 11.5 Scripting
+            // Dictionary, Sound property): the speaker's master volume, 0 (no
+            // sound) to 7 (maximum, the default). Channel `volume` is scaled to
+            // it, so it is applied as a master gain across every channel — and
+            // it has to reach sounds that are already playing, since the
+            // documented use is a mute toggle.
+            Some(BuiltInSymbol::SoundLevel) => {
+                let level = value.int_value()?.clamp(0, 7);
+                self.movie.sound_level = level;
+                self.sound_manager
+                    .set_sound_level(if self.movie.sound_enabled { level } else { 0 });
+                Ok(())
+            },
+            // `the soundEnabled` (same entry): sound on (TRUE, default) or off
+            // (FALSE). Documented to leave the volume setting UNCHANGED, so it
+            // is tracked separately from soundLevel and only gates the gain.
+            Some(BuiltInSymbol::SoundEnabled) => {
+                let enabled = value.int_value()? != 0;
+                self.movie.sound_enabled = enabled;
+                self.sound_manager
+                    .set_sound_level(if enabled { self.movie.sound_level } else { 0 });
+                Ok(())
+            },
             _ => self.movie.set_prop(prop, value, &self.allocator)
         }
     }
