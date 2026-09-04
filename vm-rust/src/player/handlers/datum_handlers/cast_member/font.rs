@@ -1571,16 +1571,23 @@ impl FontMemberHandlers {
         // kept inline (their glyph_byte is 9, zero ink).
         let normalised: String = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut lines: Vec<Vec<(char, usize)>> = Vec::new();
+        // Which of those lines BEGIN a paragraph — i.e. line one, and any line that
+        // follows a hard return. A line produced by word wrap is a continuation and
+        // begins no paragraph, which is the distinction `topSpacing` turns on below.
+        let mut para_start: Vec<bool> = Vec::new();
         {
             let chars: Vec<char> = normalised.chars().collect();
             let wrap_w = if word_wrap && max_width > 0 { max_width as f64 } else { f64::MAX };
             let mut cur: Vec<(char, usize)> = Vec::new();
+            let mut next_is_para = true;
             let mut cur_w: f64 = 0.0;
             let mut last_space: Option<usize> = None; // index within `cur`
             let mut width_to: f64 = 0.0; // width up to last_space (exclusive of space)
             for (i, &c) in chars.iter().enumerate() {
                 if c == '\n' {
                     lines.push(std::mem::take(&mut cur));
+                    para_start.push(next_is_para);
+                    next_is_para = true;
                     cur_w = 0.0; last_space = None; width_to = 0.0;
                     continue;
                 }
@@ -1592,6 +1599,8 @@ impl FontMemberHandlers {
                         let tail: Vec<(char, usize)> = cur.split_off(sp + 1);
                         cur.pop(); // drop the break space itself
                         lines.push(std::mem::take(&mut cur));
+                        para_start.push(next_is_para);
+                        next_is_para = false;
                         cur = tail;
                         cur_w = cur.iter()
                             .map(|&(ch, ix)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch), style_at(ix).bold) })
@@ -1600,6 +1609,8 @@ impl FontMemberHandlers {
                         last_space = None;
                     } else {
                         lines.push(std::mem::take(&mut cur));
+                        para_start.push(next_is_para);
+                        next_is_para = false;
                         cur_w = 0.0; last_space = None;
                     }
                 }
@@ -1608,6 +1619,7 @@ impl FontMemberHandlers {
                 cur_w += adv;
             }
             lines.push(cur);
+            para_start.push(next_is_para);
         }
 
         // --- 5× supersampled software raster buffer (straight RGBA). ---
@@ -1666,18 +1678,44 @@ impl FontMemberHandlers {
             + ((-(phys.metrics.layout_descender()) as f64).max(0.0) * scale).round()
             + 1.0)
             .max(1.0);
-        // Paige (which IS Director's text engine — XMED is serialized Paige) treats
-        // `fixedLineSpace` as `par_info.leading_fixed`, and PGTEXT.C computes:
-        //     new_line_height = ascent + descent + leading;
-        //     if (leading_fixed > new_line_height) new_line_height = leading_fixed;
-        // i.e. fixedLineSpace is a MINIMUM line height. It never squeezes a line
-        // below what the font needs.
+        // The ADVANCE between lines is `fixedLineSpace` verbatim. 11.5 dictionary,
+        // `fixedLineSpace`: "The value itself is an integer, indicating height in
+        // absolute pixels of each line. The default value is 0, which results in
+        // natural height of lines." It really does squeeze below what the font
+        // needs — measured on Burnin' Rubber 3's challenge panel, where
+        // `[M] Burnin Rubber 3 TrackSelection` bakes the track blurb with
+        // `#fontSize: 11, #lineSpacing: 10` onto a 512x64 quad that an orthographic
+        // camera at orthoHeight 480 draws 1:1 on a 480-tall stage. The capture's
+        // lines start every 10 px — exactly the fixedLineSpace — while Arial 11's
+        // natural line is 14, which is what the old `max()` produced. Three lines at
+        // 14 overran the panel and printed the blurb over the unlock bullets.
+        //
+        // The floor belongs on the BOX, not on the advance, and that is where it
+        // still is: `text.rs` sizes `.rect`/`.height`/`.image` as
+        // `top_spacing + natural + (lines - 1) * step`, so the LAST line's ink still
+        // fits. That is what Rifleman's briefing needed (Courier New Bold 32,
+        // fixedLineSpace 34, natural 36: box 138, advance 34) — flooring the advance
+        // as well was over-correction, and it drew that briefing a pixel per line
+        // looser than Director does. See [[fixedlinespace-is-a-minimum-not-a-baseline]].
         let effective_line_h = if fixed_line_space > 0 {
-            (fixed_line_space as f64).max(line_natural)
+            fixed_line_space as f64
         } else {
             line_natural
         };
-        let line_step = effective_line_h + bottom_spacing as f64 + top_spacing as f64;
+        // `topSpacing` separates PARAGRAPHS, so it is charged only to a line that
+        // begins one — never between the wrapped lines of a single paragraph. (It is
+        // also not charged to line one; `y_top` starts at 0, see the note below.)
+        // Burnin' Rubber 3's track blurb is one wrapped paragraph with topSpacing 2,
+        // so paying it per line put the lines 12 px apart where the capture has 10.
+        let line_advance = |next_line: usize| -> f64 {
+            effective_line_h
+                + bottom_spacing as f64
+                + if para_start.get(next_line).copied().unwrap_or(false) {
+                    top_spacing as f64
+                } else {
+                    0.0
+                }
+        };
 
         let seg_width = |seg: &[(char, usize)]| -> f64 {
             seg.iter().map(|&(c, ix)| advance_of(glyph_byte_for(c), style_at(ix).bold)).sum()
@@ -1703,7 +1741,7 @@ impl FontMemberHandlers {
         // idiom; applied to line one that pushed a fontSize-20 line 10px down a
         // 20px-tall box and clipped its bottom rows off the quad.
         let mut y_top = 0.0f64;
-        for line in &lines {
+        for (line_index, line) in lines.iter().enumerate() {
             if y_top >= render_height as f64 { break; }
             let baseline_y = y_top + baseline;
 
@@ -1820,7 +1858,7 @@ impl FontMemberHandlers {
                 }
             }
 
-            y_top += line_step;
+            y_top += line_advance(line_index + 1);
         }
 
         // --- Alpha-weighted 4×→1× box downscale into the destination bitmap. ---
