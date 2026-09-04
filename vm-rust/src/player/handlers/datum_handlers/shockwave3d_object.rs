@@ -3972,8 +3972,21 @@ impl Shockwave3dObjectDatumHandlers {
                                 // (the now-current motion), so it does not re-queue.
                                 {
                                     let bp = w3d.runtime_state.bones_player_mut(model_name);
+                                    // Director 11.5 Scripting Dictionary, `play() (3D)`:
+                                    // the command "initiates or unpauses the execution of a
+                                    // motion", and "the model's bonesPlayer.playing property
+                                    // will be set to TRUE". `playing` is a state of the
+                                    // PLAYER, so it is set even when nothing is loaded yet —
+                                    // a movie is allowed to call `play()` at setup and only
+                                    // afterwards queue the clips it wants. Street Sesh's
+                                    // `_animation_control.new` does exactly that
+                                    // (`bonesPlayer.play()`, then nothing but queue() and
+                                    // removeLast() for the rest of the game), so leaving
+                                    // `playing` FALSE here froze the skater in his bind pose
+                                    // for the entire run — idle, skating and crash alike.
+                                    bp.animation_playing = true;
                                     if bp.current_motion.is_some() {
-                                        bp.animation_playing = true;
+                                        // already current — the flag above is the whole job
                                     } else if !bp.motion_queue.is_empty() {
                                         let q = bp.motion_queue.remove(0);
                                         bp.current_motion = Some(Symbol::from_str(&q.name.to_string()));
@@ -4160,8 +4173,23 @@ impl Shockwave3dObjectDatumHandlers {
                             {
                                 let bp = w3d.runtime_state.bones_player_mut(model_name);
                                 if bp.motion_queue.pop().is_none() {
+                                    // Emptying the playlist does NOT stop the engine.
+                                    // Director 11.5 Scripting Dictionary: `removeLast()`
+                                    // "removes the last motion from the modifier's
+                                    // playlist", while `playing` reports whether "the
+                                    // modifier's animation playback engine is running
+                                    // (TRUE) or if it's paused (FALSE)" — only `pause()`
+                                    // clears it.
+                                    //
+                                    // Clearing it here froze Street Sesh's skater: its
+                                    // `_animation_control.qAnim` flushes the playlist with
+                                    // `repeat while playList.count > 0: removeLast()` before
+                                    // queueing the next clip, and the movie calls `play()`
+                                    // exactly once at setup — so the first flush paused the
+                                    // engine for good and every later queue() piled up
+                                    // behind a stopped player.
                                     bp.current_motion = None;
-                                    bp.animation_playing = false;
+                                    bp.motion_ended = false;
                                 }
                             }
                             w3d.runtime_state.sync_legacy_from_bones_player(model_name);

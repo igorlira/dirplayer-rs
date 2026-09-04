@@ -774,6 +774,30 @@ pub async fn tick_w3d_animations() {
                     };
                     for bp in w3d.runtime_state.bones_players.values_mut() {
                         if !bp.animation_playing || bp.motion_ended { continue; }
+                        // A playing player with nothing loaded takes the head of its
+                        // playlist. Director (`queue() (3D)`): a queued motion "is
+                        // executed by the model when all the motions ahead of it in the
+                        // playlist are finished playing" — with an empty playlist there
+                        // is nothing ahead of it, so it starts at once.
+                        //
+                        // Deliberately here and NOT in the `queue` handler: the
+                        // `queue(x); playNext()` idiom (Rasterwerks' C_BonesControl)
+                        // runs both calls inside one handler, so the tick never sees the
+                        // intermediate state and playNext() still gets the motion it was
+                        // meant to start. Promoting inside `queue()` discards it.
+                        if bp.current_motion.is_none() {
+                            if bp.motion_queue.is_empty() { continue; }
+                            let q = bp.motion_queue.remove(0);
+                            bp.current_motion = Some(Symbol::from_str(&q.name.to_string()));
+                            bp.animation_loop = q.looped;
+                            bp.animation_start_time = q.start_time;
+                            bp.animation_end_time = q.end_time;
+                            bp.animation_scale = q.scale;
+                            bp.animation_time = if q.offset >= 0.0 { q.offset } else { q.start_time };
+                            bp.motion_ended = false;
+                            bp.previous_motion = None;
+                            bp.blend_weight = 1.0;
+                        }
                         bp.animation_time += dt_seconds * bp.play_rate * bp.animation_scale;
                         if bp.blend_weight < 1.0 && bp.blend_duration > 0.0 {
                             bp.blend_elapsed += dt_seconds;
