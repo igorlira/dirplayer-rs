@@ -6330,9 +6330,24 @@ const SOFT_ALPHA_FRACTION: f32 = 0.20;
 /// `SOFT_ALPHA_FRACTION` is measured over EVERY texel, so a small effect on a
 /// large transparent field can never reach it however faint the effect is.
 /// Judge those by the texels that are visible at all: an alpha-keyed cutout
-/// keeps a solid alpha-255 interior and spends only its outline on partial
-/// alpha, while a translucent effect is almost nothing but partial alpha.
-const TRANSLUCENT_OF_VISIBLE_FRACTION: f32 = 0.80;
+/// keeps a solid alpha-255 interior and spends only its OUTLINE on partial
+/// alpha — a perimeter-to-area ratio that stays well under a third even for fine
+/// detail — while anything with a real ramp in it runs far above that.
+///
+/// The bar sits at a third rather than the 0.80 it started at because a mixed
+/// ATLAS lands between the two populations: alpha-keyed sprites and genuinely
+/// translucent art on one sheet, so the ramps are a minority of the visible
+/// texels and a much smaller minority of the sheet. Burnin' Rubber 3's HUD atlas
+/// `Interface_Texture` is measured at 1024x512 = 333230 clear, 76405 partial,
+/// 114653 opaque: 14.6% of the sheet and 40.0% of its visible texels, which
+/// missed both this test at 0.80 and `SOFT_ALPHA_FRACTION` at 0.20. Alpha-testing
+/// it binarised the scoreboard plates — black art with an alpha ramp — into hard
+/// black bars where the capture blends a gradient over the sky behind them.
+///
+/// Lowering this is strictly additive in the same way the test itself is: it can
+/// only move a texture from the alpha-tested pass to the blended one, which is
+/// the direction Director is always in.
+const TRANSLUCENT_OF_VISIBLE_FRACTION: f32 = 0.33;
 
 /// Floor on the partial-alpha texel COUNT for the test above, so a handful of
 /// stray anti-aliased texels in an otherwise binary mask cannot carry it.
@@ -7017,6 +7032,44 @@ mod alpha_classification_tests {
         let (has_alpha, soft) = classify_texture_alpha(&tex(|_, _| 255));
         assert!(!has_alpha);
         assert!(!soft);
+    }
+
+    /// A HUD atlas: alpha-keyed sprites sharing the sheet with genuinely
+    /// translucent art. Neither of the first two tests can see it — the ramps are
+    /// a minority of the sheet, and the keyed sprites keep solid interiors — but
+    /// alpha-testing it binarises the ramps.
+    ///
+    /// Proportioned from the measured Burnin' Rubber 3 `Interface_Texture`
+    /// (1024x512: 63.6% clear, 14.6% partial, 21.9% opaque — 40.0% of the visible
+    /// texels partial), which drew the scoreboard plates as hard black bars.
+    #[test]
+    fn mixed_atlas_with_translucent_art_is_soft() {
+        let atlas = tex(|_x, y| {
+            if y < 81 { 0 }                 // 63.3% clear
+            else if y < 100 { 96 }          // 14.8% partial-alpha ramp art
+            else { 255 }                    // 21.9% alpha-keyed sprite interiors
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&atlas);
+        assert!(has_alpha);
+        assert!(
+            soft,
+            "an atlas whose visible texels are 40% partial alpha is not a binary mask"
+        );
+    }
+
+    /// ...but the same shape at a cutout's perimeter-to-area ratio must NOT trip
+    /// it, or every anti-aliased sprite sheet would move to the blended pass and
+    /// stop writing depth. Same clear/visible split, a quarter of the mid-alpha.
+    #[test]
+    fn atlas_of_antialiased_cutouts_is_not_soft() {
+        let atlas = tex(|_x, y| {
+            if y < 81 { 0 }
+            else if y < 86 { 96 }           // ~10% of visible: an AA outline
+            else { 255 }
+        });
+        let (has_alpha, soft) = classify_texture_alpha(&atlas);
+        assert!(has_alpha);
+        assert!(!soft, "an anti-aliased sprite sheet is still a cutout mask");
     }
 
     /// A binary cutout — a solid alpha-255 disc with a one-texel anti-aliased
