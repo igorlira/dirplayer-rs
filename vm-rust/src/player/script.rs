@@ -592,9 +592,28 @@ pub async fn player_set_obj_prop(
         Datum::MathRef(_) => reserve_player_mut(|player| {
             MathDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),
-        Datum::Vector(..) => reserve_player_mut(|player| {
-            VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
-        }),
+        Datum::Vector(..) => {
+            reserve_player_mut(|player| {
+                VectorDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
+            })?;
+            // `my.worldPosition.z = pFloor + 5` — the component write above
+            // landed on the vector the 3D getter just built, which is a COPY of
+            // derived node state. Replay the mutated vector onto the node it
+            // came from, which is what Director's lvalue chain does. See
+            // `DirPlayer::vector_prop_lvalue`.
+            let writeback = reserve_player_mut(|player| {
+                Ok(match player.vector_prop_lvalue.take() {
+                    Some((vec_ref, receiver, prop)) if vec_ref == *obj_ref => {
+                        Some((receiver, prop))
+                    }
+                    _ => None,
+                })
+            })?;
+            if let Some((receiver, prop)) = writeback {
+                Box::pin(player_set_obj_prop(&receiver, prop, obj_ref)).await?;
+            }
+            Ok(())
+        }
         Datum::SoundChannel(_) => reserve_player_mut(|player| {
             SoundChannelDatumHandlers::set_prop(player, obj_ref, prop_name, value_ref)
         }),

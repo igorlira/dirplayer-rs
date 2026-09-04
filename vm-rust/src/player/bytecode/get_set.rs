@@ -134,6 +134,9 @@ impl GetSetBytecodeHandler {
         let prop_name = ctx.get_name(name_id).to_owned();
 
         reserve_player_mut(|player| {
+            // Storing the value into a variable ends any pending
+            // `node.<vectorProp>.<component> =` lvalue chain.
+            player.vector_prop_lvalue = None;
             let (value_ref, receiver, script_ref, cached) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
@@ -209,6 +212,7 @@ impl GetSetBytecodeHandler {
             }
 
             let result_ref = get_obj_prop(player, &obj_datum_ref, prop_name)?;
+            note_vector_prop_lvalue(player, &obj_datum_ref, prop_name, &result_ref);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_ref);
             Ok(HandlerExecutionResult::Advance)
@@ -503,6 +507,9 @@ impl GetSetBytecodeHandler {
         let name_id = unsafe { crate::player::player_ref() }.get_ctx_current_bytecode(ctx).obj as u16;
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
+            // Storing the value into a variable ends any pending
+            // `node.<vectorProp>.<component> =` lvalue chain.
+            player.vector_prop_lvalue = None;
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
@@ -570,6 +577,9 @@ impl GetSetBytecodeHandler {
 
     pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
+            // Storing the value into a variable ends any pending
+            // `node.<vectorProp>.<component> =` lvalue chain.
+            player.vector_prop_lvalue = None;
             let slot = (player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier) as usize;
 
@@ -616,6 +626,9 @@ impl GetSetBytecodeHandler {
 
     pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
+            // Storing the value into a variable ends any pending
+            // `node.<vectorProp>.<component> =` lvalue chain.
+            player.vector_prop_lvalue = None;
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier;
             let (arg_count, arg_index, value_ref) = {
@@ -902,6 +915,7 @@ impl GetSetBytecodeHandler {
                 },
             };
 
+            note_vector_prop_lvalue(player, &obj_ref, prop_name, &result_ref);
             let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
             scope.stack.push(result_ref);
             Ok(HandlerExecutionResult::Advance)
@@ -1275,4 +1289,24 @@ impl GetSetBytecodeHandler {
             Ok(HandlerExecutionResult::Advance)
         })
     }
+}
+
+/// Remember a `node.<vectorProp>` read so a following `setobjprop <component>`
+/// can write the whole vector back onto the node — see
+/// `DirPlayer::vector_prop_lvalue`. A read that is not a vector off a 3D node
+/// CLEARS any pending record, so only the compiler's immediate lvalue chain
+/// (`getchainedprop worldPosition` … `setobjprop z`) can consume one.
+fn note_vector_prop_lvalue(
+    player: &mut DirPlayer,
+    obj_ref: &DatumRef,
+    prop_name: Symbol,
+    result_ref: &DatumRef,
+) {
+    let is_lvalue = matches!(player.get_datum(obj_ref), Datum::Shockwave3dObjectRef(_))
+        && matches!(player.get_datum(result_ref), Datum::Vector(_));
+    player.vector_prop_lvalue = if is_lvalue {
+        Some((result_ref.clone(), obj_ref.clone(), prop_name))
+    } else {
+        None
+    };
 }

@@ -699,6 +699,23 @@ pub struct DirPlayer {
     /// (e.g. cached scriptInstanceList). Callers should check this before
     /// allocating a new DatumRef, to ensure mutations share the same arena entry.
     pub last_sprite_prop_ref: Option<DatumRef>,
+    /// The pending `node.<vectorProp>.<component> = value` lvalue chain, as
+    /// `(vector datum, receiver, property)`.
+    ///
+    /// Director compiles `my.worldPosition.z = pFloor + 5` to
+    /// `getprop my / getchainedprop worldPosition / … / setobjprop z`, and the
+    /// component write reaches the node. dirplayer's 3D getters build a FRESH
+    /// `Datum::Vector` for each read (`worldPosition` is derived — it walks the
+    /// parent chain — so it cannot be a persistent datum the way
+    /// `transform` is), so without this the write landed on a temporary and was
+    /// dropped: Street Sesh's `checkGroundCollision` clamped the skater to the
+    /// floor every frame and the skater still fell through the world.
+    ///
+    /// Recorded only by the two bytecodes that read a property off a 3D node,
+    /// and cleared by any bytecode that STORES the value into a variable — so
+    /// it stays confined to the compiler's lvalue-chain shape and
+    /// `v = model.worldPosition` followed by `v.z = 5` still mutates only `v`.
+    pub vector_prop_lvalue: Option<(DatumRef, DatumRef, Symbol)>,
     pub virtual_scripts: FxHashMap<CastMemberRef, Rc<dyn virtual_scripts::VirtualScriptHandler>>,
     /// Runtime overrides for `the scriptText of member`. Director exposes a
     /// member's Lingo source as a settable string on ANY member type; some
@@ -968,6 +985,7 @@ impl DirPlayer {
             active_stage_message_channels_cache: None,
             active_stage_filmloop_members_cache: None,
             last_sprite_prop_ref: None,
+            vector_prop_lvalue: None,
             virtual_scripts: FxHashMap::default(),
             movie_path_override: None,
             movie_path_label: None,
