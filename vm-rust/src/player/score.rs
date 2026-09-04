@@ -4437,6 +4437,13 @@ fn sprite_set_prop_is_noop(
     })
 }
 
+
+/// A rect with its corners the right way round, as Director keeps them:
+/// rect(10, 50, 12, 20) and rect(10, 20, 12, 50) are the same rect.
+pub fn normalise_rect([l, t, r, b]: [i32; 4]) -> [i32; 4] {
+    [l.min(r), t.min(b), l.max(r), t.max(b)]
+}
+
 pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Result<(), ScriptError> {
     // Director silently ignores property writes to invalid sprite refs. A
     // script doing `sprite(N).prop = X` where N came from a list-lookup
@@ -5065,6 +5072,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             };
             let [left, top, right, bottom] = rect_values
                 .ok_or_else(|| ScriptError::new("rect parse failed".to_string()))?;
+            // Director normalises a rect whose corners arrive the wrong way
+            // round. Movies rely on it when they draw a line between two
+            // moving points: a crane wire written as
+            //   rect(x, yClaw, x + 2, yArm)
+            // has its top below its bottom whenever the claw hangs under the
+            // arm. Taken literally that sprite got a height of -541 and drew
+            // as a full-height line.
+            let [left, top, right, bottom] = normalise_rect([left, top, right, bottom]);
             let new_width = right - left;
             let new_height = bottom - top;
 
@@ -6931,4 +6946,21 @@ pub fn get_score_sprite_mut<'a>(
 ) -> Option<&'a mut Sprite> {
     let score = get_score_mut(movie, score_source)?;
     Some(score.get_sprite_mut(channel_num))
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::normalise_rect;
+
+    #[test]
+    fn inverted_corners_are_swapped() {
+        assert_eq!(normalise_rect([10, 50, 12, 20]), [10, 20, 12, 50]);
+        assert_eq!(normalise_rect([12, 20, 10, 50]), [10, 20, 12, 50]);
+    }
+
+    #[test]
+    fn a_normal_rect_is_untouched() {
+        assert_eq!(normalise_rect([10, 20, 12, 50]), [10, 20, 12, 50]);
+        assert_eq!(normalise_rect([0, 0, 0, 0]), [0, 0, 0, 0]);
+    }
 }
