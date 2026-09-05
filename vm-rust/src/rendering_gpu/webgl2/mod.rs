@@ -2013,8 +2013,15 @@ impl WebGL2Renderer {
                     TextureSource::Bitmap { image_ref: bitmap_member.image_ref, is_flash: false }
                 }
                 CastMemberType::Shape(shape_member) => {
-                    // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                    if sprite_width <= 1 || sprite_height <= 1 {
+                    // Skip blank placeholders and zero-size shapes, but NOT a
+                    // #line: a line is 1 px in one dimension by nature, so
+                    // "width <= 1 || height <= 1" dropped every horizontal and
+                    // vertical line before the Line arm below ever ran. The
+                    // divider under the ruler on klods.dcr's working drawing
+                    // went missing this way (S8, measured against the
+                    // projector). A line is skipped only when BOTH collapse.
+                    let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                    if (sprite_width <= 1 || sprite_height <= 1) && !(is_line && (sprite_width > 1 || sprite_height > 1)) {
                         return;
                     }
 

@@ -1485,8 +1485,15 @@ fn render_filmloop_from_channel_data(
                 );
             }
             CastMemberType::Shape(shape_member) => {
-                // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                if data.width <= 1 || data.height <= 1 {
+                // Skip blank placeholders and zero-size shapes, but NOT a #line: a line
+                // is 1 px in one dimension by nature, so "width <= 1 || height <= 1"
+                // dropped every horizontal and vertical line before it reached the
+                // draw code (which explicitly promises a line "never vanishes"). The
+                // divider under the ruler on klods.dcr's working drawing went missing
+                // this way; measured against the projector, S8. A line is skipped
+                // only when BOTH dimensions collapse.
+                let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                if (data.width <= 1 || data.height <= 1) && !(is_line && (data.width > 1 || data.height > 1)) {
                     continue;
                 }
 
@@ -2164,8 +2171,15 @@ pub fn render_score_to_bitmap_with_offset(
             CastMemberType::Shape(shape_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
-                // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                if sprite.width <= 1 || sprite.height <= 1 {
+                // Skip blank placeholders and zero-size shapes, but NOT a #line: a line
+                // is 1 px in one dimension by nature, so "width <= 1 || height <= 1"
+                // dropped every horizontal and vertical line before it reached the
+                // draw code (which explicitly promises a line "never vanishes"). The
+                // divider under the ruler on klods.dcr's working drawing went missing
+                // this way; measured against the projector, S8. A line is skipped
+                // only when BOTH dimensions collapse.
+                let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                if (sprite.width <= 1 || sprite.height <= 1) && !(is_line && (sprite.width > 1 || sprite.height > 1)) {
                     continue;
                 }
 
