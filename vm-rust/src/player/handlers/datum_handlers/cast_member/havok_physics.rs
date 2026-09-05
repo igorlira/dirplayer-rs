@@ -1246,6 +1246,39 @@ fn apply_drag(state: &mut HavokPhysicsState, dt: f64) {
     }
 }
 
+/// The scene's UP axis: the unit vector opposite gravity.
+///
+/// Every HKE-authored scene is Z-up — the Havok Xtra's own default gravity is
+/// `[0,0,-g]` — so the contact code below was written testing index 2 directly.
+/// But up is a property of the MOVIE, not of the engine: Sewer Run 2 drives a
+/// Shockwave 3D world in Director's Y-up space and says so explicitly with
+/// `hk.gravity = vector(0, -8000, 0)`. Asking about index 2 there asks about a
+/// HORIZONTAL axis.
+///
+/// Falls back to +Z when gravity is zero, so a scene that never sets gravity
+/// keeps exactly the behaviour the Z-up scenes were tuned against.
+fn scene_up_axis(gravity: V3) -> V3 {
+    let m = (gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]).sqrt();
+    if m < 1e-9 {
+        return [0.0, 0.0, 1.0];
+    }
+    [-gravity[0] / m, -gravity[1] / m, -gravity[2] / m]
+}
+
+/// The index of the scene's dominant up component, and the two ground-plane
+/// indices that go with it. `[0,0,-g]` (every HKE scene) gives `(2, 0, 1)` — the
+/// axes the code below was originally written against.
+fn up_axis_indices(up: V3) -> (usize, usize, usize) {
+    let (ax, ay, az) = (up[0].abs(), up[1].abs(), up[2].abs());
+    if ax >= ay && ax >= az {
+        (0, 1, 2)
+    } else if ay >= az {
+        (1, 0, 2)
+    } else {
+        (2, 0, 1)
+    }
+}
+
 /// Apply gravity to all bodies.
 fn apply_gravity(state: &mut HavokPhysicsState) {
     let g = state.gravity;
@@ -2159,6 +2192,10 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
 /// Clears resting contact when ball leaves the mesh AABB (edge of platform).
 fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
     let g = state.gravity;
+    // The plane clamp below adjusts the body along the UP axis only (adjusting
+    // along the tilted normal jitters the other two). Which index that is comes
+    // from gravity, not from an assumption that the world is Z-up.
+    let (ui, a0, a1) = up_axis_indices(scene_up_axis(g));
 
     for bi in 0..state.rigid_bodies.len() {
         let rc = match &state.rigid_bodies[bi].resting_normal {
@@ -2174,9 +2211,13 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         let pos = state.rigid_bodies[bi].position;
         let n = rc.normal;
 
-        // Check if ball is still within the mesh AABB (on the platform)
-        if pos[0] < rc.aabb_min[0] || pos[0] > rc.aabb_max[0]
-            || pos[1] < rc.aabb_min[1] || pos[1] > rc.aabb_max[1] {
+        // Check if ball is still within the mesh AABB (on the platform).
+        // Tested on the two GROUND-PLANE axes — which ones those are depends on
+        // where up is (see `up_axis_indices`). Hardcoding 0/1 asks a Y-up movie
+        // whether its HEIGHT is inside the mesh's horizontal extent and never
+        // notices it running off the far end.
+        if pos[a0] < rc.aabb_min[a0] || pos[a0] > rc.aabb_max[a0]
+            || pos[a1] < rc.aabb_min[a1] || pos[a1] > rc.aabb_max[a1] {
             // Left the platform edge — free fall
             state.rigid_bodies[bi].resting_normal = None;
             continue;
@@ -2189,11 +2230,11 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         //   (px-ppx)*nx + (py-ppy)*ny + (pz-ppz)*nz = eff_radius
         //   pz = ppz + (eff_radius - (px-ppx)*nx - (py-ppy)*ny) / nz
         let rb = &mut state.rigid_bodies[bi];
-        if n[2].abs() > 0.01 {
-            let target_z = rc.plane_point[2]
-                + (eff_radius - (rb.position[0]-rc.plane_point[0])*n[0]
-                              - (rb.position[1]-rc.plane_point[1])*n[1]) / n[2];
-            rb.position[2] = target_z;
+        if n[ui].abs() > 0.01 {
+            let target_up = rc.plane_point[ui]
+                + (eff_radius - (rb.position[a0]-rc.plane_point[a0])*n[a0]
+                              - (rb.position[a1]-rc.plane_point[a1])*n[a1]) / n[ui];
+            rb.position[ui] = target_up;
         }
 
         // Cancel normal velocity
@@ -2318,6 +2359,8 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         && state.linear_dashpots.is_empty()
         && state.angular_dashpots.is_empty();
 
+    let up = scene_up_axis(state.gravity);
+
     for bi in 0..state.rigid_bodies.len() {
         let rb = &state.rigid_bodies[bi];
         if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
@@ -2375,8 +2418,13 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             // chassis along the road continuously — 1619 of its 1681 contacts carry
             // normal.z ~ 0.995. Discarding those left the hull with no floor, so the
             // car sank through the loop instead of resting on the track.
+            //
+            // Measured along the SCENE's up axis (see `scene_up_axis`), not a
+            // hardcoded +Z: for the Z-up scenes above this is the same test, but
+            // a Y-up movie's walls are not its floor.
             let frictionless = rb.friction.abs() < 1e-6;
-            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
+            let n_up = c.normal[0] * up[0] + c.normal[1] * up[1] + c.normal[2] * up[2];
+            if n_up > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
             }
