@@ -2211,6 +2211,32 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         let pos = state.rigid_bodies[bi].position;
         let n = rc.normal;
 
+        // A resting contact is ONE plane, sampled at one point of one triangle,
+        // and while it is held the body is skipped by `detect_all_collisions`
+        // entirely — this is the only thing touching it. That is fine for what it
+        // was written for (a ball settling on a platform, a car sitting on
+        // terrain), where the body barely moves relative to where the plane was
+        // taken. It is badly wrong once the body TRAVELS: Sewer Run 2's boarder
+        // rides a curved half-pipe at ~7000 units/s against a single collision
+        // mesh whose AABB is the entire course, so it stayed glued to the tangent
+        // plane of whatever triangle it first touched and slid straight out of the
+        // tube with no per-triangle collision ever running again.
+        //
+        // So the plane is only trusted near where it was sampled. Beyond that the
+        // resting contact is dropped and the body goes back through the full
+        // narrow phase next step, which re-acquires against the triangle it is
+        // actually over. A body that stays put never reaches the threshold, so
+        // the settle/rest behaviour it was tuned against is unchanged.
+        {
+            let d = v3_sub(pos, rc.plane_point);
+            let dn = v3_dot(d, n);
+            let tangential = v3_len([d[0] - dn * n[0], d[1] - dn * n[1], d[2] - dn * n[2]]);
+            if tangential > 4.0 * eff_radius {
+                state.rigid_bodies[bi].resting_normal = None;
+                continue;
+            }
+        }
+
         // Check if ball is still within the mesh AABB (on the platform).
         // Tested on the two GROUND-PLANE axes — which ones those are depends on
         // where up is (see `up_axis_indices`). Hardcoding 0/1 asks a Y-up movie
