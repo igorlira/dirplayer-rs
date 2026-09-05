@@ -3745,6 +3745,27 @@ pub fn draw_frame_immediate() {
     }
 }
 
+/// Draw the stage at the end of a frame cycle whose input handlers held the
+/// redraw (see `DirPlayer::draw_hold_since_ms`). Unpaced: this is the one
+/// draw Director makes for that frame.
+pub fn draw_frame_at_frame_end() {
+    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+        return;
+    }
+    if should_skip_stage_draw() {
+        return;
+    }
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            reserve_player_mut(|player| {
+                renderer.draw_frame(player);
+                player.stage_dirty = false;
+            });
+        }
+        mark_frame_drawn();
+    });
+}
+
 /// Helper to access Canvas2D renderer for Canvas2D-specific operations
 #[allow(dead_code)]
 pub fn with_canvas2d_renderer<F, R>(f: F) -> Option<R>
@@ -4227,7 +4248,13 @@ async fn run_draw_loop() {
             let skip_stage = should_skip_stage_draw();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if !skip_stage && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
+                    // Between an input handler and the exitFrame that follows it the
+                    // stage is not redrawn (see `draw_hold_since_ms`). Bounded by
+                    // time so a paused or stalled frame loop cannot hold it forever.
+                    let held = player.draw_hold_since_ms.map_or(false, |since| {
+                        player.is_playing && chrono::Utc::now().timestamp_millis() - since < 250
+                    });
+                    if !skip_stage && !held && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
                         player.stage_dirty = false;
                     }
