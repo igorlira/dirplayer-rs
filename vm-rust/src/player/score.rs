@@ -994,17 +994,50 @@ impl Score {
             .cloned()
             .collect();
 
-        // Get initialization data for sprites
+        // Get initialization data for sprites.
+        //
+        // Director enters a sprite from the score cell of the frame the playhead
+        // actually LANDS ON, which is not always the cell the span opened with:
+        // a `go` to a marker inside a span enters that span mid-way.
+        // "The Hills Have Eyes" is the case that shows it — `_debug_skip` runs
+        // `go("title")` from frame 12, jumping to frame 70, which is 50 frames
+        // into the menu background's 20..260 span. That span OPENS on the first
+        // frame of a fade-in (blend byte 255 = fully transparent), and the fade's
+        // blend keyframes are all long past by frame 70, so replaying the opening
+        // cell left the whole menu background invisible for good — the CONTROLS
+        // and GAME SIZE cards sat on black instead of the rock photo.
+        //
+        // So when the span is entered late, prefer the newest cell at or before
+        // the entered frame. Delta-encoded scores need not carry a record on
+        // every frame, and a record that names no member is not a cell this
+        // sprite can enter from, so both fall back to the span's opening cell.
         let span_init_data: Vec<_> = spans_to_enter
             .iter()
             .filter_map(|span| {
-                self.channel_initialization_data
+                let in_channel = |channel_index: &u16| {
+                    get_channel_number_from_index(*channel_index as u32)
+                        == span.channel_number as u32
+                };
+                let opening = self.channel_initialization_data
                     .iter()
-                    .find(|(_frame_index, channel_index, _data)| {
-                        get_channel_number_from_index(*channel_index as u32)
-                            == span.channel_number as u32
-                            && _frame_index + 1 == span.start_frame
-                    })
+                    .find(|(frame_index, channel_index, _)| {
+                        in_channel(channel_index) && frame_index + 1 == span.start_frame
+                    });
+                let entered = if frame_num > span.start_frame {
+                    self.channel_initialization_data
+                        .iter()
+                        .filter(|(frame_index, channel_index, data)| {
+                            in_channel(channel_index)
+                                && frame_index + 1 > span.start_frame
+                                && frame_index + 1 <= frame_num
+                                && data.cast_member != 0
+                        })
+                        .max_by_key(|(frame_index, _, _)| *frame_index)
+                } else {
+                    None
+                };
+                entered
+                    .or(opening)
                     .map(|(_frame_index, channel_index, data)| (span, *channel_index, data.clone()))
             })
             .collect();
