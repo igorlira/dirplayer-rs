@@ -218,6 +218,7 @@ impl Transform3dDatumHandlers {
             // `clone` can mean here is the independent copy `duplicate` already returns.
             "duplicate" | "clone" => Self::duplicate(datum),
             "multiply" => Self::multiply(datum, args),
+            "premultiply" => Self::pre_multiply(datum, args),
             "interpolate" => Self::interpolate(datum, args),
             "interpolateto" => Self::interpolate_to(datum, args),
             "getat" => Self::get_at(datum, args),
@@ -420,6 +421,35 @@ impl Transform3dDatumHandlers {
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let result = mat4_mul(&m, &other);
+            Ok(player.alloc_datum(Datum::transform3d(result)))
+        })
+    }
+
+    /// `transform1.preMultiply(transform2)` — Director 11.5 Scripting
+    /// Dictionary, `preMultiply`: "alters a transform by PRE-applying the
+    /// positional, rotational, and scaling effects of another transform ...
+    /// The effect is that the order of operations is reversed" relative to
+    /// `multiply`. So where `multiply` composes M*Other, this composes Other*M.
+    ///
+    /// It ALTERS the receiver, like `translate` / `rotate` / `scale` next door,
+    /// and callers rely on that rather than on the return value: thehillshaveeyes'
+    /// `_enemy.stepit` pins each mutant's collision proxies onto its skeleton with
+    ///     pCollBody.transform.preMultiply(pBPmodel.bonesPlayer.bone[16].worldTransform)
+    /// and throws the result away. The result is returned as well so a
+    /// `t = a.preMultiply(b)` form still reads.
+    fn pre_multiply(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            mark_transform_dirty(datum);
+            let m = match player.get_datum(datum) {
+                Datum::Transform3d(m) => **m,
+                _ => return Err(ScriptError::new("Expected Transform3d".into())),
+            };
+            let other = match player.get_datum(&args[0]) {
+                Datum::Transform3d(m) => **m,
+                _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
+            };
+            let result = mat4_mul(&other, &m);
+            *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(player.alloc_datum(Datum::transform3d(result)))
         })
     }
