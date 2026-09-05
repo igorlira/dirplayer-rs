@@ -836,6 +836,7 @@ in vec2 v_texcoord;
 uniform sampler2D u_texture;
 uniform float u_blend;
 uniform vec4 u_bg_color;
+uniform vec4 u_fg_color;
 uniform float u_color_tolerance;
 
 out vec4 fragColor;
@@ -894,9 +895,11 @@ void main() {
     float dist = max(max(diff.r, diff.g), diff.b);
     if (dist < u_color_tolerance) discard;
 
-    // Lighten: output color, actual MAX blending done via blend equation
+    // Lighten: the sprite's foreColor is added to the image (Using
+    // Director, "Using sprite inks"); the default black foreColor leaves
+    // it unchanged.
     float alpha = src.a * u_blend;
-    fragColor = vec4(src.rgb, alpha);
+    fragColor = vec4(min(src.rgb + u_fg_color.rgb, 1.0), alpha);
 }
 "#;
 
