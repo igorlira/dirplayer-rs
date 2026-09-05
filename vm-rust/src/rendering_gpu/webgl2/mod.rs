@@ -932,18 +932,30 @@ impl WebGL2Renderer {
         // Render each sprite.
         //
         // directToStage Shockwave3D sprites are drawn DIRECTLY to the screen, on
-        // top of the 2D layer (Director: directToStage ignores ink/blend and
-        // composites last). When a script has drawn into `(the stage).image`
-        // (`stage_image_dirty`), draw_stage_image_overlay blits that OPAQUE
-        // full-stage bitmap over the sprite output below — which would paste a
-        // frozen snapshot over the live, animating 3D (Splat draws a lives/score
-        // HUD into the stage image, freezing the maze view). Defer such sprites
-        // until after the overlay so the live 3D shows through; the HUD (drawn
-        // into a non-overlapping region) still composites underneath.
-        let overlay_active = player.stage_image_dirty && player.stage_image.is_some();
+        // top of the 2D layer. Director 11.5 Scripting Dictionary,
+        // `directToStage`: "No other cast member can appear in front of a
+        // directToStage sprite. Also, ink effects do not affect the appearance
+        // of a directToStage sprite." — so they composite LAST, whatever their
+        // channel number, and whatever is layered above them in the score.
+        //
+        // TRECH is what forced this to be unconditional: its game frames put the
+        // 3D member in channel 1 and a full-stage 775x585 border bitmap
+        // (`borderOutside`, 32-bit but `useAlpha` FALSE, ink 0) in channel 2, so
+        // drawing in channel order painted an opaque grey sheet over the whole
+        // live game. The 3D was rendering correctly the entire time; it was
+        // simply buried.
+        //
+        // The same deferral also covers the `(the stage).image` case: when a
+        // script has drawn into it (`stage_image_dirty`),
+        // draw_stage_image_overlay blits that OPAQUE full-stage bitmap over the
+        // sprite output below, which would paste a frozen snapshot over the
+        // live, animating 3D (Splat draws a lives/score HUD into the stage
+        // image, freezing the maze view). Drawing the 3D after the overlay keeps
+        // it live; the HUD, drawn into a non-overlapping region, still
+        // composites underneath.
         let mut deferred_dts_3d: Vec<i16> = Vec::new();
         for (channel_num, _) in &sorted_channels {
-            if overlay_active && self.is_direct_to_stage_3d(player, *channel_num) {
+            if self.is_direct_to_stage_3d(player, *channel_num) {
                 deferred_dts_3d.push(*channel_num);
                 continue;
             }
