@@ -519,6 +519,15 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    /// Set when an input handler (mouse or key) starts running, cleared once
+    /// the next exitFrame has run. While it is set the stage is not redrawn:
+    /// Director draws once per frame, after the handlers of that frame and
+    /// its exitFrame have both run, so a handler's half-finished state is
+    /// never on screen. Matematik i Maaneby's crane shows a claw sprite from
+    /// mouseUp and moves it into place in exitFrame; drawing in between put
+    /// the claw where that sprite last was for one frame. A timestamp, so a
+    /// hold can never outlive a stalled frame loop.
+    pub draw_hold_since_ms: Option<i64>,
     pub preview_dirty: bool, // Set when preview member/settings change; cleared after preview render
     pub has_frame_changed_in_go: bool,
     pub go_same_frame: bool,
@@ -834,6 +843,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
+            draw_hold_since_ms: None,
             preview_dirty: true,
             has_frame_changed_in_go: false,
             go_same_frame: false,
@@ -4323,6 +4333,16 @@ where
 }
 
 #[inline(always)]
+/// An input handler is about to run: hold the stage redraw until the next
+/// exitFrame has settled what it changes (`DirPlayer::draw_hold_since_ms`).
+pub fn hold_draw_for_input_handler() {
+    reserve_player_mut(|player| {
+        if player.draw_hold_since_ms.is_none() {
+            player.draw_hold_since_ms = Some(chrono::Utc::now().timestamp_millis());
+        }
+    });
+}
+
 pub fn reserve_player_mut<T, F>(callback: F) -> T
 where
     F: FnOnce(&mut DirPlayer) -> T,
@@ -6236,6 +6256,13 @@ pub async fn run_single_frame() -> (bool, bool) {
     }
 
     player_wait_available().await;
+
+    // exitFrame has run: whatever the input handlers changed is settled. A
+    // frame that had a handler is drawn right here, Director's draw point, so
+    // no further handler can slip in before the picture.
+    if reserve_player_mut(|player| player.draw_hold_since_ms.take().is_some()) {
+        crate::rendering::draw_frame_at_frame_end();
+    }
 
     // Eager movie mount anywhere in the exitFrame dispatches above: hand the
     // rest of the cycle to the frame loop's pending-init path.

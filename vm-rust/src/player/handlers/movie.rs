@@ -1295,6 +1295,8 @@ impl MovieHandlers {
     }
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // An explicit updateStage draws now, handler or not.
+        reserve_player_mut(|player| player.draw_hold_since_ms = None);
         let should_yield = reserve_player_ref(|player| {
             // Yield when: mouse handler context, command handler yielding,
             // yield-safe state, OR mouse is currently down (covers
