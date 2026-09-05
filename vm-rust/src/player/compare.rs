@@ -600,6 +600,50 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         (Datum::String(left), Datum::String(right)) =>
             Ok(left.to_ascii_lowercase() > right.to_ascii_lowercase()),
 
+        // A property list, or a list against a NON-LIST: the mirror of
+        // `datum_less_than`'s arms. A property list answers from its FIRST
+        // VALUE, a linear list requires EVERY element to satisfy the comparison,
+        // and an empty container answers false. Deliberately generic in the
+        // other operand — a Lingo list holds any datum, so narrow arms would
+        // just move the "not supported" warning to the next movie. `>` had NO
+        // prop-list handling at all before this, so it warned and answered FALSE
+        // for every prop-list comparison, silently mis-ordering any sorted
+        // insert or priority queue that probed with `>` instead of `<`.
+        (Datum::PropList(left_pairs, ..), _) => match left_pairs.front() {
+            Some((_, left_val)) => {
+                datum_greater_than(allocator.get_datum(left_val), right, allocator)
+            }
+            None => Ok(false),
+        },
+        (_, Datum::PropList(right_pairs, ..)) => match right_pairs.front() {
+            Some((_, right_val)) => {
+                datum_greater_than(left, allocator.get_datum(right_val), allocator)
+            }
+            None => Ok(false),
+        },
+        (Datum::List(_, left_items, _), _) => {
+            if left_items.is_empty() {
+                return Ok(false);
+            }
+            for l in left_items.iter() {
+                if !datum_greater_than(allocator.get_datum(l), right, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (_, Datum::List(_, right_items, _)) => {
+            if right_items.is_empty() {
+                return Ok(false);
+            }
+            for r in right_items.iter() {
+                if !datum_greater_than(left, allocator.get_datum(r), allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
         // Catch-all
         _ => {
             warn!(
@@ -794,6 +838,60 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // that sorts or compares them needs a stable result — compare by their
         // allocation id.
         (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() < r.id()),
+
+        // A list against a NON-LIST. Both container forms keep the rule their
+        // matching-pair arm above uses, with the other operand broadcast over
+        // the container: a property list answers from its FIRST VALUE, a linear
+        // list requires EVERY element to satisfy the comparison, and an empty
+        // container of either kind compares as not-less. On a one-element list
+        // the two agree, which is the shape that actually turns up.
+        //
+        // Deliberately generic in the other operand rather than written for
+        // ints and floats: a Lingo list holds any datum, so it gets compared
+        // against strings, symbols, vectors and points too, and narrow arms
+        // would just move the "not supported" warning to the next movie. Each
+        // step strips one container level, so the recursion terminates on any
+        // finite structure.
+        //
+        // LEGO WorldBuilder is the movie that surfaced this — every frame of its
+        // build loop warned "datum_less_than not supported for types: list and
+        // int" (and prop_list and int). Its comparisons are all a list of
+        // positive ints against 0, FALSE under any reading, so this defines the
+        // operator without moving the movie.
+        (Datum::PropList(left_pairs, ..), _) => match left_pairs.front() {
+            Some((_, left_val)) => {
+                datum_less_than(allocator.get_datum(left_val), right, allocator)
+            }
+            None => Ok(false),
+        },
+        (_, Datum::PropList(right_pairs, ..)) => match right_pairs.front() {
+            Some((_, right_val)) => {
+                datum_less_than(left, allocator.get_datum(right_val), allocator)
+            }
+            None => Ok(false),
+        },
+        (Datum::List(_, left_items, _), _) => {
+            if left_items.is_empty() {
+                return Ok(false);
+            }
+            for l in left_items.iter() {
+                if !datum_less_than(allocator.get_datum(l), right, allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (_, Datum::List(_, right_items, _)) => {
+            if right_items.is_empty() {
+                return Ok(false);
+            }
+            for r in right_items.iter() {
+                if !datum_less_than(left, allocator.get_datum(r), allocator)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
 
         // Catch-all
         _ => {
