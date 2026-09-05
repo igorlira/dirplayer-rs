@@ -26,6 +26,7 @@ pub mod eval;
 pub mod events;
 pub mod font;
 pub mod geometry;
+pub mod gif;
 pub mod handlers;
 pub mod interp_stats;
 pub mod js_lingo;
@@ -368,6 +369,10 @@ pub struct DirPlayer {
     /// events are per-sprite (see `get_sprites_at`), so this has to be a set
     /// rather than just the front-most sprite.
     pub hovered_sprites: Vec<i16>,
+    /// Animated GIF cast members, keyed by (cast_lib, member number). Each
+    /// holds its decoded frames; the frame loop swaps the member's image_ref
+    /// as the delays elapse. See player::gif.
+    pub gif_animations: std::collections::HashMap<(u32, u32), crate::player::gif::GifAnimation>,
     pub picking_mode: bool,
     pub allocator: DatumAllocator,
     pub dir_cache: HashMap<Box<str>, DirectorFile>,
@@ -779,6 +784,7 @@ impl DirPlayer {
             float_precision: 4,
             last_handler_result: DatumRef::Void,
             hovered_sprites: Vec::new(),
+            gif_animations: std::collections::HashMap::new(),
             picking_mode: false,
             allocator: DatumAllocator::default(),
             dir_cache: HashMap::new(),
@@ -5370,6 +5376,10 @@ async fn eval_startup_payload(code: Option<String>, flag: &str) {
 /// stepFrame, prepareFrame, startMovie, enterFrame, exitFrame.
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
+    // Animated GIF members were decoded while the cast was built, before the
+    // player could be borrowed; hand them over now so the frame loop can run
+    // them. See player::gif.
+    crate::player::gif::install_pending();
     // The projector's `--do` argument, evaluated before the movie's own code
     // gets a turn. See `DirPlayer::startup_do`.
     run_startup_do().await;
