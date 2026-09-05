@@ -2060,6 +2060,18 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),
             Some(BuiltInSymbol::FrameReady) => Self::frame_ready(args),
             Some(BuiltInSymbol::Marker) => Self::marker(args),
+            // `markerList` is a read-only Movie PROPERTY -- Director 11.5
+            // Scripting Dictionary, `markerList`: "contains a script property
+            // list of the markers in the Score", in the form
+            // `frameNumber: "markerName"`. It is already built in
+            // `DirPlayer::get_movie_prop`; what was missing is the CALL form.
+            // A movie that writes it without an explicit `the` or `_movie.`
+            // compiles to a zero-argument call, which fell through to
+            // "No built-in handler: markerlist()" -- Burnin Rubber 2's race
+            // frame does exactly that, 81 times in a single run.
+            Some(BuiltInSymbol::MarkerList) => reserve_player_mut(|player| {
+                player.get_movie_prop(Symbol::builtin(BuiltInSymbol::MarkerList))
+            }),
             Some(BuiltInSymbol::SpriteBox) => {
                 // spriteBox(sprite, left, top, right, bottom)
                 if args.len() < 5 {
