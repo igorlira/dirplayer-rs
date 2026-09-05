@@ -2347,12 +2347,23 @@ void main() {
 
         // Draw camera backdrops (Director `addBackdrop`) BEHIND the scene: after the
         // colour clear, before any models, with depth test off so all geometry
-        // occludes them. Only on the clearing (primary) pass — extra-camera passes
-        // (clear_fbo=false) must not redraw them. The FBO is already bound, cleared,
-        // and feedback-safe here, which avoids the stale/uninitialised-white that a
-        // separate pre-pass produced. After drawing, the 3D camera matrices and GL
-        // state are restored for the model loop.
-        if clear_fbo {
+        // occludes them. The FBO is already bound, cleared, and feedback-safe here,
+        // which avoids the stale/uninitialised-white that a separate pre-pass
+        // produced. After drawing, the 3D camera matrices and GL state are restored
+        // for the model loop.
+        //
+        // This runs on EVERY pass, not only the clearing one. A backdrop belongs to
+        // its camera and is part of what that camera draws; `clearAtRender` governs
+        // only the colour buffer (Director 11.5, `clearAtRender`: "indicates whether
+        // the color buffer is cleared after each frame"; `clearValue`: "the color
+        // used to clear out the color buffer IF colorBuffer.clearAtRender is set to
+        // TRUE"), and `addCamera` says each camera's view "is displayed on top of the
+        // view from cameras with lower index positions". TRECH 2's radar is exactly
+        // that shape — a second, orthographic camera inset at rect(10,10,150,150)
+        // with `clearAtRender = 0` so the world shows through, whose only chrome is
+        // an `addBackdrop` of the radarBG texture. Gating backdrops on the clear left
+        // the blips floating over the city with no radar dial under them.
+        {
             if let Some(rs) = runtime_state {
                 let cam_key = self.active_camera
                     .unwrap_or_else(|| Symbol::from_str("defaultview"));
@@ -2364,15 +2375,41 @@ void main() {
                         // like the estate explore), active_camera is None and the
                         // renderer defaults to DefaultView — fall back to whichever
                         // single camera owns backdrops. With an explicit camera, match
-                        // strictly so a multi-camera movie doesn't cross backdrops.
-                        if self.active_camera.is_none() {
+                        // strictly so a multi-camera movie doesn't cross backdrops,
+                        // and never guess on a non-clearing pass: an extra camera pass
+                        // draws a backdrop only if it owns one.
+                        if clear_fbo && self.active_camera.is_none() {
                             rs.camera_backdrops.values().find(|b| !b.is_empty())
                         } else {
                             None
                         }
                     });
                 if let Some(backdrops) = backdrops {
-                    self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                    // A backdrop is drawn UNSCALED, one backdrop pixel to one sprite
+                    // pixel, from an origin at its own camera's view — i.e. the
+                    // camera's `rect`. For camera(1) that rect is the whole sprite
+                    // (Director resets it every render), which is why the dictionary
+                    // can describe `locWithinSprite` as "measured from the upper left
+                    // corner of the sprite"; for an inset camera the two differ.
+                    //
+                    // TRECH 2's radar pins this down exactly. radarBG is a 256x256
+                    // texture whose opaque dial occupies pixels 58..197 — 140x140,
+                    // the size of the radar rect(10,10,150,150) — and the movie
+                    // places it at `point(-58, -58)`. That offset cancels the dial's
+                    // inset precisely, so the dial lands on the rect's own origin and
+                    // fills it, which is what the game looks like in Director.
+                    //
+                    // So: keep the viewport at FULL FBO SIZE (no squeezing of the
+                    // ortho, which would shrink a 256px dial to ~45px) but move its
+                    // ORIGIN to the camera rect, and let the SCISSOR — still the rect
+                    // — clip. Then restore the pass viewport for the model loop.
+                    if let Some((l, t, r, b)) = cam_viewport {
+                        gl.viewport(l, t, width as i32, height as i32);
+                        self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                        gl.viewport(l, t, r - l, b - t);
+                    } else {
+                        self.draw_backdrops_inline(gl, shader, &member_key, backdrops, width, height);
+                    }
                     // Restore camera matrices + render state for the model loop.
                     gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
                     gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
