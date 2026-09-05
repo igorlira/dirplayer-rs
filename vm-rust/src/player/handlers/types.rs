@@ -587,6 +587,26 @@ impl TypeHandlers {
                         Ok(datum_ref)
                     }
                     Err(err) => {
+                        // STAYS a warning, and deliberately so: this is the only
+                        // place a gap in the expression parser shows up.
+                        //
+                        // Director does NOT raise here -- 11.5 Scripting
+                        // Dictionary, `value()`: "Expressions that Lingo cannot
+                        // parse will produce unexpected results, but will not
+                        // produce Lingo errors. The result is the value of the
+                        // INITIAL PORTION of the expression up to the first
+                        // syntax error found in the string." Answering Void is
+                        // therefore never an error for the movie, but it is not
+                        // the whole contract either: Director returns whatever
+                        // prefix did parse, and we return Void for the lot. So
+                        // every line logged here is a candidate gap -- either an
+                        // expression the parser should have handled, or the
+                        // unimplemented partial-parse rule -- and silencing it
+                        // would hide both.
+                        //
+                        // Volume is real (308 in one corpus sweep, 161 of them
+                        // the record separator 0x1E) but that IS the signal: it
+                        // says which movies to look at first.
                         if !is_expected_value_retry_fragment(&s, &cleaned) {
                             warn!(
                                 "[value()] parse error → Void — input={:?} cleaned={:?} err={}",
