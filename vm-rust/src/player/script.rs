@@ -645,6 +645,41 @@ pub async fn player_set_obj_prop(
         Datum::PhysXObjectRef(_) => {
             crate::player::handlers::datum_handlers::physx_object::PhysXObjectDatumHandlers::set_prop(obj_ref, prop_name.as_str(), value_ref.clone())
         }
+        // `model.shaderList.<prop> = value` — the UN-indexed broadcast form.
+        //
+        // Director 11.5 Scripting Dictionary, `shaderList`: "Set a property of
+        // all of the shaders of a model to the same value with this syntax
+        // (note the absence of an index for the shaderList):
+        //     member(whichCastmember).model(whichModel).shaderList.whichProperty
+        //         = propValue"
+        // and the per-property entries spell the same optionality out in their
+        // Usage lines, e.g. `blend (3D)`:
+        //     member(x).model(y).shaderList{[index]}.blend
+        //
+        // `model.shaderList` answers a LINEAR LIST of shader references, so the
+        // broadcast arrives here as a property set on that list. Gate it on
+        // every element being a SHADER reference: the indexed form
+        // (`shaderList[i].blend`) never reaches this arm, `textureList` and the
+        // other 3D collections hold different object types, and a property set
+        // on any other list still raises exactly as before.
+        //
+        // TRECH's `buildBody` opens with `jBody.shaderList.blend = 100` on the
+        // freshly cloned avatar mesh, so without this the whole login path died
+        // ("set_obj_prop was passed an invalid datum: [shader(...), ...]") and
+        // the game could never be entered.
+        Datum::List(_, ref items, _) if !items.is_empty() && items.iter().all(|item| {
+            matches!(
+                reserve_player_ref(|player| player.get_datum(item).clone()),
+                Datum::Shockwave3dObjectRef(ref r) if r.object_type == BuiltInSymbol::Shader
+            )
+        }) => {
+            let value_datum = reserve_player_ref(|player| player.get_datum(value_ref).clone());
+            for item in items {
+                crate::player::handlers::datum_handlers::shockwave3d_object::Shockwave3dObjectDatumHandlers
+                    ::set_prop(item, prop_name.as_str(), &value_datum)?;
+            }
+            Ok(())
+        }
         Datum::Void | Datum::Null => {
             // In Director, setting a property on void/nothing is a no-op (silently ignored)
             // This commonly happens when scripts reference sprites/objects that have been erased
