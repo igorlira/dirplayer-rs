@@ -1585,6 +1585,17 @@ function translateLevel0(path: string): string {
 // content is >= 5 in practice, so assume the modern rule.)
 function coerceFlashValue(val: unknown): string | null {
   if (typeof val === "boolean") return val ? "true" : "false";
+  // Director's getVariable() "returns a string that contains the current value
+  // of the specified Flash variable" (Scripting Dictionary, getVariable()) —
+  // the value is ALWAYS stringified, whatever ActionScript type holds it.
+  // Ruffle hands numbers back as JS numbers, and letting one through untouched
+  // meant the WASM side (which only reads `as_string()`) saw a non-string and
+  // answered VOID. Sewer Run's menu keeps every selection in a numeric root
+  // variable — `sprite(1).track`, `.challenge`, `.enviro`, `.kudos` — so
+  // `startGame` read VOID for all of them, built gGame with a VOID
+  // boarderTotal, and `repeat with i = 1 to gGame.boarderTotal` then created no
+  // boarders at all.
+  if (typeof val === "number") return Number.isFinite(val) ? String(val) : "";
   return val as string | null;
 }
 
