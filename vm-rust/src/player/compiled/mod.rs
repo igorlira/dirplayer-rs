@@ -542,6 +542,26 @@ pub fn run_handler_resumable_ptr(
         };
     }
 
+    // The pending `node.<vectorProp>.<component> =` lvalue chain is ended by any
+    // bytecode that STORES a value into a variable — see
+    // `DirPlayer::vector_prop_lvalue` and `GetSetUtils::set_local`, which do the
+    // same for the sibling `<transform>.position.<component> =` chain behind
+    // `transform_sub_refs`. `SetLocal` is the one such store the IR executes
+    // itself instead of escaping to the interpreter, so it has to end them too,
+    // or a chain the IR walks past outlives the store and is consumed by a LATER
+    // `setobjprop` that has nothing to do with it.
+    //
+    // Sewer Run's `checkPhoto` / `checkWeapon` are exactly that shape:
+    //
+    //     pos = pBoarder[b].player.worldPosition
+    //     pos.y = pos.y + 375
+    //
+    // `pos` is a local COPY and `pos.y = …` must move only the copy. With the
+    // chain still live the component write went back onto the boarder's
+    // `playerNull` node — once per pickup per frame — so the node climbed 375
+    // units a step until it settled ~68 750 above the rigid body it is supposed
+    // to ride, taking the rider with it.
+    let player_ptr = unsafe { crate::player::player_mut() as *mut crate::player::DirPlayer };
     let ops = &compiled.ops;
     let mut pc = unsafe { (*scope_ptr).bytecode_index };
     let mut backjumps: u32 = 0;
@@ -563,7 +583,18 @@ pub fn run_handler_resumable_ptr(
         match &ops[pc] {
             IrOp::PushInt(n) => { st_push!(StackDatum::Int(*n)); pc += 1; }
             IrOp::GetLocal(s) => { st_push!(lc_get!(*s)); pc += 1; }
-            IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); lc_set!(*s, v); pc += 1; }
+            IrOp::SetLocal(s) => {
+                // See the note above the loop: a variable store ends the chain.
+                unsafe {
+                    if !(*player_ptr).vector_prop_lvalue.is_empty() {
+                        (*player_ptr).vector_prop_lvalue.clear();
+                    }
+                    if !(*player_ptr).transform_sub_refs.is_empty() {
+                        (*player_ptr).transform_sub_refs.clear();
+                    }
+                }
+                let v = cow_on_assign(st_pop!()); lc_set!(*s, v); pc += 1;
+            }
             IrOp::GetParam(s) => {
                 // Through the pointer this function already derived, rather
                 // than a second lookup of the same scope. `reserve_player_ref`
@@ -626,6 +657,7 @@ mod tests {
     use super::*;
     use crate::player::symbols::symbol_table::init_symbol_table;
     use crate::player::testing::{run_test, TestPlayer};
+    use crate::player::symbols::symbol::Symbol;
 
     /// Top of the scope's operand stack, as an int. The IR shares the scope
     /// stack with the interpreter, so a handler's computed value is read from
@@ -644,6 +676,63 @@ mod tests {
             let rv = player.scopes.get(scope_ref).unwrap().return_value.clone();
             player.get_datum(&rv).int_value().unwrap()
         })
+    }
+
+    /// A variable store ends BOTH vector write-back chains, in the IR exactly as
+    /// in the interpreter's `GetSetUtils::set_local`.
+    ///
+    /// `vector_prop_lvalue` and `transform_sub_refs` make a genuine lvalue chain
+    /// — `node.worldPosition.z = v`, `node.transform.position.z = v` — reach the
+    /// node, by mapping the derived vector datum back to its source. Director
+    /// hands those properties back as VALUES, though (measured in 11.5 on a real
+    /// model: `p = m.transform.position` / `p.y = p.y + 1000` leaves
+    /// `m.transform.position` at its original `vector(-863.8519, 0, 0)`, and the
+    /// same for `m.worldPosition`), so the moment the vector is STORED IN A
+    /// VARIABLE the chain has to end or a later component write on the copy is
+    /// pushed back onto the node.
+    ///
+    /// `SetLocal` is the only such store the IR runs itself instead of escaping,
+    /// and it did not clear either table. Sewer Run's `checkPhoto` /
+    /// `checkWeapon` (`pos = pBoarder[b].player.worldPosition` then
+    /// `pos.y = pos.y + 375`) therefore drove the boarder's node 375 units up per
+    /// pickup per frame, until it sat ~68 750 above the rigid body it rides.
+    #[test]
+    fn ir_set_local_ends_the_vector_write_back_chains() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let scope_ref = reserve_player_mut(|player| {
+                // Stand in for a pending `node.worldPosition` /
+                // `transform.position` read: the vector datum, its source, and
+                // the property it came from.
+                let vec_a = player.alloc_datum(Datum::Vector([1.0, 2.0, 3.0]));
+                let src_a = player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]));
+                let vec_b = player.alloc_datum(Datum::Vector([4.0, 5.0, 6.0]));
+                let src_b = player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]));
+                player.vector_prop_lvalue.push((vec_a, src_a, Symbol::from_str("worldPosition")));
+                player.transform_sub_refs.push((vec_b, src_b, Symbol::from_str("position")));
+                player.push_scope()
+            });
+
+            // `local0 = 1` — one IR-native store, nothing else.
+            let compiled = CompiledHandler {
+                ops: vec![IrOp::PushInt(1), IrOp::SetLocal(0)],
+                n_locals: 1,
+            };
+            run_handler_resumable(&compiled, scope_ref).unwrap();
+
+            reserve_player_ref(|player| {
+                assert!(
+                    player.vector_prop_lvalue.is_empty(),
+                    "SetLocal must end the pending node.worldPosition chain, or a                      later component write on the stored COPY moves the node"
+                );
+                assert!(
+                    player.transform_sub_refs.is_empty(),
+                    "SetLocal must end the pending transform.position chain too"
+                );
+            });
+            reserve_player_mut(|player| player.pop_scope());
+        });
     }
 
     #[test]

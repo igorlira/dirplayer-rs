@@ -135,8 +135,17 @@ impl GetSetBytecodeHandler {
 
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
-            // `node.<vectorProp>.<component> =` lvalue chain.
+            // `node.<vectorProp>.<component> =` lvalue chain, and equally the
+            // `<transform>.position.<component> =` one behind
+            // `transform_sub_refs` — both hand back a VALUE that a later write
+            // must not push back into its source. Measured in Director 11.5:
+            //
+            //   p = m.transform.position   q = m.worldPosition
+            //   p.y = p.y + 1000           q.y = q.y + 1000
+            //   put m.transform.position   put m.worldPosition
+            //   -- vector(-863.8519, 0.0000, -0.0000)  (unchanged, both)
             player.vector_prop_lvalue.clear();
+            player.transform_sub_refs.clear();
             let (value_ref, receiver, script_ref, cached) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 let value_ref = scope.stack.pop().unwrap();
@@ -508,8 +517,17 @@ impl GetSetBytecodeHandler {
         let prop_name = ctx.get_name(name_id);
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
-            // `node.<vectorProp>.<component> =` lvalue chain.
+            // `node.<vectorProp>.<component> =` lvalue chain, and equally the
+            // `<transform>.position.<component> =` one behind
+            // `transform_sub_refs` — both hand back a VALUE that a later write
+            // must not push back into its source. Measured in Director 11.5:
+            //
+            //   p = m.transform.position   q = m.worldPosition
+            //   p.y = p.y + 1000           q.y = q.y + 1000
+            //   put m.transform.position   put m.worldPosition
+            //   -- vector(-863.8519, 0.0000, -0.0000)  (unchanged, both)
             player.vector_prop_lvalue.clear();
+            player.transform_sub_refs.clear();
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
                 scope.stack.pop().unwrap()
@@ -578,8 +596,17 @@ impl GetSetBytecodeHandler {
     pub fn set_local(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
-            // `node.<vectorProp>.<component> =` lvalue chain.
+            // `node.<vectorProp>.<component> =` lvalue chain, and equally the
+            // `<transform>.position.<component> =` one behind
+            // `transform_sub_refs` — both hand back a VALUE that a later write
+            // must not push back into its source. Measured in Director 11.5:
+            //
+            //   p = m.transform.position   q = m.worldPosition
+            //   p.y = p.y + 1000           q.y = q.y + 1000
+            //   put m.transform.position   put m.worldPosition
+            //   -- vector(-863.8519, 0.0000, -0.0000)  (unchanged, both)
             player.vector_prop_lvalue.clear();
+            player.transform_sub_refs.clear();
             let slot = (player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier) as usize;
 
@@ -627,8 +654,17 @@ impl GetSetBytecodeHandler {
     pub fn set_param(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         reserve_player_mut(|player| {
             // Storing the value into a variable ends any pending
-            // `node.<vectorProp>.<component> =` lvalue chain.
+            // `node.<vectorProp>.<component> =` lvalue chain, and equally the
+            // `<transform>.position.<component> =` one behind
+            // `transform_sub_refs` — both hand back a VALUE that a later write
+            // must not push back into its source. Measured in Director 11.5:
+            //
+            //   p = m.transform.position   q = m.worldPosition
+            //   p.y = p.y + 1000           q.y = q.y + 1000
+            //   put m.transform.position   put m.worldPosition
+            //   -- vector(-863.8519, 0.0000, -0.0000)  (unchanged, both)
             player.vector_prop_lvalue.clear();
+            player.transform_sub_refs.clear();
             let bytecode_obj = player.get_ctx_current_bytecode(ctx).obj as u32
                 / ctx.multiplier;
             let (arg_count, arg_index, value_ref) = {
