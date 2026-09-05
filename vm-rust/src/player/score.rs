@@ -4306,6 +4306,22 @@ pub fn sprite_get_prop(
                             }
                         };
                     }
+                    // `antiAliasingSupported` is a documented 3D sprite property
+                    // (Director 11.5 Scripting Dictionary): "indicates whether
+                    // anti-aliasing is supported by the current 3D renderer.
+                    // This property can be tested but not set. This property
+                    // returns either TRUE or FALSE."
+                    //
+                    // FALSE, answered honestly: the WebGL2 renderer does not do
+                    // scene anti-aliasing, and `antiAliasingEnabled` already
+                    // reports 0 on the member side. Claiming TRUE would only
+                    // invite the documented follow-up — `if
+                    // sprite(n).antiAliasingSupported then
+                    // sprite(n).antiAliasingEnabled = TRUE` — to set a flag
+                    // nothing acts on.
+                    if prop_name.eq_ignore_ascii_case("antiAliasingSupported") {
+                        return Ok(Datum::Int(0));
+                    }
                     // Unknown sprite props may be custom behavior properties — return VOID
                     warn!(
                         "Unknown sprite prop '{}' — returning VOID", prop_name
