@@ -8,6 +8,15 @@ pub trait DirectorProperty: Clone + PartialEq {
 
     const USE_BASELINE_SKIP: bool = false;
 
+    /// Whether the property's default value is also a legitimate ANIMATED
+    /// value, so a keyframe carrying it must be kept once the tween has
+    /// started. Rotation and skew are the cases: 0 is "upright"/"unskewed",
+    /// which is where a spin-in or shear-in animation normally COMES TO REST.
+    /// Dropping that last keyframe leaves the sprite frozen at the previous
+    /// sample for the rest of the span. Properties whose 0 really does mean
+    /// "this field is not in use" (blend, size, position) leave this false.
+    const DEFAULT_IS_A_VALUE: bool = false;
+
     /// Extract raw value (if present) from frame data
     fn extract_raw(data: &ScoreFrameChannelData) -> Option<Self::Raw>;
 
@@ -95,7 +104,7 @@ pub fn collect_property_keyframes<P: DirectorProperty>(
                 }
             } else {
                 // normal logic
-                if resolved == default_val {
+                if resolved == default_val && !(P::DEFAULT_IS_A_VALUE && initialized) {
                     continue;
                 }
             }
@@ -328,6 +337,7 @@ pub struct Rotation(pub f64);
 
 impl DirectorProperty for Rotation {
     const USE_BASELINE_SKIP: bool = false;
+    const DEFAULT_IS_A_VALUE: bool = true;
     type Raw = f64;
 
     fn extract_raw(data: &ScoreFrameChannelData) -> Option<Self::Raw> {
@@ -348,6 +358,7 @@ pub struct Skew(pub f64);
 
 impl DirectorProperty for Skew {
     const USE_BASELINE_SKIP: bool = false;
+    const DEFAULT_IS_A_VALUE: bool = true;
     type Raw = f64;
 
     fn extract_raw(data: &ScoreFrameChannelData) -> Option<Self::Raw> {
