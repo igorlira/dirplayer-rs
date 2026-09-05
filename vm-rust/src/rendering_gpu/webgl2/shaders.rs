@@ -127,6 +127,8 @@ pub struct ShaderProgram {
     pub u_rotation: Option<WebGlUniformLocation>,
     pub u_rotation_center: Option<WebGlUniformLocation>,
     pub u_skew_flip: Option<WebGlUniformLocation>,
+    /// 1.0 = sample a shrunk sprite at floor(d * src / dst) (see sampleSprite).
+    pub u_floor_rule: Option<WebGlUniformLocation>,
     /// Continuous skew shear, in radians. The vertex shader applies a
     /// horizontal shear `x += y * tan(skew)` around the registration point
     /// before rotation. The special `skew_flip` (±180°) is handled
@@ -283,8 +285,51 @@ uniform float u_blend;  // 0.0 to 1.0
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (matte info baked into alpha)
     if (src.a < 0.01) discard;
@@ -312,8 +357,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (bgColor already baked as alpha=0 in texture)
     if (src.a < 0.01) discard;
@@ -346,8 +434,51 @@ uniform vec4 u_bg_color;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Color-key transparency: discard pixels matching bgColor
     // Use small threshold for floating point comparison
@@ -387,8 +518,51 @@ uniform vec4 u_bg_color;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Color-key transparency: discard pixels matching bgColor
     // Use small threshold for floating point comparison
@@ -425,8 +599,51 @@ uniform vec4 u_bg_color;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -468,8 +685,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -504,8 +764,51 @@ uniform float u_blend;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Matte: transparency comes from alpha channel (flood-fill matte baked in)
     // Discard fully transparent pixels (edge-connected background)
@@ -537,8 +840,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -574,8 +920,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     if (src.a < 0.01) discard;
 
@@ -609,8 +998,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -645,8 +1077,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -682,8 +1157,51 @@ uniform float u_color_tolerance;
 
 out vec4 fragColor;
 
+// Director picks the source texel of a scaled sprite as floor(d * src / dst),
+// the top-left corner of the destination pixel, where GPU nearest sampling
+// picks the texel under the pixel CENTRE. Measured on klods.dcr's ruler
+// (239x46 drawn at 166x32): the floor rule reproduces the projector's
+// pixels 100%, the centre rule 88%, and the difference is the digit rows
+// the centre rule skips. At 1:1 both rules pick the same texel.
+//
+// src and dst sizes come from the same uniforms the vertex shader placed
+// the quad with, so they are exact. A first version derived the step from
+// texcoord derivatives; those carry about 1e-5 relative error, which at
+// row 196 of a 1024x768 backdrop already rounded to the texel above.
+// A rotated or skewed sprite keeps the centre rule so its resampling
+// stays symmetric.
+uniform vec4 u_sprite_rect;
+uniform vec4 u_tex_rect;
+uniform float u_rotation;
+uniform float u_skew_flip;
+uniform float u_skew;
+uniform float u_floor_rule;
+vec4 sampleSprite(vec2 tc) {
+    if (abs(u_rotation) > 0.001 || u_skew_flip > 0.5 || abs(u_skew) > 0.001) {
+        return texture(u_texture, tc);
+    }
+    vec2 ts = vec2(textureSize(u_texture, 0));
+    vec2 srcSize = abs(u_tex_rect.zw) * ts;
+    vec2 dstSize = max(abs(u_sprite_rect.zw), vec2(1.0));
+    // The floor rule is measured for an authored bitmap scaling DOWN
+    // (u_floor_rule). Text, field and shape textures keep the pixel-centre
+    // rule, and so does scaling up: unmeasured, and the floor rule there
+    // shifts a sprite by up to half a source pixel.
+    if (u_floor_rule < 0.5 || dstSize.x > srcSize.x || dstSize.y > srcSize.y) {
+        return texture(u_texture, tc);
+    }
+    // Position within the sprite, 0..1; a pixel centre sits at (d + 0.5) / dst,
+    // so floor has half a pixel of margin when recovering d.
+    vec2 rel = (tc - u_tex_rect.xy) / u_tex_rect.zw;
+    vec2 d = floor(rel * dstSize);
+    vec2 src = floor(d * srcSize / dstSize + 1e-3);
+    ivec2 texel = ivec2(floor(u_tex_rect.xy * ts + 1e-3)) + ivec2(src);
+    texel = clamp(texel, ivec2(0), ivec2(ts) - ivec2(1));
+    return texelFetch(u_texture, texel, 0);
+}
+
 void main() {
-    vec4 src = texture(u_texture, v_texcoord);
+    vec4 src = sampleSprite(v_texcoord);
 
     // Discard fully transparent pixels (from matte mask)
     if (src.a < 0.01) discard;
@@ -741,6 +1259,7 @@ void main() {
         let u_rotation = gl.get_uniform_location(&program, "u_rotation");
         let u_rotation_center = gl.get_uniform_location(&program, "u_rotation_center");
         let u_skew_flip = gl.get_uniform_location(&program, "u_skew_flip");
+        let u_floor_rule = gl.get_uniform_location(&program, "u_floor_rule");
         let u_skew = gl.get_uniform_location(&program, "u_skew");
 
         Ok(ShaderProgram {
@@ -759,6 +1278,7 @@ void main() {
             u_rotation,
             u_rotation_center,
             u_skew_flip,
+            u_floor_rule,
             u_skew,
         })
     }

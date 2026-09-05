@@ -514,6 +514,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), 0.0);
         }
+        if let Some(ref loc) = program.u_floor_rule {
+            gl.uniform1f(Some(loc), 0.0);
+        }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
@@ -589,6 +592,9 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew {
@@ -677,6 +683,9 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew {
@@ -1202,6 +1211,7 @@ impl WebGL2Renderer {
             bg_color_explicit: false,
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+            floor_rule: false,
         };
 
         // Render text to the bitmap
@@ -1285,6 +1295,9 @@ impl WebGL2Renderer {
         }
         // No skew flip
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew {
@@ -3558,6 +3571,10 @@ impl WebGL2Renderer {
         // Colorize is also baked into the texture when has_fore_color or has_back_color is set
 
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
+        // The floor sampling rule was measured on authored bitmaps; a text,
+        // field or shape texture whose sprite rect is a pixel short keeps the
+        // centre rule it always had.
+        let floor_rule = matches!(texture_source, TextureSource::Bitmap { is_flash: false, .. });
         let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
         // These sources rasterize a FRESH texture here every frame and, unlike
@@ -3961,6 +3978,7 @@ impl WebGL2Renderer {
                             bg_color_explicit: false,
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            floor_rule: false,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -4493,6 +4511,9 @@ impl WebGL2Renderer {
         // Set skew flip (vertex space y-negation before rotation)
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), if has_skew_flip { 1.0 } else { 0.0 });
+        }
+        if let Some(ref loc) = program.u_floor_rule {
+            gl.uniform1f(Some(loc), if floor_rule { 1.0 } else { 0.0 });
         }
 
         // Continuous skew (`the skew of sprite`) — applied as a horizontal
@@ -6239,6 +6260,7 @@ impl WebGL2Renderer {
             bg_color_explicit: false,
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+            floor_rule: false,
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -7041,6 +7063,7 @@ impl WebGL2Renderer {
                             bg_color_explicit: false,
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            floor_rule: false,
                         };
 
                         // Pick the run's atlas. When the run names a variant
