@@ -1219,6 +1219,11 @@ impl MovieHandlers {
         // cursor is still.
         crate::player::events::dispatch_rollover_events();
 
+        // Animated GIF members: put up whichever frame the elapsed time calls
+        // for. Done here, once per frame, so an animation runs at its own
+        // delays regardless of the movie's tempo.
+        crate::player::gif::tick_gif_animations();
+
         // Relay prepareFrame to timeout targets
         dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
 

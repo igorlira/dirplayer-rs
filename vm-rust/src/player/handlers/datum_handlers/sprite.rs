@@ -307,6 +307,15 @@ impl SpriteDatumHandlers {
         if is_sync_handler {
             return Ok(false);
         }
+        // pause and resume are not built-ins on an ordinary sprite, so they stay
+        // on the async path where a behaviour may define them. On a sprite
+        // showing an animated GIF they drive the animation.
+        if matches!(name_lower.as_str(), "pause" | "resume")
+            && crate::player::gif::sprite_has_gif(datum)
+        {
+            return Ok(false);
+        }
+
 
         // For all other handlers, use the async path which will:
         // 1. Try sprite's attached scripts
@@ -321,6 +330,15 @@ impl SpriteDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let name_lower = handler_name.to_lowercase();
         match name_lower.as_str() {
+            // A movie drives an animated GIF through its sprite:
+            // `sprite(n).pause()` freezes it, `rewind()` returns it to frame 1
+            // and `resume()` starts it again. Without these the animation runs
+            // continuously, so a plume meant to puff at intervals never stops.
+            "pause" | "resume" | "rewind" | "play" | "stop"
+                if crate::player::gif::sprite_has_gif(datum) =>
+            {
+                crate::player::gif::control_sprite_gif(datum, &name_lower)
+            }
             // `sprite(N).pointToChar(point)` — 1-based char index at a stage
             // coordinate within the sprite's text/field member, or -1 if the
             // point isn't within the text (Director 11.5 Scripting Dictionary).

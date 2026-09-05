@@ -2027,6 +2027,19 @@ pub fn render_score_to_bitmap_with_offset(
                     None
                 };
 
+                // A GIF carries the background colour the file declares, and
+                // a movie hides it with ink 36, which keys out the background
+                // colour. The score's bgColor for such a sprite is whatever
+                // the author left there, usually white, so a GIF with any
+                // other background drew as a solid box. Prefer the member's.
+                let bg_color = match sprite.member.as_ref() {
+                    Some(m) if crate::player::gif::is_gif_member(player, m.cast_lib, m.cast_member) => {
+                        player.movie.cast_manager.find_member_by_ref(m)
+                            .map(|mem| mem.bg_color.clone())
+                            .unwrap_or_else(|| sprite.bg_color.clone())
+                    }
+                    _ => sprite.bg_color.clone(),
+                };
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
