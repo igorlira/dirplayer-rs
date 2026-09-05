@@ -5162,7 +5162,8 @@ impl Shockwave3dObjectDatumHandlers {
                             let excluded = expand_detached_subtrees(
                                 &scene, &runtime_state.detached_nodes);
                             if let Some(hit) = raycast::raycast_scene_multi(
-                                &ray, &scene, 100000.0, 1,
+                                // No `#maxDistance`: picking has no model cull.
+                                &ray, &scene, f32::INFINITY, 1,
                                 Some(&runtime_state.node_transforms), Some(&excluded), None,
                                 // Bind-pose geometry: this is a picking path, not
                                 // gameplay hit detection. Wire the anim closure in if a
@@ -5307,7 +5308,7 @@ impl Shockwave3dObjectDatumHandlers {
                             // (unicraft's galaxy: camera ~140000 units from the planets → hits=0,
                             // so no hover/select). Use an effectively-unbounded range.
                             let mut hits = raycast::raycast_scene_multi(
-                                &ray, &scene, 1.0e9, max_models,
+                                &ray, &scene, f32::INFINITY, max_models,
                                 Some(&node_transforms), Some(&excluded), None,
                                 // As above — picking, so bind-pose geometry is accepted.
                                 None,

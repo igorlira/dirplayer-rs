@@ -3734,20 +3734,23 @@ impl Shockwave3dMemberHandlers {
                             origin: [origin[0] as f32, origin[1] as f32, origin[2] as f32],
                             direction: norm_dir,
                         };
-                        // Director parameterizes the ray as origin + t*direction with
-                        // t in [0, maxDistance], so maxDistance is measured in units of
-                        // the DIRECTION VECTOR's length, not world units. The world reach
-                        // is therefore maxDistance * |direction|. We cast with a unit
-                        // direction, so scale the world cutoff by |direction| to match.
-                        // SweeTarts' snake ground-snap casts vector(0,-15,0) with
-                        // maxDistance 100 → 1500 units of reach; treating it as 100 world
-                        // units fell ~7 units short of the platform 107 below the spawn
-                        // origin, so the snake never seated ("can't move before it jumps").
-                        let world_max_dist = if dir_len > 1e-10 {
-                            max_dist * dir_len as f32
-                        } else {
-                            max_dist
-                        };
+                        // `#maxDistance` is a WORLD distance, and it selects MODELS
+                        // rather than clipping the hit: Director 11.5, `modelsUnderRay`
+                        // — "If a model's bounding sphere is within the maximum distance
+                        // specified, that model is included. If the bounding sphere is in
+                        // range, then it may contain polygons in range and thus might be
+                        // intersected." `raycast_scene_multi` applies exactly that, so the
+                        // value goes through in world units.
+                        //
+                        // It used to be scaled by |direction| on the theory that Director
+                        // parameterises the ray as origin + t*direction with t bounded by
+                        // maxDistance. That was a workaround for reading maxDistance as a
+                        // hit cutoff at all: SweeTarts' snake ground-snap
+                        // (`vector(0,-15,0)`, maxDistance 100) needed to reach a platform
+                        // 107 below, and under the documented rule it does — the platform's
+                        // bounding sphere is well within 100 of the snake standing on it,
+                        // so the model is included and the hit comes back at 107.
+                        let world_max_dist = max_dist;
                         // An explicit #modelList names the models to test, and the
                         // dictionary describes it purely as a whitelist over what the
                         // ray finds — it says nothing about world membership. Naming a

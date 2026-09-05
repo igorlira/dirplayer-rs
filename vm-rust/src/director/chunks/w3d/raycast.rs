@@ -191,6 +191,72 @@ pub fn raycast_scene(
     raycast_scene_multi(ray, scene, max_dist, 1, None, None, None, None).into_iter().next()
 }
 
+/// Local-space AABB of one model resource's geometry, or `None` when it has no
+/// vertices. Computed once per resource per ray cast and reused across every
+/// node that instances it — `#maxDistance` culling must not cost a pass over
+/// the geometry per node.
+fn resource_local_aabb(scene: &W3dScene, resource: &Symbol) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    let mut any = false;
+    {
+        let mut visit = |positions: &[[f32; 3]]| {
+            for p in positions {
+                for i in 0..3 {
+                    if p[i] < min[i] { min[i] = p[i]; }
+                    if p[i] > max[i] { max[i] = p[i]; }
+                }
+                any = true;
+            }
+        };
+        if let Some(meshes) = scene.clod_meshes.get(resource) {
+            for mesh in meshes {
+                visit(&mesh.positions);
+            }
+        }
+        for mesh in scene.raw_meshes.iter().filter(|m| m.name == *resource) {
+            visit(&mesh.positions);
+        }
+    }
+    if any { Some((min, max)) } else { None }
+}
+
+/// World-space bounding sphere of a local AABB placed by `world_transform`:
+/// the eight transformed corners, their midpoint as the centre and the farthest
+/// corner as the radius. A corner-derived sphere is never tighter than the true
+/// one, and for `#maxDistance` looser only means MORE models are considered —
+/// which the ray then rejects on its own.
+fn aabb_world_sphere(
+    (min, max): ([f32; 3], [f32; 3]),
+    world_transform: &[f32; 16],
+) -> ([f32; 3], f32) {
+    let mut corners = [[0.0f32; 3]; 8];
+    for (i, c) in corners.iter_mut().enumerate() {
+        let x = if i & 1 == 0 { min[0] } else { max[0] };
+        let y = if i & 2 == 0 { min[1] } else { max[1] };
+        let z = if i & 4 == 0 { min[2] } else { max[2] };
+        *c = transform_point_4x4(world_transform, x, y, z);
+    }
+    let mut lo = corners[0];
+    let mut hi = corners[0];
+    for c in &corners[1..] {
+        for i in 0..3 {
+            if c[i] < lo[i] { lo[i] = c[i]; }
+            if c[i] > hi[i] { hi[i] = c[i]; }
+        }
+    }
+    let center = [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    ];
+    let radius = ((hi[0] - center[0]).powi(2)
+        + (hi[1] - center[1]).powi(2)
+        + (hi[2] - center[2]).powi(2))
+        .sqrt();
+    (center, radius)
+}
+
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
 /// If node_transforms is provided, meshes are tested in world space using model transforms.
 /// If excluded_nodes is provided, nodes in the set are skipped (e.g. invisible models).
@@ -219,7 +285,30 @@ pub fn raycast_scene_multi(
     // distance 499921). Without tightening, an unbounded ray tests every triangle
     // of every model in the member: level 2 of Agent Free Ride went from ~97 to
     // ~198 ms/frame purely from that.
-    let mut work_max = max_dist;
+    //
+    // `max_dist` is `#maxDistance`, which is NOT a cutoff on the intersection.
+    // Director 11.5 Scripting Dictionary, `modelsUnderRay`:
+    //
+    //   maxDistance — "The maximum distance from the world position specified by
+    //   locationVector. If a MODEL'S BOUNDING SPHERE is within the maximum
+    //   distance specified, THAT MODEL IS INCLUDED. If the bounding sphere is in
+    //   range, then it may contain polygons in range and thus might be
+    //   intersected."
+    //
+    // So it selects MODELS by their bounding sphere and then intersects their
+    // polygons with no distance limit at all — a hit may come back far beyond
+    // maxDistance. Treating it as a hit-distance cutoff broke thehillshaveeyes:
+    // `_controller_FPS.checkFloor` casts straight down with `#maxDistance: 100`
+    // to seat the player on `L_C_floor`, but the mine floor under the spawn is
+    // ~530 units below. Director includes the model (the ray starts well inside
+    // its 3378-unit bounding sphere), returns the hit at 530, and the player
+    // stands on the ground; clamped to 100 the ray found nothing and the movie —
+    // which has no gravity, only this snap — left the player floating ~480 units
+    // above the mine for the whole game.
+    //
+    // The hit-distance bound therefore starts UNBOUNDED and is only ever
+    // tightened by the progressive pruning below.
+    let mut work_max = f32::INFINITY;
 
     // Name -> node index, built once per call. The world transform of each model
     // is accumulated by walking its parent chain, and each level did
@@ -236,6 +325,12 @@ pub fn raycast_scene_multi(
         .enumerate()
         .map(|(i, n)| (n.name, i))
         .collect();
+
+    // Local AABB per model resource, filled on demand for the `#maxDistance`
+    // cull below. Scoped to the call for the same reason `node_index` is: the
+    // scene's geometry changes at runtime.
+    let mut local_aabb_cache: std::collections::HashMap<Symbol, Option<([f32; 3], [f32; 3])>> =
+        std::collections::HashMap::new();
 
     // For each model node, find its mesh data and test
     for node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
@@ -332,7 +427,31 @@ pub fn raycast_scene_multi(
                 && (l(4, 5, 6) - 1.0).abs() < 1e-3
                 && (l(8, 9, 10) - 1.0).abs() < 1e-3
         };
-        let node_max = if unit_scale { work_max } else { max_dist };
+        let node_max = if unit_scale { work_max } else { f32::INFINITY };
+
+        // `#maxDistance` model cull: skip the whole model when its world-space
+        // bounding sphere is farther than maxDistance from the ray's origin.
+        // This is the only thing maxDistance does, and it is also what keeps an
+        // unbounded ray affordable — a far model costs one sphere test instead
+        // of a pass over its triangles. Runs before the skinning below so a
+        // culled model costs no pose either; the AABB is the BIND pose, which
+        // is what the sphere's generous corner-derived radius is there to
+        // absorb.
+        if max_dist.is_finite() {
+            let aabb = *local_aabb_cache
+                .entry(*resource)
+                .or_insert_with(|| resource_local_aabb(scene, resource));
+            if let Some(aabb) = aabb {
+                let (center, radius) = aabb_world_sphere(aabb, &world_transform);
+                let dx = center[0] - ray.origin[0];
+                let dy = center[1] - ray.origin[1];
+                let dz = center[2] - ray.origin[2];
+                let to_center = (dx * dx + dy * dy + dz * dz).sqrt();
+                if to_center - radius > max_dist {
+                    continue;
+                }
+            }
+        }
         // Skinned models are tested against their POSED geometry. `anim` supplies
         // the same (motion, time, rootLock) the renderer is drawing with, so the
         // hit volume tracks the body instead of the bind pose. `None` (no rig, or
