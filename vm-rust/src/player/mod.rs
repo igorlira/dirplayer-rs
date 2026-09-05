@@ -4343,6 +4343,27 @@ pub fn hold_draw_for_input_handler() {
     });
 }
 
+/// Director runs one handler at a time: input that arrives while a frame
+/// handler is busy-waiting (`repeat while ... updateStage()`) is queued until
+/// the handler returns. The busy-wait yield lets the command and event loops
+/// run inside that wait, so a mouseEnter fired mid-animation on Maaneby's map
+/// build sequence, where the original ignores the mouse until it is over.
+/// Waits for the gap; never drops the input.
+pub async fn wait_for_handler_gap() {
+    loop {
+        let busy = reserve_player_ref(|player| {
+            player.is_playing
+                && !player.is_yield_safe()
+                && !player.in_mouse_command
+                && !player.command_handler_yielding
+        });
+        if !busy {
+            return;
+        }
+        let _ = timeout(Duration::from_millis(4), future::pending::<()>()).await;
+    }
+}
+
 pub fn reserve_player_mut<T, F>(callback: F) -> T
 where
     F: FnOnce(&mut DirPlayer) -> T,
@@ -8041,6 +8062,44 @@ mod interp_bench {
             let report = crate::player::run_bytecode_benchmark();
             println!("{report}");
             assert!(report.contains("ops/sec"));
+        });
+    }
+}
+
+#[cfg(test)]
+mod handler_gap_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn input_waits_until_the_frame_handler_returns() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.is_playing = true;
+                p.in_frame_script = true;
+            });
+            let held = timeout(Duration::from_millis(30), wait_for_handler_gap()).await;
+            assert!(held.is_err(), "input ran inside the frame handler");
+            reserve_player_mut(|p| p.in_frame_script = false);
+            let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
+            assert!(released.is_ok(), "input never ran after the handler returned");
+        });
+    }
+
+    #[test]
+    fn a_mouse_handler_does_not_hold_input() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.is_playing = true;
+                p.in_frame_script = true;
+                p.in_mouse_command = true;
+            });
+            let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
+            assert!(released.is_ok());
         });
     }
 }
