@@ -24,8 +24,15 @@ const loadedEnv = {
   ...process.env,
 };
 
+// Through the Windows shell an argument with a space splits in two, so a
+// checkout under "C:\Users\Some Name\..." handed wasm-bindgen half a path.
+function quoted(args) {
+  if (!IS_WIN) return args;
+  return args.map((a) => (/\s/.test(a) && !/^"/.test(a) ? `"${a}"` : a));
+}
+
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, {
+  const res = spawnSync(cmd, quoted(args), {
     stdio: "inherit",
     shell: IS_WIN,
     ...opts,
@@ -211,11 +218,11 @@ const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
 // 9. Always generate the HTML snapshot report regardless of test outcome.
 spawnSync(
   "node",
-  [
+  quoted([
     path.join(__dirname, "generate-snapshot-report.mjs"),
     path.join(VM_RUST_DIR, "tests", "snapshots"),
     path.join(REPO_ROOT, "test-results", "snapshot-report"),
-  ],
+  ]),
   { cwd: REPO_ROOT, stdio: "inherit", shell: IS_WIN },
 );
 
