@@ -66,6 +66,49 @@ extern "C" {
     /// (== #button) — no dependency on continuous mouse routing.
     #[wasm_bindgen(js_name = "dirplayer_ruffleHitTest")]
     fn ruffle_hit_test(sprite_num: i32, x: f64, y: f64) -> i32;
+    /// Flash variable access behind the sprite dot-syntax — see
+    /// `flash_sprite_variable_name`.
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
+    fn ruffle_get_variable(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
+    fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
+}
+
+/// `_level0`-qualify a bare Flash variable name, matching
+/// `datum_handlers::sprite::root_flash_path`.
+fn root_flash_path(path: &str) -> String {
+    if path.is_empty()
+        || path.starts_with("_level0")
+        || path.starts_with("_root")
+        || path.starts_with("_global")
+        || path.starts_with("this")
+        || path.starts_with('/')
+    {
+        path.to_string()
+    } else {
+        format!("_level0.{}", path)
+    }
+}
+
+/// TRUE when the sprite currently displays a Flash (SWF) cast member, i.e. when
+/// an otherwise-unrecognised `sprite(N).foo` is a FLASH VARIABLE rather than a
+/// behaviour property.
+///
+/// "Director now lets you access Flash variables and execute methods directly
+/// on the Director sprite: `spriteReference.myFlashVariable = "newValue"` /
+/// `put spriteReference.myFlashVariable`" — Using Director 11.5, "Using Lingo
+/// or JavaScript syntax with Flash variables". The `setVariable()` /
+/// `getVariable()` methods are the older spelling of the same access, and
+/// dirplayer already implements those; this is the dot-syntax surface.
+fn sprite_is_flash(player: &DirPlayer, sprite_id: i16) -> bool {
+    player
+        .movie
+        .score
+        .get_sprite(sprite_id)
+        .and_then(|s| s.member.as_ref())
+        .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
+        .map(|m| matches!(m.member_type, CastMemberType::Flash(_)))
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -4201,6 +4244,35 @@ pub fn sprite_get_prop(
                 }
 
                 None => {
+                    // No behaviour owns the name. On a Flash sprite the dot
+                    // syntax reads the SWF's ActionScript variable of that name
+                    // (Using Director 11.5, "Using Lingo or JavaScript syntax
+                    // with Flash variables") — the same value `getVariable()`
+                    // returns. Sewer Run's whole UI is one SWF driven this way:
+                    // `sprite(1).track`, `.challenge`, `.state`, `.skiptomenu`,
+                    // `.load_percent`, … Without this the reads answered VOID
+                    // and, worse, the paired WRITES were invented as behaviour
+                    // properties on the sprite, so the loader's
+                    // `sprite(1).load_percent = 100` never reached the SWF and
+                    // the game sat forever on "The game is loading (0%)".
+                    if reserve_player_ref(|player| sprite_is_flash(player, sprite_id)) {
+                        return match ruffle_get_variable(sprite_id as i32, &root_flash_path(&prop_name.to_string())) {
+                            // Always a STRING when the variable exists — see
+                            // `getVariable()` in the dictionary, and
+                            // `flashPlayerManager.ts::coerceFlashValue`, which
+                            // stringifies numbers and booleans on the way over.
+                            // A null/undefined answer (no such variable, or the
+                            // instance is not ready) is VOID.
+                            Ok(val) => Ok(match val.as_string() {
+                                Some(s) => Datum::String(s),
+                                None => Datum::Void,
+                            }),
+                            Err(e) => {
+                                warn!("Flash sprite variable get '{}' error: {:?}", prop_name, e);
+                                Ok(Datum::Void)
+                            }
+                        };
+                    }
                     // Unknown sprite props may be custom behavior properties — return VOID
                     warn!(
                         "Unknown sprite prop '{}' — returning VOID", prop_name
@@ -5386,10 +5458,28 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 match first_pass {
                     Some(r) => r,
                     None => {
-                        // No behavior declares this property. Director allows dynamic
-                        // creation of behavior properties via assignment, so create it
-                        // on the first behavior (e.g. cs `sprite(N).pCustomData = ...`
-                        // on a sprite whose only behavior doesn't declare pCustomData).
+                        // No behaviour declares it. On a Flash sprite the dot
+                        // syntax WRITES the SWF's ActionScript variable of that
+                        // name — the mirror of the getter above, and the same
+                        // thing `setVariable()` does. This must come before the
+                        // dynamic-behaviour-property fallback, which would
+                        // otherwise swallow the write into a Director-side
+                        // instance the SWF can never see.
+                        if reserve_player_ref(|player| sprite_is_flash(player, sprite_id)) {
+                            let value_str = value.string_value().unwrap_or_default();
+                            if let Err(e) = ruffle_set_variable(
+                                sprite_id as i32,
+                                &root_flash_path(&prop_name.to_string()),
+                                &value_str,
+                            ) {
+                                warn!("Flash sprite variable set '{}' error: {:?}", prop_name, e);
+                            }
+                            return Ok(());
+                        }
+                        // Director allows dynamic creation of behavior properties
+                        // via assignment, so create it on the first behavior (e.g.
+                        // `sprite(N).pCustomData = ...` on a sprite whose only
+                        // behavior doesn't declare pCustomData).
                         if let Some(first_behavior) = sprite.script_instance_list.first().cloned() {
                             reserve_player_mut(|player| {
                                 let value_ref = player.alloc_datum(value.clone());
