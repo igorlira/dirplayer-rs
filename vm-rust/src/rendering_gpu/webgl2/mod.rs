@@ -4613,15 +4613,25 @@ impl WebGL2Renderer {
             }
         }
 
-        // Darken (ink 41) is a foreColor/bgColor duotone — feed the shader the
-        // sprite's foreColor as well as the bgColor set above.
-        if effective_ink == InkMode::Darken {
+        // Darken (ink 41) is a foreColor/bgColor duotone and Lighten (ink 40)
+        // adds the foreColor: feed the shader the sprite's foreColor as well
+        // as the bgColor set above. Lighten adds it to TRUE-COLOUR bitmaps
+        // only. An indexed bitmap under Lighten keeps its palette colours
+        // (Habbo's navigator buttons: 8-bit, ink 40, foreColor light grey, and
+        // the real client leaves their black outlines black), while a 32-bit
+        // one is lifted by the foreColor (Matematik i Maaneby's stones).
+        if effective_ink == InkMode::Darken || effective_ink == InkMode::Lighten {
+            let fg = if effective_ink == InkMode::Lighten && bitmap_bit_depth <= 8 {
+                (0, 0, 0)
+            } else {
+                fg_color_rgb
+            };
             if let Some(ref loc) = u_fg_color {
                 gl.uniform4f(
                     Some(loc),
-                    fg_color_rgb.0 as f32 / 255.0,
-                    fg_color_rgb.1 as f32 / 255.0,
-                    fg_color_rgb.2 as f32 / 255.0,
+                    fg.0 as f32 / 255.0,
+                    fg.1 as f32 / 255.0,
+                    fg.2 as f32 / 255.0,
                     1.0,
                 );
             }
