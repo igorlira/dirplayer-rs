@@ -191,8 +191,9 @@ impl SoundChannelDatumHandlers {
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeIn) => {
-                let ticks = if args.is_empty() {
-                    60
+                // fadeIn({milliseconds}). One argument, and it is a duration.
+                let ms = if args.is_empty() {
+                    1000
                 } else {
                     player.get_datum(&args[0]).int_value()?
                 };
@@ -201,27 +202,34 @@ impl SoundChannelDatumHandlers {
                 } else {
                     255.0
                 };
-                Self::handle_fade_in(player, datum, ticks, to_volume)?;
+                Self::handle_fade_in(player, datum, ms, to_volume)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeOut) => {
-                let ticks = if args.is_empty() {
-                    60
+                // fadeOut({milliseconds}). Read as ticks, a fadeOut(1000) took
+                // 16 seconds instead of one.
+                let ms = if args.is_empty() {
+                    1000
                 } else {
                     player.get_datum(&args[0]).int_value()?
                 };
-                Self::handle_fade_out(player, datum, ticks)?;
+                Self::handle_fade_out(player, datum, ms)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeTo) => {
                 if args.len() < 2 {
                     return Err(ScriptError::new(
-                        "fadeTo requires ticks and volume arguments".to_string(),
+                        "fadeTo requires volume and duration arguments".to_string(),
                     ));
                 }
-                let ticks = player.get_datum(&args[0]).int_value()?;
-                let to_volume = player.get_datum(&args[1]).float_value()?;
-                Self::handle_fade_to(player, datum, ticks, to_volume)?;
+                // Director's order is fadeTo(volume, milliseconds). Read the
+                // other way round, Matematik i Maaneby's music button,
+                // `sound(1).fadeTo(200 * musik, 1500)`, turned the music OFF by
+                // fading to 1500 over 0 ticks: 1500 clamps to 255, so the button
+                // meant to silence the music set it to full, instantly.
+                let to_volume = player.get_datum(&args[0]).float_value()?;
+                let ms = player.get_datum(&args[1]).int_value()?;
+                Self::handle_fade_to(player, datum, ms, to_volume)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::SetPlaylist) => {
@@ -530,32 +538,32 @@ impl SoundChannelDatumHandlers {
     fn handle_fade_in(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
         to_volume: f64,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_in(ticks, to_volume);
+        channel.borrow_mut().fade_in(ms, to_volume);
         Ok(())
     }
 
     fn handle_fade_out(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_out(ticks);
+        channel.borrow_mut().fade_out(ms);
         Ok(())
     }
 
     fn handle_fade_to(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
         to_volume: f64,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_to(ticks, to_volume);
+        channel.borrow_mut().fade_to(ms, to_volume);
         Ok(())
     }
 
@@ -3862,8 +3870,9 @@ impl SoundChannel {
         }
     }
 
-    pub fn fade_in(&mut self, ticks: i32, to_volume: f64) {
-        let duration = ticks as f64 / 60.0;
+    /// Fade in over `ms` MILLISECONDS, same unit as `fade_to`.
+    pub fn fade_in(&mut self, ms: i32, to_volume: f64) {
+        let duration = (ms as f64 / 1000.0).max(0.0);
         self.is_fading = true;
         self.fade_start_volume = 0.0;
         self.fade_target_volume = to_volume;
@@ -3872,12 +3881,17 @@ impl SoundChannel {
         self.volume = 0.0;
     }
 
-    pub fn fade_out(&mut self, ticks: i32) {
-        self.fade_to(ticks, 0.0);
+    pub fn fade_out(&mut self, ms: i32) {
+        self.fade_to(ms, 0.0);
     }
 
-    pub fn fade_to(&mut self, ticks: i32, to_volume: f64) {
-        let duration = ticks as f64 / 60.0;
+    /// Fade this channel to `to_volume` over `ms` MILLISECONDS.
+    ///
+    /// Director's sound-channel fades are in milliseconds, not ticks. Treating
+    /// them as ticks stretched every fade by 16.7x, so a `fadeOut(1000)` took
+    /// 16 seconds instead of one.
+    pub fn fade_to(&mut self, ms: i32, to_volume: f64) {
+        let duration = (ms as f64 / 1000.0).max(0.0);
         self.is_fading = true;
         self.fade_start_volume = self.volume;
         self.fade_target_volume = to_volume;
@@ -4727,5 +4741,21 @@ impl SoundChannel {
         }
 
         Ok((buffer, num_channels, buffer_sample_rate))
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::SoundChannel;
+
+    #[test]
+    fn fades_are_in_milliseconds() {
+        let mut ch = SoundChannel::new(1, None);
+        ch.fade_to(1500, 0.0);
+        assert!((ch.fade_duration - 1.5).abs() < 1e-9, "1500 ms is 1.5 s, not 1500 ticks");
+        ch.fade_out(1000);
+        assert!((ch.fade_duration - 1.0).abs() < 1e-9);
+        ch.fade_in(250, 1.0);
+        assert!((ch.fade_duration - 0.25).abs() < 1e-9);
     }
 }
