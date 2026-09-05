@@ -45,6 +45,11 @@ pub struct CopyPixelsParams<'a> {
     /// (mask_reg - src_reg). Director allows mask bitmaps to be larger or
     /// smaller than the source — alignment is by registration point.
     pub ink9_mask_offset: (i32, i32),
+    /// Sample a shrunk source at floor(d * src / dst), as Director does for
+    /// an authored bitmap (measured on klods.dcr's ruler). Off for text, field
+    /// and shape blits, which keep the pixel-centre rule; see the shader's
+    /// u_floor_rule.
+    pub floor_rule: bool,
 }
 
 impl CopyPixelsParams<'_> {
@@ -65,6 +70,7 @@ impl CopyPixelsParams<'_> {
             original_dst_rect: None,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            floor_rule: false,
         }
     }
 }
@@ -1879,6 +1885,7 @@ impl Bitmap {
             original_dst_rect,
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
+            floor_rule: false,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -2632,9 +2639,20 @@ impl Bitmap {
                     continue;
                 }
 
-                // Map destination pixel to source coordinate with scaling
-                let src_f_x = src_left_f + (dst_x_idx + 0.5) * scale_x;
-                let src_f_y = src_top_f + (dst_y_idx + 0.5) * scale_y;
+                // Map destination pixel to source coordinate with scaling.
+                // Director samples a stretched bitmap at floor(d * src / dst),
+                // the top-left of the destination pixel, not its centre.
+                // Measured on klods.dcr's ruler (member 82, 239x46 drawn at
+                // 166x32): the floor rule reproduces the projector's pixels
+                // 100%, the centre rule 88%, and the difference is the digit
+                // rows the centre rule skips. Rotation and skew keep the
+                // centre so their resampling stays symmetric.
+                // Floor rule (phase 0) only for an authored bitmap scaling down;
+                // see the shader.
+                let scaling_up = scale_x < 1.0 || scale_y < 1.0;
+                let phase = if has_sprite_rotation || has_skew_flip || scaling_up || !params.floor_rule { 0.5 } else { 0.0 };
+                let src_f_x = src_left_f + (dst_x_idx + phase) * scale_x;
+                let src_f_y = src_top_f + (dst_y_idx + phase) * scale_y;
 
                 // Handle horizontal flip
                 let src_mapped_x = if flip_x {
@@ -4275,5 +4293,35 @@ impl Bitmap {
             line_direction: 0,
         };
         self.draw_shape_with_sprite(sprite, &default_shape, dst_rect, palettes, palette_ref);
+    }
+}
+
+#[cfg(test)]
+mod shrink_sampling_tests {
+    use super::*;
+    use crate::player::bitmap::bitmap::{BuiltInPalette, PaletteRef};
+    use crate::player::bitmap::palette_map::PaletteMap;
+
+    // Three source columns with distinct reds, drawn into two: the floor rule
+    // keeps columns 0 and 1 (floor(0 * 1.5), floor(1 * 1.5)); the centre rule
+    // keeps 0 and 2 (floor(0.75), floor(2.25)).
+    fn shrink(floor_rule: bool) -> Vec<u8> {
+        let mut src = Bitmap::new(3, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        for x in 0..3 { src.data[x * 4..x * 4 + 4].copy_from_slice(&[10 * (x as u8 + 1), 0, 0, 255]); }
+        let mut dst = Bitmap::new(2, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut params = CopyPixelsParams::default(&src);
+        params.floor_rule = floor_rule;
+        dst.copy_pixels_with_params(&PaletteMap::new(), &src, IntRect::from(0, 0, 2, 1), IntRect::from(0, 0, 3, 1), &params);
+        vec![dst.data[0], dst.data[4]]
+    }
+
+    #[test]
+    fn an_authored_bitmap_shrinks_by_the_floor_rule() {
+        assert_eq!(shrink(true), vec![10, 20]);
+    }
+
+    #[test]
+    fn everything_else_keeps_the_centre_rule() {
+        assert_eq!(shrink(false), vec![10, 30]);
     }
 }
