@@ -2172,6 +2172,28 @@ impl Shockwave3dMemberHandlers {
                                 .get(&Symbol::from_str(&source_model_name)).map(|(n, _)| *n))
                             .unwrap_or(0);
                         let hops = src_hops + 1;
+                        // Was the SOURCE rig one Director actually folds? Either it was
+                        // folded at parse in its own member (`model_com_folded`), or it
+                        // is itself a clone of such a lineage (`clone_com_folded`). Only
+                        // then may a hop re-fold r0 into the node transform — the r0
+                        // itself is carried either way, because the renderer's clone tier
+                        // needs it for unfolded rigs too. See
+                        // `Shockwave3dRuntimeState::clone_com_folded`.
+                        let src_com_folded: bool = source_member_ref.as_ref()
+                            .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                            .and_then(|sm| sm.member_type.as_shockwave3d())
+                            .map(|sw| {
+                                let n = Symbol::from_str(&source_model_name);
+                                sw.runtime_state.clone_com_folded.contains(&n)
+                                    || sw.parsed_scene.as_deref().map_or(false, |sc| {
+                                        [source_model_name.to_ascii_lowercase(),
+                                         source_model_resource_name.to_ascii_lowercase(),
+                                         source_resource_name.to_ascii_lowercase()]
+                                            .iter()
+                                            .any(|k| sc.model_com_folded.contains(k))
+                                    })
+                            })
+                            .unwrap_or(false);
                         let mut record_hops: Option<(Symbol, u32, [f32; 16])> = None;
                         // (source name, name actually used) for every cloned descendant —
                         // read back after the scene borrow ends to record clone provenance.
@@ -2321,6 +2343,9 @@ impl Shockwave3dMemberHandlers {
                                 }
                                 if let Some((name, n, r0)) = record_hops {
                                     w3d.runtime_state.clone_hop_count.insert(name, (n, r0));
+                                    if src_com_folded {
+                                        w3d.runtime_state.clone_com_folded.insert(name);
+                                    }
                                 }
                                 // Motions stay scene-global and keep naming the ORIGINAL
                                 // node, so record where each cloned node came from —
@@ -3404,6 +3429,7 @@ impl Shockwave3dMemberHandlers {
                             texture_write_versions: HashMap::new(),
                             texture_epoch: 0,
                             model_root_com: HashMap::new(),
+                            model_com_folded: Default::default(),
                         };
                         empty_scene.nodes.push(W3dNode {
                             name: Symbol::builtin(BuiltInSymbol::World),

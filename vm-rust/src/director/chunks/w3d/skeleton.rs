@@ -113,9 +113,18 @@ pub fn idle_reference_motion<'a>(
 /// Frame 0 of the motion Director samples to fold a skinned model's biped COM
 /// into its model node at import (`apply_root_com_to_model_nodes`).
 ///
-/// `None` means "no clip for this rig in this member" — and frame 0 of no motion
-/// is the skeleton's REST pose, which is what the caller then samples. Director
-/// folds that too: AreaZero keeps each robot in its own cast member with zero
+/// `None` means "no clip for this rig in this member" — and the caller now
+/// SKIPS the fold entirely in that case, because Director does. Measured with
+/// `put` in real Director 11.5: a rig whose reference motion is in its own member
+/// is folded (AFR `member(5).model("player")` = (0,0,-90); Rifleman's "enemy"
+/// source node = (0,0,-90)), and one whose clips live in a member of their own is
+/// NOT (TRECH `member("mech").model("mech")`, AreaZero `member("RobotGun")...`
+/// and Backlot `member("onlyguy").model("charachterBiped")` all = (0,0,0)).
+/// See `docs/w3d-clone-com-refold-handoff.md` §2c.
+///
+/// The superseded reasoning, kept because the renderer's STRIP still depends on
+/// it — frame 0 of no motion is the skeleton's REST pose, and the claim was that
+/// Director folds that too: AreaZero keeps each robot in its own cast member with zero
 /// MOTION_BLOCKs and every clip in a member of its own, and without the rest-pose
 /// fold `member("RobotGun").model("RobotGun").getWorldTransform()` — the transform
 /// the game copies onto every robot it spawns — comes back without the COM.

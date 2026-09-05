@@ -293,7 +293,7 @@ impl W3dFileParser {
     /// R0 is recorded in `scene.model_root_com` so the renderer strips precisely
     /// the matrix composed here and the two sides cannot drift apart.
     fn apply_root_com_to_model_nodes(&mut self) {
-        let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>)> = Vec::new();
+        let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>, bool)> = Vec::new();
 
         for (i, node) in self.scene.nodes.iter().enumerate() {
             if node.node_type != W3dNodeType::Model { continue; }
@@ -306,30 +306,63 @@ impl W3dFileParser {
                         || s.name == node.name)
             }) else { continue };
 
-            // A member may hold the rig with NO motion at all: AreaZero keeps each
-            // robot in its own cast member and every clip in a member of its own,
-            // then clones both into the level at runtime. Frame 0 of "no motion" is
-            // the skeleton's REST pose, so that is what Director folds — and it has
-            // to, or `member("RobotGun").model("RobotGun").getWorldTransform()` (the
-            // transform the game copies onto every robot it spawns) comes back
-            // without the biped COM while the renderer still strips it. The robots
-            // then aim correctly and render 90 degrees off, because a 3ds-Max biped
-            // root sits at +90 about Z.
+            // Director folds ONLY when the reference motion is in the SAME cast
+            // member as the rig. Measured with `put` in real Director 11.5:
+            //
+            //   FOLDED     AFR      member(5).model("player")     (0, 0, -90)
+            //              Rifleman "enemy" source node           (0, 0, -90)
+            //   NOT FOLDED TRECH    member("mech").model("mech")  (0, 0,   0)
+            //              AreaZero member("RobotGun")...         (0, 0,   0)
+            //              Backlot  member("onlyguy")...          (0, 0,   0)
+            //
+            // and the file structure separates the two exactly: the folded rigs
+            // carry their own motion (member5.w3d has SKELETON "player" 31 +
+            // MOTION "player" 31; Internal_5_enemy.w3d has SKELETON/MOTION "enemy"
+            // 36), while the unfolded ones keep every clip in a member of its own
+            // and clone it in at runtime (TRECH's mech.w3d has no motion at all,
+            // the clips are in MSQMech.w3d; AreaZero's 149_Punch.w3d likewise,
+            // clips in 151_PunchMelee1_Animation.w3d). Phosphor alpha 4 and
+            // Rasterwerks beta 2 are both in the folded class, which is why they
+            // are unaffected. `SKELETON-MODIFIER` was the rival discriminator and
+            // is refuted: Rifleman's enemy folds without one.
+            //
+            // So this is `import_root_com_motion` answering Some — an idle clip
+            // for this skeleton, else a motion named like the skeleton carrying a
+            // track for its root bone. NOT "the member holds any motion": every
+            // rigged member also ships a one-track "Bip01 Footsteps-Key" that
+            // matches nothing.
+            //
+            // The old behaviour folded the skeleton's REST pose when this answered
+            // None. That branch was added on a consistency argument rather than a
+            // measurement — to cancel a strip Director does not perform — and it
+            // is what put a spurious Rz(-90) on TRECH's mech (drawn 180 deg about
+            // the vertical), on Backlot's charachterBiped (hair off the head) and
+            // on every clip-less AreaZero rig. See
+            // `docs/w3d-clone-com-refold-handoff.md` §2c and
+            // `docs/backlot-character-facing.md`.
+            // `None` = the member holds no clip for this rig, so r0 comes from the
+            // skeleton's REST pose. Recorded either way (the strip's clone path
+            // needs it); folded into the node only when it is Some.
             let reference = super::skeleton::import_root_com_motion(&self.scene, skel);
+            let fold = reference.is_some();
 
             let posed = super::skeleton::build_bone_matrices(skel, reference, 0.0);
             let Some(r0) = posed.first() else { continue };
             if is_identity_mat4(r0) { continue; }
 
-            fixups.push((i, *r0, reference.map(|m| m.name)));
+            fixups.push((i, *r0, reference.map(|m| m.name), fold));
         }
 
-        for (i, r0, reference) in fixups {
+        for (i, r0, reference, fold) in fixups {
             let name = self.scene.nodes[i].name.to_ascii_lowercase();
-            log(&format!("  Root COM folded into model node {:?} (from {})",
+            log(&format!("  Root COM {} model node {:?} (from {})",
+                if fold { "folded into" } else { "recorded for (NOT folded into)" },
                 self.scene.nodes[i].name,
                 reference.map(|n| n.as_str()).unwrap_or("the rest pose")));
-            self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
+            if fold {
+                self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
+                self.scene.model_com_folded.insert(name.clone());
+            }
             self.scene.model_root_com.insert(name, r0);
         }
     }

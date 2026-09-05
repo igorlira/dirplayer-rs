@@ -4579,15 +4579,39 @@ impl Shockwave3dObjectDatumHandlers {
                                         .collect()
                                 };
                                 // Only hops BEYOND the first re-fold; a node cloned straight
-                                // out of parsed data keeps its transform verbatim, exactly as
-                                // before this change.
+                                // out of parsed data keeps its transform verbatim.
+                                //
+                                // AND only for a lineage Director folds at all — i.e. one
+                                // whose source rig had its reference MOTION in its own cast
+                                // member. `model_root_com` also carries the REST root of
+                                // clip-less rigs, recorded purely so the renderer's clone
+                                // tier can replace an idle-clip strip with it; re-folding
+                                // THAT into the transform put a spurious Rz(-90) on every
+                                // hop and drew TRECH's mech and AreaZero's RobotGun robots
+                                // lying on their sides. See
+                                // `Shockwave3dRuntimeState::clone_com_folded` and
+                                // `docs/w3d-clone-com-refold-handoff.md` §2c.
+                                let folded_lineage: Vec<bool> = com_pairs.iter()
+                                    .map(|(src, _)| {
+                                        w3d.runtime_state.clone_com_folded.contains(src)
+                                            || w3d.parsed_scene.as_deref().map_or(false, |sc| {
+                                                sc.model_com_folded.contains(&src.to_ascii_lowercase())
+                                            })
+                                    })
+                                    .collect();
                                 let hop_com: Vec<Option<[f32; 16]>> = src_state.iter()
-                                    .map(|(n, r0)| if *n >= 1 { *r0 } else { None })
+                                    .zip(folded_lineage.iter())
+                                    .map(|((n, r0), folded)| if *n >= 1 && *folded { *r0 } else { None })
                                     .collect();
                                 for (i, (src_name, new_name)) in com_pairs.iter().enumerate() {
                                     let (n, r0) = src_state[i];
                                     if let Some(r0) = r0 {
                                         w3d.runtime_state.clone_hop_count.insert(*new_name, (n + 1, r0));
+                                        // Carry the fold marker down the lineage, so a
+                                        // clone of a clone gates the same way.
+                                        if folded_lineage[i] {
+                                            w3d.runtime_state.clone_com_folded.insert(*new_name);
+                                        }
                                     }
                                     // Motions name the ORIGINAL node, so a clone can only
                                     // find its own animation through its origin.

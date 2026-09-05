@@ -5924,8 +5924,17 @@ void main() {
         // move: (node * R0) * inv(R0) * world * inv_bind == node * world * inv_bind.
         // Taking R0 from the recorded value rather than recomputing it is what keeps
         // the two sides from drifting apart.
-        let folded_com = scene.model_root_com.get(&model_name.to_ascii_lowercase())
-            .or_else(|| scene.model_root_com.get(&resource_name.to_ascii_lowercase()));
+        // ONLY a rig that was actually folded may be stripped as a cancellation.
+        // `model_root_com` now also carries the REST root of rigs whose member holds
+        // no clip — those are NOT folded (Director does not fold them: TRECH's mech,
+        // AreaZero's robots and Backlot's charachterBiped all read (0,0,0) on the
+        // model node in real Director), and stripping one here would displace a mesh
+        // that has nothing to cancel. They still reach the clone tier below, which is
+        // what keeps Street Sesh's skater out of the pavement.
+        let folded_com = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
+            .into_iter()
+            .find(|k| scene.model_com_folded.contains(k))
+            .and_then(|k| scene.model_root_com.get(&k));
         // A CLONE is deliberately absent from `model_root_com` (its fold can be
         // destroyed by a script assigning `transform`, and recording it there
         // blanked AreaZero's FPS weapon), but `clone_hop_count` carries the exact
