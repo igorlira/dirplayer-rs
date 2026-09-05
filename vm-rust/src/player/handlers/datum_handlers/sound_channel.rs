@@ -121,6 +121,9 @@ impl SoundChannelDatumHandlers {
         // Mutably borrow the channel
         {
             let mut channel = channel_rc.borrow_mut();
+            // A new sound is not part of the old one's fade.
+            channel.is_fading = false;
+            channel.stop_after_fade = false;
             channel.playlist.clear();
             channel.current_segment_index = None;
             channel.stop_playback_nodes();
@@ -746,6 +749,10 @@ impl SoundChannelDatumHandlers {
         let channel_rc = Self::get_sound_channel(player, datum)?;
         // borrow mutably to access fields and methods
         let mut channel = channel_rc.borrow_mut();
+        // An explicit volume ends any fade in progress; otherwise the fade's
+        // next step overwrote the value the script just set.
+        channel.is_fading = false;
+        channel.stop_after_fade = false;
         channel.set_volume(vol);
         Ok(())
     }
@@ -1131,6 +1138,8 @@ pub struct SoundChannel {
 
     // Fade state
     pub is_fading: bool,
+    /// The fade came from fadeOut(): the channel stops when it reaches silence.
+    pub stop_after_fade: bool,
     pub fade_start_volume: f64,
     pub fade_target_volume: f64,
     pub fade_duration: f64,
@@ -1419,6 +1428,7 @@ impl SoundChannel {
             channel_count: 0,
             elapsed_time: 0.0,
             is_fading: false,
+            stop_after_fade: false,
             fade_start_volume: 0.0,
             fade_target_volume: 0.0,
             fade_duration: 0.0,
@@ -3694,8 +3704,13 @@ impl SoundChannel {
         self.volume = 0.0;
     }
 
+    /// fadeOut({ms}): fade to silence and then stop, as Director does. Left
+    /// playing at volume 0 the channel stayed busy, and Matematik i Maaneby's
+    /// map, which fades the previous house's voice out and sets the volume
+    /// back to 255 for the next, had every voice after the first swallowed.
     pub fn fade_out(&mut self, ms: i32) {
         self.fade_to(ms, 0.0);
+        self.stop_after_fade = true;
     }
 
     /// Fade this channel to `to_volume` over `ms` MILLISECONDS.
@@ -3706,6 +3721,7 @@ impl SoundChannel {
     pub fn fade_to(&mut self, ms: i32, to_volume: f64) {
         let duration = (ms as f64 / 1000.0).max(0.0);
         self.is_fading = true;
+        self.stop_after_fade = false;
         self.fade_start_volume = self.volume;
         self.fade_target_volume = to_volume;
         self.fade_duration = duration;
@@ -3729,20 +3745,29 @@ impl SoundChannel {
         self.sample_count as f64 / self.sample_rate as f64
     }
 
-    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
-        // Handle fading
-        if self.is_fading {
-            self.fade_elapsed += delta_time;
-            if self.fade_elapsed >= self.fade_duration {
-                self.set_volume(self.fade_target_volume);
-                self.is_fading = false;
-            } else {
-                let t = self.fade_elapsed / self.fade_duration;
-                let new_volume =
-                    self.fade_start_volume + (self.fade_target_volume - self.fade_start_volume) * t;
-                self.set_volume(new_volume);
-            }
+    /// Advance a fade in progress by `delta_time` seconds.
+    pub fn step_fade(&mut self, delta_time: f64) {
+        if !self.is_fading {
+            return;
         }
+        self.fade_elapsed += delta_time;
+        if self.fade_elapsed >= self.fade_duration {
+            self.set_volume(self.fade_target_volume);
+            self.is_fading = false;
+            if self.stop_after_fade {
+                self.stop_after_fade = false;
+                self.stop();
+            }
+        } else {
+            let t = self.fade_elapsed / self.fade_duration;
+            let new_volume =
+                self.fade_start_volume + (self.fade_target_volume - self.fade_start_volume) * t;
+            self.set_volume(new_volume);
+        }
+    }
+
+    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
+        self.step_fade(delta_time);
 
         // ⭐ Remove the playback advancement logic - it's handled by onended callback now
         // Audio plays asynchronously in Web Audio thread
@@ -4593,6 +4618,19 @@ mod pcm_guard_tests {
 #[cfg(test)]
 mod fade_tests {
     use super::SoundChannel;
+
+    #[test]
+    fn fade_out_stops_the_channel_when_silent() {
+        let mut ch = SoundChannel::new(4, None);
+        ch.set_volume(255.0);
+        ch.fade_out(1000);
+        assert!(ch.is_fading && ch.stop_after_fade);
+        ch.step_fade(0.5);
+        assert!(ch.is_fading, "half way through the fade");
+        ch.step_fade(0.6);
+        assert!(!ch.is_fading && !ch.stop_after_fade);
+        assert!(!ch.is_busy(), "fadeOut ends in a stopped channel");
+    }
 
     #[test]
     fn fades_are_in_milliseconds() {
