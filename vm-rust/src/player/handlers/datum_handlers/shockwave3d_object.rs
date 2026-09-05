@@ -2475,9 +2475,62 @@ impl Shockwave3dObjectDatumHandlers {
                                         }
                                         Some((w, h, rgba))
                                     }
+                                    // Text members are rasterised below — the
+                                    // borrow here is shared, and rendering one
+                                    // needs `&mut player`.
                                     _ => None,
                                 }
                             })
+                        };
+                        // A TEXT member re-bound onto a texture. The dictionary puts
+                        // no bitmap restriction on `#fromCastMember`, and `newTexture`
+                        // already rasterises a text member through the same path its
+                        // own `.image` getter uses (Intel ChickenChasin's score) — the
+                        // RE-BIND had been left bitmap-only, so a live text HUD could
+                        // only ever show whatever the member held at newTexture time.
+                        //
+                        // TRECH's score readout is exactly that: `createHUD` makes
+                        // `newTexture("overlayText", #fromCastMember, member("overlayText"))`
+                        // while that member is still EMPTY, and every update afterwards
+                        // is `member("overlayText").text = …` followed by
+                        // `gScene.texture("overlayText").member = member("overlayText")`.
+                        // Dropped, that left the LEVEL TIME / KILL SCORE / LEVEL SCORE
+                        // block permanently blank on the in-game HUD.
+                        let rgba_data = match rgba_data {
+                            Some(v) => Some(v),
+                            None => {
+                                let td = player.movie.cast_manager
+                                    .find_member_by_ref(&src_ref)
+                                    .and_then(|m| match &m.member_type {
+                                        crate::player::cast_member::CastMemberType::Text(t) => Some(t.clone()),
+                                        _ => None,
+                                    });
+                                match td {
+                                    Some(td) => match crate::player::handlers::datum_handlers::cast_member::text::TextMemberHandlers::render_text_image(player, &src_ref, &td) {
+                                        Ok(bmp) => {
+                                            let (w, h) = (bmp.width, bmp.height);
+                                            let palettes = player.movie.cast_manager.palettes();
+                                            let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+                                            for y in 0..h as usize {
+                                                for x in 0..w as usize {
+                                                    let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                                    let i = (y * w as usize + x) * 4;
+                                                    rgba[i] = r; rgba[i + 1] = g; rgba[i + 2] = b;
+                                                    // Keep the rasterised alpha: a text member's
+                                                    // image is glyphs over a TRANSPARENT ground and
+                                                    // this texture exists to be composited as a
+                                                    // camera overlay. Forcing it opaque would draw
+                                                    // a solid bar instead of bare lettering.
+                                                    rgba[i + 3] = a;
+                                                }
+                                            }
+                                            Some((w, h, rgba))
+                                        }
+                                        Err(_) => None,
+                                    },
+                                    None => None,
+                                }
+                            }
                         };
                         if let Some((w, h, rgba)) = rgba_data {
                             if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
