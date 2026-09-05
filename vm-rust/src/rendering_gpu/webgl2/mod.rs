@@ -3969,8 +3969,14 @@ impl WebGL2Renderer {
                 char_spacing,
                 is_field,
             } => {
+                // Investigation probe for tab-stop layout, not a gap report:
+                // it fires on every render of any text that merely CONTAINS a
+                // tab. Rasterwerks alone emitted 280 of these in one corpus
+                // sweep, which is the volume that buries the warnings that do
+                // mean something. Kept at debug so it can be turned back on
+                // when tab layout is being worked on.
                 if text.contains('\t') || !tab_stops.is_empty() {
-                    warn!(
+                    debug!(
                         "[webgl2 RenderedText] member={}:{} tabs={} has_tab={} text='{}'",
                         cache_key.member_ref.cast_lib, cache_key.member_ref.cast_member,
                         tab_stops.len(), text.contains('\t'),
