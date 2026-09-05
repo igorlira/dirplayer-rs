@@ -132,6 +132,8 @@ fn blend_pixel(
     src: (u8, u8, u8),
     ink: u32,
     bg_color: (u8, u8, u8),
+    fg_color: (u8, u8, u8),
+    src_indexed: bool, // an indexed (1 to 8 bit) source keeps its colours under Lighten
     blend_alpha: f32, // This is params.blend / 100.0
     src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
 ) -> (u8, u8, u8) {
@@ -281,22 +283,37 @@ fn blend_pixel(
                 }
             }
         }
-        // 40 = Lighten
+        // 40 = Lighten: the sprite's foreColor is added to the image
+        // (Using Director, "Using sprite inks"). A sprite on the default
+        // black foreColor is unchanged, which is what the earlier
+        // pass-through measured.
         40 => {
             if src == bg_color {
                 dst
-            } else {
+            } else if src_indexed {
                 blend_color_alpha(dst, src, effective_alpha)
+            } else {
+                let lit = (
+                    src.0.saturating_add(fg_color.0),
+                    src.1.saturating_add(fg_color.1),
+                    src.2.saturating_add(fg_color.2),
+                );
+                blend_color_alpha(dst, lit, effective_alpha)
             }
         }
+        // 41 = Darken: a foreColor/bgColor remap per channel, black to
+        // foreColor and white to bgColor, the same mix the WebGL2 shader
+        // draws. The defaults (black, white) leave the image unchanged.
         41 => {
-            // Darken
-            // TODO
-            // bg_color
-            let r = (src.0 as f32 / 255.0) * (bg_color.0 as f32 / 255.0) * 255.0;
-            let g = (src.1 as f32 / 255.0) * (bg_color.1 as f32 / 255.0) * 255.0;
-            let b = (src.2 as f32 / 255.0) * (bg_color.2 as f32 / 255.0) * 255.0;
-            let color = (r as u8, g as u8, b as u8);
+            let mix = |s: u8, fg: u8, bg: u8| {
+                let t = s as f32 / 255.0;
+                (fg as f32 * (1.0 - t) + bg as f32 * t).round().clamp(0.0, 255.0) as u8
+            };
+            let color = (
+                mix(src.0, fg_color.0, bg_color.0),
+                mix(src.1, fg_color.1, bg_color.1),
+                mix(src.2, fg_color.2, bg_color.2),
+            );
             blend_color_alpha(dst, color, effective_alpha)
         }
         _ => blend_color_alpha(dst, src, effective_alpha),
@@ -3466,6 +3483,8 @@ impl Bitmap {
                             fg_color_resolved,
                             ink,
                             bg_color_resolved,
+                            fg_color_resolved,
+                            is_indexed,
                             alpha,
                             sa as f32 / 255.0,
                         );
@@ -3522,6 +3541,8 @@ impl Bitmap {
                     src_color,
                     ink,
                     bg_color_resolved,
+                    fg_color_resolved,
+                    is_indexed,
                     alpha,
                     src_alpha,
                 );
@@ -4323,5 +4344,36 @@ mod shrink_sampling_tests {
     #[test]
     fn everything_else_keeps_the_centre_rule() {
         assert_eq!(shrink(false), vec![10, 30]);
+    }
+}
+
+mod ink_colour_tests {
+    use super::blend_pixel;
+
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+    const BLACK: (u8, u8, u8) = (0, 0, 0);
+
+    #[test]
+    fn lighten_adds_the_fore_colour() {
+        let src = (100, 100, 100);
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (150, 125, 100));
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0), src, "the default foreColor changes nothing");
+        assert_eq!(blend_pixel((0, 0, 0), (250, 250, 250), 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (255, 255, 250), "pinned at 255");
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0), src, "an indexed bitmap keeps its palette colours");
+    }
+
+    #[test]
+    fn lighten_still_keys_the_background_colour() {
+        let dst = (7, 8, 9);
+        assert_eq!(blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), dst);
+    }
+
+    #[test]
+    fn darken_remaps_black_to_fore_and_white_to_back() {
+        let fg = (50, 25, 0);
+        let bg = (200, 220, 240);
+        assert_eq!(blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0), fg);
+        assert_eq!(blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0), bg);
+        assert_eq!(blend_pixel((0, 0, 0), (100, 100, 100), 41, WHITE, BLACK, false, 1.0, 1.0), (100, 100, 100), "defaults are the identity");
     }
 }
