@@ -524,8 +524,20 @@ impl SoundChannelDatumHandlers {
         datum: &DatumRef,
         member: &DatumRef,
     ) -> Result<(), ScriptError> {
+        // Director takes a bare member as well as a [#member: m, ...] list;
+        // `sound(4).queue(member("Tal - 30"))` is the form a movie uses to
+        // string spoken numbers together.
+        let entry = match player.get_datum(member) {
+            Datum::CastMember(_) => {
+                let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)));
+                let mut props = VecDeque::new();
+                props.push_back((key, member.clone()));
+                player.alloc_datum(Datum::PropList(props, false))
+            }
+            _ => member.clone(),
+        };
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().queue(member.clone(), player); // <-- pass player here
+        channel.borrow_mut().queue(entry, player);
         Ok(())
     }
 
