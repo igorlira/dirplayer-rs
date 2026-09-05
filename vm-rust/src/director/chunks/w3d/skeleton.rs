@@ -295,42 +295,120 @@ pub fn build_bone_matrices_ex(
 
 /// Build inverse bind matrices (rest pose inverted).
 /// These transform from world space back to bone-local space for skinning.
-/// The matrix a skinned draw is relativized by, given the model's recorded biped
-/// COM fold.
+/// Runtime facts the strip needs and the parsed scene cannot know. Gathered by
+/// `Shockwave3dRuntimeState::root_strip_state`, so the renderer, the animation
+/// tick and the raycaster all pose a model from the same inputs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RootStripState {
+    /// The r0 a `cloneModelFromCastmember` hop carried for this model, already
+    /// gated by the caller on the node still holding it (`broken_root_com_fold`).
+    pub clone_r0: Option<[f32; 16]>,
+    /// The model has its own bonesPlayer with a motion bound — i.e. a script (or
+    /// auto-play) started a clip on THIS model, so Director's root clearance is
+    /// being handed to its node.
+    pub has_bones_player: bool,
+    /// The posed root, in skin space, at the moment a script last REPLACED the
+    /// node's rotation while that motion was active. `None` = the node still
+    /// carries every clearance the bonesPlayer gave it.
+    pub rotation_replaced_at: Option<[f32; 16]>,
+}
+
+/// The root bone's posed world matrix (its local, it has no parent) for
+/// `motion` at `time`, or the rest root when there is no motion — the exact
+/// matrix IFX's `GetRootClearance` hands back and the renderer's
+/// `world_matrices[0]`.
+pub fn posed_root_matrix(skeleton: &W3dSkeleton, motion: Option<&W3dMotion>, time: f32) -> [f32; 16] {
+    build_bone_matrices(skeleton, motion, time)
+        .first()
+        .copied()
+        .unwrap_or(IDENTITY_MAT4)
+}
+
+const IDENTITY_MAT4: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// The matrix a skinned draw is relativized by: `skin[b] = strip × world[b] ×
+/// inv_bind[b]`.
 ///
-/// Shared so the renderer and the RAYCASTER pose a model identically. They used
-/// to disagree completely — the raycaster had no skinning at all and intersected
-/// the bind pose, so a soldier could only be shot where the T-pose happened to
-/// overlap the animated body (its belly), and the hit volume sat sunk into the
-/// ground where the bind pose rests.
+/// Shared so the renderer, the animation tick and the RAYCASTER pose a model
+/// identically. They used to disagree — the raycaster had no skinning at all and
+/// intersected the bind pose, so a soldier could only be shot where the T-pose
+/// happened to overlap the animated body.
 ///
-/// Mirrors the renderer's `root_relinv` exactly — recorded fold first, then the
-/// rig's authored idle at frame 0, then identity.
-pub fn root_relativizer(
+/// WHY there is a strip at all — the IFX contract (U3D RTL, `IFXBonesManagerImpl::
+/// UpdateMesh` and `IFXSkin::PrepareBoneCacheArray`): the skin matrix is always
+/// `posedWorld[b] × inv(referenceWorld[b])`, with the reference captured once from
+/// the REST pose, root included. The bones manager then CLEARS the root bone's
+/// posed TRS out of the hierarchy (`RootClearTranslate`/`RootClearRotate`) and
+/// hands it to the host through `GetRootClearance`; Director composes that
+/// clearance onto the MODEL NODE, destructively, as a per-update delta. Measured
+/// consequences in real Director 11.5: a rig whose member holds its own motion
+/// auto-plays at load and its node reads the root's rotation
+/// (`member(5).model("player").transform.rotation` = (0,0,-90) on Agent Free
+/// Ride); each clone hop re-applies it (Rifleman: -90 → -180 → -270); a live
+/// AreaZero robot's own node reads Rz(+90) plus the Run clip's tilt while its
+/// source member's node reads (0,0,0).
+///
+/// So on screen Director draws `node_script × inv(C_last) × posed[b] × inv(rest[b])`,
+/// where `C_last` is the root clearance the node was carrying when a script last
+/// replaced the node's rotation — the clearance applied after that write stays
+/// on the node and cancels against the skin; whatever the script wiped does not.
+/// dirplayer's node never absorbs the clearance (the parse-time fold is the one
+/// exception, below), so the strip has to be `inv(C_last)`:
+///
+///  1. a rig folded at parse (`model_com_folded`): the node holds `r0` exactly as
+///     Director's auto-play left it, strip `inv(r0)` — the cancellation;
+///  2. a clone that still holds its carried `r0` and has an idle clip — the
+///     Street Sesh skater — strips that r0 (see the renderer's history note);
+///  3. a model driven by its own bonesPlayer: the node would carry the clearance
+///     from the moment `play()` ran. If a script never replaced the rotation after
+///     that, the node keeps ALL of it and the strip is IDENTITY — AreaZero's
+///     robots (`newModel` + `.resource =`, transform written BEFORE play, then only
+///     `scale.x/y` ramps, which keep the rotation; the GROUP is what pointAt turns).
+///     Relativizing them by the idle root drew them 90° out, walking sideways. If
+///     a script did replace the rotation while the clip played, strip the root as
+///     it stood at that write: the Elite FPS weapon (`transform.rotation =
+///     vector(-90,90,0)` once at setup, root at t=0 of EliteIdle) and the Punch
+///     blade (rotation/scale/position rewritten EVERY frame, so the reference is
+///     the root right now and the pelvis lands on the node — the blade was drawn
+///     105 units and 90° away, out of frame, with no strip at all);
+///  4. anything else keeps the historical idle-frame-0 fallback, then identity.
+pub fn root_strip_matrix(
     scene: &W3dScene,
     skeleton: &W3dSkeleton,
     model_name: Symbol,
     resource_name: Symbol,
+    st: RootStripState,
 ) -> [f32; 16] {
-    const IDENTITY: [f32; 16] = [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-    ];
-    let key = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
+    // 1. The parse-time fold, stripped back out as a cancellation. ONLY a rig
+    //    that was actually folded: `model_root_com` also carries the REST root of
+    //    clip-less rigs, purely so the clone path can hand it on.
+    let folded = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
         .into_iter()
-        .find(|k| scene.model_root_com.contains_key(k));
-    if let Some(k) = key {
-        let r0 = scene.model_root_com[&k];
+        .find(|k| scene.model_com_folded.contains(k))
+        .and_then(|k| scene.model_root_com.get(&k).copied());
+    if let Some(r0) = folded {
         return invert_matrix(&r0);
     }
-    // Fallback for models whose fold was never recorded: the rig's authored idle,
-    // frame 0. Deliberately narrow — widening it relativizes draws that never were.
-    match idle_reference_motion(scene, skeleton) {
-        Some(im) => {
-            let m = build_bone_matrices(skeleton, Some(im), 0.0);
-            m.first().map(|r| invert_matrix(r)).unwrap_or(IDENTITY)
-        }
-        None => IDENTITY,
+    let idle_root = idle_reference_motion(scene, skeleton)
+        .map(|im| posed_root_matrix(skeleton, Some(im), 0.0));
+    // 2. A clone still holding its carried r0, with an authored idle to replace.
+    if let (Some(r0), Some(_)) = (st.clone_r0, idle_root) {
+        return invert_matrix(&r0);
+    }
+    // 3. Director's clearance semantics for a script-driven bonesPlayer.
+    if st.has_bones_player {
+        return match st.rotation_replaced_at {
+            Some(c) => invert_matrix(&c),
+            None => IDENTITY_MAT4,
+        };
+    }
+    // 4. Legacy: the member-wide clock, no per-model player.
+    match idle_root {
+        Some(m) => invert_matrix(&m),
+        None => IDENTITY_MAT4,
     }
 }
 
@@ -358,12 +436,13 @@ pub fn posed_bone_world_matrices(
     tick_carries_root: bool,
     overrides: Option<&HashMap<usize, [f32; 16]>>,
     model_name: Symbol,
+    strip: RootStripState,
 ) -> Vec<[f32; 16]> {
     let strips_root = !root_lock
         && tick_carries_root
         && motion.map(|m| motion_has_root_translation(skeleton, m)).unwrap_or(false);
     let world = build_bone_matrices_ex(skeleton, motion, time, root_lock || strips_root, overrides);
-    let relinv = root_relativizer(scene, skeleton, model_name, skeleton.name);
+    let relinv = root_strip_matrix(scene, skeleton, model_name, skeleton.name, strip);
     world.iter().map(|m| multiply_matrix(&relinv, m)).collect()
 }
 

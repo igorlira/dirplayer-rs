@@ -672,6 +672,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     scene, skeleton, motion, t, root_lock, bp.is_some(),
                                     if overrides.is_empty() { None } else { Some(&overrides) },
                                     model_name,
+                                    w3d.runtime_state.root_strip_state(model_name),
                                 );
                                 matrices.get(bone_idx).copied()
                             });
@@ -733,6 +734,7 @@ impl Shockwave3dObjectDatumHandlers {
                                     scene, skeleton, motion, t, root_lock, bp.is_some(),
                                     if overrides.is_empty() { None } else { Some(&overrides) },
                                     model_name,
+                                    w3d.runtime_state.root_strip_state(model_name),
                                 );
                                 matrices.get(bone_idx).copied()
                             });
@@ -10129,7 +10131,7 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
     if dirty_ids.is_empty() { return; }
 
     // Collect entries for dirty datums only
-    let mut entries: Vec<(i32, u32, Symbol, DatumRef)> = Vec::new();
+    let mut entries: Vec<(i32, u32, Symbol, DatumRef, u8)> = Vec::new();
     for cast in &player.movie.cast_manager.casts {
         for (member_num, member) in &cast.members {
             if let Some(w3d) = member.member_type.as_shockwave3d() {
@@ -10141,14 +10143,14 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
                     // DatumRef clone (and later drop) per node per frame for
                     // nothing. `drop_in_place<DatumRef>` was 6.1% of an AreaZero
                     // frame at higher waves.
-                    if !dirty_ids.contains(&datum_ref.unwrap()) { continue; }
-                    entries.push((cast.number as i32, *member_num, *node_name, datum_ref.clone()));
+                    let Some(mask) = dirty_ids.get(&datum_ref.unwrap()).copied() else { continue };
+                    entries.push((cast.number as i32, *member_num, *node_name, datum_ref.clone(), mask));
                 }
             }
         }
     }
 
-    for (cast_lib, cast_member, node_name, datum_ref) in entries {
+    for (cast_lib, cast_member, node_name, datum_ref, mask) in entries {
         if let Datum::Transform3d(m64) = player.get_datum(&datum_ref) {
             let m32: [f32; 16] = m64.map(|v| v as f32);
             if m32.iter().any(|v| !v.is_finite()) { continue; }
@@ -10163,6 +10165,17 @@ pub fn sync_persistent_transforms(player: &mut crate::player::DirPlayer) {
                     // is exactly that, and it is why the renderer must not strip
                     // the cloned Elite's fold from its skin.
                     w3d.runtime_state.broken_root_com_fold.insert(node_name);
+                    // …and WHICH components it replaced. A chained `scale.x =` keeps
+                    // the node's rotation and so keeps the bonesPlayer's root
+                    // clearance; `rotation =` / `position =` wipe it. See
+                    // `NodeScriptWrites`.
+                    let scene = w3d.parsed_scene.as_deref();
+                    w3d.runtime_state.note_node_transform_replaced(
+                        scene,
+                        node_name,
+                        mask & super::transform3d::WRITE_ROTATION != 0,
+                        mask & super::transform3d::WRITE_POSITION != 0,
+                    );
                 }
             }
         }
@@ -11004,6 +11017,8 @@ fn note_root_com_fold_broken(
     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
             w3d.runtime_state.broken_root_com_fold.insert(node_name);
+            let scene = w3d.parsed_scene.as_deref();
+            w3d.runtime_state.note_node_transform_replaced(scene, node_name, true, true);
         }
     }
 }

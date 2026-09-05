@@ -3826,6 +3826,20 @@ impl Shockwave3dMemberHandlers {
                                 })
                                 .unwrap_or_default()
                         };
+                        // The runtime half of the skinned strip, per skinned model, so
+                        // the ray meets the body exactly where the renderer draws it
+                        // (`skeleton::root_strip_matrix`).
+                        let strip_states: std::collections::HashMap<Symbol, crate::director::chunks::w3d::skeleton::RootStripState> = {
+                            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+                            member.and_then(|m| m.member_type.as_shockwave3d())
+                                .map(|w3d| {
+                                    scene.nodes.iter()
+                                        .filter(|n| crate::director::chunks::w3d::skeleton::skeleton_for_model(&scene, n.name).is_some())
+                                        .map(|n| (n.name, w3d.runtime_state.root_strip_state(n.name)))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
                         let member_wide = {
                             let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
                             member.and_then(|m| m.member_type.as_shockwave3d())
@@ -3834,7 +3848,7 @@ impl Shockwave3dMemberHandlers {
                                             w3d.runtime_state.root_lock))
                                 .unwrap_or((None, 0.0, false))
                         };
-                        let anim_fn = |model: Symbol, _skel: Symbol| -> Option<(Option<Symbol>, f32, bool)> {
+                        let anim_fn = |model: Symbol, skel: Symbol| -> Option<(Option<Symbol>, f32, bool, [f32; 16])> {
                             let (motion, time, lock) = anim_state.get(&model)
                                 .copied()
                                 .unwrap_or(member_wide);
@@ -3842,7 +3856,12 @@ impl Shockwave3dMemberHandlers {
                                 crate::director::chunks::w3d::skeleton::default_motion_for_model(&scene, model)
                                     .map(|m| m.name)
                             });
-                            Some((motion, time, lock))
+                            let skeleton = scene.skeletons.iter().find(|s| s.name == skel)?;
+                            let strip = crate::director::chunks::w3d::skeleton::root_strip_matrix(
+                                &scene, skeleton, model, skel,
+                                strip_states.get(&model).copied().unwrap_or_default(),
+                            );
+                            Some((motion, time, lock, strip))
                         };
                         let hits = raycast_scene_multi(
                             &ray, &scene, world_max_dist, max_models as usize,

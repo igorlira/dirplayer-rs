@@ -1354,6 +1354,30 @@ impl Default for BonesPlayerState {
     }
 }
 
+/// A script's replacing writes to a skinned model's node transform, relative to
+/// the model's own bonesPlayer.
+///
+/// Director composes a bonesPlayer's root clearance onto the model NODE,
+/// destructively (U3D `IFXBonesManagerImpl::UpdateMesh` → `GetRootClearance`;
+/// measured on Rifleman's clone hops and on AreaZero's live robots). A script
+/// that then REPLACES a component of the node's transform wipes the clearance
+/// from that component — `transform = t`, `transform.rotation = v`,
+/// `transform.position = v` — while the composing calls (`translate`, `rotate`,
+/// `pointAt`) and a chained `transform.scale.x = s` keep it. dirplayer's node
+/// never absorbs the clearance, so the renderer strips whatever Director's node
+/// would still be carrying — see `skeleton::root_strip_matrix`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NodeScriptWrites {
+    /// The posed root, in skin space, when a script last replaced the node's
+    /// ROTATION while a motion was bound on the model's bonesPlayer. `None`
+    /// while no such write has happened — including a write made BEFORE the
+    /// clip started, since the clearance then lands on top of it (AreaZero's
+    /// robots: `model.transform = …getWorldTransform()`, then `play()`).
+    pub rotation_replaced_at: Option<[f32; 16]>,
+    /// A script replaced the node's POSITION while a motion was bound.
+    pub position_replaced: bool,
+}
+
 /// One camera's fog settings (Director: `camera.fog`).
 #[derive(Clone, Copy, Debug)]
 pub struct CameraFog {
@@ -1461,6 +1485,11 @@ pub struct Shockwave3dRuntimeState {
     /// re-parent — KEEP the fold and are deliberately not recorded here; only a
     /// wholesale replacement of the matrix loses it.
     pub broken_root_com_fold: std::collections::HashSet<Symbol>,
+    /// What a script has REPLACED on each node's transform, and the root
+    /// clearance the node's bonesPlayer was handing it at the time — the input
+    /// the renderer's strip keys on. See [`NodeScriptWrites`] and
+    /// `skeleton::root_strip_matrix` (rule 3).
+    pub node_script_writes: std::collections::HashMap<Symbol, NodeScriptWrites>,
     /// Persistent Transform3d DatumRefs per node — returned by .transform getter
     /// so that chained mutations (model.transform.position = v) persist
     pub node_transform_datums: std::collections::HashMap<Symbol, crate::player::DatumRef>,
@@ -2026,6 +2055,7 @@ impl Shockwave3dRuntimeState {
         self.node_shaders_indexed.retain(|k| !doomed.contains(k));
         self.clone_hop_count.retain(|k, _| !doomed.contains(k));
         self.clone_com_folded.retain(|k| !doomed.contains(k));
+        self.node_script_writes.retain(|k, _| !doomed.contains(k));
         self.mesh_deform.retain(|k, _| !doomed.contains(k));
         self.detached_nodes.retain(|k| !doomed.contains(k));
         self.point_at_orientations.retain(|k, _| !doomed.contains(k));
@@ -2089,6 +2119,86 @@ impl Shockwave3dRuntimeState {
     /// route here so each model animates independently.
     pub fn bones_player_mut(&mut self, model: Symbol) -> &mut BonesPlayerState {
         self.bones_players.entry(model).or_default()
+    }
+
+    /// Record a script write that REPLACED components of `node`'s transform: a
+    /// whole `transform =`, or a chained `transform.rotation/position/scale =`
+    /// flushed by `sync_persistent_transforms`. Composing operations must not
+    /// come here. See [`NodeScriptWrites`].
+    pub fn note_node_transform_replaced(
+        &mut self,
+        scene: Option<&crate::director::chunks::w3d::types::W3dScene>,
+        node: Symbol,
+        rotation: bool,
+        position: bool,
+    ) {
+        use crate::director::chunks::w3d::skeleton as skel;
+        if !rotation && !position {
+            return;
+        }
+        // The clearance this node's bonesPlayer is handing it right now: the
+        // bound clip's root at the player's current sample time — the same
+        // matrix the renderer draws with this frame.
+        let clearance = self
+            .bones_player(node)
+            .filter(|bp| bp.current_motion.is_some())
+            .and_then(|bp| {
+                let scene = scene?;
+                let skeleton = skel::skeleton_for_model(scene, node)?;
+                let motion = scene.motions.iter().find(|m| Some(m.name) == bp.current_motion);
+                let t = motion
+                    .map(|m| skel::effective_motion_time(
+                        bp.animation_time,
+                        bp.animation_start_time,
+                        bp.animation_end_time,
+                        bp.animation_loop,
+                        m.duration(),
+                    ))
+                    .unwrap_or(0.0);
+                Some(skel::posed_root_matrix(skeleton, motion, t))
+            })
+            // A clone of a FOLDED lineage is born with its source's player already
+            // running (the source auto-plays its in-member clip and the clone
+            // copies the modifier), so in Director a script write lands after
+            // play even when this engine has bound no motion on the clone yet.
+            // The clearance such a node carries is exactly the r0 the hop
+            // carried. Rasterwerks' `BotModel_0N` clones of MA_BASEMESH are the
+            // case: without this they faced ~120 deg off.
+            .or_else(|| {
+                if self.clone_com_folded.contains(&node) {
+                    self.clone_hop_count.get(&node).map(|(_, r0)| *r0)
+                } else {
+                    None
+                }
+            });
+        let entry = self.node_script_writes.entry(node).or_default();
+        if rotation {
+            // A replacement made while no clip is bound leaves nothing for the
+            // clearance to cancel against: the node absorbs all of it at play().
+            entry.rotation_replaced_at = clearance;
+        }
+        if position {
+            entry.position_replaced = clearance.is_some();
+        }
+    }
+
+    /// The runtime half of `skeleton::root_strip_matrix`'s inputs for `model`.
+    pub fn root_strip_state(&self, model: Symbol) -> crate::director::chunks::w3d::skeleton::RootStripState {
+        let clone_r0 = if self.broken_root_com_fold.contains(&model) {
+            None
+        } else {
+            self.clone_hop_count.get(&model).map(|(_, r0)| *r0)
+        };
+        crate::director::chunks::w3d::skeleton::RootStripState {
+            clone_r0,
+            has_bones_player: self
+                .bones_player(model)
+                .map_or(false, |bp| bp.current_motion.is_some()),
+            rotation_replaced_at: self
+                .node_script_writes
+                .get(&model)
+                .and_then(|w| w.rotation_replaced_at),
+        }
     }
 
     /// Mirror a model's per-node animation state into the member-level single

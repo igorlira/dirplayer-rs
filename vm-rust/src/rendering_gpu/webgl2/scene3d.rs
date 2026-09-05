@@ -5882,118 +5882,104 @@ void main() {
             if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
         );
 
-        // [root-relativize] Director keeps a 3ds-Max biped's ROOT at identity IN THE SKIN
-        // (the root COM drives the model node, not the deformation). dirplayer's posed
-        // skeleton is instead pre-rotated by the root COM — verified against Director:
-        // dirplayer's bone[i] world == Rz(-122°) × Director's, the SAME factor for every
-        // bone (the root's COM). Strip it by relativizing each posed bone to the posed
-        // ROOT: skin[b] = inverse(root) × world[b] × inv_bind[b]. Algebra cancels to
-        // (b-relative-to-root) × inv_bind[b], so the inv_bind (mesh-consistent dir/quat
-        // T-pose) is untouched — no distortion (changing the bind DOES distort). This is
-        // the bot "aims right, faces ~NW" fix; rigid bodies/non-skinned models are
-        // unaffected (only skinned models reach here).
-        let affine_inv = |m: &[f32; 16]| -> [f32; 16] {
-            let (r00, r01, r02) = (m[0], m[4], m[8]);
-            let (r10, r11, r12) = (m[1], m[5], m[9]);
-            let (r20, r21, r22) = (m[2], m[6], m[10]);
-            let (tx, ty, tz) = (m[12], m[13], m[14]);
-            let itx = -(r00 * tx + r10 * ty + r20 * tz);
-            let ity = -(r01 * tx + r11 * ty + r21 * tz);
-            let itz = -(r02 * tx + r12 * ty + r22 * tz);
-            [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0, itx, ity, itz, 1.0]
-        };
-        // Relativize by a FIXED idle-pose root, NOT the per-frame posed root. The idle
-        // root strips the biped COM convention while KEEPING each frame's run deviation
-        // (the per-frame posed root removed the run's small turn too → bots looked
-        // "slightly off while moving"). The bot mesh is authored at "Idle_Rest", so use
-        // that motion's frame-0 root as the fixed reference; models with no idle motion
-        // (dino/frog) get no relativization at all.
+        // [root-relativize] `skin[b] = root_relinv × world[b] × inv_bind[b]`.
         //
-        // The idle MUST be one that drives THIS rig — `scene.motions` is a member-wide
-        // table and a game can clone several skeletons plus all their clips into one
-        // member. Keep this to an authored idle: it is a FALLBACK for models whose fold
-        // was not recorded, and widening it relativizes draws that never were.
-        let idle_root_mats = crate::director::chunks::w3d::skeleton::idle_reference_motion(scene, skeleton)
-            .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
-        // Only models with an idle-rest motion (the biped actors/bots) are relativized;
-        // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
-        // relativization — so this can't regress them.
-        // The parser folds the biped COM into the model NODE at import, the way
-        // Director does (see `apply_root_com_to_model_nodes`), and records the exact
-        // matrix it used. Strip that same matrix here so the drawn mesh does not
-        // move: (node * R0) * inv(R0) * world * inv_bind == node * world * inv_bind.
-        // Taking R0 from the recorded value rather than recomputing it is what keeps
-        // the two sides from drifting apart.
-        // ONLY a rig that was actually folded may be stripped as a cancellation.
-        // `model_root_com` now also carries the REST root of rigs whose member holds
-        // no clip — those are NOT folded (Director does not fold them: TRECH's mech,
-        // AreaZero's robots and Backlot's charachterBiped all read (0,0,0) on the
-        // model node in real Director), and stripping one here would displace a mesh
-        // that has nothing to cancel. They still reach the clone tier below, which is
-        // what keeps Street Sesh's skater out of the pavement.
-        let folded_com = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
-            .into_iter()
-            .find(|k| scene.model_com_folded.contains(k))
-            .and_then(|k| scene.model_root_com.get(&k));
-        // A CLONE is deliberately absent from `model_root_com` (its fold can be
-        // destroyed by a script assigning `transform`, and recording it there
-        // blanked AreaZero's FPS weapon), but `clone_hop_count` carries the exact
-        // r0 the hop applied. When the idle tier is about to fire for such a
-        // model, strip THAT matrix instead of re-deriving one from a clip: the
-        // whole point of recording r0 is that the fold and the strip must be the
-        // same matrix, and for a clone they demonstrably are not.
+        // IFX skins with `posed[b] × inv(rest[b])` and hands the root bone's posed
+        // TRS to the MODEL NODE as a "root clearance" (U3D `IFXBonesManagerImpl::
+        // UpdateMesh`); Director composes that clearance onto the node. dirplayer's
+        // node does not absorb it (except the parse-time fold), so the draw is
+        // relativized by whatever Director's node would still be carrying. The
+        // rule, its Director measurements and its history live on
+        // `skeleton::root_strip_matrix`; the runtime inputs come from
+        // `Shockwave3dRuntimeState::root_strip_state`. Kept here only the two
+        // pieces of history that gate the clone tier:
         //
-        // Street Sesh clones its skater out of "player_mike" — a member holding
-        // the rig and no clips, so the parser folded its REST root, r0 =
-        // (0, 4.42, -0.87) — and only afterwards clones `player_idle` & co into
-        // the world member. `idle_reference_motion` then found `cpy_player2_idle`,
-        // whose frame-0 root sits at the pelvis, (17.05, 22.48, 105.72), and
-        // stripping that buried the skater to the waist in the plaza.
+        //  * Street Sesh clones its skater out of "player_mike" — a member holding
+        //    the rig and no clips — and only afterwards clones `player_idle` & co
+        //    into the world member. Relativizing by that idle's frame-0 root, which
+        //    sits at the pelvis, buried the skater to the waist; the clone tier
+        //    strips the carried r0 instead.
+        //  * A script that replaces the node's matrix outright destroys the fold
+        //    a clone carried (`broken_root_com_fold`): AreaZero's
+        //    `[M] FPS Weapon.setup_Elite` hardcodes `transform.rotation =
+        //    vector(-90, 90, 0)`, and stripping the carried r0 (root at the biped
+        //    COM, z = 104.5, against the idle clip's z = 2.8) threw the first-person
+        //    weapon out of frame. Such a clone falls through to rule 3.
         //
-        // Narrow ON PURPOSE: it only ever REPLACES the matrix of a strip that was
-        // already going to happen. A model with no idle motion still gets no
-        // strip, so this cannot introduce one where there was none.
-        // …and ONLY while the node still holds it. A script that replaces the
-        // node's matrix outright destroys the fold, and stripping it then
-        // displaces the mesh instead of cancelling: AreaZero's
-        // `[M] FPS Weapon.setup_Elite` hardcodes
-        // `transform.rotation = vector(-90, 90, 0)` on its cloned "Elite" rig,
-        // and stripping the carried r0 (whose root sits at the biped COM,
-        // z = 104.5, against the idle clip's z = 2.8) threw the first-person
-        // weapon out of frame entirely.
-        let clone_r0 = runtime_state.and_then(|rs| {
-            if rs.broken_root_com_fold.contains(&model_name) {
-                return None;
+        // REFUTED (2026-08-18), do not retry: relativizing EVERY clone by its
+        // posed root. `clone_hop_count` holds every cloned skinned model, so it
+        // also fired on Agent Free Ride's riders and Rifleman's soldiers, whose
+        // nodes DO carry the clearance (folded lineage), and rotated them by
+        // inv(root). What separates the Punch blade from those is not clone-ness
+        // but that its script rewrites the node's rotation after `play()`.
+        let strip_state = runtime_state
+            .map(|rs| rs.root_strip_state(model_name))
+            .unwrap_or_default();
+        let root_relinv = crate::director::chunks::w3d::skeleton::root_strip_matrix(
+            scene, skeleton, model_name, resource_name, strip_state,
+        );
+
+        /*
+        // [TIER] probe — one line per (model, resource): the tier the OLD match
+        // would have picked vs the rule now applied, and every input.
+        {
+            use std::cell::RefCell;
+            use std::collections::HashSet;
+            use crate::director::chunks::w3d::skeleton as skel;
+            thread_local! { static SEEN: RefCell<HashSet<String>> = RefCell::new(HashSet::new()); }
+            let key = format!("{}|{}", model_name.as_str(), resource_name.as_str());
+            if SEEN.with(|c| c.borrow_mut().insert(key)) {
+                let rot = |m: &[f32; 16]| format!("[{:.2},{:.2},{:.2} | {:.1},{:.1},{:.1}]",
+                    m[0], m[1], m[2], m[12], m[13], m[14]);
+                let folded = [model_name.to_ascii_lowercase(), resource_name.to_ascii_lowercase()]
+                    .into_iter()
+                    .any(|k| scene.model_com_folded.contains(&k) && scene.model_root_com.contains_key(&k));
+                let idle = skel::idle_reference_motion(scene, skeleton);
+                let idle0 = idle.map(|im| skel::posed_root_matrix(skeleton, Some(im), 0.0));
+                let old_tier = if folded { "1_folded" }
+                    else if strip_state.clone_r0.is_some() && idle0.is_some() { "2_clone_r0" }
+                    else if idle0.is_some() { "3_idle" }
+                    else { "4_identity" };
+                let new_tier = if folded { "1_folded" }
+                    else if strip_state.clone_r0.is_some() && idle0.is_some() { "2_clone_r0" }
+                    else if strip_state.has_bones_player {
+                        if strip_state.rotation_replaced_at.is_some() { "3_bp_script_rot" } else { "3_bp_identity" }
+                    }
+                    else if idle0.is_some() { "4_idle" }
+                    else { "5_identity" };
+                let nodet = scene.nodes.iter().find(|n| n.name == model_name)
+                    .map(|n| rot(&n.transform)).unwrap_or_else(|| "-".to_string());
+                // The strip the OLD match would have produced, to flag REAL changes.
+                let inv = |m: &[f32; 16]| -> [f32; 16] {
+                    let (r00, r01, r02) = (m[0], m[4], m[8]);
+                    let (r10, r11, r12) = (m[1], m[5], m[9]);
+                    let (r20, r21, r22) = (m[2], m[6], m[10]);
+                    let (tx, ty, tz) = (m[12], m[13], m[14]);
+                    [r00, r01, r02, 0.0, r10, r11, r12, 0.0, r20, r21, r22, 0.0,
+                     -(r00 * tx + r10 * ty + r20 * tz), -(r01 * tx + r11 * ty + r21 * tz), -(r02 * tx + r12 * ty + r22 * tz), 1.0]
+                };
+                let old_strip = match old_tier {
+                    "3_idle" => idle0.map(|m| inv(&m)).unwrap_or(IDENTITY_4X4),
+                    "4_identity" => IDENTITY_4X4,
+                    _ => root_relinv,
+                };
+                let changed = old_strip.iter().zip(root_relinv.iter()).any(|(a, b)| (a - b).abs() > 1e-3);
+                crate::console_warn!(
+                    "[TIER] {} res={} old={} new={}{} bp={} broken={} clone_r0={} rot_at={} idle={} idle0={} node={} strip={}",
+                    model_name.as_str(), resource_name.as_str(), old_tier, new_tier,
+                    if changed { " CHANGED" } else { "" },
+                    strip_state.has_bones_player,
+                    runtime_state.map_or(false, |rs| rs.broken_root_com_fold.contains(&model_name)),
+                    strip_state.clone_r0.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    strip_state.rotation_replaced_at.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    idle.map(|m| m.name.as_str().to_string()).unwrap_or_else(|| "-".to_string()),
+                    idle0.as_ref().map(|m| rot(m)).unwrap_or_else(|| "-".to_string()),
+                    nodet,
+                    rot(&root_relinv),
+                );
             }
-            rs.clone_hop_count.get(&model_name).map(|(_, r0)| *r0)
-        });
-        let root_relinv = match (folded_com, clone_r0, &idle_root_mats) {
-            (Some(r0), _, _) => affine_inv(r0),
-            (None, Some(r0), Some(m)) if !m.is_empty() => affine_inv(&r0),
-            (None, _, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
-            // NO clone tier here. A 2026-08-18 attempt added a LAST tier that
-            // relativized any cloneModelFromCastmember model by its posed root
-            // (`world_matrices[0]`) to strip the biped COM from AreaZero's clip-less
-            // "Punch" blade rig. It is refuted: `clone_hop_count` holds EVERY cloned
-            // skinned model (hop >= 1), so the tier also fired on Agent Free Ride's
-            // rider/vehicle rigs and on all six Rifleman `soldier_N` clones — probe:
-            // `tier=clone_posed` for player/veh_player_1..5/soldier_1..6 — rotating
-            // each by inv(root) (a 3ds-Max biped root is Rz(-90) here) and displacing
-            // it by the root offset. That is the reported "AFR1/AFR2 player rotation"
-            // and "Rifleman soldier aiming"; with the tier gone the AFR riders stand
-            // on their boards again.
-            //
-            // It also contradicts a rule MEASURED in real Director 11.5 on Rifleman's
-            // own spawn code (memory [[w3d-clone-hop-refold]]): the fold is re-applied
-            // per clone HOP and a clone is deliberately never recorded in
-            // `model_root_com`, because "the renderer's strip is only valid while the
-            // node still holds the fold, and a script assigning `transform` destroys
-            // it" — which is exactly what AreaZero's FPS weapon script does
-            // (`transform.rotation = vector(-90,90,0)`). Any future fix for the blade
-            // must key off the hop COUNT and the r0 the hop carried, not off "is a
-            // clone at all".
-            _ => IDENTITY_4X4,
-        };
+        }
+        */
 
         // Check for motion blending (crossfade) — per-model blend state.
         let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);

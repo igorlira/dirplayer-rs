@@ -878,7 +878,10 @@ pub async fn tick_w3d_animations() {
                                 };
                                 let node = scene.nodes.iter().find(|n| n.name == model_name);
                                 let resource_name = node.map(|n| n.resource_name).unwrap_or(model_name);
-                                let relinv = skel::root_relativizer(scene, skeleton, model_name, resource_name);
+                                let relinv = skel::root_strip_matrix(
+                                    scene, skeleton, model_name, resource_name,
+                                    rs.root_strip_state(model_name),
+                                );
                                 skel::root_clearance_node_offset(&relinv, p)
                             };
                             let delta = [want[0] - applied[0], want[1] - applied[1], want[2] - applied[2]];

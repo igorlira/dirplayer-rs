@@ -268,11 +268,12 @@ pub fn raycast_scene_multi(
     node_transforms: Option<&std::collections::HashMap<Symbol, [f32; 16]>>,
     excluded_nodes: Option<&std::collections::HashSet<Symbol>>,
     included_nodes: Option<&std::collections::HashSet<Symbol>>,
-    // Per-model animation state: (model, skeleton) -> (motion name, time, rootLock).
-    // Supplied by the player, which owns the bonesPlayer state the renderer draws
-    // from; passing it as a closure keeps this module free of player types.
-    // `None` disables skinned raycasting and tests bind-pose geometry.
-    anim: Option<&dyn Fn(Symbol, Symbol) -> Option<(Option<Symbol>, f32, bool)>>,
+    // Per-model animation state: (model, skeleton) -> (motion name, time, rootLock,
+    // root strip). Supplied by the player, which owns the bonesPlayer state the
+    // renderer draws from; passing it as a closure keeps this module free of
+    // player types. `None` disables skinned raycasting and tests bind-pose
+    // geometry.
+    anim: Option<&dyn Fn(Symbol, Symbol) -> Option<(Option<Symbol>, f32, bool, [f32; 16])>>,
 ) -> Vec<RayHit> {
     let mut all_hits: Vec<RayHit> = Vec::new();
 
@@ -460,8 +461,7 @@ pub fn raycast_scene_multi(
         let skin_pose: Option<Vec<[f32; 16]>> = anim.and_then(|a| {
             let skeleton = scene.skeletons.iter()
                 .find(|s| s.name == *resource && s.bones.len() > 1)?;
-            let (motion, time, root_lock) = a(node.name, skeleton.name)?;
-            let relinv = super::skeleton::root_relativizer(scene, skeleton, node.name, *resource);
+            let (motion, time, root_lock, relinv) = a(node.name, skeleton.name)?;
             Some(super::skeleton::build_skinning_matrices(
                 skeleton,
                 motion.and_then(|m| scene.motions.iter().find(|x| x.name == m)),
