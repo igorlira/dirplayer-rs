@@ -2692,6 +2692,12 @@ impl SoundChannel {
         self.elapsed_time = 0.0;
         self.loops_remaining = 0;
         self.is_fading = false;
+        // A stopped channel keeps nothing queued. Matematik i Maaneby's
+        // Gentag button stops channel 4 and queues the narration again; with
+        // the old entries left in place they played before the new ones.
+        self.playlist_segments.clear();
+        self.playlist.clear();
+        self.current_segment_index = None;
 
         if let Some(ref source) = self.source_node {
             let _ = source.stop_with_when(0.0);
@@ -4548,6 +4554,24 @@ impl SoundChannel {
         }
 
         Ok((buffer, num_channels, buffer_sample_rate))
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::{SoundChannel, SoundSegment};
+    use crate::player::DatumRef;
+
+    #[test]
+    fn stop_empties_the_playlist() {
+        let mut ch = SoundChannel::new(4, None);
+        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1 });
+        ch.playlist.push(DatumRef::Void);
+        ch.current_segment_index = Some(0);
+        ch.stop();
+        assert!(ch.playlist_segments.is_empty());
+        assert!(ch.playlist.is_empty());
+        assert_eq!(ch.current_segment_index, None);
     }
 }
 
