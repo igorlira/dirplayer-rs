@@ -197,7 +197,12 @@ impl VectorDatumHandlers {
         // the inner Vector datum (which has no node mapping), not the parent transform.
         if let Some((_, parent_ref, sub_prop)) = player.transform_sub_refs.iter()
             .find(|(vec_ref, _, _)| vec_ref == datum).cloned() {
-            super::transform3d::mark_transform_dirty(&parent_ref);
+            super::transform3d::mark_transform_dirty_with(&parent_ref, match sub_prop.as_lower_str() {
+                "position" => super::transform3d::WRITE_POSITION,
+                "rotation" => super::transform3d::WRITE_ROTATION,
+                "scale" => super::transform3d::WRITE_SCALE,
+                _ => super::transform3d::WRITE_COMPOSE,
+            });
             if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
                 match sub_prop.as_lower_str() {
                     "position" => {
