@@ -513,6 +513,12 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         // Void comparisons - Void is never > any number
         (Datum::Void, Datum::Int(_)) => Ok(false),
         (Datum::Void, Datum::Float(_)) => Ok(false),
+        // VOID against VOID. Both sides read as 0, so neither is greater and
+        // neither is less -- the same answer the arms above give for a Void on
+        // one side only. Age of Speed 2's steering asks for this 2697 times in a
+        // single test, which fell through to the catch-all: it warned on every
+        // one and returned false anyway.
+        (Datum::Void, Datum::Void) => Ok(false),
         
         // String vs number — see `string_number_ordering`.
         (Datum::String(left), Datum::Int(right)) => Ok(string_number_ordering(
@@ -574,22 +580,10 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             Ok(*n > (vals[0] as i32) || *n > (vals[1] as i32))
         }
 
-        // Linear list comparison — element-wise, mirroring `datum_less_than`
-        // (and the 11.5 dictionary's rect/point-as-list rule). True only if
-        // every corresponding element of the left is > the right's.
-        (Datum::List(_, left_items, _), Datum::List(_, right_items, _)) => {
-            if left_items.is_empty() || right_items.is_empty() {
-                return Ok(false);
-            }
-            for (l, r) in left_items.iter().zip(right_items.iter()) {
-                let ld = allocator.get_datum(l);
-                let rd = allocator.get_datum(r);
-                if !datum_greater_than(ld, rd, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        // No dedicated list-vs-list arm: the generic container arms below give
+        // first-vs-first, which is the measured rule. See the note in
+        // `datum_less_than` for the Message-window results that retired the
+        // element-wise version.
 
         // Script instances compare by allocation id (see `datum_less_than`).
         (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() > r.id()),
@@ -600,15 +594,21 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
         (Datum::String(left), Datum::String(right)) =>
             Ok(left.to_ascii_lowercase() > right.to_ascii_lowercase()),
 
+        // A vector against a SCALAR is never ordered -- see the measured table
+        // in `datum_less_than`. Director answers 0 both ways, for both
+        // operators.
+        (Datum::Vector(_), Datum::Int(_) | Datum::Float(_)) => Ok(false),
+        (Datum::Int(_) | Datum::Float(_), Datum::Vector(_)) => Ok(false),
+
         // A property list, or a list against a NON-LIST: the mirror of
-        // `datum_less_than`'s arms. A property list answers from its FIRST
-        // VALUE, a linear list requires EVERY element to satisfy the comparison,
-        // and an empty container answers false. Deliberately generic in the
-        // other operand — a Lingo list holds any datum, so narrow arms would
-        // just move the "not supported" warning to the next movie. `>` had NO
-        // prop-list handling at all before this, so it warned and answered FALSE
-        // for every prop-list comparison, silently mis-ordering any sorted
-        // insert or priority queue that probed with `>` instead of `<`.
+        // `datum_less_than`'s arms, and measured the same way -- the answer
+        // comes from the container's FIRST element/value, and an empty one
+        // answers false. See the Message-window table over there.
+        //
+        // `>` had NO prop-list handling at all before this, so it warned and
+        // answered FALSE for every prop-list comparison, silently mis-ordering
+        // any sorted insert or priority queue that probed with `>` rather
+        // than `<`.
         (Datum::PropList(left_pairs, ..), _) => match left_pairs.front() {
             Some((_, left_val)) => {
                 datum_greater_than(allocator.get_datum(left_val), right, allocator)
@@ -621,28 +621,14 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
             }
             None => Ok(false),
         },
-        (Datum::List(_, left_items, _), _) => {
-            if left_items.is_empty() {
-                return Ok(false);
-            }
-            for l in left_items.iter() {
-                if !datum_greater_than(allocator.get_datum(l), right, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (_, Datum::List(_, right_items, _)) => {
-            if right_items.is_empty() {
-                return Ok(false);
-            }
-            for r in right_items.iter() {
-                if !datum_greater_than(left, allocator.get_datum(r), allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        (Datum::List(_, left_items, _), _) => match left_items.front() {
+            Some(l) => datum_greater_than(allocator.get_datum(l), right, allocator),
+            None => Ok(false),
+        },
+        (_, Datum::List(_, right_items, _)) => match right_items.front() {
+            Some(r) => datum_greater_than(left, allocator.get_datum(r), allocator),
+            None => Ok(false),
+        },
 
         // Catch-all
         _ => {
@@ -755,6 +741,9 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // Void comparisons - Void is always < any number
         (Datum::Void, Datum::Int(_)) => Ok(true),
         (Datum::Void, Datum::Float(_)) => Ok(true),
+        // Two VOIDs are equal, so neither ordering holds. Mirrors the
+        // Void/Void arm in `datum_greater_than`.
+        (Datum::Void, Datum::Void) => Ok(false),
         
         // Vector comparisons — lexicographic; see `datum_greater_than` for the
         // Director-measured truth table this mirrors.
@@ -815,49 +804,71 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             }
         }
 
-        // Linear list comparison. Per the 11.5 dictionary `<` entry, rects/points
-        // (and by extension lists) compare "with each element of the first list
-        // compared to the corresponding element of the second list" — the same
-        // all-components rule the Point arm above uses. True only if every
-        // corresponding element of the left is < the right's.
-        (Datum::List(_, left_items, _), Datum::List(_, right_items, _)) => {
-            if left_items.is_empty() || right_items.is_empty() {
-                return Ok(false);
-            }
-            for (l, r) in left_items.iter().zip(right_items.iter()) {
-                let ld = allocator.get_datum(l);
-                let rd = allocator.get_datum(r);
-                if !datum_less_than(ld, rd, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        // A list against another LIST needs no arm of its own: the generic
+        // container arms below reduce the left to its first element and then the
+        // right to its first, which is first-vs-first -- the measured rule.
+        //
+        // There WAS a dedicated arm here requiring every corresponding element
+        // to satisfy the comparison, citing the dictionary's rect/point wording
+        // ("each element of the first list compared to the corresponding element
+        // of the second"). That text is about RECTS and POINTS, which are their
+        // own datum types here with their own arms, and it does not describe
+        // lists. Measured:
+        //
+        //     put [3,1]   > [2,2]     -- 1     first: 3>2   all: 1>2 is false
+        //     put [1,2,3] < [2,2,2]   -- 1     first: 1<2   all: 2<2 is false
+        //
+        // Both answer 1 in Director and 0 under the all-elements rule, so the
+        // arm was wrong and is gone rather than rewritten.
 
         // Script instances have no meaningful ordering in Director, but a movie
         // that sorts or compares them needs a stable result — compare by their
         // allocation id.
         (Datum::ScriptInstanceRef(l), Datum::ScriptInstanceRef(r)) => Ok(l.id() < r.id()),
 
-        // A list against a NON-LIST. Both container forms keep the rule their
-        // matching-pair arm above uses, with the other operand broadcast over
-        // the container: a property list answers from its FIRST VALUE, a linear
-        // list requires EVERY element to satisfy the comparison, and an empty
-        // container of either kind compares as not-less. On a one-element list
-        // the two agree, which is the shape that actually turns up.
+        // A vector against a SCALAR is never ordered -- Director answers FALSE
+        // both ways round, for both operators. Measured in the Message window:
         //
-        // Deliberately generic in the other operand rather than written for
-        // ints and floats: a Lingo list holds any datum, so it gets compared
-        // against strings, symbols, vectors and points too, and narrow arms
-        // would just move the "not supported" warning to the next movie. Each
-        // step strips one container level, so the recursion terminates on any
-        // finite structure.
+        //     put vector(1,2,3) > 2     -- 0      put vector(1,2,3) < 2   -- 0
+        //     put vector(5,1,1) > 2     -- 0      put vector(5,1,1) < 2   -- 0
+        //     put vector(3,3,3) > 4     -- 0      put vector(3,3,3) < 4   -- 0
+        //     put vector(1,1,1) > 1.5   -- 0      put 2 < vector(1,2,3)   -- 0
+        //     put vector(0,0,5) > 1     -- 0      put 2 > vector(1,2,3)   -- 0
+        //     put vector(1,2,3) = 2     -- 0
         //
-        // LEGO WorldBuilder is the movie that surfaced this — every frame of its
-        // build loop warned "datum_less_than not supported for types: list and
-        // int" (and prop_list and int). Its comparisons are all a list of
-        // positive ints against 0, FALSE under any reading, so this defines the
-        // operator without moving the movie.
+        // So it is not x-only, not all-components, not any-component and not
+        // magnitude -- each of those answers 1 for at least one line above. The
+        // comparison simply does not hold, which is what the catch-all already
+        // returned; these arms exist to stop it WARNING on a shape Director
+        // defines perfectly well.
+        (Datum::Vector(_), Datum::Int(_) | Datum::Float(_)) => Ok(false),
+        (Datum::Int(_) | Datum::Float(_), Datum::Vector(_)) => Ok(false),
+
+        // A list against a NON-LIST: the answer comes from the list's FIRST
+        // ELEMENT, for linear lists and property lists alike. Measured:
+        //
+        //     put [1,2,3] > 2        -- 0      first: 1>2
+        //     put [1,2,3] < 2        -- 1      first: 1<2
+        //     put [3,1]   > 2        -- 1      first: 3>2
+        //     put [5,6]   > 2        -- 1      first: 5>2
+        //     put []      > 2        -- 0      no first element
+        //     put [#a:1, #b:5] > 2   -- 0      first VALUE: 1>2
+        //     put [#a:5, #b:1] > 2   -- 1      first VALUE: 5>2
+        //
+        // First-element is the only rule that fits all seven. "Every element
+        // must satisfy it" is ruled out by `[1,2,3] < 2`, which Director
+        // answers 1 while 2<2 is false; "any element" by `[1,2,3] > 2`, which
+        // it answers 0 while 3>2 is true.
+        //
+        // Deliberately generic in the other operand rather than written for ints
+        // and floats: a Lingo list holds any datum, so it gets compared against
+        // strings, symbols and points too, and narrow arms would only move the
+        // "not supported" warning to the next movie. Each step strips one
+        // container level, so the recursion terminates on any finite structure.
+        //
+        // LEGO WorldBuilder surfaced this -- every frame of its build loop
+        // warned "datum_less_than not supported for types: list and int" (and
+        // prop_list and int).
         (Datum::PropList(left_pairs, ..), _) => match left_pairs.front() {
             Some((_, left_val)) => {
                 datum_less_than(allocator.get_datum(left_val), right, allocator)
@@ -870,28 +881,14 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
             }
             None => Ok(false),
         },
-        (Datum::List(_, left_items, _), _) => {
-            if left_items.is_empty() {
-                return Ok(false);
-            }
-            for l in left_items.iter() {
-                if !datum_less_than(allocator.get_datum(l), right, allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (_, Datum::List(_, right_items, _)) => {
-            if right_items.is_empty() {
-                return Ok(false);
-            }
-            for r in right_items.iter() {
-                if !datum_less_than(left, allocator.get_datum(r), allocator)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        (Datum::List(_, left_items, _), _) => match left_items.front() {
+            Some(l) => datum_less_than(allocator.get_datum(l), right, allocator),
+            None => Ok(false),
+        },
+        (_, Datum::List(_, right_items, _)) => match right_items.front() {
+            Some(r) => datum_less_than(left, allocator.get_datum(r), allocator),
+            None => Ok(false),
+        },
 
         // Catch-all
         _ => {
