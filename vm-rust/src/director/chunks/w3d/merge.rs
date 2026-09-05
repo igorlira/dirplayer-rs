@@ -286,6 +286,7 @@ impl W3dScene {
         // Carry the folded biped COM across, or a merged-in skinned model would keep
         // the composed node transform while the renderer stopped stripping it.
         self.model_root_com.extend(src.model_root_com);
+        self.model_com_folded.extend(src.model_com_folded);
 
         // Force the renderer to re-upload geometry and textures.
         // A whole scene merged in: the changed resources are not enumerated

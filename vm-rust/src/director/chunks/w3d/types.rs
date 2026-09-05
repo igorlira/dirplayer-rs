@@ -587,12 +587,30 @@ pub struct W3dScene {
     /// Per-texture write counters handle the ordinary case precisely; this epoch
     /// covers the case they cannot express, where a counter goes BACKWARDS.
     pub texture_epoch: u64,
-    /// Per skinned model (lowercased node name): the biped COM that Director folds
-    /// into the model node at import — the root bone's frame-0 pose from the model's
-    /// reference motion. Recorded here so the renderer strips exactly the matrix the
-    /// parser composed, and the two can never drift apart. See
-    /// `apply_root_com_to_model_nodes`.
+    /// Per skinned model (lowercased node name): the rig's biped COM — the root
+    /// bone's frame-0 pose from the model's reference motion, or from the REST pose
+    /// when the member holds no clip for this rig.
+    ///
+    /// Recorded for EVERY rig, whether or not it was folded into the node, because
+    /// two different consumers need it and they do not agree:
+    ///
+    ///  * the renderer's fold-cancelling strip, which must see only rigs that were
+    ///    actually folded — it gates on `model_com_folded` below;
+    ///  * the clone provenance path (`cloneModelFromCastmember` →
+    ///    `clone_hop_count`), which uses it to REPLACE an idle-clip strip in the
+    ///    destination scene with the rig's own root. Street Sesh clones its skater
+    ///    out of the clip-less "player_mike" and only then clones `player_idle` in;
+    ///    without this the strip picks up `cpy_player2_idle`, whose frame-0 root sits
+    ///    at the pelvis, and buries the skater to the waist. AreaZero's robots are
+    ///    the same shape and walk sideways without it.
+    ///
+    /// See `apply_root_com_to_model_nodes`.
     pub model_root_com: HashMap<String, [f32; 16]>,
+    /// The subset of `model_root_com` that was actually composed into
+    /// `node.transform`. Director folds only when the rig's reference MOTION lives
+    /// in the same cast member (measured — see `apply_root_com_to_model_nodes`), so
+    /// only these may be stripped back out as a cancellation.
+    pub model_com_folded: std::collections::HashSet<String>,
 }
 
 impl W3dScene {

@@ -1435,6 +1435,21 @@ pub struct Shockwave3dRuntimeState {
     /// `model_root_com` table (that only holds originally-parsed models), so the
     /// matrix has to travel with the clone or the second hop has nothing to fold.
     pub clone_hop_count: std::collections::HashMap<Symbol, (u32, [f32; 16])>,
+    /// The subset of `clone_hop_count` whose LINEAGE was actually folded, i.e.
+    /// whose source rig had its reference motion in its own cast member (see
+    /// `W3dScene::model_com_folded`).
+    ///
+    /// `clone_hop_count`'s r0 has two consumers that disagree, exactly as
+    /// `model_root_com`'s do:
+    ///
+    ///  * the per-hop RE-FOLD of the node transform, which is only correct for a
+    ///    lineage Director folds in the first place — gate it on this set. Without
+    ///    the gate, TRECH's avatar (cloned from an unfolded rig) picks up a spurious
+    ///    Rz(-90) per hop and the mech is drawn lying on its side.
+    ///  * the renderer's clone tier, which uses r0 to REPLACE an idle-clip strip
+    ///    with the rig's own root and needs it for folded and unfolded lineages
+    ///    alike (Street Sesh's skater, AreaZero's robots) — it must NOT gate.
+    pub clone_com_folded: std::collections::HashSet<Symbol>,
     /// Nodes whose biped-COM fold a script has DESTROYED by replacing the node's
     /// own transform outright (`model.transform = t`, or a chained
     /// `model.transform.rotation = v` flushed by `sync_persistent_transforms`).
@@ -2010,6 +2025,7 @@ impl Shockwave3dRuntimeState {
         self.node_shaders.retain(|k, _| !doomed.contains(k));
         self.node_shaders_indexed.retain(|k| !doomed.contains(k));
         self.clone_hop_count.retain(|k, _| !doomed.contains(k));
+        self.clone_com_folded.retain(|k| !doomed.contains(k));
         self.mesh_deform.retain(|k, _| !doomed.contains(k));
         self.detached_nodes.retain(|k| !doomed.contains(k));
         self.point_at_orientations.retain(|k, _| !doomed.contains(k));
