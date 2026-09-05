@@ -1454,6 +1454,7 @@ pub async fn run_event_loop(rx: Receiver<PlayerVMEvent>) {
         if skip {
             continue;
         }
+        crate::player::wait_for_handler_gap().await;
         let result = match item {
             PlayerVMEvent::Global(name, args) => player_invoke_global_event(name, &args).await,
             PlayerVMEvent::Targeted(name, args, instances) => {
