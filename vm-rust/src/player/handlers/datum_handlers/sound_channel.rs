@@ -1869,6 +1869,10 @@ impl SoundChannel {
 
         // Retrieve datum
         let datum = player.get_datum(&member_ref);
+        let member_name = match &datum {
+            Datum::CastMember(r) => player.movie.cast_manager.find_member_by_ref(r).map(|m| m.name.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
 
         if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
             // Update expected sample rate
@@ -1937,15 +1941,19 @@ impl SoundChannel {
                         ch.status = SoundStatus::Loading;
                     }
 
+                    // No PCM reading of these bytes exists: this branch is only
+                    // reached once the sniff found a chain of valid MPEG frames (or
+                    // an Ogg stream), and the cast's own codec field says nothing
+                    // more, since it reports "raw_pcm" for an MP3 behind an ID3 tag.
+                    // Playing the frames as samples was seconds of noise, and a zero
+                    // sample size on the way divided by zero. The channel goes idle
+                    // and the console names the member, so a decoder refusal can be
+                    // traced rather than heard.
                     if let Err(e) = Self::start_sound_mp3_async(self_rc_clone.clone(), mp3_data.clone(), mp3_sound_member).await {
-                        error!("❌ MP3 playback failed: {:?}", e);
-                        debug!("📊 MP3 data size: {} bytes, first bytes: {:02X?}",
-                            mp3_data.len(), &mp3_data[0..32.min(mp3_data.len())]);
-                        {
-                            let mut ch = self_rc_clone.borrow_mut();
-                            ch.status = SoundStatus::Idle;
-                        }
-                        Self::start_sound_pcm_fallback(self_rc_clone, member_ref);
+                        error!("❌ MP3 playback failed for \"{}\": {:?} ({} bytes, first bytes {:02X?})",
+                            member_name, e, mp3_data.len(), &mp3_data[0..16.min(mp3_data.len())]);
+                        let mut ch = self_rc_clone.borrow_mut();
+                        ch.status = SoundStatus::Idle;
                     }
                 });
                 debug!("🚀 Spawned MP3 decode task (start_sound)");
@@ -2597,223 +2605,6 @@ impl SoundChannel {
         Ok(())
     }
 
-    /// PCM fallback when MP3 decoding fails
-    fn start_sound_pcm_fallback(self_rc: Rc<RefCell<Self>>, member_ref: DatumRef) {
-        debug!("🔄 Starting PCM fallback playback");
-
-        let mut this = self_rc.borrow_mut();
-
-        // Get global player
-        // Resolve the member against the ACTIVE player, not always the host: a
-        // nested `#movie` sub-player's `puppetSound` runs under its own active id
-        // and its member_ref/datum + sound cast member live in the SUB's
-        // allocator/cast. Using PLAYER_OPT (host) looked up a different datum at
-        // that id (the "datum type: string/symbol/int" mismatch) and never found
-        // the sound member.
-        let player_opt = unsafe {
-            if crate::player::ACTIVE_PLAYER_ID == 0 {
-                crate::PLAYER_OPT.as_mut()
-            } else {
-                crate::player::NESTED_PLAYERS
-                    .get_mut(crate::player::ACTIVE_PLAYER_ID - 1)
-                    .and_then(|o| o.as_mut())
-            }
-        };
-        let player = match player_opt {
-            Some(p) => p,
-            None => {
-                error!("❌ No active player found");
-                return;
-            }
-        };
-
-        // Retrieve datum
-        let datum = player.get_datum(&member_ref);
-
-        if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
-            let audio_context = this.audio_context.clone().unwrap();
-
-            // CRITICAL FIX: Don't check for MP3 patterns here!
-            // If MP3 decoding failed and we're in fallback, just try PCM.
-            // The false positive MP3 detection was preventing any sound playback.
-
-            debug!("🔧 Forcing PCM decoding (ignoring any MP3-like patterns)");
-
-            // Force PCM decoding by treating as raw PCM (NOT MP3)
-            let pcm_wav = match Self::load_director_sound_from_bytes(
-                &sound_member.sound.data(),
-                sound_member.info.channels,
-                sound_member.info.sample_rate,
-                sound_member.info.sample_size,
-                "raw_pcm", // ← Force raw_pcm codec to avoid MP3 detection
-                Some(sound_member.info.sample_count),
-                sound_member.sound.big_endian_data(),
-            ) {
-                Ok(wav) => wav,
-                Err(e) => {
-                    error!("❌ PCM fallback failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Decode WAV to AudioData
-            let audio_data = match AudioData::from_wav_bytes(&pcm_wav) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("❌ WAV decode failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            debug!(
-                    "✅ PCM fallback: {} samples, {} Hz, {} channels",
-                    audio_data.samples.len(),
-                    audio_data.sample_rate,
-                    audio_data.num_channels
-                );
-
-            // Handle empty samples
-            if audio_data.samples.is_empty() {
-                error!("❌ Audio data has no samples");
-                this.status = SoundStatus::Idle;
-                return;
-            }
-
-            let num_frames = audio_data.samples.len() / audio_data.num_channels as usize;
-            let target_sample_rate = audio_context.sample_rate();
-            let source_sample_rate = audio_data.sample_rate as f32;
-
-            // Calculate resampling
-            let resample_ratio = target_sample_rate / source_sample_rate;
-            let resampled_frames = (num_frames as f32 * resample_ratio).round() as usize;
-
-            debug!(
-                    "🔄 Resampling {} frames -> {} frames (ratio: {:.3})",
-                    num_frames, resampled_frames, resample_ratio
-                );
-
-            // Create buffer at target sample rate
-            let buffer = match audio_context.create_buffer(
-                audio_data.num_channels as u32,
-                resampled_frames as u32,
-                target_sample_rate as f32,
-            ) {
-                Ok(buf) => buf,
-                Err(_) => {
-                    error!("❌ Failed to create AudioBuffer");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Resample and copy data
-            for ch in 0..audio_data.num_channels {
-                let mut channel_data = vec![0.0f32; resampled_frames];
-
-                for frame in 0..resampled_frames {
-                    let source_pos = frame as f32 / resample_ratio;
-                    let source_frame = source_pos.floor() as usize;
-                    let frac = source_pos - source_frame as f32;
-
-                    let idx1 = (source_frame * audio_data.num_channels as usize + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-                    let idx2 = ((source_frame + 1) * audio_data.num_channels as usize
-                        + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-
-                    let sample1 = audio_data.samples[idx1] as f32;
-                    let sample2 = audio_data.samples[idx2] as f32;
-                    channel_data[frame] = sample1 + (sample2 - sample1) * frac;
-                }
-
-                let _ = buffer.copy_to_channel(&channel_data, ch as i32);
-            }
-
-            // CRITICAL FIX: Wrap in Rc::new() for Rc<AudioBuffer>
-            this.current_audio_buffer = Some(Rc::new(buffer.clone()));
-
-            // Create and connect source node
-            let source = match audio_context.create_buffer_source() {
-                Ok(s) => s,
-                Err(_) => {
-                    error!("❌ Failed to create buffer source");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            source.set_buffer(Some(&buffer));
-            
-            // Set up looping if needed
-            let loop_count = this.loop_count;
-            if loop_count == 0 {
-                source.set_loop(true);
-            } else {
-                source.set_loop(false);
-            }
-
-            // Create gain node
-            let gain = match audio_context.create_gain() {
-                Ok(g) => g,
-                Err(_) => {
-                    error!("❌ Failed to create gain node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let volume = this.volume;
-            gain.gain().set_value((volume / 255.0) as f32);
-
-            // Create pan node
-            let pan = match audio_context.create_stereo_panner() {
-                Ok(p) => p,
-                Err(_) => {
-                    error!("❌ Failed to create pan node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let pan_value = this.pan;
-            pan.pan().set_value(pan_value as f32);
-
-            // Connect the audio graph
-            let _ = source.connect_with_audio_node(&gain);
-            let _ = gain.connect_with_audio_node(&pan);
-            let _ = pan.connect_with_audio_node(&audio_context.destination());
-
-            // Set up the onended callback before starting
-            let channel_index = this.channel_num;
-            let closure = Closure::<dyn FnMut()>::new(move || {
-                SoundChannel::handle_end_of_sound(channel_index);
-            });
-            source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref())
-                .unwrap_or_else(|e| {
-                    warn!("⚠️ Failed to add ended listener: {:?}", e);
-                });
-            closure.forget();
-
-            // Start playback
-            let _ = source.start();
-
-            debug!("✅ PCM fallback playback started successfully");
-
-            // CRITICAL FIX: Wrap all nodes in Rc::new()
-            this.source_node = Some(Rc::new(source));
-            this.gain_node = Some(Rc::new(gain));
-            this.pan_node = Some(Rc::new(pan));
-            this.status = SoundStatus::Playing;
-            this.playback_start_context_time = this.context_time();
-        } else {
-            error!("❌ Could not resolve sound member");
-            this.status = SoundStatus::Idle;
-        }
-    }
-
-    /// Validates MP3 frame headers and calculates frame size
     fn get_mp3_frame_info(header: &[u8; 4]) -> Option<(usize, u32)> {
         if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
             return None;
@@ -3232,7 +3023,11 @@ impl SoundChannel {
         } else {
             bits_per_sample
         };
-        let sample_count = (pcm_data.len() / (channels as usize * (bits as usize / 8))) as u32;
+        let bytes_per_frame = channels as usize * (bits as usize / 8);
+        if bytes_per_frame == 0 {
+            return Err(format!("cannot build PCM from {} channels at {} bits", channels, bits));
+        }
+        let sample_count = (pcm_data.len() / bytes_per_frame) as u32;
         let byte_rate = sample_rate * channels as u32 * bits as u32 / 8;
         let block_align = (channels * bits / 8) as u16;
         let data_len = pcm_data.len() as u32;
@@ -4753,6 +4548,21 @@ impl SoundChannel {
         }
 
         Ok((buffer, num_channels, buffer_sample_rate))
+    }
+}
+
+#[cfg(test)]
+mod pcm_guard_tests {
+    use super::SoundChannel;
+
+    #[test]
+    fn a_zero_frame_size_is_an_error_not_a_panic() {
+        // A member with no sample size (an MP3 whose decode failed) used to
+        // reach the WAV builder and divide by zero.
+        let r = SoundChannel::load_director_sound_from_bytes(&[0x49, 0x44, 0x33, 0x03, 0, 0, 0, 0], 1, 22050, 0, "raw_pcm", None, false);
+        assert!(r.is_err());
+        let r = SoundChannel::load_director_sound_from_bytes(&[1, 2, 3, 4, 5, 6, 7, 8], 0, 22050, 16, "raw_pcm", None, false);
+        assert!(r.is_err());
     }
 }
 
