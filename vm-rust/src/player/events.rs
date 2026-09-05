@@ -108,35 +108,21 @@ pub fn player_dispatch_event_to_sprite(
 /// so with mouseWithin only on movement, a click on a stationary cursor was
 /// never seen.
 ///
-/// The hovered set is narrowed to sprites that can actually respond, plus the
-/// front-most one whatever it is. Dispatching to a sprite with no matching
-/// behaviour falls through to the frame and movie scripts, so sending to every
-/// overlapping sprite would invoke a movie-level `on mouseWithin` once per
-/// layer; keeping the front-most as the sole fall-through preserves exactly one
-/// invocation.
+/// Only the front-most sprite under the pointer is hovered, as in Director,
+/// where these events follow `the rollover`: a sprite covered by another does
+/// not see the pointer at all. Sending them to every overlapping sprite that
+/// had a handler let a lower sprite's mouseEnter run after the front-most
+/// sprite's and undo it (Matematik i Maaneby's map: a ground patch carrying
+/// one house's behaviour sits under another house, and a pointer landing on
+/// the house lit it and then unlit it in the same event).
 pub fn dispatch_rollover_events() {
     let (now_hovered, prev_hovered) = reserve_player_mut(|player| {
         let (x, y) = player.mouse_loc;
         let prev_hovered = std::mem::take(&mut player.hovered_sprites);
         let now_hovered: Vec<i16> = crate::player::score::get_sprites_at(player, x, y)
-            .iter()
-            .enumerate()
-            .filter(|(idx, num)| {
-                *idx == 0
-                    || player
-                        .movie
-                        .score
-                        .get_sprite(**num as i16)
-                        .map(|sprite| {
-                            crate::player::score::sprite_has_handler(
-                                player,
-                                sprite,
-                                &["mouseEnter", "mouseWithin", "mouseLeave"],
-                            )
-                        })
-                        .unwrap_or(false)
-            })
-            .map(|(_, num)| *num as i16)
+            .first()
+            .map(|num| *num as i16)
+            .into_iter()
             .collect();
         player.hovered_sprites = now_hovered.clone();
         (now_hovered, prev_hovered)
