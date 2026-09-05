@@ -1555,6 +1555,18 @@ impl WebGL2Renderer {
                     channel_num, w3d_cam, w3d_extra_cams
                 );
             }
+            // A GIF carries the background colour the file declares, and a
+            // movie hides it with ink 36, which keys out the background
+            // colour. The score's bgColor for such a sprite is whatever the
+            // author left there, usually white, so a GIF with any other
+            // background drew as a solid box.
+            let bg_color = if crate::player::gif::is_gif_member(player, member_ref.cast_lib, member_ref.cast_member) {
+                player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    .map(|m| m.bg_color.clone())
+                    .unwrap_or_else(|| sprite.bg_color.clone())
+            } else {
+                sprite.bg_color.clone()
+            };
             (
                 member_ref,
                 rect,
