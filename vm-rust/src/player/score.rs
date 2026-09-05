@@ -1947,11 +1947,10 @@ impl Score {
                     continue;
                 }
 
-                let (detail_info_opt, _details_count) = reserve_player_ref(|player| {
-                    let info = player.movie.score.sprite_details.get(&sprite_list_idx).cloned();
-                    let count = player.movie.score.sprite_details.len();
-                    (info, count)
-                });
+                // The index names an entry in THIS score's table. A film loop
+                // carries its own; read through the stage's and the index lands
+                // on whatever the main score keeps there, frame scripts included.
+                let detail_info_opt = self.sprite_details.get(&sprite_list_idx).cloned();
 
                 if let Some(detail_info) = detail_info_opt {
                     if detail_info.behaviors.is_empty() {
@@ -2241,9 +2240,7 @@ impl Score {
                     continue;
                 }
 
-                let detail_info_opt = reserve_player_ref(|player| {
-                    player.movie.score.sprite_details.get(&sprite_list_idx).cloned()
-                });
+                let detail_info_opt = self.sprite_details.get(&sprite_list_idx).cloned();
 
                 if let Some(detail_info) = detail_info_opt {
                     if detail_info.behaviors.is_empty() {
