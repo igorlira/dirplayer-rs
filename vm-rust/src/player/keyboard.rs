@@ -9,6 +9,10 @@ pub struct KeyboardKey {
 
 pub struct KeyboardManager {
     pub down_keys: Vec<KeyboardKey>,
+    /// The key most recently pressed, kept after its release: `the key` and
+    /// `the keyCode` report it inside `on keyUp`, when the key is no longer
+    /// down. Cleared by nothing but the next key press.
+    pub last_key: Option<KeyboardKey>,
     /// Timestamp of the most recent `key_down`; `None` if no key has been
     /// pressed since the movie started. Used by `the lastKey` to compute
     /// ticks since the last key event.
@@ -19,6 +23,7 @@ impl KeyboardManager {
     pub fn new() -> Self {
         Self {
             down_keys: Vec::new(),
+            last_key: None,
             last_key_time: None,
         }
     }
@@ -37,6 +42,11 @@ impl KeyboardManager {
             _ => key,
         };
 
+        self.last_key = Some(KeyboardKey {
+            key: mapped_key.clone(),
+            code: mapped_code,
+        });
+
         // Check if this code is already in the down_keys list
         if !self.down_keys.iter().any(|x| x.code == mapped_code) {
             self.down_keys.push(KeyboardKey {
@@ -44,6 +54,12 @@ impl KeyboardManager {
                 code: mapped_code,
             });
         }
+    }
+
+    /// The key `the key` and `the keyCode` describe: the one most recently
+    /// pressed among those still down, else the last one pressed.
+    fn current_key(&self) -> Option<&KeyboardKey> {
+        self.down_keys.last().or(self.last_key.as_ref())
     }
 
     pub fn key_up(&mut self, _: &str, code: u16) {
@@ -86,12 +102,7 @@ impl KeyboardManager {
     }
 
     pub fn key_code(&self) -> u16 {
-        if self.down_keys.len() == 0 {
-            return 0;
-        }
-
-        let key = self.down_keys.last().unwrap();
-        key.code
+        self.current_key().map_or(0, |key| key.code)
     }
 
     /// Translate a stored browser key name (e.g. `e.key` = "ArrowLeft") to the
@@ -112,10 +123,9 @@ impl KeyboardManager {
     }
 
     pub fn key(&self) -> String {
-        if self.down_keys.is_empty() {
+        let Some(key) = self.current_key().map(|key| &key.key) else {
             return "".to_string();
-        }
-        let key = &self.down_keys.last().unwrap().key;
+        };
         if let Some(ch) = Self::director_char_for(key) {
             return ch.to_string();
         }
@@ -137,3 +147,33 @@ impl KeyboardManager {
         key.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::KeyboardManager;
+
+    #[test]
+    fn the_key_survives_the_release() {
+        // `on keyUp` runs after the key has left the down list, and Director
+        // still reports the released key there.
+        let mut kb = KeyboardManager::new();
+        kb.key_down(" ".to_string(), 32);
+        let code = kb.key_code();
+        assert_eq!(kb.key(), " ");
+        kb.key_up(" ", 32);
+        assert_eq!(kb.key(), " ");
+        assert_eq!(kb.key_code(), code);
+        assert!(!kb.is_key_down(" "));
+        assert_eq!(kb.key_pressed(), "", "keyPressed is about keys still down");
+    }
+
+    #[test]
+    fn a_key_still_down_wins_over_the_last_release() {
+        let mut kb = KeyboardManager::new();
+        kb.key_down("a".to_string(), 65);
+        kb.key_down("b".to_string(), 66);
+        kb.key_up("b", 66);
+        assert_eq!(kb.key(), "a");
+    }
+}
+
