@@ -1,0 +1,20 @@
+[package]
+name = "filextra4-xtra"
+version = "0.1.0"
+edition = "2024"
+description = "FileXtra4 stub xtra for dirplayer-rs"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xtra-sdk = { path = "../../xtra-sdk" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -6,6 +6,132 @@ use crate::{
     player::{reserve_player_mut, DatumRef, ScriptError},
 };
 
+/// localStorage-backed persistence for the virtual filesystem, so files a
+/// movie writes (settings, logs, e.g. a measured movie's settings file with its
+/// language choice) survive a page reload. Keys are the lowercased BASENAME
+/// so "C:\dir\settings.txt", "http://host/dir/settings.txt" and "settings.txt"
+/// all refer to the same stored file. Values are base64 (bytes are CP1252,
+/// not valid UTF-16 storage material). All failures are silently ignored —
+/// persistence is best-effort and must never take the movie down.
+/// The save games this browser holds, newest first.
+///
+/// A Director projector puts up the OS file dialog here. A browser cannot,
+/// and blocking dialogs are the wrong shape for a web page anyway, so the
+/// two dialog handlers below answer from the persistence layer instead:
+/// saving reuses the name the movie suggests (the player's own name), and
+/// loading picks the most recent save. That makes "Gem spil" and "Hent spil"
+/// work end to end, with a save per player name.
+fn list_persisted_saves() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let count = storage.length().unwrap_or(0);
+        for i in 0..count {
+            if let Ok(Some(key)) = storage.key(i) {
+                if let Some(base) = key.strip_prefix("dirplayer.fileio.") {
+                    if base.ends_with(".mim") {
+                        names.push(base.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // Newest first: the save index below records the order files were written.
+    let order = save_order();
+    names.sort_by_key(|n| std::cmp::Reverse(order.iter().position(|o| o == n).map(|p| order.len() - p).unwrap_or(0)));
+    names
+}
+
+/// Write order for saved games, so "load" can offer the newest one.
+/// Kept as its own small list next to the files themselves.
+fn save_order() -> Vec<String> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item("dirplayer.fileio.saveorder").ok().flatten())
+        .map(|v| v.split(char::from_u32(10).unwrap()).filter(|p| !p.is_empty()).map(|p| p.to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn record_save_order(file_name: &str) {
+    let base = file_name
+        .rsplit(|c| c == char::from_u32(92).unwrap() || c == '/')
+        .next()
+        .unwrap_or(file_name)
+        .to_lowercase();
+    if !base.ends_with(".mim") {
+        return;
+    }
+    let mut order = save_order();
+    order.retain(|o| o != &base);
+    order.push(base);
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let joined = order.join(&String::from(char::from_u32(10).unwrap()));
+        let _ = storage.set_item("dirplayer.fileio.saveorder", &joined);
+    }
+}
+
+fn persist_storage_key(file_name: &str) -> String {
+    let base = file_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(file_name)
+        .to_lowercase();
+    format!("dirplayer.fileio.{}", base)
+}
+
+fn persist_file(file_name: &str, data: &[u8]) {
+    use base64::Engine;
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let _ = storage.set_item(&persist_storage_key(file_name), &encoded);
+    }
+    // Saved games get their write order recorded so the load handler can
+    // offer the newest one in place of a file dialog.
+    record_save_order(file_name);
+}
+
+fn load_persisted_file(file_name: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let storage = web_sys::window().and_then(|w| w.local_storage().ok().flatten())?;
+    let encoded = storage.get_item(&persist_storage_key(file_name)).ok()??;
+    base64::engine::general_purpose::STANDARD.decode(encoded).ok()
+}
+
+fn remove_persisted_file(file_name: &str) {
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = storage.remove_item(&persist_storage_key(file_name));
+    }
+}
+
+/// Blocking fetch for the SYNC openFile path (Lingo command syntax
+/// `openFile(fileObj, name, mode)` dispatches through the sync handler
+/// chain, which cannot await). Sync XHR is deprecated but supported on the
+/// main thread, and only runs for the rare bootstrap read of a
+/// server-shipped file that is in neither the VFS nor localStorage.
+/// The x-user-defined charset trick keeps the transfer byte-exact.
+fn sync_fetch_bytes(relative_name: &str) -> Option<Vec<u8>> {
+    let url: Option<String> = reserve_player_mut(|player| {
+        if relative_name.contains("://") {
+            return Some(relative_name.to_string());
+        }
+        player
+            .net_manager
+            .base_path
+            .as_ref()
+            .and_then(|b| b.join(relative_name).ok())
+            .map(|u| u.to_string())
+    });
+    let url = url?;
+    let xhr = web_sys::XmlHttpRequest::new().ok()?;
+    xhr.open_with_async("GET", &url, false).ok()?;
+    xhr.override_mime_type("text/plain; charset=x-user-defined").ok()?;
+    xhr.send().ok()?;
+    if xhr.status().ok()? != 200 {
+        return None;
+    }
+    let text = xhr.response_text().ok()??;
+    Some(text.chars().map(|c| (c as u32 & 0xFF) as u8).collect())
+}
+
 /// Resolve a file path from the Lingo world (which may use movie_path_override)
 /// to a relative filename that can be fetched from the real net_manager.base_path.
 /// Returns (resolved_relative_name, real_base_url) or None if no override applies.
@@ -95,8 +221,12 @@ impl FileIoXtraInstance {
                     break;
                 }
             }
-            // Always stop on newlines for readLine/readToken/readWord
-            if delimiter.is_some() && (b == b'\r' || b == b'\n') {
+            // Always stop on newlines for readLine/readToken/readWord.
+            // readLine passes delimiter=None and STILL must stop at the line
+            // end — gating this on delimiter.is_some() made readLine return
+            // the whole rest of the file, which broke every line-parsing
+            // loop (e.g. a measured movie's user-info reader).
+            if b == b'\r' || b == b'\n' {
                 break;
             }
             end += 1;
@@ -200,6 +330,22 @@ impl FileIoXtraManager {
                     });
                 }
 
+                // Check localStorage persistence (written by an earlier
+                // session's closeFile) before hitting the network — a file
+                // the movie saved wins over the pristine served copy.
+                if let Some(data) = load_persisted_file(&file_name) {
+                    debug!(
+                        "FileIO.openFile: '{}' restored from localStorage ({} bytes)",
+                        file_name, data.len()
+                    );
+                    let instance = manager.instances.get_mut(&instance_id).unwrap();
+                    instance.data = data;
+                    instance.is_open = true;
+                    return reserve_player_mut(|player| {
+                        Ok(player.alloc_datum(Datum::Void))
+                    });
+                }
+
                 // Fetch via net_manager and await completion
                 let task_id = reserve_player_mut(|player| {
                     player.net_manager.preload_net_thing(relative_name.clone())
@@ -247,14 +393,29 @@ impl FileIoXtraManager {
                     Ok(player.alloc_datum(Datum::Void))
                 })
             }
-            "displayopen" | "displaysave" => {
-                debug!(
-                    "FileIO.{}(): file dialogs not yet supported in WASM, returning empty",
-                    handler_name
-                );
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::String(String::new())))
-                })
+            "displaysave" => {
+                // A projector puts up the OS save dialog here. A browser
+                // cannot, and a blocking dialog is the wrong shape for a web
+                // page, so answer with the name the movie already suggests
+                // (in the measured movie the player name plus an extension). Saving then works end to end
+                // through the persistence layer, one save per player name.
+                // Args are (title, defaultName): the xtra instance itself is
+                // the receiver, not an argument - same convention as openFile,
+                // whose file name is args[0].
+                let suggested = args
+                    .get(1)
+                    .and_then(|a| reserve_player_mut(|player| player.get_datum(a).string_value().ok()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "untitled".to_string());
+                debug!("FileIO.displaySave(): using suggested name {}", suggested);
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(suggested))))
+            }
+            "displayopen" => {
+                // Offer the most recent save. EMPTY reads as "cancel" to the
+                // game, which is the right answer before anything is saved.
+                let newest = list_persisted_saves().into_iter().next().unwrap_or_default();
+                debug!("FileIO.displayOpen(): newest save = {:?}", newest);
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(newest))))
             }
             _ => Err(ScriptError::new(format!(
                 "No async handler {} found for FileIO xtra instance #{}",
@@ -272,21 +433,113 @@ impl FileIoXtraManager {
         let handler = handler_name.to_lowercase();
 
         match handler.as_str() {
-            // openfile is handled by call_instance_async_handler
+            // openfile also exists as an async handler (method-syntax dispatch
+            // checks has_instance_async_handler and awaits it). Lingo COMMAND
+            // syntax — `openFile(fileObj, name, mode)`, which Director-era
+            // movies use heavily — routes through the sync global-handler
+            // fallback (handlers/manager.rs) that cannot await, and used to
+            // error out here, aborting e.g. a measured movie's
+            // user-info writer before any write. The sync implementation covers
+            // the same sources in the same order, with a blocking XHR standing
+            // in for the async fetch.
             "openfile" => {
-                // Should not reach here - async handler takes priority
-                Err(ScriptError::new("openFile should be handled by async handler".to_string()))
+                let (file_name, mode) = reserve_player_mut(|player| {
+                    let name = player.get_datum(&args[0]).string_value()?;
+                    let mode = if args.len() > 1 {
+                        player.get_datum(&args[1]).int_value()?
+                    } else {
+                        1
+                    };
+                    Ok((name, mode))
+                })?;
+
+                let instance = manager.instances.get_mut(&instance_id).unwrap();
+                instance.file_name = file_name.clone();
+                instance.position = 0;
+                instance.last_error = 0;
+
+                // 1) Virtual FS by the exact name the movie passed
+                if let Some(data) = manager.virtual_fs.get(&file_name) {
+                    let data = data.clone();
+                    let instance = manager.instances.get_mut(&instance_id).unwrap();
+                    instance.data = data;
+                    instance.is_open = true;
+                    return Ok(DatumRef::Void);
+                }
+
+                // Resolve a relative name the same way the async path does
+                let fetch_result = resolve_override_path(&file_name);
+                let relative_name = if let Some((rel, _)) = &fetch_result {
+                    rel.clone()
+                } else {
+                    file_name.rsplit(['\\', '/']).next().unwrap_or(&file_name).to_string()
+                };
+
+                // 2) Virtual FS by relative name
+                let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                if let Some(data) = manager.virtual_fs.get(&relative_name) {
+                    let data = data.clone();
+                    let instance = manager.instances.get_mut(&instance_id).unwrap();
+                    instance.data = data;
+                    instance.is_open = true;
+                    return Ok(DatumRef::Void);
+                }
+
+                // 3) localStorage persistence from an earlier session
+                if let Some(data) = load_persisted_file(&file_name) {
+                    debug!(
+                        "FileIO.openFile(sync): '{}' restored from localStorage ({} bytes)",
+                        file_name, data.len()
+                    );
+                    let instance = manager.instances.get_mut(&instance_id).unwrap();
+                    instance.data = data;
+                    instance.is_open = true;
+                    return Ok(DatumRef::Void);
+                }
+
+                // 4) Blocking fetch of a server-shipped file (bootstrap reads)
+                let fetched = sync_fetch_bytes(&relative_name);
+                let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_mut().unwrap() };
+                let instance = manager.instances.get_mut(&instance_id).unwrap();
+                match fetched {
+                    Some(bytes) => {
+                        debug!(
+                            "FileIO.openFile(sync): loaded '{}' ({} bytes)",
+                            relative_name, bytes.len()
+                        );
+                        instance.data = bytes;
+                        instance.is_open = true;
+                    }
+                    None => {
+                        warn!("FileIO.openFile(sync): '{}' not found", relative_name);
+                        instance.data = Vec::new();
+                        instance.is_open = true;
+                        if mode == 1 {
+                            instance.last_error = -43;
+                        }
+                    }
+                }
+                Ok(DatumRef::Void)
             }
             "createfile" => {
                 let file_name = reserve_player_mut(|player| {
                     player.get_datum(&args[0]).string_value()
                 })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
-                instance.file_name = file_name;
+                instance.file_name = file_name.clone();
                 instance.data = Vec::new();
                 instance.position = 0;
                 instance.is_open = true;
                 instance.last_error = 0;
+
+                // Native createFile leaves an EMPTY file on disk. Register it
+                // in the virtual FS (and persistence) immediately, so the
+                // delete() -> createFile() -> openFile() rewrite idiom (e.g.
+                // a measured movie's user-info writer) reopens the empty
+                // file instead of falling through to a network fetch of the
+                // pristine served copy and rewriting over stale bytes.
+                manager.virtual_fs.insert(file_name.clone(), Vec::new());
+                persist_file(&file_name, &[]);
 
                 reserve_player_mut(|player| {
                     Ok(player.alloc_datum(Datum::Void))
@@ -295,7 +548,8 @@ impl FileIoXtraManager {
             "closefile" => {
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 if instance.is_open && !instance.file_name.is_empty() {
-                    // Persist to virtual filesystem
+                    // Persist to virtual filesystem AND localStorage (reload-proof)
+                    persist_file(&instance.file_name, &instance.data);
                     manager.virtual_fs.insert(
                         instance.file_name.clone(),
                         instance.data.clone(),
@@ -310,6 +564,7 @@ impl FileIoXtraManager {
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 if !instance.file_name.is_empty() {
                     manager.virtual_fs.remove(&instance.file_name.clone());
+                    remove_persisted_file(&instance.file_name.clone());
                 }
                 Ok(DatumRef::Void)
             }
@@ -408,6 +663,9 @@ impl FileIoXtraManager {
                     }
                     instance.position += bytes.len();
                     instance.last_error = 0;
+                    // Persist eagerly: not every movie bothers with closeFile,
+                    // and the write must survive a reload either way.
+                    persist_file(&instance.file_name, &instance.data);
                 } else {
                     instance.last_error = -1;
                 }
@@ -536,14 +794,29 @@ impl FileIoXtraManager {
             }
 
             // -- Dialog stubs (sync fallback) --
-            "displayopen" | "displaysave" => {
-                debug!(
-                    "FileIO.{}(): sync fallback, returning empty",
-                    handler_name
-                );
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::String(String::new())))
-                })
+            "displaysave" => {
+                // A projector puts up the OS save dialog here. A browser
+                // cannot, and a blocking dialog is the wrong shape for a web
+                // page, so answer with the name the movie already suggests
+                // (in the measured movie the player name plus an extension). Saving then works end to end
+                // through the persistence layer, one save per player name.
+                // Args are (title, defaultName): the xtra instance itself is
+                // the receiver, not an argument - same convention as openFile,
+                // whose file name is args[0].
+                let suggested = args
+                    .get(1)
+                    .and_then(|a| reserve_player_mut(|player| player.get_datum(a).string_value().ok()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "untitled".to_string());
+                debug!("FileIO.displaySave(): using suggested name {}", suggested);
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(suggested))))
+            }
+            "displayopen" => {
+                // Offer the most recent save. EMPTY reads as "cancel" to the
+                // game, which is the right answer before anything is saved.
+                let newest = list_persisted_saves().into_iter().next().unwrap_or_default();
+                debug!("FileIO.displayOpen(): newest save = {:?}", newest);
+                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(newest))))
             }
 
             // -- put interface --
