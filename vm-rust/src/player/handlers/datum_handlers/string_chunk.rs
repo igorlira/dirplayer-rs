@@ -783,6 +783,43 @@ impl StringChunkHandlers {
         *spans = new_spans;
     }
 
+    fn is_chunk_symbol(datum_ref: &DatumRef) -> bool {
+        crate::player::reserve_player_ref(|player| {
+            let name = player.get_datum(datum_ref).string_value().unwrap_or_default();
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
+            )
+        })
+    }
+
+    /// `chunk.word[a..b] = v` compiles to setProp(chunk, #word, a, b, v):
+    /// put v into that part of the chunk's text, then the chunk back into
+    /// its source. Before this the write was dropped as an unknown property.
+    pub fn set_nested_chunk(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (source, outer, text) = player.get_datum(datum).to_string_chunk()?;
+            let (source, outer, text) = (source.clone(), outer.clone(), text.to_owned());
+            let kind = player.get_datum(&args[0]).symbol_value()?;
+            let first = player.get_datum(&args[1]).int_value()?;
+            let (last, value_ref) = if args.len() >= 4 {
+                (player.get_datum(&args[2]).int_value()?, &args[3])
+            } else {
+                (first, &args[2])
+            };
+            let replacement = player.get_datum(value_ref).string_value()?;
+            let inner = StringChunkExpr {
+                chunk_type: StringChunkType::from(kind),
+                start: first,
+                end: last,
+                item_delimiter: player.movie.item_delimiter,
+            };
+            let new_text = StringChunkUtils::string_by_putting_into_chunk(&text, &inner, &replacement)?;
+            StringChunkUtils::set_contents(player, &source, &outer, new_text)?;
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn set_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
@@ -1162,6 +1199,9 @@ impl StringChunkHandlers {
                         "setProp requires 2 arguments for string chunk datum".to_string(),
                     ));
                 }
+                if args.len() >= 3 && Self::is_chunk_symbol(&args[0]) {
+                    return Self::set_nested_chunk(datum, args);
+                }
                 let datum = datum.clone();
                 let prop_ref = args[0].clone();
                 let value_ref = args[1].clone();
@@ -1397,6 +1437,53 @@ mod tests {
         assert_eq!(del_word("a b c", 3, 0), "a b");
         // Interior runs of whitespace: only the deleted gap goes.
         assert_eq!(del_word("a   b   c", 2, 0), "a   c");
+    }
+}
+
+#[cfg(test)]
+mod nested_chunk_write_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    fn sym(player: &mut DirPlayer, s: &str) -> DatumRef {
+        player.alloc_datum(Datum::Symbol(Symbol::from_str(s)))
+    }
+
+    #[test]
+    fn a_word_of_a_line_is_written_back_into_the_source() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            // member("Tekst 4").line[3].word[1] = "4/4" on a three-line text.
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("Den Dybe\r\n(gange)\r\n0/4 x".to_string()));
+                let line = StringChunkExpr { chunk_type: StringChunkType::Line, start: 3, end: 3, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), line, "0/4 x".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(1)), player.alloc_datum(Datum::String("4/4".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "Den Dybe\r\n(gange)\r\n4/4 x");
+        });
+    }
+
+    #[test]
+    fn a_range_form_writes_the_whole_range() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("a b c d".to_string()));
+                let whole = StringChunkExpr { chunk_type: StringChunkType::Line, start: 1, end: 1, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), whole, "a b c d".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(2)), player.alloc_datum(Datum::Int(3)), player.alloc_datum(Datum::String("X".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "a X d");
+        });
     }
 }
 
