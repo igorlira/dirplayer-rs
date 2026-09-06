@@ -50,6 +50,18 @@ fn caret_blink_visible() -> bool {
     (t.rem_euclid(1000.0)) < 500.0
 }
 
+/// Text cast members rendered as film-loop children must use the same native
+/// font path as ordinary stage text when their face is not backed by an
+/// embedded PFR bitmap. Falling back to the tiny built-in System bitmap here
+/// changes both the glyph size and metrics (notably for Symbol-font cursors).
+fn filmloop_text_should_use_native(
+    has_styled_spans: bool,
+    is_pfr_font: bool,
+    pfr_enabled: bool,
+) -> bool {
+    has_styled_spans && !is_pfr_font && pfr_enabled
+}
+
 /// Standard text-selection background color (matches macOS-ish blue). Drawn
 /// before glyphs so the text reads on top.
 const SELECTION_COLOR: (u8, u8, u8) = (164, 205, 255);
@@ -1613,7 +1625,6 @@ fn render_filmloop_from_channel_data(
                 }
 
                 if let Some(font) = font_opt {
-                    let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
                     let ink = ((data.ink & 0x7F) / 5) as u32;
                     let blend = if data.blend == 255 { 100 } else {
                         ((255.0 - data.blend as f32) * 100.0 / 255.0) as i32
@@ -1639,17 +1650,86 @@ fn render_filmloop_from_channel_data(
                         floor_rule: false,
                     };
 
-                    bitmap.draw_text(
-                        &text_member.text,
-                        &font,
-                        font_bitmap,
-                        sprite_rect.left,
-                        sprite_rect.top,
-                        params,
-                        &palettes,
-                        text_member.fixed_line_space,
-                        text_member.top_spacing,
+                    let use_native = filmloop_text_should_use_native(
+                        !text_member.html_styled_spans.is_empty(),
+                        font.char_widths.is_some(),
+                        player.font_manager.pfr_enabled,
                     );
+
+                    let rendered_native = if use_native {
+                        let initial_span_size = text_member
+                            .html_styled_spans
+                            .first()
+                            .and_then(|span| span.style.font_size)
+                            .unwrap_or(0);
+                        let should_override_span_sizes = text_member.font_size > 0
+                            && text_member.font_size as i32 != initial_span_size;
+                        let spans_with_defaults: Vec<StyledSpan> = text_member
+                            .html_styled_spans
+                            .iter()
+                            .map(|span| {
+                                let mut style = span.style.clone();
+                                if !text_member.font.is_empty() {
+                                    style.font_face = Some(text_member.font.clone());
+                                } else if style.font_face.as_ref().map_or(true, |face| face.is_empty()) {
+                                    style.font_face = Some("Arial".to_string());
+                                }
+                                if should_override_span_sizes {
+                                    style.font_size = Some(text_member.font_size as i32);
+                                } else if style.font_size.map_or(true, |size| size <= 0) {
+                                    style.font_size = Some(12);
+                                }
+                                if !text_member.font_style.is_empty() {
+                                    style.bold = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
+                                    style.italic = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
+                                    style.underline = text_member.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                                }
+                                StyledSpan { text: span.text.clone(), style }
+                            })
+                            .collect();
+                        let alignment = match text_member.alignment {
+                            BuiltInSymbol::Center => TextAlignment::Center,
+                            BuiltInSymbol::Right => TextAlignment::Right,
+                            BuiltInSymbol::Justify => TextAlignment::Justify,
+                            _ => TextAlignment::Left,
+                        };
+                        FontMemberHandlers::render_native_text_to_bitmap(
+                            bitmap,
+                            &spans_with_defaults,
+                            sprite_rect.left,
+                            sprite_rect.top,
+                            sprite_rect.width().max(1),
+                            sprite_rect.height().max(1),
+                            alignment,
+                            sprite_rect.width().max(1),
+                            text_member.word_wrap,
+                            None,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                            text_member.bottom_spacing,
+                            &text_member.tab_stops,
+                            &text_member.par_infos,
+                            &text_member.par_runs,
+                        )
+                        .is_ok()
+                    } else {
+                        false
+                    };
+
+                    if !rendered_native {
+                        let font_bitmap = player.bitmap_manager.get_bitmap(font.bitmap_ref).unwrap();
+                        bitmap.draw_text(
+                            &text_member.text,
+                            &font,
+                            font_bitmap,
+                            sprite_rect.left,
+                            sprite_rect.top,
+                            params,
+                            &palettes,
+                            text_member.fixed_line_space,
+                            text_member.top_spacing,
+                        );
+                    }
                 }
             }
             CastMemberType::Flash(_) => {
@@ -4284,4 +4364,17 @@ pub fn has_swf_signature(data: &[u8]) -> bool {
     }
     let sig = &data[0..3];
     sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filmloop_text_should_use_native;
+
+    #[test]
+    fn filmloop_system_text_uses_native_renderer() {
+        assert!(filmloop_text_should_use_native(true, false, true));
+        assert!(!filmloop_text_should_use_native(true, true, true));
+        assert!(!filmloop_text_should_use_native(false, false, true));
+        assert!(!filmloop_text_should_use_native(true, false, false));
+    }
 }

@@ -19,6 +19,74 @@ use std::borrow::Borrow;
 use log::debug;
 use wasm_bindgen::JsCast;
 
+/// Director preserves whitespace authored at the beginning of a source line.
+/// Some movies use it to position a short run inside a shared member rectangle,
+/// so native Canvas2D layout must retain the run's measured width.
+fn native_line_start_whitespace_advance(
+    token_is_whitespace: bool,
+    current_line_is_empty: bool,
+    token_width: f64,
+) -> f64 {
+    if token_is_whitespace && current_line_is_empty {
+        token_width
+    } else {
+        0.0
+    }
+}
+
+/// Canvas2D exposes fractional CSS-font metrics, while Director advances its
+/// text cursor in whole stage pixels. Quantize visible-token advances after
+/// preserving Canvas kerning; for whitespace runs, quantize the per-character
+/// advance before accumulating it. This prevents authored spacing (including
+/// leading padding) from drifting by many pixels across a member.
+fn native_director_token_advance(
+    is_whitespace: bool,
+    char_count: usize,
+    measured_width: f64,
+) -> f64 {
+    if is_whitespace && char_count > 0 {
+        (measured_width / char_count as f64).round() * char_count as f64
+    } else {
+        measured_width.round()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{native_director_token_advance, native_line_start_whitespace_advance};
+
+    #[test]
+    fn native_text_preserves_authored_leading_whitespace_advance() {
+        assert_eq!(native_line_start_whitespace_advance(true, true, 12.5), 12.5);
+        assert_eq!(native_line_start_whitespace_advance(true, true, 136.0), 136.0);
+    }
+
+    #[test]
+    fn native_text_does_not_add_leading_advance_to_other_tokens() {
+        assert_eq!(native_line_start_whitespace_advance(true, false, 12.5), 0.0);
+        assert_eq!(native_line_start_whitespace_advance(false, true, 12.5), 0.0);
+    }
+
+    #[test]
+    fn native_text_quantizes_whitespace_before_accumulating() {
+        // Arial 12 is approximately 3.3359 px per space in Canvas2D. Director
+        // advances it by 3 stage pixels, so 11 authored spaces land at x=33.
+        let canvas_width = 3.335_937_5 * 11.0;
+        assert_eq!(
+            native_director_token_advance(true, 11, canvas_width),
+            33.0,
+        );
+    }
+
+    #[test]
+    fn native_text_quantizes_visible_token_cursor_advance() {
+        assert_eq!(
+            native_director_token_advance(false, 4, 18.625),
+            19.0,
+        );
+    }
+}
+
 // Simple HTML parser without external dependencies
 #[derive(Clone, Debug)]
 pub struct HtmlStyle {
@@ -826,10 +894,15 @@ impl FontMemberHandlers {
                 }
                 let is_whitespace = is_ws.unwrap_or(false);
                 ctx.set_font(&style.font);
-                let token_width = ctx
+                let measured_token_width = ctx
                     .measure_text(token_text)
                     .map(|m| m.width())
                     .unwrap_or_else(|_| token_text.chars().count() as f64 * (style.size_px * 0.55));
+                let token_width = native_director_token_advance(
+                    is_whitespace,
+                    token_text.chars().count(),
+                    measured_token_width,
+                );
 
                 // If the line has a tab marker, text after the tab is positioned by
                 // the tab stop (e.g. right-aligned), so it doesn't increase line width
@@ -842,14 +915,28 @@ impl FontMemberHandlers {
                     lines_out.push(std::mem::take(line));
                 }
 
-                if !(is_whitespace && line.segments.is_empty()) {
+                // Leading whitespace on a source line is authored layout, not
+                // disposable wrapping padding. Whitespace preceding a wrap
+                // stays on the previous line because the following visible
+                // token is what triggers the wrap.
+                let leading_whitespace_width = native_line_start_whitespace_advance(
+                    is_whitespace,
+                    line.segments.is_empty(),
+                    token_width,
+                );
+                if leading_whitespace_width > 0.0 || !(is_whitespace && line.segments.is_empty()) {
+                    let segment_width = if leading_whitespace_width > 0.0 {
+                        leading_whitespace_width
+                    } else {
+                        token_width
+                    };
                     line.max_font_px = line.max_font_px.max(style.size_px);
                     if !has_tab {
-                        line.width += token_width;
+                        line.width += segment_width;
                     }
                     line.segments.push(NativeSegment {
                         text: token_text.clone(),
-                        width: token_width,
+                        width: segment_width,
                         style: style.clone(),
                         is_tab: false,
                         start_byte,

@@ -284,7 +284,10 @@ impl Default for XmedStyle {
 }
 
 /// Main parser for XMED styled text format
-pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
+pub fn parse_xmed(
+    data: &[u8],
+    text_encoding: crate::io::encoding::DirectorTextEncoding,
+) -> Result<XmedStyledText, String> {
     // Verify magic header "FFFF00000006" (12 ASCII bytes)
     if data.len() < 12 {
         return Err("Data too short for XMED header".to_string());
@@ -381,7 +384,7 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         let chunk = data[offset..offset + byte_count].to_vec();
         // Section 0x0002 can have multiple chunks; parse each and accumulate text
         if key == 0x0002 {
-            if let Ok(parsed) = parse_section_3(&chunk) {
+            if let Ok(parsed) = parse_section_3(&chunk, text_encoding) {
                 section2_texts.push(parsed.text);
             }
         }
@@ -420,7 +423,7 @@ pub fn parse_xmed(data: &[u8]) -> Result<XmedStyledText, String> {
         Section3Data { text: section2_texts.concat() }
     } else if let Some(section3) = sections.get(&0x0003) {
         debug!("Found text in Section 3");
-        parse_section_3(section3)?
+        parse_section_3(section3, text_encoding)?
     } else {
         // Empty text is valid: Director text members authored with explicit
         // width/height/font but no initial content (the script populates
@@ -872,7 +875,10 @@ fn parse_hyperlinks(data: &[u8], doc_version: i32) -> Vec<(i32, i32)> {
 
 /// Parse Section 3 - Text Content
 /// Format: 00 [length], [text] 03
-fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
+fn parse_section_3(
+    data: &[u8],
+    text_encoding: crate::io::encoding::DirectorTextEncoding,
+) -> Result<Section3Data, String> {
     if data.len() < 4 {
         return Err("Section 3 data too short".to_string());
     }
@@ -901,20 +907,18 @@ fn parse_section_3(data: &[u8]) -> Result<Section3Data, String> {
 
     // Extract text, preserving all characters including \r, \n, \t.
     //
-    // Encoding: D6-D9 movies store text bytes as Windows-1252; D10+
-    // (Unicode-aware authoring) stores them as UTF-8. Fugue No.4 (D11.5)
+    // Encoding: D6-D9 movies use the authoring platform's legacy encoding;
+    // D10+ (Unicode-aware authoring) stores text as UTF-8. Fugue No.4 (D11.5)
     // has e.g. "Tradução" as `m c3 a7 c3 a3 o` and "©" as `c2 a9`.
     // Decoding either as plain Win-1252 mangles UTF-8 sequences into
     // "Â©" / "TraduÃ§Ã£o" mojibake.
     //
     // Strategy: trim at the first 0x00 padding byte, then run
-    // `decode_text_auto` — strict UTF-8 first, falling back to Win-1252
-    // only when the bytes don't form a valid UTF-8 sequence. Win-1252
-    // input almost never coincidentally satisfies UTF-8's continuation-
-    // byte constraints, so older movies keep decoding correctly.
+    // strict UTF-8 first, then fall back to Mac Roman or Windows-1252 as
+    // declared by ConfigChunk.platform.
     let raw = &data[text_start..text_end];
     let body_end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    let text = crate::io::encoding::decode_text_auto(&raw[..body_end]);
+    let text = text_encoding.decode_text_auto(&raw[..body_end]);
 
     debug!("    Section 3: {} chars", text.len());
 

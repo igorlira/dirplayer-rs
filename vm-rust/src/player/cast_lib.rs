@@ -376,7 +376,7 @@ impl CastLib {
 
     pub fn apply_cast_def(
         &mut self,
-        _: &DirectorFile,
+        file: &DirectorFile,
         cast_def: &CastDef,
         bitmap_manager: &mut BitmapManager,
         font_table: &HashMap<u16, String>,
@@ -401,7 +401,17 @@ impl CastLib {
         for (id, member_def) in &cast_def.members {
             self.insert_member(
                 *id,
-                CastMember::from(self.number, *id, member_def, &self.lctx, bitmap_manager, self.dir_version, self.palette_id_offset, font_table),
+                CastMember::from(
+                    self.number,
+                    *id,
+                    member_def,
+                    &self.lctx,
+                    bitmap_manager,
+                    self.dir_version,
+                    file.config.platform,
+                    self.palette_id_offset,
+                    font_table,
+                ),
             );
             JsApi::on_cast_member_name_changed(CastMemberRefHandlers::get_cast_slot_number(
                 self.number,

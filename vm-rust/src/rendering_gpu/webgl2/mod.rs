@@ -35,6 +35,22 @@ pub use texture_cache::{TextureCache, TextureCacheKey, RenderedTextCache, Render
 const DEBUG_WEBGL2_TEXT: bool = false;
 static SPRITE_DEBUG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Leading whitespace in Director text members is authored content, not
+/// layout padding. Some movies use it to place a short run within the member
+/// rectangle, so the styled PFR path must account for its advance even when
+/// the current line does not contain a visible run yet.
+fn pfr_line_start_whitespace_advance(
+    token_is_whitespace: bool,
+    current_line_is_empty: bool,
+    token_width: i32,
+) -> i32 {
+    if token_is_whitespace && current_line_is_empty {
+        token_width
+    } else {
+        0
+    }
+}
+
 /// Caret blink phase (500ms on / 500ms off). Mirrors the CPU path's
 /// `caret_blink_visible()` in `rendering.rs` so both renderers blink in sync.
 fn caret_blink_visible_now() -> bool {
@@ -6922,15 +6938,30 @@ impl WebGL2Renderer {
                                 push_line(&mut current_line, &mut lines, current_text_line_idx);
                             }
 
-                            if token.is_whitespace && current_line.runs.is_empty() {
-                                continue;
-                            }
+                            // Do not discard whitespace at the beginning of a
+                            // source line. Director preserves its advance and
+                            // movies can deliberately use it for positioning.
+                            // A wrap-induced line cannot acquire the preceding
+                            // whitespace here: whitespace tokens are appended
+                            // before the following non-whitespace token causes
+                            // the wrap.
+                            let leading_whitespace_width =
+                                pfr_line_start_whitespace_advance(
+                                    token.is_whitespace,
+                                    current_line.runs.is_empty(),
+                                    width,
+                                );
+                            let run_width = if leading_whitespace_width > 0 {
+                                leading_whitespace_width
+                            } else {
+                                width
+                            };
 
-                            current_line.width += width;
+                            current_line.width += run_width;
                             current_line.max_size = current_line.max_size.max(token.style.size_px);
                             current_line.runs.push(PfrLineRun {
                                 text: token.text,
-                                width,
+                                width: run_width,
                                 style: token.style,
                             });
                         }
@@ -7990,5 +8021,24 @@ impl super::Renderer for WebGL2Renderer {
 
         self.quad.bind(self.context.gl());
         self.render_sprite(player, channel_num);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pfr_line_start_whitespace_advance;
+
+    #[test]
+    fn styled_pfr_preserves_authored_leading_whitespace_advance() {
+        // Synthetic short and wide members: the background/texture rectangle
+        // is unchanged; only the glyph origin advances within it.
+        assert_eq!(pfr_line_start_whitespace_advance(true, true, 12), 12);
+        assert_eq!(pfr_line_start_whitespace_advance(true, true, 136), 136);
+    }
+
+    #[test]
+    fn styled_pfr_does_not_add_a_second_leading_advance() {
+        assert_eq!(pfr_line_start_whitespace_advance(true, false, 12), 0);
+        assert_eq!(pfr_line_start_whitespace_advance(false, true, 12), 0);
     }
 }

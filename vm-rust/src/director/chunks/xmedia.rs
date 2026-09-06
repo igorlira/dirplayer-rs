@@ -72,14 +72,17 @@ impl XMediaChunk {
         false
     }
 
-    pub fn parse_styled_text(&self) -> Option<XmedStyledText> {
+    pub fn parse_styled_text(
+        &self,
+        text_encoding: crate::io::encoding::DirectorTextEncoding,
+    ) -> Option<XmedStyledText> {
         if !self.is_styled_text() {
             return None;
         }
 
         debug!("Parsing XMED styled text format...");
 
-        match super::xmedia_styled_text::parse_xmed(&self.raw_data) {
+        match super::xmedia_styled_text::parse_xmed(&self.raw_data, text_encoding) {
             Ok(styled_text) => {
                 debug!("  Text: {} chars", styled_text.text.len());
                 debug!("  Spans: {}", styled_text.styled_spans.len());
