@@ -1212,6 +1212,7 @@ impl WebGL2Renderer {
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             floor_rule: false,
+            erase_transparent_source: false,
         };
 
         // Render text to the bitmap
@@ -3986,6 +3987,7 @@ impl WebGL2Renderer {
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -6278,6 +6280,7 @@ impl WebGL2Renderer {
             fore_color_explicit: false,
             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
             floor_rule: false,
+            erase_transparent_source: false,
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -7081,6 +7084,7 @@ impl WebGL2Renderer {
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         // Pick the run's atlas. When the run names a variant

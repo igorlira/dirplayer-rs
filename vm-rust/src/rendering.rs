@@ -637,6 +637,7 @@ pub fn render_preview_bitmap(
                 fore_color_explicit: false,
                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 floor_rule: false,
+                erase_transparent_source: false,
             };
 
             for char_code in 0u16..256 {
@@ -665,6 +666,7 @@ pub fn render_preview_bitmap(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
                         bitmap.draw_text(
                             &label,
@@ -1476,6 +1478,7 @@ fn render_filmloop_from_channel_data(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     floor_rule: true,
+                    erase_transparent_source: false,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1560,6 +1563,7 @@ fn render_filmloop_from_channel_data(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     bitmap.draw_text(
@@ -1639,6 +1643,7 @@ fn render_filmloop_from_channel_data(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     bitmap.draw_text(
@@ -1689,6 +1694,7 @@ fn render_filmloop_from_channel_data(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -1777,6 +1783,7 @@ fn render_filmloop_from_channel_data(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -2142,6 +2149,7 @@ pub fn render_score_to_bitmap_with_offset(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     floor_rule: true,
+                    erase_transparent_source: false,
                 };
 
                 if let Some(mask) = mask {
@@ -2332,6 +2340,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     let is_focused = player.keyboard_focus_sprite == sprite.number as i16;
@@ -2536,6 +2545,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     let wrap_w = if field.word_wrap { text_area_w } else { 0 };
@@ -2705,6 +2715,7 @@ pub fn render_score_to_bitmap_with_offset(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 if let Some(mask) = mask {
@@ -2845,6 +2856,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -3114,6 +3126,7 @@ pub fn render_score_to_bitmap_with_offset(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -3190,6 +3203,7 @@ pub fn render_score_to_bitmap_with_offset(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -3529,6 +3543,7 @@ impl PlayerCanvasRenderer {
                 fore_color_explicit: false,
                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 floor_rule: false,
+                erase_transparent_source: false,
             };
 
             bitmap.draw_text(

@@ -1768,6 +1768,7 @@ impl TextMemberHandlers {
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -2051,6 +2052,7 @@ impl TextMemberHandlers {
                                 fore_color_explicit: false,
                                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                                 floor_rule: false,
+                                erase_transparent_source: false,
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(

@@ -519,6 +519,7 @@ impl FieldMemberHandlers {
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         bitmap.draw_text(
