@@ -1402,6 +1402,15 @@ impl DirPlayer {
         }
     }
 
+    /// The `cursor` setting belongs to the movie that made it: a new movie
+    /// starts with the system arrow. A task movie that hid the cursor for a
+    /// drag otherwise left the next movie without one.
+    pub fn reset_cursor_for_new_movie(&mut self) {
+        self.cursor = CursorRef::System(0);
+        self.cursor_is_hidden = false;
+        self.wants_pointer_lock = false;
+    }
+
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
         // Start this movie from the builtin display-spelling baseline. A cast's
         // name table claims the spelling for symbols it defines
@@ -1421,6 +1430,7 @@ impl DirPlayer {
         // member numbers: the map's planet and smoke frames turned up on a
         // task scene's craftsman and plank piles.
         crate::player::gif::forget_all(self);
+        self.reset_cursor_for_new_movie();
         self.movie
             .load_from_file(
                 dir,
@@ -8067,6 +8077,29 @@ mod interp_bench {
             let report = crate::player::run_bytecode_benchmark();
             println!("{report}");
             assert!(report.contains("ops/sec"));
+        });
+    }
+}
+
+#[cfg(test)]
+mod cursor_reset_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn a_new_movie_starts_with_the_arrow() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.cursor = CursorRef::System(200);
+                p.cursor_is_hidden = true;
+                p.wants_pointer_lock = true;
+                p.reset_cursor_for_new_movie();
+                assert!(matches!(p.cursor, CursorRef::System(0)));
+                assert!(!p.cursor_is_hidden);
+                assert!(!p.wants_pointer_lock);
+            });
         });
     }
 }
