@@ -830,6 +830,15 @@ pub fn multiply_datums(
             }
             Datum::List(DatumType::List, ref_list, false)
         }
+        (Datum::String(left), Datum::String(right)) => {
+            match (left.trim().parse::<i32>(), right.trim().parse::<i32>()) {
+                (Ok(a), Ok(b)) => Datum::Int(a.wrapping_mul(b)),
+                _ => Datum::Float(
+                    TypeHandlers::float_impl(left).unwrap_or(0.0)
+                        * TypeHandlers::float_impl(right).unwrap_or(0.0),
+                ),
+            }
+        }
         (Datum::String(left), Datum::Int(right)) => {
             if *right == 0 {
                 Datum::Int(0)
@@ -1070,6 +1079,14 @@ pub fn divide_datums(
                 ScriptError::new(format!("Cannot divide float by string: {}", right))
             })?;
             Datum::Float(left / right_val)
+        }
+        (Datum::String(left), Datum::String(right)) => {
+            let l = TypeHandlers::float_impl(left).unwrap_or(0.0);
+            let r = TypeHandlers::float_impl(right).unwrap_or(0.0);
+            match (left.trim().parse::<i32>(), right.trim().parse::<i32>()) {
+                (Ok(a), Ok(b)) if b != 0 => Datum::Int(a / b),
+                _ => Datum::Float(l / r),
+            }
         }
         (Datum::String(left), Datum::Int(right)) => {
             let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
