@@ -1416,6 +1416,11 @@ impl DirPlayer {
         // movies to System-Win; these differ at high indices and decide how
         // indexed bitmaps / shape pattern fills resolve. Read before `dir` moves.
         crate::player::bitmap::bitmap::set_default_system_palette_from_platform(dir.config.platform);
+        // The GIF animations belong to the cast that is going away. Left in
+        // place, their keys land on whatever the next movie keeps at those
+        // member numbers: the map's planet and smoke frames turned up on a
+        // task scene's craftsman and plank piles.
+        crate::player::gif::forget_all(self);
         self.movie
             .load_from_file(
                 dir,
