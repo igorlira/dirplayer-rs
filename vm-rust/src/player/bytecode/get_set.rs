@@ -416,10 +416,41 @@ impl GetSetBytecodeHandler {
                                 false
                             };
 
+                            // A text/field chunk set replaces exactly that
+                            // range and keeps the rest: `member(x).char[1..10]
+                            // = "4 x 8"` on "100 x 100" leaves "4 x 8". The
+                            // chunk used to be dropped here, so the member kept
+                            // whatever the author had typed — every stone in
+                            // the lava scene was labelled "100 x N" instead of
+                            // its own size, because the scene writes each label
+                            // with `char[1..10]`.
+                            let mut handled = handled;
                             if !handled {
-                                // Non-style prop, or not a field: fall back to
-                                // the member-wide setter (chunk info ignored,
-                                // matching the prior behaviour for these).
+                                if let Some(ref ce) = chunk_expr {
+                                    let lcp = prop_name.to_ascii_lowercase();
+                                    if lcp == "text" {
+                                        use crate::player::handlers::datum_handlers::string_chunk::StringChunkHandlers;
+                                        let current = CastMemberRefHandlers::get_prop(player, &member_ref, Symbol::from_str("text"))
+                                            .ok()
+                                            .and_then(|d| d.string_value().ok())
+                                            .unwrap_or_default();
+                                        let replacement = value.string_value().unwrap_or_default();
+                                        let (start, end) = StringChunkHandlers::resolve_chunk_char_range(&current, ce);
+                                        let chars: Vec<char> = current.chars().collect();
+                                        let start = start.min(chars.len());
+                                        let end = end.min(chars.len()).max(start);
+                                        let mut out: String = chars[..start].iter().collect();
+                                        out.push_str(&replacement);
+                                        out.extend(chars[end..].iter());
+                                        let new_value = Datum::String(out);
+                                        CastMemberRefHandlers::set_prop(&member_ref, Symbol::builtin(prop_name), new_value)?;
+                                        handled = true;
+                                    }
+                                }
+                            }
+                            if !handled {
+                                // Non-style prop, or no chunk: the member-wide
+                                // setter.
                                 CastMemberRefHandlers::set_prop(&member_ref, Symbol::builtin(prop_name), value)?;
                             }
                             Ok(HandlerExecutionResult::Advance)

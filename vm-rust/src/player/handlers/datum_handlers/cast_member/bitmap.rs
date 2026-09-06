@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 use num_traits::FromPrimitive;
@@ -9,6 +9,29 @@ use num_traits::FromPrimitive;
 pub struct BitmapMemberHandlers {}
 
 impl BitmapMemberHandlers {
+    /// Method calls on a bitmap MEMBER. Director exposes the image methods on
+    /// the member too (`member("x").crop(rect)` is as valid as
+    /// `member("x").image.crop(rect)`), so forward to the image the member
+    /// holds. Without this a bitmap member reached the generic "No handler"
+    /// error: a Director MX 2004 movie halts its whole scene on the first
+    /// `crop` call, leaving a black stage.
+    pub fn call(
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
+        handler_name: &str,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let bitmap_ref = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(cast_member_ref)
+            .and_then(|m| m.member_type.as_bitmap())
+            .map(|b| b.image_ref)
+            .ok_or_else(|| ScriptError::new("Cannot call handler on invalid bitmap".to_string()))?;
+        let image_datum = player.alloc_datum(Datum::BitmapRef(bitmap_ref));
+        BitmapDatumHandlers::call(&image_datum, Symbol::from_str(handler_name), args)
+    }
+
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
@@ -201,8 +224,6 @@ impl BitmapMemberHandlers {
                         bitmap_member.image_ref
                     };
                     player.bitmap_manager.replace_bitmap(member_image_ref, media_bitmap.clone());
-
-
 
                     let cast_member = player
                         .movie

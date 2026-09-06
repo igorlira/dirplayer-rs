@@ -43,27 +43,41 @@ pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usi
 }
 
 impl StringChunkUtils {
+    /// Read the source text behind a chunk, for BOTH Field and Text members
+    /// (the old `.as_field().unwrap()` panicked the whole VM when a chunk of
+    /// a #text member was mutated — MX 2004 movies do that routinely).
+    fn source_text(
+        player: &DirPlayer,
+        original_str_src: &StringChunkSource,
+    ) -> Result<String, ScriptError> {
+        match original_str_src {
+            StringChunkSource::Datum(original_str_ref) => {
+                player.get_datum(original_str_ref).string_value()
+            }
+            StringChunkSource::Member(member_ref) => {
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .ok_or_else(|| ScriptError::new("Chunk source member not found".to_string()))?;
+                match &member.member_type {
+                    crate::player::cast_member::CastMemberType::Field(f) => Ok(f.text.clone()),
+                    crate::player::cast_member::CastMemberType::Text(t) => Ok(t.text.clone()),
+                    _ => Err(ScriptError::new(
+                        "Chunk source member is not a text member".to_string(),
+                    )),
+                }
+            }
+        }
+    }
+
     pub fn delete(
         player: &mut DirPlayer,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_deleting_chunk(&original_str, &chunk_expr)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -77,21 +91,7 @@ impl StringChunkUtils {
         new_string: String,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -128,7 +128,21 @@ impl StringChunkUtils {
                     .member_type;
                 match member {
                     CastMemberType::Field(field) => field.set_text_preserving_caret(new_string),
-                    CastMemberType::Text(member) => member.set_text_preserving_caret(new_string),
+                    CastMemberType::Text(member) => {
+                        member.set_text_preserving_caret(new_string);
+                        // Same cleanup the plain `.text` setter does. The
+                        // renderer prefers html_styled_spans when present, so
+                        // leaving the old spans in place kept drawing the
+                        // PREVIOUS content: the measured movie localises its labels
+                        // with `member("Tekst 3").line[1] = "Klods-lageret"`,
+                        // and the screen went on showing the cast's English
+                        // "Mayor's house" while the member held Danish text.
+                        // Clearing lets the next render synthesise spans from
+                        // the new text; that movie applies chunk styles after
+                        // writing content, so nothing it sets is lost.
+                        member.html_styled_spans.clear();
+                        member.text_set_at_runtime = true;
+                    }
                     _ => {
                         return Err(ScriptError::new(
                             "Cannot set contents for non-text member".to_string(),
@@ -785,6 +799,18 @@ impl StringChunkHandlers {
             "font" | "fontstyle" | "color" | "hyperlink" | "fontsize" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
             }
+            // `chunk.setProp(#text, s)` / `chunk.text = s` — replace the
+            // chunk's contents, same semantics as `put s into <chunk>`.
+            // A Director MX 2004 movie rewrites per-line template text this way;
+            // the previous warn-and-ignore fallback left original/template
+            // words visible in the rendered story text.
+            "text" => {
+                let (source, chunk_expr, ..) = player.get_datum(datum_ref).to_string_chunk()?;
+                let source = source.clone();
+                let chunk_expr = chunk_expr.clone();
+                let new_str = player.get_datum(value_ref).string_value()?;
+                return StringChunkUtils::set_contents(player, &source, &chunk_expr, new_str);
+            }
             "charspacing" => {
                 // Update the source member's char_spacing
                 // Walk the source chain to find the originating member
@@ -818,9 +844,10 @@ impl StringChunkHandlers {
                 }
             }
             _ => {
-                return Err(ScriptError::new(format!(
-                    "Cannot set property {prop} for string chunk datum"
-                )))
+                // Unknown chunk property: warn-and-continue instead of erroring.
+                // A ScriptError here reaches on_script_error which stops the
+                // whole movie; a missed style tweak is strictly less damage.
+                log::warn!("Ignoring set of unknown property {prop} for string chunk datum");
             }
         }
         Ok(())
@@ -1124,6 +1151,26 @@ impl StringChunkHandlers {
                 }
             }
             Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
+            // Explicit `setProp(chunk, #prop, value)` handler-call form.
+            // The dot-syntax path (`chunk.color = v`) already routes through
+            // script.rs::set_obj_prop -> Self::set_prop; this wires the same
+            // implementation into the generic handler-call dispatch, which
+            // a Director MX 2004 movie hits on startup.
+            Some(BuiltInSymbol::SetProp) => {
+                if args.len() < 2 {
+                    return Err(ScriptError::new(
+                        "setProp requires 2 arguments for string chunk datum".to_string(),
+                    ));
+                }
+                let datum = datum.clone();
+                let prop_ref = args[0].clone();
+                let value_ref = args[1].clone();
+                reserve_player_mut(|player| {
+                    let prop_name = player.get_datum(&prop_ref).string_value()?;
+                    Self::set_prop(player, &datum, Symbol::from_str(&prop_name), &value_ref)?;
+                    Ok(DatumRef::Void)
+                })
+            }
             Some(BuiltInSymbol::Delete) => Self::delete(datum, args),
             Some(BuiltInSymbol::SetContents) => Self::set_contents(datum, args),
             Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(datum, args),

@@ -557,6 +557,16 @@ impl CastMemberRefHandlers {
                 CastMemberType::VectorShape(_) => {
                     VectorShapeMemberHandlers::call(player, datum, handler_name, args)
                 }
+                // Director exposes the image methods (crop, copyPixels, draw,
+                // getPixel, ...) on bitmap MEMBERS as well as on image
+                // objects; forward to the member's image.
+                CastMemberType::Bitmap(_) => {
+                    let member_ref = match player.get_datum(datum) {
+                        Datum::CastMember(r) => r.to_owned(),
+                        _ => return Err(ScriptError::new("Expected cast member".to_string())),
+                    };
+                    BitmapMemberHandlers::call(player, &member_ref, handler_name, args)
+                }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for member type {:?}",
                     handler_name, cast_member.member_type.member_type_id()
