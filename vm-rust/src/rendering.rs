@@ -1167,7 +1167,9 @@ fn render_filmloop_from_channel_data(
         let (pos_x, pos_y) = if let Some(channel_keyframes) = keyframes_cache.get(&(channel_num as u16)) {
             if let Some(path_keyframes) = &channel_keyframes.path {
                 // Debug: log path keyframes for this channel
-                if current_frame <= 5 || current_frame >= 95 {
+                if (current_frame <= 5 || current_frame >= 95)
+                    && log::log_enabled!(log::Level::Debug)
+                {
                     let kf_summary: Vec<String> = path_keyframes.keyframes.iter()
                         .take(5)
                         .map(|kf| format!("f{}:({},{})", kf.frame, kf.x, kf.y))

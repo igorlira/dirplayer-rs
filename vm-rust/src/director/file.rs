@@ -23,7 +23,7 @@ use super::chunks::cast_member::CastMemberChunk;
 use super::chunks::effect::EffectChunk;
 use super::chunks::key_table::KeyTableEntry;
 use super::chunks::lctx::ScriptContextChunk;
-use super::chunks::make_chunk;
+use super::chunks::make_chunk_in;
 use super::chunks::media::MediaChunk;
 use super::chunks::score::FrameLabelsChunk;
 use super::chunks::score::ScoreChunk;
@@ -81,6 +81,7 @@ impl DirectorFile {
             cached_chunk_views: HashMap::new(),
             chunk_info: HashMap::new(),
             deserialized_chunks: HashMap::new(),
+            ils_chunk_ids: std::collections::HashSet::new(),
         };
 
         let meta_fourcc = reader.read_u32().map_err(|e| format!("Failed to read file header: {}", e))?;
@@ -104,6 +105,7 @@ impl DirectorFile {
                 reader,
                 &mut chunk_container.cached_chunk_views,
                 &mut chunk_container.chunk_info,
+                &mut chunk_container.ils_chunk_ids,
             )
             .unwrap();
         } else {
@@ -771,6 +773,7 @@ fn read_after_burner_map(
     reader: &mut BinaryReader,
     cached_chunk_views: &mut HashMap<u32, Vec<u8>>,
     chunk_info: &mut HashMap<u32, ChunkInfo>,
+    ils_chunk_ids: &mut std::collections::HashSet<u32>,
 ) -> Result<usize, String> {
     let start: usize;
     let end: usize;
@@ -930,6 +933,9 @@ fn read_after_burner_map(
         let info = chunk_info.get(&res_id).unwrap();
 
         // info!("Loading ILS resource {}: '{}', {} bytes", res_id, fourcc_to_string(info.fourcc), info.len);
+        // Remember it: these bytes exist only here, so this entry can never be
+        // dropped and re-read the way a streamed chunk can.
+        ils_chunk_ids.insert(res_id);
         cached_chunk_views.insert(res_id, ils_reader.read_bytes(info.len).unwrap().to_vec());
     }
 
@@ -1145,13 +1151,22 @@ pub fn read_director_file_bytes(
     );
 }
 
-fn get_chunk_data(
+/// Ensure chunk `id` is decompressed and present in `cached_chunk_views`.
+///
+/// Returns nothing on purpose. The cache OWNS the bytes for the rest of the
+/// movie's life, so handing the caller its own copy is pure waste: for this
+/// game that was a second copy of every chunk on insert and a third on the way
+/// out, roughly three times the movie's decompressed size in memcpy and
+/// allocation before a single cast member was built. Callers that only read
+/// (all of them) borrow from the cache instead - see `get_chunk` and
+/// `get_chunk_data`.
+fn ensure_chunk_data(
     reader: &mut BinaryReader,
     chunk_container: &mut ChunkContainer,
     rifx: &RIFXReaderContext,
     fourcc: u32,
     id: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<(), String> {
     // let chunk_info = &mut self.chunk_info;
     // let cached_chunk_views = &self.cached_chunk_views;
     // let ils_body_offset = self.ils_body_offset;
@@ -1190,11 +1205,7 @@ fn get_chunk_data(
             }
 
             if chunk_container.cached_chunk_views.contains_key(&id) {
-                return Ok(chunk_container
-                    .cached_chunk_views
-                    .get(&id)
-                    .unwrap()
-                    .to_vec());
+                return Ok(());
             } else if rifx.after_burned {
                 reader.jmp(info.offset + rifx.ils_body_offset);
                 if info.len == 0 && info.uncompressed_len == 0 {
@@ -1208,8 +1219,9 @@ fn get_chunk_data(
                     if info.compression_id == ZLIB_COMPRESSION_GUID
                         || info.compression_id == ZLIB_COMPRESSION_GUID2
                     {
-                        uncomp_buf = Some(reader.read_zlib_bytes(info.len)
-                            .map_err(|e| format!("Chunk {}: zlib decompression failed: {}", id, e))?);
+                        let inflated = reader.read_zlib_bytes(info.len)
+                            .map_err(|e| format!("Chunk {}: zlib decompression failed: {}", id, e))?;
+                        uncomp_buf = Some(inflated);
                     } else if info.compression_id == SND_COMPRESSION_GUID {
                         // Handle Director SND compressed chunk
                         reader.jmp(info.offset + rifx.ils_body_offset);
@@ -1230,16 +1242,16 @@ fn get_chunk_data(
                                 let wav_bytes = sound_chunk.to_wav(); // convert to usable PCM
                                 chunk_container
                                     .cached_chunk_views
-                                    .insert(id, wav_bytes.clone());
-                                return Ok(wav_bytes);
+                                    .insert(id, wav_bytes);
+                                return Ok(());
                             }
                             Err(e) => {
                                 warn!("Failed to parse SND chunk {}: {}", id, e);
                                 // fallback: just insert the raw bytes to avoid crash
                                 chunk_container
                                     .cached_chunk_views
-                                    .insert(id, snd_bytes.to_vec());
-                                return Ok(snd_bytes.to_vec());
+                                    .insert(id, snd_bytes);
+                                return Ok(());
                             }
                         }
                     }
@@ -1257,7 +1269,7 @@ fn get_chunk_data(
                     }
                     chunk_container
                         .cached_chunk_views
-                        .insert(id, uncomp_buf.to_vec());
+                        .insert(id, uncomp_buf);
                 } else if info.compression_id == FONTMAP_COMPRESSION_GUID {
                     // Non-fatal: the chunk is stored raw and load continues.
                     // debug!, not warn! — fires per FONTMAP chunk on load and
@@ -1273,8 +1285,8 @@ fn get_chunk_data(
                         .map_err(|e| format!("Failed to read FONTMAP chunk {}: {}", id, e))?
                         .to_vec();
 
-                    chunk_container.cached_chunk_views.insert(id, raw.clone());
-                    return Ok(raw);
+                    chunk_container.cached_chunk_views.insert(id, raw);
+                    return Ok(());
                 } else {
                     // NULL = uncompressed; SWA = Shockwave Audio (MP3) members,
                     // whose compressed bytes are correctly stored raw for the
@@ -1301,16 +1313,29 @@ fn get_chunk_data(
                     .insert(id, chunk_data);
             }
 
-            return Ok(chunk_container
-                .cached_chunk_views
-                .get(&id)
-                .unwrap()
-                .to_vec());
+            return Ok(());
         }
         None => {
             Err(format_args!("Could not find chunk {} ${id}", fourcc_to_string(fourcc)).to_string())
         }
     }
+}
+
+/// Owned copy of a chunk's bytes. Only for the few callers that genuinely need
+/// one; the hot path (`get_chunk`) borrows from the cache instead.
+fn get_chunk_data(
+    reader: &mut BinaryReader,
+    chunk_container: &mut ChunkContainer,
+    rifx: &RIFXReaderContext,
+    fourcc: u32,
+    id: u32,
+) -> Result<Vec<u8>, String> {
+    ensure_chunk_data(reader, chunk_container, rifx, fourcc, id)?;
+    Ok(chunk_container
+        .cached_chunk_views
+        .get(&id)
+        .map(|v| v.to_vec())
+        .unwrap_or_default())
 }
 
 pub fn get_chunk(
@@ -1325,14 +1350,38 @@ pub fn get_chunk(
     //   return deserialized_chunks.get(&id).unwrap();
     // }
 
-    let chunk_view = get_chunk_data(reader, chunk_container, rifx, fourcc, id);
-    if let Ok(chunk_view) = chunk_view {
-        let chunk = make_chunk(reader.endian, rifx, fourcc, &chunk_view);
-        return chunk;
+    ensure_chunk_data(reader, chunk_container, rifx, fourcc, id)?;
+    let endian = reader.endian;
+    // Hand the cached bytes to the chunk reader by MOVE, then give them back.
+    // `BinaryReader` owns its data and its constructors all copy, so building
+    // one per chunk was a full second copy of everything in the movie - 29 MB
+    // of speech included. The cache survives the load (the chunk inspector in
+    // js_api reads it), so the bytes go straight back where they came from.
+    let bytes = chunk_container
+        .cached_chunk_views
+        .remove(&id)
+        .ok_or_else(|| format!("Chunk {} ${} vanished from the cache", fourcc_to_string(fourcc), id))?;
+    let had_bytes = !bytes.is_empty();
+    // A chunk may KEEP the buffer instead of copying it, but only if we could
+    // rebuild the cache entry from the file afterwards. Chunks that came out of
+    // the afterburner initial load segment could not: their bytes live inside
+    // the ILS blob, and `info.offset` points somewhere else entirely.
+    let may_consume = !chunk_container.ils_chunk_ids.contains(&id);
+    let mut chunk_reader = BinaryReader::from_u8(&[]);
+    chunk_reader.length = bytes.len();
+    chunk_reader.data = bytes;
+    chunk_reader.set_endian(endian);
+    let out = make_chunk_in(rifx, fourcc, &mut chunk_reader, may_consume);
+    if had_bytes && chunk_reader.data.is_empty() {
+        // The chunk took ownership. Leave the slot empty rather than caching a
+        // second copy of the same bytes; `ensure_chunk_data` re-reads and
+        // re-inflates from the file if anyone asks for this chunk again.
     } else {
-        // warn!("Could not find chunk data for chunk {} of id {}", fourcc_to_string(fourcc), id);
-        Err(chunk_view.unwrap_err())
+        chunk_container
+            .cached_chunk_views
+            .insert(id, std::mem::take(&mut chunk_reader.data));
     }
+    out
     // deserialized_chunks.insert(id, chunk);
     // return deserialized_chunks.get(&id).unwrap();
 }

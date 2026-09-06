@@ -174,6 +174,12 @@ pub struct ChunkContainer {
     pub deserialized_chunks: HashMap<u32, Chunk>,
     pub chunk_info: HashMap<u32, ChunkInfo>,
     pub cached_chunk_views: HashMap<u32, Vec<u8>>,
+    /// Chunks that came out of the afterburner initial load segment. Their
+    /// bytes live inside the ILS blob, not at `info.offset` in the file, so a
+    /// dropped cache entry can NEVER be recovered for these. Every other chunk
+    /// can be re-read and re-inflated on demand, which is what lets a big chunk
+    /// hand its bytes to the deserialised form instead of being copied.
+    pub ils_chunk_ids: std::collections::HashSet<u32>,
 }
 
 #[allow(dead_code)]
@@ -186,20 +192,54 @@ pub fn is_chunk_writable(chunk_type: Chunk) -> bool {
     }
 }
 
+/// The chunk about to be built owns a full copy of the reader's buffer. Take it
+/// when the caller allows, so the movie does not hold the same bytes twice.
+fn own_buffer(chunk_reader: &mut BinaryReader, may_consume: bool) -> Vec<u8> {
+    if may_consume {
+        std::mem::take(&mut chunk_reader.data)
+    } else {
+        chunk_reader.data.clone()
+    }
+}
+
+/// Deserialise one chunk from a borrowed buffer.
+///
+/// Copies the buffer, because `BinaryReader` owns its data and this caller only
+/// has a borrow. Only the chunk inspector in `js_api` needs that; the movie
+/// loader uses `make_chunk_in` and hands the bytes over by move.
 pub fn make_chunk(
     endian: Endian,
     rifx: &mut RIFXReaderContext,
     fourcc: u32,
     view: &Vec<u8>,
 ) -> Result<Chunk, String> {
-    let version = rifx.dir_version;
     let mut chunk_reader = BinaryReader::from_vec(view);
     chunk_reader.set_endian(endian);
+    make_chunk_in(rifx, fourcc, &mut chunk_reader, false)
+}
+
+/// Deserialise one chunk from a reader the caller already owns.
+///
+/// Split out so the movie loader never copies a chunk just to read it.
+/// `BinaryReader::from_vec` clones its input, so building a reader per chunk was
+/// a full second copy of every chunk in the file - for the measured movie that included
+/// 29 MB of speech, copied once to cache it and again to parse it.
+/// `may_consume`: the caller will not need the reader's buffer afterwards, so a
+/// chunk that would otherwise copy the whole thing (media) may take it instead.
+/// Only true for chunks that can be re-read from the file if asked for again.
+pub fn make_chunk_in(
+    rifx: &mut RIFXReaderContext,
+    fourcc: u32,
+    chunk_reader: &mut BinaryReader,
+    may_consume: bool,
+) -> Result<Chunk, String> {
+    let version = rifx.dir_version;
+    let chunk_reader_endian = chunk_reader.endian;
 
     match fourcc_to_string(fourcc).as_str() {
         "imap" => {
             return Ok(Chunk::InitialMap(InitialMapChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
@@ -208,93 +248,93 @@ pub fn make_chunk(
         // }
         "CAS*" => {
             return Ok(Chunk::Cast(CastChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
         "CASt" => {
             return Ok(Chunk::CastMember(CastMemberChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
         "KEY*" => {
             return Ok(Chunk::KeyTable(KeyTableChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
         "LctX" | "Lctx" => {
             rifx.lctx_capital_x = fourcc == FOURCC("LctX");
             return Ok(Chunk::ScriptContext(ScriptContextChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
         "Lnam" => {
             return Ok(Chunk::ScriptNames(ScriptNamesChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?));
         }
         "Lscr" => {
             return Ok(Chunk::Script(ScriptChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
                 rifx.lctx_capital_x,
             )?));
         }
         "DRCF" | "VWCF" => {
             return Ok(Chunk::Config(ConfigChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
-                endian,
+                chunk_reader_endian,
             )?));
         }
         "MCsL" => {
             return Ok(Chunk::CastList(CastListChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
-                endian,
+                chunk_reader_endian,
             )?));
             //res = CastListChunk(dir: this);
         }
         "VWSC" | "SCVW" => {
             return Ok(Chunk::Score(
-                ScoreChunk::read(&mut chunk_reader, version, rifx.after_burned)?,
+                ScoreChunk::read(chunk_reader, version, rifx.after_burned)?,
             ))
         }
         "VWLB" => {
             return Ok(Chunk::FrameLabels(FrameLabelsChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?))
         }
-        "ediM" => return Ok(Chunk::Media(MediaChunk::from_reader(&mut chunk_reader)?)),
+        "ediM" => return Ok(Chunk::Media(MediaChunk::from_reader(chunk_reader)?)),
         "Sord" => {
             return Ok(Chunk::ScoreOrder(SordChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
             )?))
         }
         "VWTL" => {
             return Ok(Chunk::TileList(tile_list::TileListChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
                 version,
             )?))
         }
-        "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(&mut chunk_reader, version)?)),
-        "sndH" => return Ok(Chunk::SndHeader(SndHeaderChunk::from_reader(&mut chunk_reader)?)),
+        "snd " => return Ok(Chunk::Sound(SoundChunk::from_snd_chunk(chunk_reader, version)?)),
+        "sndH" => return Ok(Chunk::SndHeader(SndHeaderChunk::from_reader(chunk_reader)?)),
         "sndS" => {
             // Sound samples chunk - just raw audio bytes
-            log::debug!("sndS chunk: {} bytes of audio data", view.len());
-            return Ok(Chunk::SndSamples(view.clone()));
+            log::debug!("sndS chunk: {} bytes of audio data", chunk_reader.data.len());
+            return Ok(Chunk::SndSamples(own_buffer(chunk_reader, may_consume)));
         }
-        "STXT" => return Ok(Chunk::Text(TextChunk::read(&mut chunk_reader)?)),
+        "STXT" => return Ok(Chunk::Text(TextChunk::read(chunk_reader)?)),
         "RTE1" => {
             // Rich Text Editor text content — the raw text of an RTE member.
             // Labels are typically ASCII; decode leniently and drop a trailing
             // NUL terminator if present.
-            let mut text = String::from_utf8_lossy(view).into_owned();
+            let mut text = String::from_utf8_lossy(&chunk_reader.data).into_owned();
             if text.ends_with('\0') {
                 text.truncate(text.trim_end_matches('\0').len());
             }
@@ -302,34 +342,62 @@ pub fn make_chunk(
         }
         "RTE2" => {
             // RTE pre-rendered bitmap — keep raw; decoded in cast_member.rs.
-            return Ok(Chunk::RteBitmap(view.clone()));
+            return Ok(Chunk::RteBitmap(own_buffer(chunk_reader, may_consume)));
         }
         "BITD" => {
-            return Ok(Chunk::Bitmap(BitmapChunk::read(
-                &mut chunk_reader,
+            // The chunk owns the pixel data outright, so take the buffer rather
+            // than cloning it: 271 bitmaps in the measured movie alone.
+            return Ok(Chunk::Bitmap(BitmapChunk::from_data(
+                own_buffer(chunk_reader, may_consume),
                 version,
-            )?))
+            )))
         }
-        "XMED" => return Ok(Chunk::XMedia(XMediaChunk::from_reader(&mut chunk_reader)?)),
+        "XMED" => return Ok(Chunk::XMedia(XMediaChunk::from_reader(chunk_reader)?)),
         "Cinf" => {
             return Ok(Chunk::CstInfo(CastInfoChunk::from_reader(
-                &mut chunk_reader,
+                chunk_reader,
             )?))
         }
-        "FXmp" => return Ok(Chunk::Effect(EffectChunk::from_reader(&mut chunk_reader)?)),
-        "Thum" => return Ok(Chunk::Thum(ThumChunk::from_reader(&mut chunk_reader)?)),
-        "XTRl" => return Ok(Chunk::XtraList(XtraListChunk::from_reader(&mut chunk_reader)?)),
-        "cupt" => return Ok(Chunk::CuePoints(CuePointsChunk::from_reader(&mut chunk_reader)?)),
+        "FXmp" => return Ok(Chunk::Effect(EffectChunk::from_reader(chunk_reader)?)),
+        "Thum" => return Ok(Chunk::Thum(ThumChunk::from_reader(chunk_reader)?)),
+        "XTRl" => return Ok(Chunk::XtraList(XtraListChunk::from_reader(chunk_reader)?)),
+        "cupt" => return Ok(Chunk::CuePoints(CuePointsChunk::from_reader(chunk_reader)?)),
         "CLUT" => Ok(Chunk::Palette(palette::PaletteChunk::from_reader(
-            &mut chunk_reader,
+            chunk_reader,
             version,
         )?)),
         "ALFA" => {
             // Alpha channel data for JPEG bitmaps — store as raw bytes
-            return Ok(Chunk::Raw(view.clone()));
+            return Ok(Chunk::Raw(own_buffer(chunk_reader, may_consume)));
         }
         _ => {
-            return Ok(Chunk::Raw(view.to_vec()));
+            return Ok(Chunk::Raw(own_buffer(chunk_reader, may_consume)));
         }
     }
+}
+
+/// Hex preview of a byte buffer for `debug!`, capped and gated.
+///
+/// The log macros do gate on the level before evaluating their arguments, but
+/// several chunk readers built a four-characters-per-byte String of the WHOLE
+/// chunk in a SEPARATE `let` statement first, and that runs unconditionally.
+/// The browser logger runs at Level::Error, so every one of those strings was
+/// built and thrown away. On the measured movie's
+/// 29 MB of speech (214 ediM chunks) that alone was 3.0 of the 3.2 seconds the
+/// loading screen took. Returns empty unless debug logging is actually on, and
+/// never formats more than `MAX` bytes.
+pub fn hex_preview(data: &[u8]) -> String {
+    const MAX: usize = 128;
+    if !log::log_enabled!(log::Level::Debug) {
+        return String::new();
+    }
+    let head = &data[..data.len().min(MAX)];
+    let mut out = String::with_capacity(head.len() * 3 + 32);
+    for b in head {
+        out.push_str(&format!("{:02X} ", b));
+    }
+    if data.len() > MAX {
+        out.push_str(&format!("... ({} bytes total)", data.len()));
+    }
+    out
 }

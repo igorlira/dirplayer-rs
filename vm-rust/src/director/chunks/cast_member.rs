@@ -39,25 +39,19 @@ impl CastMemberChunk {
     ) -> Result<CastMemberChunk, String> {
         reader.endian = Endian::Big;
 
-        let mut data_test = Vec::new();
-
         let r_begin = reader.pos;
-        while let Ok(byte) = reader.read_u8() {
-            data_test.push(byte);
-        }
-
-        let hex_dump = data_test
-            .iter()
-            .map(|b| format!("{:02X} ", b))
-            .collect::<Vec<String>>()
-            .join(" ");
-        debug!(
-            "CASt (Full Chunk, {} bytes):\n{}",
-            data_test.len(),
-            hex_dump
-        );
-
+        let remaining = reader.length.saturating_sub(reader.pos);
+        let data_test: Vec<u8> = reader
+            .read_bytes(remaining)
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
         reader.pos = r_begin;
+
+        debug!(
+            "CASt ({} bytes): {}",
+            data_test.len(),
+            crate::director::chunks::hex_preview(&data_test)
+        );
 
         let mut info: Option<CastMemberInfoChunk> = None;
         let info_len: usize;

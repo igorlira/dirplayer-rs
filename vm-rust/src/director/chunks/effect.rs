@@ -20,11 +20,7 @@ impl EffectChunk {
         debug!(
             "FXmp raw_data ({} bytes): {:?}",
             raw_data.len(),
-            raw_data
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<String>>()
-                .join(" ")
+            crate::director::chunks::hex_preview(&raw_data)
         );
 
         Ok(EffectChunk { raw_data })

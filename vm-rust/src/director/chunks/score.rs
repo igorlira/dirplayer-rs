@@ -628,9 +628,18 @@ impl ScoreFrameData {
         // (a field that is never read): a max-channel movie like Infestation
         // (frame_count 2075 × num_channels 1006 × 48) allocated ~100 MB per score
         // chunk, permanently inflating the un-shrinkable WASM heap. Carry-forward is
-        // now implicit — `frame_buf` keeps the previous frame's bytes and each delta
-        // overwrites only what changed; the frame is parsed immediately, then reused.
-        let mut frame_buf = vec![0u8; frame_size];
+        // now implicit — the rolling buffer keeps the previous frame's bytes and
+        // each delta overwrites only what changed; the frame is parsed
+        // immediately out of that same buffer, then reused.
+        // The rolling buffer IS the channel reader's buffer. It used to be copied
+        // into a fresh `BinaryReader` once per frame (`BinaryReader::from_u8`
+        // clones its input), which is an allocation and a full copy of
+        // num_channels x sprite_record_size bytes on every frame of every score
+        // chunk in the movie.
+        let mut channel_reader = BinaryReader::from_u8(&[]);
+        channel_reader.data = vec![0u8; frame_size];
+        channel_reader.length = frame_size;
+        channel_reader.set_endian(Endian::Big);
         let mut frame_channel_data: Vec<(u32, u16, ScoreFrameChannelData)> = vec![];
         let mut sound_channel_data: Vec<(u32, u16, SoundChannelData)> = vec![];
         let mut tempo_channel_data: Vec<(u32, TempoChannelData)> = vec![];
@@ -654,39 +663,45 @@ impl ScoreFrameData {
             // channel_offset is a byte offset within the frame.
             let frame_length = length - 2;
             if frame_length > 0 {
-                let chunk_data = reader
-                    .read_bytes(frame_length as usize)
-                    .map_err(|e| format!("Failed to read chunk data: {:?}", e))?;
-                let mut frame_chunk_reader = BinaryReader::from_u8(chunk_data);
-                frame_chunk_reader.set_endian(Endian::Big);
-                while !frame_chunk_reader.eof() {
-                    let channel_size = frame_chunk_reader
-                        .read_u16()
-                        .map_err(|e| format!("Failed to read channel size: {:?}", e))?
-                        as usize;
-                    let channel_offset = frame_chunk_reader
-                        .read_u16()
-                        .map_err(|e| format!("Failed to read channel offset: {:?}", e))?
-                        as usize;
-                    let channel_delta = frame_chunk_reader
-                        .read_bytes(channel_size)
-                        .map_err(|e| format!("Failed to read channel delta: {:?}", e))?;
+                // Walk the delta stream in place. It used to be copied into a
+                // second `BinaryReader` per frame purely to read three fields
+                // at a time from it.
+                // Layout: (channel_size: u16, channel_offset: u16, data[channel_size])
+                let stream_start = reader.pos;
+                let stream_end = stream_start + frame_length as usize;
+                if stream_end > reader.length {
+                    return Err("Failed to read chunk data: frame runs past the score".to_string());
+                }
+                let mut p = stream_start;
+                while p < stream_end {
+                    if p + 4 > stream_end {
+                        return Err("Failed to read channel size/offset: truncated delta".to_string());
+                    }
+                    let channel_size =
+                        u16::from_be_bytes([reader.data[p], reader.data[p + 1]]) as usize;
+                    let channel_offset =
+                        u16::from_be_bytes([reader.data[p + 2], reader.data[p + 3]]) as usize;
+                    p += 4;
+                    if p + channel_size > stream_end {
+                        return Err("Failed to read channel delta: truncated delta".to_string());
+                    }
                     let end_offset = channel_offset + channel_size;
-                    if end_offset > frame_buf.len() {
+                    if end_offset > channel_reader.data.len() {
                         error!("Channel data copy out of bounds. Channel offset: {}, Channel size: {}, Frame len: {}",
-                            channel_offset, channel_size, frame_buf.len());
+                            channel_offset, channel_size, channel_reader.data.len());
                         return Err("Channel data copy out of bounds".to_string());
                     }
-                    frame_buf[channel_offset..end_offset].copy_from_slice(&channel_delta);
+                    channel_reader.data[channel_offset..end_offset]
+                        .copy_from_slice(&reader.data[p..p + channel_size]);
+                    p += channel_size;
                 }
+                reader.jmp(stream_end);
             }
 
             // Parse the just-expanded frame directly out of the rolling buffer
             // (frame_start is 0 — the buffer holds exactly this one frame).
             {
                 let frame_start = 0usize;
-                let mut channel_reader = BinaryReader::from_u8(frame_buf.as_slice());
-                channel_reader.set_endian(Endian::Big);
 
                 if is_d4 {
                     // D4: Main channels packed in first 40 bytes.
@@ -961,6 +976,19 @@ impl ScoreFrameData {
                                 palette_channel_data.push((frame_index, palette_cast_lib, palette_member));
                             }
                         } else {
+                            // An all-zero record can only produce an all-zero
+                            // `data`, and every field `has_sprite_data` looks at
+                            // comes from these bytes - so the parse below would
+                            // throw it away. Most channels are empty in most
+                            // frames, and this is the innermost loop of the whole
+                            // score parse: frames x channels x ~30 field reads.
+                            let rec_end = (pos + header.sprite_record_size as usize)
+                                .min(channel_reader.data.len());
+                            if pos < rec_end
+                                && channel_reader.data[pos..rec_end].iter().all(|b| *b == 0)
+                            {
+                                continue;
+                            }
                             let data = ScoreFrameChannelData::read_with_size(&mut channel_reader, header.sprite_record_size)?;
 
                             let has_sprite_data = data.cast_member != 0

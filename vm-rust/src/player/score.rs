@@ -1843,8 +1843,15 @@ impl Score {
                                             );
                                         }
                                     }
-                                    // Log all property values for debugging
-                                    let summary: Vec<String> = props_to_set.iter().map(|(name, vref)| {
+                                    // Log all property values for debugging.
+                                    // Guarded: this is a separate statement, so
+                                    // without the check it formats every property
+                                    // of every behaviour on every beginSprite and
+                                    // throws the result away.
+                                    let summary: Vec<String> = if !log::log_enabled!(log::Level::Debug) {
+                                        Vec::new()
+                                    } else {
+                                    props_to_set.iter().map(|(name, vref)| {
                                         let v = match player.get_datum(vref) {
                                             Datum::Int(n) => format!("{}", n),
                                             Datum::Float(f) => format!("{:.4}", f),
@@ -1854,7 +1861,8 @@ impl Score {
                                             other => format!("<{:?}>", other.type_enum()),
                                         };
                                         format!("{}={}", name, v)
-                                    }).collect();
+                                    }).collect()
+                                    };
                                     debug!(
                                         "[BEHAVIOR-APPLY] cast {}/{}: [{}]",
                                         behavior_ref.cast_lib, behavior_ref.cast_member,

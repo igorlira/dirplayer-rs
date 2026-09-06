@@ -4600,11 +4600,7 @@ impl CastMember {
             };
             let is_text_ole = ole_type.is_empty() || ole_type == "text";
             if is_text_ole {
-                let hex_dump = xm.raw_data.clone()
-                    .iter()
-                    .map(|b| format!("{:02X} ", b))
-                    .collect::<Vec<String>>()
-                    .join(" ");
+                let hex_dump = crate::director::chunks::hex_preview(&xm.raw_data);
                 debug!(
                     "XMED X2 (text member #{} '{}', {} bytes):\n{}",
                     number,
