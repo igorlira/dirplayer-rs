@@ -131,6 +131,8 @@ fn list_to_rect_vals(player: &DirPlayer, list: &VecDeque<DatumRef>) -> Result<([
 fn symbol_as_arithmetic_operand(datum: &Datum) -> Option<Datum> {
     match datum {
         Datum::Symbol(name) => Some(Datum::String(name.clone().to_string())),
+        // A string chunk (`str.item[k]`) is a string operand.
+        Datum::StringChunk(_, _, text) => Some(Datum::String(text.clone())),
         _ => None,
     }
 }

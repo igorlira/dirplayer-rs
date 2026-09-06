@@ -34,6 +34,12 @@ impl MovieHandlers {
                     .cast_manager
                     .find_member_ref_by_number(*script_num as u32)),
                 Datum::CastMember(cast_member_ref) => Ok(Some(cast_member_ref.clone())),
+                // A string chunk (e.g. `str.item[1]`) names a script just as
+                // a String does.
+                Datum::StringChunk(_, _, chunk_text) => Ok(player
+                    .movie
+                    .cast_manager
+                    .find_member_ref_by_name(chunk_text)),
                 _ => Err(ScriptError::new(format!(
                     "Invalid identifier for script: {}",
                     formatted_id
