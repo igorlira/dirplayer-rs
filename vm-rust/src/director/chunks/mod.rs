@@ -20,6 +20,7 @@ pub mod score_order;
 pub mod tile_list;
 pub mod script;
 pub mod script_names;
+pub mod audio_format;
 pub mod sound;
 pub mod text;
 pub mod thum;
@@ -310,7 +311,7 @@ pub fn make_chunk_in(
                 version,
             )?))
         }
-        "ediM" => return Ok(Chunk::Media(MediaChunk::from_reader(chunk_reader)?)),
+        "ediM" => return Ok(Chunk::Media(MediaChunk::from_reader(chunk_reader, may_consume)?)),
         "Sord" => {
             return Ok(Chunk::ScoreOrder(SordChunk::from_reader(
                 chunk_reader,
