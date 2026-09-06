@@ -205,6 +205,14 @@ pub fn take_pending() -> Vec<((u32, u32), GifAnimation)> {
     }
 }
 
+/// A movie is being replaced: drop every animation, installed or pending.
+/// The keys are (cast, member) numbers, which the next movie reuses for
+/// members of its own.
+pub fn forget_all(player: &mut crate::player::DirPlayer) {
+    player.gif_animations.clear();
+    let _ = take_pending();
+}
+
 /// Advance every animation and point its cast member at the current frame.
 /// Called once per frame from the movie loop.
 pub fn tick_gif_animations() {
@@ -435,6 +443,23 @@ mod control_tests {
         a.running = false;
         assert!(!a.advance(5000.0), "paused, so no frame change");
         assert_eq!(a.current, 1);
+    }
+
+    #[test]
+    fn a_movie_change_forgets_every_animation() {
+        crate::player::init_symbol_table();
+        crate::player::testing::run_test(async {
+            let _p = crate::player::testing::TestPlayer::new();
+            register_pending(1, 2, anim());
+            install_pending();
+            register_pending(1, 3, anim());
+            crate::player::reserve_player_mut(|player| {
+                assert!(player.gif_animations.contains_key(&(1, 2)));
+                forget_all(player);
+                assert!(player.gif_animations.is_empty());
+            });
+            assert!(take_pending().is_empty(), "a pending one is dropped too");
+        });
     }
 
     #[test]
