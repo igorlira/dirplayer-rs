@@ -72,6 +72,27 @@ pub enum StringChunkType {
     Line,
 }
 
+impl StringChunkType {
+    /// The fallible form of the `From<Symbol>` impl below.
+    ///
+    /// That one panics on anything that is not #item/#word/#char/#line, which is
+    /// fine where the caller got the symbol from the bytecode (a chunk opcode
+    /// cannot carry anything else) but NOT where it comes from a movie. A
+    /// `setProp` objcall on a cast member is the second kind: `member.char[a..b]
+    /// = v` compiles to one, but so does every other setProp a movie makes, and
+    /// a panic on wasm is a trap that takes the whole player down rather than
+    /// something a handler can report.
+    pub fn from_symbol_opt(s: Symbol) -> Option<Self> {
+        match s.into_builtin() {
+            Some(BuiltInSymbol::Item) | Some(BuiltInSymbol::Items) => Some(StringChunkType::Item),
+            Some(BuiltInSymbol::Word) | Some(BuiltInSymbol::Words) => Some(StringChunkType::Word),
+            Some(BuiltInSymbol::Char) | Some(BuiltInSymbol::Chars) => Some(StringChunkType::Char),
+            Some(BuiltInSymbol::Line) | Some(BuiltInSymbol::Lines) => Some(StringChunkType::Line),
+            _ => None,
+        }
+    }
+}
+
 impl From<Symbol> for StringChunkType {
     fn from(s: Symbol) -> Self {
         match s.into_builtin_or_error().unwrap() {

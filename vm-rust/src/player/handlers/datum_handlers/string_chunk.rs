@@ -1393,3 +1393,26 @@ mod tests {
         assert_eq!(del_word("a   b   c", 2, 0), "a   c");
     }
 }
+
+#[cfg(test)]
+mod chunk_write_tests {
+    use super::StringChunkUtils;
+    use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
+
+    fn chars(start: i32, end: i32) -> StringChunkExpr {
+        StringChunkExpr { chunk_type: StringChunkType::Char, start, end, item_delimiter: ',' }
+    }
+
+    #[test]
+    fn a_range_past_the_end_replaces_to_the_end() {
+        // The form a movie uses to relabel a field: char[1..10] on a shorter text.
+        assert_eq!(StringChunkUtils::string_by_putting_into_chunk("100 x 8", &chars(1, 10), "10 x 6").unwrap(), "10 x 6");
+        assert_eq!(StringChunkUtils::string_by_putting_into_chunk("", &chars(1, 10), "10 x 6").unwrap(), "10 x 6");
+    }
+
+    #[test]
+    fn a_range_inside_keeps_both_sides() {
+        assert_eq!(StringChunkUtils::string_by_putting_into_chunk("ABCDEFGH", &chars(3, 5), "xy").unwrap(), "ABxyFGH");
+        assert_eq!(StringChunkUtils::string_by_putting_into_chunk("ABCDEFGHIJKLMNOP", &chars(1, 10), "4 x 8").unwrap(), "4 x 8KLMNOP");
+    }
+}

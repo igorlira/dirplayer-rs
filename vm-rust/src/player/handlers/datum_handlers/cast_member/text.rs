@@ -1095,6 +1095,9 @@ impl TextMemberHandlers {
                         bg_color_explicit: false,
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        // Text keeps the pixel-centre sampling rule; the floor
+                        // rule upstream added is for authored BITMAPS only.
+                        floor_rule: false,
                     };
 
                     use crate::player::bitmap::bitmap::resolve_color_ref;
@@ -1378,6 +1381,9 @@ impl TextMemberHandlers {
                                 bg_color_explicit: false,
                                 fore_color_explicit: false,
                                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                                // Inherited: this is a per-run glyph blit of the
+                                // params above, which are text and so never floor.
+                                floor_rule: params.floor_rule,
                             };
                             if use_tight {
                                 bitmap_font_copy_char_tight(

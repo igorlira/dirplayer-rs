@@ -514,6 +514,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), 0.0);
         }
+        if let Some(ref loc) = program.u_floor_rule {
+            gl.uniform1f(Some(loc), 0.0);
+        }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
@@ -672,6 +675,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), 0.0);
         }
+        if let Some(ref loc) = program.u_floor_rule {
+            gl.uniform1f(Some(loc), 0.0);
+        }
         if let Some(ref loc) = program.u_skew {
             gl.uniform1f(Some(loc), 0.0);
         }
@@ -758,6 +764,9 @@ impl WebGL2Renderer {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew {
@@ -1355,7 +1364,10 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+            ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
+            reverse_ink: false,
+            floor_rule: false,
         };
 
         // Render text to the bitmap
@@ -1439,6 +1451,9 @@ impl WebGL2Renderer {
         }
         // No skew flip
         if let Some(ref loc) = program.u_skew_flip {
+            gl.uniform1f(Some(loc), 0.0);
+        }
+        if let Some(ref loc) = program.u_floor_rule {
             gl.uniform1f(Some(loc), 0.0);
         }
         if let Some(ref loc) = program.u_skew {
@@ -1709,6 +1724,18 @@ impl WebGL2Renderer {
                     channel_num, w3d_cam, w3d_extra_cams
                 );
             }
+            // A GIF carries the background colour the file declares, and a
+            // movie hides it with ink 36, which keys out the background
+            // colour. The score's bgColor for such a sprite is whatever the
+            // author left there, usually white, so a GIF with any other
+            // background drew as a solid box.
+            let bg_color = if crate::player::gif::is_gif_member(player, member_ref.cast_lib, member_ref.cast_member) {
+                player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    .map(|m| m.bg_color.clone())
+                    .unwrap_or_else(|| sprite.bg_color.clone())
+            } else {
+                sprite.bg_color.clone()
+            };
             (
                 member_ref,
                 rect,
@@ -2215,8 +2242,15 @@ impl WebGL2Renderer {
                     TextureSource::Bitmap { image_ref: bitmap_member.image_ref, is_flash: false }
                 }
                 CastMemberType::Shape(shape_member) => {
-                    // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                    if sprite_width <= 1 || sprite_height <= 1 {
+                    // Skip blank placeholders and zero-size shapes, but NOT a
+                    // #line: a line is 1 px in one dimension by nature, so
+                    // "width <= 1 || height <= 1" dropped every horizontal and
+                    // vertical line before the Line arm below ever ran. The
+                    // divider under the ruler on klods.dcr's working drawing
+                    // went missing this way (S8, measured against the
+                    // projector). A line is skipped only when BOTH collapse.
+                    let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                    if (sprite_width <= 1 || sprite_height <= 1) && !(is_line && (sprite_width > 1 || sprite_height > 1)) {
                         return;
                     }
 
@@ -3899,6 +3933,10 @@ impl WebGL2Renderer {
         // Colorize is also baked into the texture when has_fore_color or has_back_color is set
 
         let is_rendered_text = matches!(texture_source, TextureSource::RenderedText { .. });
+        // The floor sampling rule was measured on authored bitmaps; a text,
+        // field or shape texture whose sprite rect is a pixel short keeps the
+        // centre rule it always had.
+        let floor_rule = matches!(texture_source, TextureSource::Bitmap { is_flash: false, .. });
         let is_button_alpha_matte = matches!(texture_source, TextureSource::ButtonBitmap { ink: i, .. } if i == 2 || i == 36 || i == 8 || i == 7);
 
         // These sources rasterize a FRESH texture here every frame and, unlike
@@ -4369,7 +4407,10 @@ impl WebGL2Renderer {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
+                            floor_rule: false,
                         };
                         btn_bitmap.draw_text_wrapped(
                             &text, font, font_bmp,
@@ -4973,6 +5014,9 @@ impl WebGL2Renderer {
         if let Some(ref loc) = program.u_skew_flip {
             gl.uniform1f(Some(loc), if has_skew_flip { 1.0 } else { 0.0 });
         }
+        if let Some(ref loc) = program.u_floor_rule {
+            gl.uniform1f(Some(loc), if floor_rule { 1.0 } else { 0.0 });
+        }
 
         // Continuous skew (`the skew of sprite`) — applied as a horizontal
         // shear `x += y * tan(skew_radians)` around the registration point,
@@ -5078,15 +5122,25 @@ impl WebGL2Renderer {
             }
         }
 
-        // Darken (ink 41) is a foreColor/bgColor duotone — feed the shader the
-        // sprite's foreColor as well as the bgColor set above.
-        if effective_ink == InkMode::Darken {
+        // Darken (ink 41) is a foreColor/bgColor duotone and Lighten (ink 40)
+        // adds the foreColor: feed the shader the sprite's foreColor as well
+        // as the bgColor set above. Lighten adds it to TRUE-COLOUR bitmaps
+        // only. An indexed bitmap under Lighten keeps its palette colours
+        // (Habbo's navigator buttons: 8-bit, ink 40, foreColor light grey, and
+        // the real client leaves their black outlines black), while a 32-bit
+        // one is lifted by the foreColor (Matematik i Maaneby's stones).
+        if effective_ink == InkMode::Darken || effective_ink == InkMode::Lighten {
+            let fg = if effective_ink == InkMode::Lighten && bitmap_bit_depth <= 8 {
+                (0, 0, 0)
+            } else {
+                fg_color_rgb
+            };
             if let Some(ref loc) = u_fg_color {
                 gl.uniform4f(
                     Some(loc),
-                    fg_color_rgb.0 as f32 / 255.0,
-                    fg_color_rgb.1 as f32 / 255.0,
-                    fg_color_rgb.2 as f32 / 255.0,
+                    fg.0 as f32 / 255.0,
+                    fg.1 as f32 / 255.0,
+                    fg.2 as f32 / 255.0,
                     1.0,
                 );
             }
@@ -6805,7 +6859,10 @@ impl WebGL2Renderer {
             original_dst_rect: None,
             bg_color_explicit: false,
             fore_color_explicit: false,
-            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+            ink9_mask_bitmap: None,
+            ink9_mask_offset: (0, 0),
+            reverse_ink: false,
+            floor_rule: false,
         };
 
         let pfr_multi_span_styled = is_pfr_font && styled_spans.map_or(false, |s| s.len() > 1);
@@ -7644,7 +7701,10 @@ impl WebGL2Renderer {
                             original_dst_rect: params.original_dst_rect.clone(),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
+                            floor_rule: false,
                         };
 
                         // Pick the run's atlas. When the run names a variant

@@ -26,6 +26,7 @@ pub mod eval;
 pub mod events;
 pub mod font;
 pub mod geometry;
+pub mod gif;
 pub mod handlers;
 pub mod interp_stats;
 pub mod js_lingo;
@@ -427,6 +428,10 @@ pub struct DirPlayer {
     /// events are per-sprite (see `get_sprites_at`), so this has to be a set
     /// rather than just the front-most sprite.
     pub hovered_sprites: Vec<i16>,
+    /// Animated GIF cast members, keyed by (cast_lib, member number). Each
+    /// holds its decoded frames; the frame loop swaps the member's image_ref
+    /// as the delays elapse. See player::gif.
+    pub gif_animations: std::collections::HashMap<(u32, u32), crate::player::gif::GifAnimation>,
     pub picking_mode: bool,
     pub allocator: DatumAllocator,
     pub dir_cache: HashMap<Box<str>, DirectorFile>,
@@ -599,6 +604,15 @@ pub struct DirPlayer {
     pub current_frame_tempo: u32,  // Cached tempo for the current frame
     pub has_player_frame_changed: bool,
     pub stage_dirty: bool, // Set when any sprite property changes; cleared after render
+    /// Set when an input handler (mouse or key) starts running, cleared once
+    /// the next exitFrame has run. While it is set the stage is not redrawn:
+    /// Director draws once per frame, after the handlers of that frame and
+    /// its exitFrame have both run, so a handler's half-finished state is
+    /// never on screen. Matematik i Maaneby's crane shows a claw sprite from
+    /// mouseUp and moves it into place in exitFrame; drawing in between put
+    /// the claw where that sprite last was for one frame. A timestamp, so a
+    /// hold can never outlive a stalled frame loop.
+    pub draw_hold_since_ms: Option<i64>,
     pub preview_dirty: bool, // Set when preview member/settings change; cleared after preview render
     pub has_frame_changed_in_go: bool,
     pub go_same_frame: bool,
@@ -905,6 +919,7 @@ impl DirPlayer {
             float_precision: 4,
             last_handler_result: DatumRef::Void,
             hovered_sprites: Vec::new(),
+            gif_animations: std::collections::HashMap::new(),
             picking_mode: false,
             allocator: DatumAllocator::default(),
             dir_cache: HashMap::new(),
@@ -957,6 +972,7 @@ impl DirPlayer {
             current_frame_tempo: 30,  // Default to 30 fps
             has_player_frame_changed: false,
             stage_dirty: true,
+            draw_hold_since_ms: None,
             preview_dirty: true,
             has_frame_changed_in_go: false,
             go_same_frame: false,
@@ -1604,6 +1620,15 @@ impl DirPlayer {
         }
     }
 
+    /// The `cursor` setting belongs to the movie that made it: a new movie
+    /// starts with the system arrow. A task movie that hid the cursor for a
+    /// drag otherwise left the next movie without one.
+    pub fn reset_cursor_for_new_movie(&mut self) {
+        self.cursor = CursorRef::System(0);
+        self.cursor_is_hidden = false;
+        self.wants_pointer_lock = false;
+    }
+
     pub(crate) async fn load_movie_from_dir(&mut self, dir: DirectorFile) {
         // Start this movie from the builtin display-spelling baseline. A cast's
         // name table claims the spelling for symbols it defines
@@ -1618,6 +1643,12 @@ impl DirPlayer {
         // movies to System-Win; these differ at high indices and decide how
         // indexed bitmaps / shape pattern fills resolve. Read before `dir` moves.
         crate::player::bitmap::bitmap::set_default_system_palette_from_platform(dir.config.platform);
+        // The GIF animations belong to the cast that is going away. Left in
+        // place, their keys land on whatever the next movie keeps at those
+        // member numbers: the map's planet and smoke frames turned up on a
+        // task scene's craftsman and plank piles.
+        crate::player::gif::forget_all(self);
+        self.reset_cursor_for_new_movie();
         self.movie
             .load_from_file(
                 dir,
@@ -4629,6 +4660,37 @@ where
 }
 
 #[inline(always)]
+/// An input handler is about to run: hold the stage redraw until the next
+/// exitFrame has settled what it changes (`DirPlayer::draw_hold_since_ms`).
+pub fn hold_draw_for_input_handler() {
+    reserve_player_mut(|player| {
+        if player.draw_hold_since_ms.is_none() {
+            player.draw_hold_since_ms = Some(chrono::Utc::now().timestamp_millis());
+        }
+    });
+}
+
+/// Director runs one handler at a time: input that arrives while a frame
+/// handler is busy-waiting (`repeat while ... updateStage()`) is queued until
+/// the handler returns. The busy-wait yield lets the command and event loops
+/// run inside that wait, so a mouseEnter fired mid-animation on Maaneby's map
+/// build sequence, where the original ignores the mouse until it is over.
+/// Waits for the gap; never drops the input.
+pub async fn wait_for_handler_gap() {
+    loop {
+        let busy = reserve_player_ref(|player| {
+            player.is_playing
+                && !player.is_yield_safe()
+                && !player.in_mouse_command
+                && !player.command_handler_yielding
+        });
+        if !busy {
+            return;
+        }
+        let _ = timeout(Duration::from_millis(4), future::pending::<()>()).await;
+    }
+}
+
 pub fn reserve_player_mut<T, F>(callback: F) -> T
 where
     F: FnOnce(&mut DirPlayer) -> T,
@@ -5682,6 +5744,10 @@ async fn eval_startup_payload(code: Option<String>, flag: &str) {
 /// stepFrame, prepareFrame, startMovie, enterFrame, exitFrame.
 /// Shared by `play()` and `transition_to_net_movie`.
 async fn run_movie_init_sequence() {
+    // Animated GIF members were decoded while the cast was built, before the
+    // player could be borrowed; hand them over now so the frame loop can run
+    // them. See player::gif.
+    crate::player::gif::install_pending();
     // The projector's `--do` argument, evaluated before the movie's own code
     // gets a turn. See `DirPlayer::startup_do`.
     run_startup_do().await;
@@ -6197,7 +6263,7 @@ async fn restart_current_movie() {
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_isFlashLoading", catch)]
-    fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
+    pub(crate) fn is_flash_loading() -> Result<bool, wasm_bindgen::JsValue>;
 
     /// Resize a live Ruffle instance so it re-renders the vector sharp at the
     /// sprite's current on-stage size (splashes grow, arm swaps dims).
@@ -6538,6 +6604,13 @@ pub async fn run_single_frame() -> (bool, bool) {
     }
 
     player_wait_available().await;
+
+    // exitFrame has run: whatever the input handlers changed is settled. A
+    // frame that had a handler is drawn right here, Director's draw point, so
+    // no further handler can slip in before the picture.
+    if reserve_player_mut(|player| player.draw_hold_since_ms.take().is_some()) {
+        crate::rendering::draw_frame_at_frame_end();
+    }
 
     // Eager movie mount anywhere in the exitFrame dispatches above: hand the
     // rest of the cycle to the frame loop's pending-init path.
@@ -8345,6 +8418,67 @@ mod interp_bench {
             let report = crate::player::run_bytecode_benchmark();
             println!("{report}");
             assert!(report.contains("ops/sec"));
+        });
+    }
+}
+
+#[cfg(test)]
+mod cursor_reset_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn a_new_movie_starts_with_the_arrow() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.cursor = CursorRef::System(200);
+                p.cursor_is_hidden = true;
+                p.wants_pointer_lock = true;
+                p.reset_cursor_for_new_movie();
+                assert!(matches!(p.cursor, CursorRef::System(0)));
+                assert!(!p.cursor_is_hidden);
+                assert!(!p.wants_pointer_lock);
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+mod handler_gap_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    #[test]
+    fn input_waits_until_the_frame_handler_returns() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.is_playing = true;
+                p.in_frame_script = true;
+            });
+            let held = timeout(Duration::from_millis(30), wait_for_handler_gap()).await;
+            assert!(held.is_err(), "input ran inside the frame handler");
+            reserve_player_mut(|p| p.in_frame_script = false);
+            let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
+            assert!(released.is_ok(), "input never ran after the handler returned");
+        });
+    }
+
+    #[test]
+    fn a_mouse_handler_does_not_hold_input() {
+        init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            reserve_player_mut(|p| {
+                p.is_playing = true;
+                p.in_frame_script = true;
+                p.in_mouse_command = true;
+            });
+            let released = timeout(Duration::from_millis(200), wait_for_handler_gap()).await;
+            assert!(released.is_ok());
         });
     }
 }

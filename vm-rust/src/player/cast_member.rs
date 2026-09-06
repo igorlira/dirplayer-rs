@@ -5336,6 +5336,45 @@ impl CastMember {
                 });
             }
 
+            // 1c) Animated GIF. Director's "Animated GIF Asset" Xtra stores
+            // the whole .gif file as the XMED payload. Decode the frames and
+            // hand back a plain Bitmap member on frame 0, so every ink and
+            // stretch path treats it as an ordinary bitmap;
+            // `player.gif_animations` swaps the frame as time passes. Without
+            // this the payload fell through to the text parser below.
+            if crate::player::gif::is_gif(&xm.raw_data) {
+                if let Some(anim) = crate::player::gif::decode_gif(&xm.raw_data, bitmap_manager) {
+                    debug!(
+                        "GIF member #{} '{}': {} frames, {}x{}",
+                        number,
+                        chunk.member_info.as_ref().map(|x| x.name.as_str()).unwrap_or(""),
+                        anim.frames.len(), anim.width, anim.height
+                    );
+                    let info = crate::player::gif::gif_bitmap_info(anim.width, anim.height);
+                    let first = anim.frames[0];
+                    // Carry the GIF's own background colour so a sprite drawn
+                    // with ink 36 keys out the right thing.
+                    let bg = crate::player::gif::background_color(&xm.raw_data)
+                        .map(|(r, g, b)| ColorRef::Rgb(r, g, b))
+                        .unwrap_or(ColorRef::PaletteIndex(0));
+                    crate::player::gif::register_pending(cast_lib, number, anim);
+                    return Some(CastMember {
+                        number,
+                        name: chunk.member_info.as_ref().map(|x| x.name.to_owned()).unwrap_or_default(),
+                        comments: chunk.member_info.as_ref().map(|x| x.comments.to_owned()).unwrap_or_default(),
+                        member_type: CastMemberType::Bitmap(BitmapMember {
+                            image_ref: first,
+                            reg_point: (info.reg_x, info.reg_y),
+                            script_id: 0,
+                            member_script_ref: None,
+                            info,
+                        }),
+                        color: ColorRef::PaletteIndex(255),
+                        bg_color: bg,
+                        reg_point: (0, 0),
+                    });
+                }
+            }
             // 2) Check if styled text (XMED format)
             // Only parse as styled text if the Ole type string is "text" or empty
             // (avoid mis-parsing raw binary data like lightmap coordinates as text)

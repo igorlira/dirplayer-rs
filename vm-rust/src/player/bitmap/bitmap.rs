@@ -452,6 +452,36 @@ impl Bitmap {
 }
 
 impl Bitmap {
+    /// The `rect` of this 32-bit bitmap as a new 32-bit bitmap, RGBA copied
+    /// byte for byte. A crop keeps the alpha channel; going through an ink
+    /// path does not, since ink Copy skips fully transparent source pixels
+    /// and leaves the destination's initial fill behind them. A rect that
+    /// runs past the source is padded with transparent pixels when the image
+    /// has an alpha channel; Bitmap::new's white showed as a bar under a claw
+    /// a movie cropped taller than its image.
+    pub fn crop_rgba(&self, left: i32, top: i32, width: u16, height: u16) -> Bitmap {
+        let mut out = Bitmap::new(width, height, 32, 32, if self.use_alpha { 8 } else { 0 }, self.palette_ref.clone());
+        if self.use_alpha {
+            out.data.fill(0);
+        }
+        out.use_alpha = self.use_alpha;
+        out.trim_white_space = self.trim_white_space;
+        let sw = self.width as i32;
+        let sh = self.height as i32;
+        for dy in 0..height as i32 {
+            let sy = top + dy;
+            if sy < 0 || sy >= sh { continue; }
+            for dx in 0..width as i32 {
+                let sx = left + dx;
+                if sx < 0 || sx >= sw { continue; }
+                let si = ((sy * sw + sx) * 4) as usize;
+                let di = ((dy * width as i32 + dx) * 4) as usize;
+                out.data[di..di + 4].copy_from_slice(&self.data[si..si + 4]);
+            }
+        }
+        out
+    }
+
     pub fn new(
         width: u16,
         height: u16,
@@ -1933,4 +1963,33 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec
         version: 0,
         hi_res: HiResTwin::default(),
     })
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn crop_keeps_the_alpha_channel() {
+        // 3x3, opaque red centre, everything else fully transparent.
+        let mut src = Bitmap::new(3, 3, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        src.use_alpha = true;
+        for i in 0..9 { src.data[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]); }
+        src.data[4 * 4..4 * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+        let out = src.crop_rgba(1, 0, 2, 2); // columns 1..2, rows 0..1
+        assert!(out.use_alpha);
+        assert_eq!(&out.data[0..4], &[0, 0, 0, 0], "top-left of the crop is transparent");
+        assert_eq!(&out.data[(1 * 2 + 0) * 4..(1 * 2 + 0) * 4 + 4], &[255, 0, 0, 255], "the red pixel lands at (0,1)");
+        assert_eq!(&out.data[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn crop_outside_the_source_is_transparent() {
+        let mut src = Bitmap::new(2, 2, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        src.use_alpha = true;
+        for i in 0..4 { src.data[i * 4..i * 4 + 4].copy_from_slice(&[9, 9, 9, 255]); }
+        let out = src.crop_rgba(1, 1, 3, 3); // runs past the right and bottom edge
+        assert_eq!(&out.data[0..4], &[9, 9, 9, 255]);
+        assert_eq!(&out.data[(2 * 3 + 2) * 4..(2 * 3 + 2) * 4 + 4], &[0, 0, 0, 0], "padding past the source is transparent");
+    }
 }

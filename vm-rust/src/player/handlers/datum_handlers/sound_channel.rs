@@ -144,6 +144,9 @@ impl SoundChannelDatumHandlers {
         // Mutably borrow the channel
         {
             let mut channel = channel_rc.borrow_mut();
+            // A new sound is not part of the old one's fade.
+            channel.is_fading = false;
+            channel.stop_after_fade = false;
             channel.playlist.clear();
             channel.current_segment_index = None;
             channel.stop_playback_nodes();
@@ -214,8 +217,9 @@ impl SoundChannelDatumHandlers {
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeIn) => {
-                let ticks = if args.is_empty() {
-                    60
+                // fadeIn({milliseconds}). One argument, and it is a duration.
+                let ms = if args.is_empty() {
+                    1000
                 } else {
                     player.get_datum(&args[0]).int_value()?
                 };
@@ -224,27 +228,34 @@ impl SoundChannelDatumHandlers {
                 } else {
                     255.0
                 };
-                Self::handle_fade_in(player, datum, ticks, to_volume)?;
+                Self::handle_fade_in(player, datum, ms, to_volume)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeOut) => {
-                let ticks = if args.is_empty() {
-                    60
+                // fadeOut({milliseconds}). Read as ticks, a fadeOut(1000) took
+                // 16 seconds instead of one.
+                let ms = if args.is_empty() {
+                    1000
                 } else {
                     player.get_datum(&args[0]).int_value()?
                 };
-                Self::handle_fade_out(player, datum, ticks)?;
+                Self::handle_fade_out(player, datum, ms)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::FadeTo) => {
                 if args.len() < 2 {
                     return Err(ScriptError::new(
-                        "fadeTo requires ticks and volume arguments".to_string(),
+                        "fadeTo requires volume and duration arguments".to_string(),
                     ));
                 }
-                let ticks = player.get_datum(&args[0]).int_value()?;
-                let to_volume = player.get_datum(&args[1]).float_value()?;
-                Self::handle_fade_to(player, datum, ticks, to_volume)?;
+                // Director's order is fadeTo(volume, milliseconds). Read the
+                // other way round, Matematik i Maaneby's music button,
+                // `sound(1).fadeTo(200 * musik, 1500)`, turned the music OFF by
+                // fading to 1500 over 0 ticks: 1500 clamps to 255, so the button
+                // meant to silence the music set it to full, instantly.
+                let to_volume = player.get_datum(&args[0]).float_value()?;
+                let ms = player.get_datum(&args[1]).int_value()?;
+                Self::handle_fade_to(player, datum, ms, to_volume)?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::SetPlaylist) => {
@@ -539,8 +550,20 @@ impl SoundChannelDatumHandlers {
         datum: &DatumRef,
         member: &DatumRef,
     ) -> Result<(), ScriptError> {
+        // Director takes a bare member as well as a [#member: m, ...] list;
+        // `sound(4).queue(member("Tal - 30"))` is the form a movie uses to
+        // string spoken numbers together.
+        let entry = match player.get_datum(member) {
+            Datum::CastMember(_) => {
+                let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)));
+                let mut props = VecDeque::new();
+                props.push_back((key, member.clone()));
+                player.alloc_datum(Datum::PropList(props, false))
+            }
+            _ => member.clone(),
+        };
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().queue(member.clone(), player); // <-- pass player here
+        channel.borrow_mut().queue(entry, player);
         Ok(())
     }
 
@@ -553,32 +576,32 @@ impl SoundChannelDatumHandlers {
     fn handle_fade_in(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
         to_volume: f64,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_in(ticks, to_volume);
+        channel.borrow_mut().fade_in(ms, to_volume);
         Ok(())
     }
 
     fn handle_fade_out(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_out(ticks);
+        channel.borrow_mut().fade_out(ms);
         Ok(())
     }
 
     fn handle_fade_to(
         player: &mut DirPlayer,
         datum: &DatumRef,
-        ticks: i32,
+        ms: i32,
         to_volume: f64,
     ) -> Result<(), ScriptError> {
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        channel.borrow_mut().fade_to(ticks, to_volume);
+        channel.borrow_mut().fade_to(ms, to_volume);
         Ok(())
     }
 
@@ -749,6 +772,10 @@ impl SoundChannelDatumHandlers {
         let channel_rc = Self::get_sound_channel(player, datum)?;
         // borrow mutably to access fields and methods
         let mut channel = channel_rc.borrow_mut();
+        // An explicit volume ends any fade in progress; otherwise the fade's
+        // next step overwrote the value the script just set.
+        channel.is_fading = false;
+        channel.stop_after_fade = false;
         channel.set_volume(vol);
         Ok(())
     }
@@ -1147,6 +1174,8 @@ pub struct SoundChannel {
 
     // Fade state
     pub is_fading: bool,
+    /// The fade came from fadeOut(): the channel stops when it reaches silence.
+    pub stop_after_fade: bool,
     pub fade_start_volume: f64,
     pub fade_target_volume: f64,
     pub fade_duration: f64,
@@ -1435,6 +1464,7 @@ impl SoundChannel {
             channel_count: 0,
             elapsed_time: 0.0,
             is_fading: false,
+            stop_after_fade: false,
             fade_start_volume: 0.0,
             fade_target_volume: 0.0,
             fade_duration: 0.0,
@@ -1885,6 +1915,10 @@ impl SoundChannel {
 
         // Retrieve datum
         let datum = player.get_datum(&member_ref);
+        let member_name = match &datum {
+            Datum::CastMember(r) => player.movie.cast_manager.find_member_by_ref(r).map(|m| m.name.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
 
         if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
             // Update expected sample rate
@@ -1953,15 +1987,19 @@ impl SoundChannel {
                         ch.status = SoundStatus::Loading;
                     }
 
+                    // No PCM reading of these bytes exists: this branch is only
+                    // reached once the sniff found a chain of valid MPEG frames (or
+                    // an Ogg stream), and the cast's own codec field says nothing
+                    // more, since it reports "raw_pcm" for an MP3 behind an ID3 tag.
+                    // Playing the frames as samples was seconds of noise, and a zero
+                    // sample size on the way divided by zero. The channel goes idle
+                    // and the console names the member, so a decoder refusal can be
+                    // traced rather than heard.
                     if let Err(e) = Self::start_sound_mp3_async(self_rc_clone.clone(), mp3_data.clone(), mp3_sound_member).await {
-                        error!("❌ MP3 playback failed: {:?}", e);
-                        debug!("📊 MP3 data size: {} bytes, first bytes: {:02X?}",
-                            mp3_data.len(), &mp3_data[0..32.min(mp3_data.len())]);
-                        {
-                            let mut ch = self_rc_clone.borrow_mut();
-                            ch.status = SoundStatus::Idle;
-                        }
-                        Self::start_sound_pcm_fallback(self_rc_clone, member_ref);
+                        error!("❌ MP3 playback failed for \"{}\": {:?} ({} bytes, first bytes {:02X?})",
+                            member_name, e, mp3_data.len(), &mp3_data[0..16.min(mp3_data.len())]);
+                        let mut ch = self_rc_clone.borrow_mut();
+                        ch.status = SoundStatus::Idle;
                     }
                 });
                 debug!("🚀 Spawned MP3 decode task (start_sound)");
@@ -2613,223 +2651,6 @@ impl SoundChannel {
         Ok(())
     }
 
-    /// PCM fallback when MP3 decoding fails
-    fn start_sound_pcm_fallback(self_rc: Rc<RefCell<Self>>, member_ref: DatumRef) {
-        debug!("🔄 Starting PCM fallback playback");
-
-        let mut this = self_rc.borrow_mut();
-
-        // Get global player
-        // Resolve the member against the ACTIVE player, not always the host: a
-        // nested `#movie` sub-player's `puppetSound` runs under its own active id
-        // and its member_ref/datum + sound cast member live in the SUB's
-        // allocator/cast. Using PLAYER_OPT (host) looked up a different datum at
-        // that id (the "datum type: string/symbol/int" mismatch) and never found
-        // the sound member.
-        let player_opt = unsafe {
-            if crate::player::ACTIVE_PLAYER_ID == 0 {
-                crate::PLAYER_OPT.as_mut()
-            } else {
-                crate::player::NESTED_PLAYERS
-                    .get_mut(crate::player::ACTIVE_PLAYER_ID - 1)
-                    .and_then(|o| o.as_mut())
-            }
-        };
-        let player = match player_opt {
-            Some(p) => p,
-            None => {
-                error!("❌ No active player found");
-                return;
-            }
-        };
-
-        // Retrieve datum
-        let datum = player.get_datum(&member_ref);
-
-        if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
-            let audio_context = this.audio_context.clone().unwrap();
-
-            // CRITICAL FIX: Don't check for MP3 patterns here!
-            // If MP3 decoding failed and we're in fallback, just try PCM.
-            // The false positive MP3 detection was preventing any sound playback.
-
-            debug!("🔧 Forcing PCM decoding (ignoring any MP3-like patterns)");
-
-            // Force PCM decoding by treating as raw PCM (NOT MP3)
-            let pcm_wav = match Self::load_director_sound_from_bytes(
-                &sound_member.sound.data(),
-                sound_member.info.channels,
-                sound_member.info.sample_rate,
-                sound_member.info.sample_size,
-                "raw_pcm", // ← Force raw_pcm codec to avoid MP3 detection
-                Some(sound_member.info.sample_count),
-                sound_member.sound.big_endian_data(),
-            ) {
-                Ok(wav) => wav,
-                Err(e) => {
-                    error!("❌ PCM fallback failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Decode WAV to AudioData
-            let audio_data = match AudioData::from_wav_bytes(&pcm_wav) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("❌ WAV decode failed: {}", e);
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            debug!(
-                    "✅ PCM fallback: {} samples, {} Hz, {} channels",
-                    audio_data.samples.len(),
-                    audio_data.sample_rate,
-                    audio_data.num_channels
-                );
-
-            // Handle empty samples
-            if audio_data.samples.is_empty() {
-                error!("❌ Audio data has no samples");
-                this.status = SoundStatus::Idle;
-                return;
-            }
-
-            let num_frames = audio_data.samples.len() / audio_data.num_channels as usize;
-            let target_sample_rate = audio_context.sample_rate();
-            let source_sample_rate = audio_data.sample_rate as f32;
-
-            // Calculate resampling
-            let resample_ratio = target_sample_rate / source_sample_rate;
-            let resampled_frames = (num_frames as f32 * resample_ratio).round() as usize;
-
-            debug!(
-                    "🔄 Resampling {} frames -> {} frames (ratio: {:.3})",
-                    num_frames, resampled_frames, resample_ratio
-                );
-
-            // Create buffer at target sample rate
-            let buffer = match audio_context.create_buffer(
-                audio_data.num_channels as u32,
-                resampled_frames as u32,
-                target_sample_rate as f32,
-            ) {
-                Ok(buf) => buf,
-                Err(_) => {
-                    error!("❌ Failed to create AudioBuffer");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            // Resample and copy data
-            for ch in 0..audio_data.num_channels {
-                let mut channel_data = vec![0.0f32; resampled_frames];
-
-                for frame in 0..resampled_frames {
-                    let source_pos = frame as f32 / resample_ratio;
-                    let source_frame = source_pos.floor() as usize;
-                    let frac = source_pos - source_frame as f32;
-
-                    let idx1 = (source_frame * audio_data.num_channels as usize + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-                    let idx2 = ((source_frame + 1) * audio_data.num_channels as usize
-                        + ch as usize)
-                        .min(audio_data.samples.len() - 1);
-
-                    let sample1 = audio_data.samples[idx1] as f32;
-                    let sample2 = audio_data.samples[idx2] as f32;
-                    channel_data[frame] = sample1 + (sample2 - sample1) * frac;
-                }
-
-                let _ = buffer.copy_to_channel(&channel_data, ch as i32);
-            }
-
-            // CRITICAL FIX: Wrap in Rc::new() for Rc<AudioBuffer>
-            this.current_audio_buffer = Some(Rc::new(buffer.clone()));
-
-            // Create and connect source node
-            let source = match audio_context.create_buffer_source() {
-                Ok(s) => s,
-                Err(_) => {
-                    error!("❌ Failed to create buffer source");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            source.set_buffer(Some(&buffer));
-            
-            // Set up looping if needed
-            let loop_count = this.loop_count;
-            if loop_count == 0 {
-                source.set_loop(true);
-            } else {
-                source.set_loop(false);
-            }
-
-            // Create gain node
-            let gain = match audio_context.create_gain() {
-                Ok(g) => g,
-                Err(_) => {
-                    error!("❌ Failed to create gain node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let volume = this.volume;
-            gain.gain().set_value(master_gain(volume));
-
-            // Create pan node
-            let pan = match audio_context.create_stereo_panner() {
-                Ok(p) => p,
-                Err(_) => {
-                    error!("❌ Failed to create pan node");
-                    this.status = SoundStatus::Idle;
-                    return;
-                }
-            };
-
-            let pan_value = this.pan;
-            pan.pan().set_value(pan_value as f32);
-
-            // Connect the audio graph
-            let _ = source.connect_with_audio_node(&gain);
-            let _ = gain.connect_with_audio_node(&pan);
-            let _ = pan.connect_with_audio_node(&audio_context.destination());
-
-            // Set up the onended callback before starting
-            let channel_index = this.channel_num;
-            let closure = Closure::<dyn FnMut()>::new(move || {
-                SoundChannel::handle_end_of_sound(channel_index);
-            });
-            source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref())
-                .unwrap_or_else(|e| {
-                    warn!("⚠️ Failed to add ended listener: {:?}", e);
-                });
-            closure.forget();
-
-            // Start playback
-            let _ = source.start();
-
-            debug!("✅ PCM fallback playback started successfully");
-
-            // CRITICAL FIX: Wrap all nodes in Rc::new()
-            this.source_node = Some(Rc::new(source));
-            this.gain_node = Some(Rc::new(gain));
-            this.pan_node = Some(Rc::new(pan));
-            this.status = SoundStatus::Playing;
-            this.playback_start_context_time = this.context_time();
-        } else {
-            error!("❌ Could not resolve sound member");
-            this.status = SoundStatus::Idle;
-        }
-    }
-
-    /// Validates MP3 frame headers and calculates frame size
     fn get_mp3_frame_info(header: &[u8; 4]) -> Option<(usize, u32)> {
         if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
             return None;
@@ -2917,6 +2738,12 @@ impl SoundChannel {
         self.elapsed_time = 0.0;
         self.loops_remaining = 0;
         self.is_fading = false;
+        // A stopped channel keeps nothing queued. Matematik i Maaneby's
+        // Gentag button stops channel 4 and queues the narration again; with
+        // the old entries left in place they played before the new ones.
+        self.playlist_segments.clear();
+        self.playlist.clear();
+        self.current_segment_index = None;
 
         if let Some(ref source) = self.source_node {
             let _ = source.stop_with_when(0.0);
@@ -3248,7 +3075,11 @@ impl SoundChannel {
         } else {
             bits_per_sample
         };
-        let sample_count = (pcm_data.len() / (channels as usize * (bits as usize / 8))) as u32;
+        let bytes_per_frame = channels as usize * (bits as usize / 8);
+        if bytes_per_frame == 0 {
+            return Err(format!("cannot build PCM from {} channels at {} bits", channels, bits));
+        }
+        let sample_count = (pcm_data.len() / bytes_per_frame) as u32;
         let byte_rate = sample_rate * channels as u32 * bits as u32 / 8;
         let block_align = (channels * bits / 8) as u16;
         let data_len = pcm_data.len() as u32;
@@ -3898,8 +3729,9 @@ impl SoundChannel {
         }
     }
 
-    pub fn fade_in(&mut self, ticks: i32, to_volume: f64) {
-        let duration = ticks as f64 / 60.0;
+    /// Fade in over `ms` MILLISECONDS, same unit as `fade_to`.
+    pub fn fade_in(&mut self, ms: i32, to_volume: f64) {
+        let duration = (ms as f64 / 1000.0).max(0.0);
         self.is_fading = true;
         self.fade_start_volume = 0.0;
         self.fade_target_volume = to_volume;
@@ -3908,13 +3740,24 @@ impl SoundChannel {
         self.volume = 0.0;
     }
 
-    pub fn fade_out(&mut self, ticks: i32) {
-        self.fade_to(ticks, 0.0);
+    /// fadeOut({ms}): fade to silence and then stop, as Director does. Left
+    /// playing at volume 0 the channel stayed busy, and Matematik i Maaneby's
+    /// map, which fades the previous house's voice out and sets the volume
+    /// back to 255 for the next, had every voice after the first swallowed.
+    pub fn fade_out(&mut self, ms: i32) {
+        self.fade_to(ms, 0.0);
+        self.stop_after_fade = true;
     }
 
-    pub fn fade_to(&mut self, ticks: i32, to_volume: f64) {
-        let duration = ticks as f64 / 60.0;
+    /// Fade this channel to `to_volume` over `ms` MILLISECONDS.
+    ///
+    /// Director's sound-channel fades are in milliseconds, not ticks. Treating
+    /// them as ticks stretched every fade by 16.7x, so a `fadeOut(1000)` took
+    /// 16 seconds instead of one.
+    pub fn fade_to(&mut self, ms: i32, to_volume: f64) {
+        let duration = (ms as f64 / 1000.0).max(0.0);
         self.is_fading = true;
+        self.stop_after_fade = false;
         self.fade_start_volume = self.volume;
         self.fade_target_volume = to_volume;
         self.fade_duration = duration;
@@ -3938,20 +3781,29 @@ impl SoundChannel {
         self.sample_count as f64 / self.sample_rate as f64
     }
 
-    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
-        // Handle fading
-        if self.is_fading {
-            self.fade_elapsed += delta_time;
-            if self.fade_elapsed >= self.fade_duration {
-                self.set_volume(self.fade_target_volume);
-                self.is_fading = false;
-            } else {
-                let t = self.fade_elapsed / self.fade_duration;
-                let new_volume =
-                    self.fade_start_volume + (self.fade_target_volume - self.fade_start_volume) * t;
-                self.set_volume(new_volume);
-            }
+    /// Advance a fade in progress by `delta_time` seconds.
+    pub fn step_fade(&mut self, delta_time: f64) {
+        if !self.is_fading {
+            return;
         }
+        self.fade_elapsed += delta_time;
+        if self.fade_elapsed >= self.fade_duration {
+            self.set_volume(self.fade_target_volume);
+            self.is_fading = false;
+            if self.stop_after_fade {
+                self.stop_after_fade = false;
+                self.stop();
+            }
+        } else {
+            let t = self.fade_elapsed / self.fade_duration;
+            let new_volume =
+                self.fade_start_volume + (self.fade_target_volume - self.fade_start_volume) * t;
+            self.set_volume(new_volume);
+        }
+    }
+
+    pub fn update(&mut self, delta_time: f64, player: &mut DirPlayer) -> Result<(), ScriptError> {
+        self.step_fade(delta_time);
 
         // ⭐ Remove the playback advancement logic - it's handled by onended callback now
         // Audio plays asynchronously in Web Audio thread
@@ -4763,5 +4615,67 @@ impl SoundChannel {
         }
 
         Ok((buffer, num_channels, buffer_sample_rate))
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::{SoundChannel, SoundSegment};
+    use crate::player::DatumRef;
+
+    #[test]
+    fn stop_empties_the_playlist() {
+        let mut ch = SoundChannel::new(4, None);
+        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1 });
+        ch.playlist.push(DatumRef::Void);
+        ch.current_segment_index = Some(0);
+        ch.stop();
+        assert!(ch.playlist_segments.is_empty());
+        assert!(ch.playlist.is_empty());
+        assert_eq!(ch.current_segment_index, None);
+    }
+}
+
+#[cfg(test)]
+mod pcm_guard_tests {
+    use super::SoundChannel;
+
+    #[test]
+    fn a_zero_frame_size_is_an_error_not_a_panic() {
+        // A member with no sample size (an MP3 whose decode failed) used to
+        // reach the WAV builder and divide by zero.
+        let r = SoundChannel::load_director_sound_from_bytes(&[0x49, 0x44, 0x33, 0x03, 0, 0, 0, 0], 1, 22050, 0, "raw_pcm", None, false);
+        assert!(r.is_err());
+        let r = SoundChannel::load_director_sound_from_bytes(&[1, 2, 3, 4, 5, 6, 7, 8], 0, 22050, 16, "raw_pcm", None, false);
+        assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::SoundChannel;
+
+    #[test]
+    fn fade_out_stops_the_channel_when_silent() {
+        let mut ch = SoundChannel::new(4, None);
+        ch.set_volume(255.0);
+        ch.fade_out(1000);
+        assert!(ch.is_fading && ch.stop_after_fade);
+        ch.step_fade(0.5);
+        assert!(ch.is_fading, "half way through the fade");
+        ch.step_fade(0.6);
+        assert!(!ch.is_fading && !ch.stop_after_fade);
+        assert!(!ch.is_busy(), "fadeOut ends in a stopped channel");
+    }
+
+    #[test]
+    fn fades_are_in_milliseconds() {
+        let mut ch = SoundChannel::new(1, None);
+        ch.fade_to(1500, 0.0);
+        assert!((ch.fade_duration - 1.5).abs() < 1e-9, "1500 ms is 1.5 s, not 1500 ticks");
+        ch.fade_out(1000);
+        assert!((ch.fade_duration - 1.0).abs() < 1e-9);
+        ch.fade_in(250, 1.0);
+        assert!((ch.fade_duration - 0.25).abs() < 1e-9);
     }
 }

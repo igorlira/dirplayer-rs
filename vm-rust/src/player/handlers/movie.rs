@@ -1222,6 +1222,11 @@ impl MovieHandlers {
         // cursor is still.
         crate::player::events::dispatch_rollover_events();
 
+        // Animated GIF members: put up whichever frame the elapsed time calls
+        // for. Done here, once per frame, so an animation runs at its own
+        // delays regardless of the movie's tempo.
+        crate::player::gif::tick_gif_animations();
+
         // Relay prepareFrame to timeout targets
         dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
 
@@ -1293,6 +1298,8 @@ impl MovieHandlers {
     }
 
     pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // An explicit updateStage draws now, handler or not.
+        reserve_player_mut(|player| player.draw_hold_since_ms = None);
         let should_yield = reserve_player_ref(|player| {
             // Yield when: mouse handler context, command handler yielding,
             // yield-safe state, OR mouse is currently down (covers

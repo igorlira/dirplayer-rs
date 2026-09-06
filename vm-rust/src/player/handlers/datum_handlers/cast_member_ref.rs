@@ -252,6 +252,39 @@ impl CastMemberRefHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let handler_name_str = handler_name.as_str();
         match handler_name.into_builtin() {
+            // `member(x).char[a..b] = v` compiles to an object call
+            // setProp(member, #char, a, b, v). Director writes just that range
+            // of the member's text and leaves the rest; without this the call
+            // errored and the member kept whatever the author had typed.
+            //
+            // But setProp is the GENERIC objcall, not a chunk-write opcode: a
+            // VectorShape vertex write is setProp(member, #vertex, ...), and
+            // Spectral Wizard's `resetTalkBox` makes one. Taking the chunk path
+            // for every symbol sent #vertex into `StringChunkType::from`, which
+            // panics -- and a panic on wasm is a trap that takes the player
+            // down mid-frame rather than something the handler can report.
+            //
+            // So dispatch on the symbol: a chunk kind takes the new path, and
+            // anything else goes where it went before this arm existed, to the
+            // member-type dispatch that has always handled it.
+            Some(BuiltInSymbol::SetProp) => {
+                let is_chunk_write = reserve_player_ref(|player| {
+                    args.first().is_some_and(|a| match player.get_datum(a) {
+                        Datum::Symbol(sym) => {
+                            crate::director::lingo::datum::StringChunkType::from_symbol_opt(
+                                sym.clone(),
+                            )
+                            .is_some()
+                        }
+                        _ => false,
+                    })
+                });
+                if is_chunk_write {
+                    crate::player::handlers::manager::BuiltInHandlerManager::set_member_chunk(datum, args)
+                } else {
+                    Self::call_member_type(datum, handler_name_str, args)
+                }
+            }
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
             Some(BuiltInSymbol::Erase) => Self::erase(datum, args),
             Some(BuiltInSymbol::Move) => Self::move_member(datum, args),

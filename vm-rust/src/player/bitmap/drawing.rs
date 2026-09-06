@@ -83,6 +83,11 @@ pub struct CopyPixelsParams<'a> {
     /// path shared with ink 36, so the two cases are kept apart rather than
     /// changing how every ink-2 sprite in every movie draws.
     pub reverse_ink: bool,
+    /// Sample a shrunk source at floor(d * src / dst), as Director does for
+    /// an authored bitmap (measured on klods.dcr's ruler). Off for text, field
+    /// and shape blits, which keep the pixel-centre rule; see the shader's
+    /// u_floor_rule.
+    pub floor_rule: bool,
 }
 
 impl CopyPixelsParams<'_> {
@@ -104,6 +109,7 @@ impl CopyPixelsParams<'_> {
             ink9_mask_bitmap: None,
             ink9_mask_offset: (0, 0),
             reverse_ink: false,
+            floor_rule: false,
         }
     }
 }
@@ -165,6 +171,8 @@ fn blend_pixel(
     src: (u8, u8, u8),
     ink: u32,
     bg_color: (u8, u8, u8),
+    fg_color: (u8, u8, u8),
+    src_indexed: bool, // an indexed (1 to 8 bit) source keeps its colours under Lighten
     blend_alpha: f32, // This is params.blend / 100.0
     src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
     reverse_ink: bool, // params.reverse_ink — see the `2 | 6` arm below
@@ -346,22 +354,37 @@ fn blend_pixel(
                 }
             }
         }
-        // 40 = Lighten
+        // 40 = Lighten: the sprite's foreColor is added to the image
+        // (Using Director, "Using sprite inks"). A sprite on the default
+        // black foreColor is unchanged, which is what the earlier
+        // pass-through measured.
         40 => {
             if src == bg_color {
                 dst
-            } else {
+            } else if src_indexed {
                 blend_color_alpha(dst, src, effective_alpha)
+            } else {
+                let lit = (
+                    src.0.saturating_add(fg_color.0),
+                    src.1.saturating_add(fg_color.1),
+                    src.2.saturating_add(fg_color.2),
+                );
+                blend_color_alpha(dst, lit, effective_alpha)
             }
         }
+        // 41 = Darken: a foreColor/bgColor remap per channel, black to
+        // foreColor and white to bgColor, the same mix the WebGL2 shader
+        // draws. The defaults (black, white) leave the image unchanged.
         41 => {
-            // Darken
-            // TODO
-            // bg_color
-            let r = (src.0 as f32 / 255.0) * (bg_color.0 as f32 / 255.0) * 255.0;
-            let g = (src.1 as f32 / 255.0) * (bg_color.1 as f32 / 255.0) * 255.0;
-            let b = (src.2 as f32 / 255.0) * (bg_color.2 as f32 / 255.0) * 255.0;
-            let color = (r as u8, g as u8, b as u8);
+            let mix = |s: u8, fg: u8, bg: u8| {
+                let t = s as f32 / 255.0;
+                (fg as f32 * (1.0 - t) + bg as f32 * t).round().clamp(0.0, 255.0) as u8
+            };
+            let color = (
+                mix(src.0, fg_color.0, bg_color.0),
+                mix(src.1, fg_color.1, bg_color.1),
+                mix(src.2, fg_color.2, bg_color.2),
+            );
             blend_color_alpha(dst, color, effective_alpha)
         }
         _ => blend_color_alpha(dst, src, effective_alpha),
@@ -1986,6 +2009,7 @@ impl Bitmap {
             reverse_ink: !is_text_rendering
                 && !param_list.contains_key("sprite_ink")
                 && (ink == 2 || ink == 6),
+            floor_rule: false,
         };
         self.copy_pixels_with_params(palettes, src, dst_rect, src_rect, &params);
     }
@@ -2740,9 +2764,20 @@ impl Bitmap {
                     continue;
                 }
 
-                // Map destination pixel to source coordinate with scaling
-                let src_f_x = src_left_f + (dst_x_idx + 0.5) * scale_x;
-                let src_f_y = src_top_f + (dst_y_idx + 0.5) * scale_y;
+                // Map destination pixel to source coordinate with scaling.
+                // Director samples a stretched bitmap at floor(d * src / dst),
+                // the top-left of the destination pixel, not its centre.
+                // Measured on klods.dcr's ruler (member 82, 239x46 drawn at
+                // 166x32): the floor rule reproduces the projector's pixels
+                // 100%, the centre rule 88%, and the difference is the digit
+                // rows the centre rule skips. Rotation and skew keep the
+                // centre so their resampling stays symmetric.
+                // Floor rule (phase 0) only for an authored bitmap scaling down;
+                // see the shader.
+                let scaling_up = scale_x < 1.0 || scale_y < 1.0;
+                let phase = if has_sprite_rotation || has_skew_flip || scaling_up || !params.floor_rule { 0.5 } else { 0.0 };
+                let src_f_x = src_left_f + (dst_x_idx + phase) * scale_x;
+                let src_f_y = src_top_f + (dst_y_idx + phase) * scale_y;
 
                 // Handle horizontal flip
                 let src_mapped_x = if flip_x {
@@ -3557,6 +3592,8 @@ impl Bitmap {
                             fg_color_resolved,
                             ink,
                             bg_color_resolved,
+                            fg_color_resolved,
+                            is_indexed,
                             alpha,
                             sa as f32 / 255.0,
                             params.reverse_ink,
@@ -3614,6 +3651,8 @@ impl Bitmap {
                     src_color,
                     ink,
                     bg_color_resolved,
+                    fg_color_resolved,
+                    is_indexed,
                     alpha,
                     src_alpha,
                     params.reverse_ink,
@@ -4392,5 +4431,66 @@ impl Bitmap {
             line_direction: 0,
         };
         self.draw_shape_with_sprite(sprite, &default_shape, dst_rect, palettes, palette_ref);
+    }
+}
+
+#[cfg(test)]
+mod shrink_sampling_tests {
+    use super::*;
+    use crate::player::bitmap::bitmap::{BuiltInPalette, PaletteRef};
+    use crate::player::bitmap::palette_map::PaletteMap;
+
+    // Three source columns with distinct reds, drawn into two: the floor rule
+    // keeps columns 0 and 1 (floor(0 * 1.5), floor(1 * 1.5)); the centre rule
+    // keeps 0 and 2 (floor(0.75), floor(2.25)).
+    fn shrink(floor_rule: bool) -> Vec<u8> {
+        let mut src = Bitmap::new(3, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        for x in 0..3 { src.data[x * 4..x * 4 + 4].copy_from_slice(&[10 * (x as u8 + 1), 0, 0, 255]); }
+        let mut dst = Bitmap::new(2, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut params = CopyPixelsParams::default(&src);
+        params.floor_rule = floor_rule;
+        dst.copy_pixels_with_params(&PaletteMap::new(), &src, IntRect::from(0, 0, 2, 1), IntRect::from(0, 0, 3, 1), &params);
+        vec![dst.data[0], dst.data[4]]
+    }
+
+    #[test]
+    fn an_authored_bitmap_shrinks_by_the_floor_rule() {
+        assert_eq!(shrink(true), vec![10, 20]);
+    }
+
+    #[test]
+    fn everything_else_keeps_the_centre_rule() {
+        assert_eq!(shrink(false), vec![10, 30]);
+    }
+}
+
+mod ink_colour_tests {
+    use super::blend_pixel;
+
+    const WHITE: (u8, u8, u8) = (255, 255, 255);
+    const BLACK: (u8, u8, u8) = (0, 0, 0);
+
+    #[test]
+    fn lighten_adds_the_fore_colour() {
+        let src = (100, 100, 100);
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), (150, 125, 100));
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0, false), src, "the default foreColor changes nothing");
+        assert_eq!(blend_pixel((0, 0, 0), (250, 250, 250), 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), (255, 255, 250), "pinned at 255");
+        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0, false), src, "an indexed bitmap keeps its palette colours");
+    }
+
+    #[test]
+    fn lighten_still_keys_the_background_colour() {
+        let dst = (7, 8, 9);
+        assert_eq!(blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0, false), dst);
+    }
+
+    #[test]
+    fn darken_remaps_black_to_fore_and_white_to_back() {
+        let fg = (50, 25, 0);
+        let bg = (200, 220, 240);
+        assert_eq!(blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0, false), fg);
+        assert_eq!(blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0, false), bg);
+        assert_eq!(blend_pixel((0, 0, 0), (100, 100, 100), 41, WHITE, BLACK, false, 1.0, 1.0, false), (100, 100, 100), "defaults are the identity");
     }
 }

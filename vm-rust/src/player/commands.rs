@@ -575,6 +575,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {
+            crate::player::wait_for_handler_gap().await;
+            crate::player::hold_draw_for_input_handler();
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
@@ -999,6 +1001,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
+            crate::player::wait_for_handler_gap().await;
+            crate::player::hold_draw_for_input_handler();
             if !player_is_playing().await {
                 return Ok(DatumRef::Void);
             }
@@ -1338,6 +1342,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             }
         }
         PlayerVMCommand::KeyDown(key, code) => {
+            crate::player::wait_for_handler_gap().await;
+            crate::player::hold_draw_for_input_handler();
             // Set command_handler_yielding so that:
             // 1. updateStage() always yields (bypasses is_yield_safe check),
             //    letting the browser process keyUp events during repeat-while-
@@ -1357,6 +1363,8 @@ pub async fn run_player_command(command: PlayerVMCommand) -> Result<DatumRef, Sc
             return result;
         }
         PlayerVMCommand::KeyUp(key, code) => {
+            crate::player::wait_for_handler_gap().await;
+            crate::player::hold_draw_for_input_handler();
             return player_key_up(key, code).await;
         }
         PlayerVMCommand::TriggerAlertHook => {

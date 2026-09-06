@@ -91,6 +91,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || steps.resolve_pr.outputs.ref || inputs.ref || github.ref }}
           submodules: true
           fetch-depth: 0
+          allow-unsafe-pr-checkout: true
 
       - name: Post pending status
         if: inputs.pr_number != ''
@@ -254,6 +255,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || steps.resolve_pr.outputs.ref || inputs.ref || github.ref }}
           submodules: true
           fetch-depth: 0
+          allow-unsafe-pr-checkout: true
 
       - name: Post pending status
         if: inputs.pr_number != ''

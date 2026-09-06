@@ -24,8 +24,15 @@ const loadedEnv = {
   ...process.env,
 };
 
+// Through the Windows shell an argument with a space splits in two, so a
+// checkout under "C:\Users\Some Name\..." handed wasm-bindgen half a path.
+function quoted(args) {
+  if (!IS_WIN) return args;
+  return args.map((a) => (/\s/.test(a) && !/^"/.test(a) ? `"${a}"` : a));
+}
+
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, {
+  const res = spawnSync(cmd, quoted(args), {
     stdio: "inherit",
     shell: IS_WIN,
     ...opts,
@@ -119,78 +126,6 @@ for (const name of envVars) {
 }
 const testEnvJson = JSON.stringify(testEnv);
 
-// 5a. Build the test -> tags map for `E2E_TAGS`.
-//
-// Tags describe the SUBSYSTEMS a movie exercises (`[test] tags` in its TOML —
-// 2d / flash / 3d / havok / physx / groove3d, the Type column of
-// docs/github_wiki/Tested-Movies.md). They let a run be narrowed to the port
-// being worked on: `E2E_TAGS=havok` replays only the Havok titles instead of
-// the whole suite, which is both slow and, played end to end, heavy enough to
-// exhaust the browser before it finishes.
-//
-// Resolved here rather than in Rust because it costs nothing at build time and
-// needs no cross-language plumbing: each e2e source file covers exactly one
-// movie and `include_str!`s that movie's config, so the tests a file declares
-// inherit the tags of the config(s) it includes.
-const E2E_DIR = path.join(VM_RUST_DIR, "tests", "e2e");
-
-function tomlTags(configFile) {
-  const full = path.join(CONFIG_DIR, configFile);
-  if (!fs.existsSync(full)) return [];
-  const contents = fs.readFileSync(full, "utf8");
-  // `tags = ["3d", "havok"]` — single-line array, which is how the configs
-  // are written. Deliberately not a TOML parse: this is one well-known key.
-  const m = /^\s*tags\s*=\s*\[([^\]]*)\]/m.exec(contents);
-  if (!m) return [];
-  return [...m[1].matchAll(/["']([^"']+)["']/g)].map((t) => t[1].toLowerCase());
-}
-
-function collectTestTags(dir, out) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name !== "configs") collectTestTags(full, out);
-      continue;
-    }
-    if (!entry.name.endsWith(".rs")) continue;
-    const src = fs.readFileSync(full, "utf8");
-    const tags = new Set();
-    for (const m of src.matchAll(/include_str!\("\.\.\/configs\/([^"]+)"\)/g)) {
-      for (const t of tomlTags(m[1])) tags.add(t);
-    }
-    if (tags.size === 0) continue;
-    // A commented-out test is still a `//`-prefixed macro call; skip those so a
-    // disabled test can't be resurrected by a tag filter.
-    for (const m of src.matchAll(
-      /^[ \t]*(?:browser_e2e_test|hybrid_e2e_test|native_e2e_test)!\(\s*(test_\w+)/gm,
-    )) {
-      out[m[1]] = [...tags];
-    }
-  }
-}
-
-const testTags = {};
-if (fs.existsSync(E2E_DIR)) collectTestTags(E2E_DIR, testTags);
-const testTagsJson = JSON.stringify(testTags);
-
-const tagFilter = (loadedEnv.E2E_TAGS || "").replace(/"/g, "");
-if (tagFilter) {
-  const wanted = tagFilter
-    .split(",")
-    .map((t) => t.trim().toLowerCase())
-    .filter(Boolean);
-  const matching = Object.entries(testTags).filter(([, tags]) =>
-    tags.some((t) => wanted.includes(t)),
-  );
-  console.log(
-    `E2E_TAGS=${tagFilter}: ${matching.length} of ${Object.keys(testTags).length} tagged tests match`,
-  );
-  if (matching.length === 0) {
-    const known = [...new Set(Object.values(testTags).flat())].sort();
-    console.warn(`  no test carries any of those tags. Known tags: ${known.join(", ")}`);
-  }
-}
-
 // 6. Copy the JS API stub and render the HTML template.
 fs.copyFileSync(
   path.join(TEMPLATE_DIR, "dirplayer-js-api.js"),
@@ -241,12 +176,6 @@ const html = template
   // Optional substring filter: `E2E_FILTER=lore npm run e2e-test-browser`
   // runs only test_* functions whose name contains the string.
   .replaceAll("$TEST_FILTER", (loadedEnv.E2E_FILTER || "").replace(/"/g, ""))
-  // Subsystem filter: `E2E_TAGS=3d,havok npm run e2e-test-browser`. ANDed with
-  // E2E_FILTER, so the two compose. $TEST_TAGS_JSON must be substituted FIRST:
-  // $TEST_TAGS is a prefix of it, so the shorter token would eat the longer
-  // one's placeholder and leave `window.__testTagMap = havok_JSON`.
-  .replaceAll("$TEST_TAGS_JSON", testTagsJson)
-  .replaceAll("$TEST_TAGS", tagFilter)
   // `E2E_INTERP_STATS=1` turns on the interpreter opcode/escape counters for
   // the run and writes test-results/interp-stats.txt. OFF by default: the
   // counters add two atomic RMWs per interpreted opcode, which is harmless for
@@ -289,11 +218,11 @@ const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
 // 9. Always generate the HTML snapshot report regardless of test outcome.
 spawnSync(
   "node",
-  [
+  quoted([
     path.join(__dirname, "generate-snapshot-report.mjs"),
     path.join(VM_RUST_DIR, "tests", "snapshots"),
     path.join(REPO_ROOT, "test-results", "snapshot-report"),
-  ],
+  ]),
   { cwd: REPO_ROOT, stdio: "inherit", shell: IS_WIN },
 );
 

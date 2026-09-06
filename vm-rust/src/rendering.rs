@@ -636,7 +636,10 @@ pub fn render_preview_bitmap(
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                ink9_mask_bitmap: None,
+                ink9_mask_offset: (0, 0),
+                reverse_ink: false,
+                floor_rule: false,
             };
 
             for char_code in 0u16..256 {
@@ -663,7 +666,10 @@ pub fn render_preview_bitmap(
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
+                            floor_rule: false,
                         };
                         bitmap.draw_text(
                             &label,
@@ -1473,6 +1479,7 @@ fn render_filmloop_from_channel_data(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     reverse_ink: false,
+                    floor_rule: true,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1484,8 +1491,15 @@ fn render_filmloop_from_channel_data(
                 );
             }
             CastMemberType::Shape(shape_member) => {
-                // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                if data.width <= 1 || data.height <= 1 {
+                // Skip blank placeholders and zero-size shapes, but NOT a #line: a line
+                // is 1 px in one dimension by nature, so "width <= 1 || height <= 1"
+                // dropped every horizontal and vertical line before it reached the
+                // draw code (which explicitly promises a line "never vanishes"). The
+                // divider under the ruler on klods.dcr's working drawing went missing
+                // this way; measured against the projector, S8. A line is skipped
+                // only when BOTH dimensions collapse.
+                let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                if (data.width <= 1 || data.height <= 1) && !(is_line && (data.width > 1 || data.height > 1)) {
                     continue;
                 }
 
@@ -1548,7 +1562,10 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
+                        floor_rule: false,
                     };
 
                     bitmap.draw_text(
@@ -1626,7 +1643,10 @@ fn render_filmloop_from_channel_data(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
+                        floor_rule: false,
                     };
 
                     bitmap.draw_text(
@@ -1675,7 +1695,10 @@ fn render_filmloop_from_channel_data(
                             original_dst_rect: Some(dst_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
+                            floor_rule: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -1762,7 +1785,10 @@ fn render_filmloop_from_channel_data(
                     original_dst_rect: Some(sprite_rect.clone()),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
+                    floor_rule: false,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -2037,6 +2063,24 @@ pub fn render_score_to_bitmap_with_offset(
                 // held as palette indices resolve through the MOVIE palette when the
                 // source is direct-colour — see `sprite_color_for_source`.
                 let movie_palette = player.current_movie_palette();
+                // A GIF carries the background colour the file declares, and
+                // a movie hides it with ink 36, which keys out the background
+                // colour. The score's bgColor for such a sprite is whatever
+                // the author left there, usually white, so a GIF with any
+                // other background drew as a solid box. Prefer the member's.
+                //
+                // This picks WHICH colour is the background; `sprite_color_for_source`
+                // below then decides which PALETTE that colour is an index into. The
+                // two are independent, so the GIF's own background still resolves
+                // through the movie palette like any other.
+                let bg_color = match sprite.member.as_ref() {
+                    Some(m) if crate::player::gif::is_gif_member(player, m.cast_lib, m.cast_member) => {
+                        player.movie.cast_manager.find_member_by_ref(m)
+                            .map(|mem| mem.bg_color.clone())
+                            .unwrap_or_else(|| sprite.bg_color.clone())
+                    }
+                    _ => sprite.bg_color.clone(),
+                };
                 let sprite_bitmap = player
                     .bitmap_manager
                     .get_bitmap_mut(bitmap_member.image_ref);
@@ -2110,7 +2154,7 @@ pub fn render_score_to_bitmap_with_offset(
                     blend: sprite.effective_blend(),
                     ink: sprite.ink as u32,
                     color: sprite_color_for_source(&palettes, &sprite.color, src_bitmap, &movie_palette),
-                    bg_color: sprite_color_for_source(&palettes, &sprite.bg_color, src_bitmap, &movie_palette),
+                    bg_color: sprite_color_for_source(&palettes, &bg_color, src_bitmap, &movie_palette),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
                     mask_image: None,
@@ -2123,6 +2167,7 @@ pub fn render_score_to_bitmap_with_offset(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     reverse_ink: false,
+                    floor_rule: true,
                 };
 
                 if let Some(mask) = mask {
@@ -2154,8 +2199,15 @@ pub fn render_score_to_bitmap_with_offset(
             CastMemberType::Shape(shape_member) => {
                 let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
 
-                // Skip rendering shapes with tiny dimensions (blank placeholders or zero-size)
-                if sprite.width <= 1 || sprite.height <= 1 {
+                // Skip blank placeholders and zero-size shapes, but NOT a #line: a line
+                // is 1 px in one dimension by nature, so "width <= 1 || height <= 1"
+                // dropped every horizontal and vertical line before it reached the
+                // draw code (which explicitly promises a line "never vanishes"). The
+                // divider under the ruler on klods.dcr's working drawing went missing
+                // this way; measured against the projector, S8. A line is skipped
+                // only when BOTH dimensions collapse.
+                let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
+                if (sprite.width <= 1 || sprite.height <= 1) && !(is_line && (sprite.width > 1 || sprite.height > 1)) {
                     continue;
                 }
 
@@ -2304,7 +2356,10 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
+                        floor_rule: false,
                     };
 
                     let is_focused = player.keyboard_focus_sprite == sprite.number as i16;
@@ -2507,7 +2562,10 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
+                        floor_rule: false,
                     };
 
                     let wrap_w = if field.word_wrap { text_area_w } else { 0 };
@@ -2678,7 +2736,10 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: None,
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
+                    floor_rule: false,
                 };
 
                 if let Some(mask) = mask {
@@ -2817,7 +2878,10 @@ pub fn render_score_to_bitmap_with_offset(
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
+                        reverse_ink: false,
+                        floor_rule: false,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -3085,7 +3149,10 @@ pub fn render_score_to_bitmap_with_offset(
                     original_dst_rect: Some(logical_rect),
                     bg_color_explicit: false,
                     fore_color_explicit: false,
-                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                    ink9_mask_bitmap: None,
+                    ink9_mask_offset: (0, 0),
+                    reverse_ink: false,
+                    floor_rule: false,
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -3160,7 +3227,10 @@ pub fn render_score_to_bitmap_with_offset(
                             original_dst_rect: Some(sprite_rect.clone()),
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            reverse_ink: false,
+                            floor_rule: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -3519,7 +3589,10 @@ impl PlayerCanvasRenderer {
                 original_dst_rect: None,
                 bg_color_explicit: false,
                 fore_color_explicit: false,
-                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0), reverse_ink: false,
+                ink9_mask_bitmap: None,
+                ink9_mask_offset: (0, 0),
+                reverse_ink: false,
+                floor_rule: false,
             };
 
             bitmap.draw_text(
@@ -3736,6 +3809,27 @@ pub fn draw_frame_immediate() {
             mark_frame_drawn();
         });
     }
+}
+
+/// Draw the stage at the end of a frame cycle whose input handlers held the
+/// redraw (see `DirPlayer::draw_hold_since_ms`). Unpaced: this is the one
+/// draw Director makes for that frame.
+pub fn draw_frame_at_frame_end() {
+    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
+        return;
+    }
+    if should_skip_stage_draw() {
+        return;
+    }
+    with_renderer_mut(|renderer_lock| {
+        if let Some(renderer) = renderer_lock {
+            reserve_player_mut(|player| {
+                renderer.draw_frame(player);
+                player.stage_dirty = false;
+            });
+        }
+        mark_frame_drawn();
+    });
 }
 
 /// Helper to access Canvas2D renderer for Canvas2D-specific operations
@@ -4220,7 +4314,13 @@ async fn run_draw_loop() {
             let skip_stage = should_skip_stage_draw();
             with_renderer_mut(|renderer_lock| {
                 if let Some(renderer) = renderer_lock {
-                    if !skip_stage && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
+                    // Between an input handler and the exitFrame that follows it the
+                    // stage is not redrawn (see `draw_hold_since_ms`). Bounded by
+                    // time so a paused or stalled frame loop cannot hold it forever.
+                    let held = player.draw_hold_since_ms.map_or(false, |since| {
+                        player.is_playing && chrono::Utc::now().timestamp_millis() - since < 250
+                    });
+                    if !skip_stage && !held && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
                         renderer.draw_frame(&mut player);
                         player.stage_dirty = false;
                     }

@@ -370,25 +370,24 @@ impl BitmapDatumHandlers {
             );
             cropped_bitmap.use_alpha = src_bitmap.use_alpha;
             cropped_bitmap.trim_white_space = src_bitmap.trim_white_space;
-
-            let palettes = player.movie.cast_manager.palettes();
-
-            // Copy pixels from source rect to destination (0,0 to crop_width, crop_height)
-            let src_rect = IntRect::from(left, top, right, bottom);
-            let dst_rect = IntRect::from(0, 0, crop_width as i32, crop_height as i32);
-
-            let params = crate::player::bitmap::drawing::CopyPixelsParams::default(&src_bitmap);
-
-            // Need to clone src_bitmap to avoid borrow issues
-            let src_bitmap_clone = src_bitmap.clone();
-
-            cropped_bitmap.copy_pixels_with_params(
-                &palettes,
-                &src_bitmap_clone,
-                dst_rect,
-                src_rect,
-                &params,
-            );
+            // Same depth: copy the rows straight, so the alpha channel survives.
+            // Anything else still goes through the ink path.
+            if src_bitmap.bit_depth == 32 && cropped_bitmap.bit_depth == 32 {
+                cropped_bitmap = src_bitmap.crop_rgba(left, top, crop_width, crop_height);
+            } else {
+                let palettes = player.movie.cast_manager.palettes();
+                let src_rect = IntRect::from(left, top, right, bottom);
+                let dst_rect = IntRect::from(0, 0, crop_width as i32, crop_height as i32);
+                let params = crate::player::bitmap::drawing::CopyPixelsParams::default(&src_bitmap);
+                let src_bitmap_clone = src_bitmap.clone();
+                cropped_bitmap.copy_pixels_with_params(
+                    &palettes,
+                    &src_bitmap_clone,
+                    dst_rect,
+                    src_rect,
+                    &params,
+                );
+            }
 
             // Ephemeral: `bitmap.duplicate(rect)` produces a fresh bitmap not
             // owned by any cast member. Free when the wrapping DatumRef drops.
