@@ -152,6 +152,35 @@ impl BitmapMemberHandlers {
                     bitmap_member.reg_point = (reg_x as i16, reg_y as i16);
                     cast_member.reg_point = (reg_x, reg_y);
 
+                    // A sprite that does not own its size follows its member.
+                    // The measured movie builds its scrolling sky in `on startMovie` by
+                    // cropping one wide bitmap into eight 199-wide members; the
+                    // sprites were authored before that crop, so they kept the
+                    // source's 1600x342 and each tile covered the whole stage
+                    // eight times over. The member itself was already correct -
+                    // only the sprites showing it were stale.
+                    let mut resized = false;
+                    for channel in player.movie.score.channels.iter_mut() {
+                        if channel.number == 0 {
+                            continue;
+                        }
+                        if channel.sprite.member.as_ref() != Some(member_ref) {
+                            continue;
+                        }
+                        if channel.sprite.stretch != 0 || channel.sprite.explicit_lingo_size {
+                            continue;
+                        }
+                        channel.sprite.width = new_width as i32;
+                        channel.sprite.height = new_height as i32;
+                        channel.sprite.base_width = new_width as i32;
+                        channel.sprite.base_height = new_height as i32;
+                        resized = true;
+                    }
+                    if resized {
+                        player.movie.score.invalidate_render_channel_cache();
+                        player.stage_dirty = true;
+                    }
+
                     Ok(())
                 })
             }
@@ -172,6 +201,8 @@ impl BitmapMemberHandlers {
                         bitmap_member.image_ref
                     };
                     player.bitmap_manager.replace_bitmap(member_image_ref, media_bitmap.clone());
+
+
 
                     let cast_member = player
                         .movie

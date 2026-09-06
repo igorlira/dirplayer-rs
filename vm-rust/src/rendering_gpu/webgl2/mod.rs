@@ -1765,6 +1765,11 @@ impl WebGL2Renderer {
         // Set by filmloop logic: true when the stage sprite dimensions match the
         // filmloop's sprite-dim rect, meaning the score dimensions are intentional.
         let mut filmloop_sprite_dims_match = false;
+        // Set by the FilmLoop arm below: the authored rect the sprite's
+        // on-stage rectangle corresponds to, and how far the offscreen grew
+        // past it to fit the whole animation (left, top, right, bottom).
+        let mut filmloop_base_size = (0i32, 0i32);
+        let mut filmloop_expand = (0i32, 0i32, 0i32, 0i32);
 
         // Handle Flash member dispatch before the texture_source borrow block.
         // We dispatch per (sprite, cast_lib, cast_member) so multiple sprites
@@ -3265,6 +3270,13 @@ impl WebGL2Renderer {
                 CastMemberType::FilmLoop(film_loop) => {
                     // Film loop: render the film loop's score to an offscreen bitmap.
                     // Prefer info_rect (authoritative viewport from Director file).
+                    // NB: despite the field names, FilmLoopInfo.width/height hold
+                    // the info block's RIGHT and BOTTOM edges, not a size. Measured
+                    // on a measured credits loop: reg=(-204,452),
+                    // width/height=(355,793) gives 559x341, which matches the
+                    // bounding box computed from the member's own sprites
+                    // (544x334). Reading them as a size instead produced a
+                    // 355x793 rect and the animation rendered clipped.
                     let info_rect = IntRect::from(
                         film_loop.info.reg_point.0 as i32,
                         film_loop.info.reg_point.1 as i32,
@@ -3274,6 +3286,9 @@ impl WebGL2Renderer {
 
                     let sprite_dim_rect = &film_loop.initial_rect;
                     let bitmap_dim_rect = crate::rendering::compute_filmloop_initial_rect_with_members(player, &member_ref);
+                    // The area the children cover across the whole animation,
+                    // which is what the offscreen has to hold.
+                    let animated_bounds = crate::rendering::compute_filmloop_animated_bounds(player, &member_ref);
 
                     debug!(
                         "FILMLOOP DIMS: member {}:{} sprite_rect {}x{} sprite_dim_rect ({},{},{},{}) {}x{} bitmap_dim_rect {:?} info_rect ({},{},{},{}) {}x{}",
@@ -3291,19 +3306,45 @@ impl WebGL2Renderer {
                         && (sprite_height - sprite_dim_rect.height()).abs() <= 1;
                     filmloop_sprite_dims_match = sprite_dims_match_stage;
 
-                    let initial_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
+                    let base_rect = if info_rect.width() > 0 && info_rect.height() > 0 {
                         info_rect.clone()
                     } else if sprite_dims_match_stage {
                         film_loop.initial_rect.clone()
                     } else {
-                        bitmap_dim_rect.unwrap_or_else(|| film_loop.initial_rect.clone())
+                        bitmap_dim_rect
+                            .clone()
+                            .unwrap_or_else(|| film_loop.initial_rect.clone())
                     };
 
-                    let width = initial_rect.width().max(1);
-                    let height = initial_rect.height().max(1);
+                    // Cover the WHOLE animation, not just the frame the info
+                    // block describes. Measured on a credits loop:
+                    // the walking creature's own rect runs down to y=496 inside
+                    // a 341-tall offscreen, so his legs were cut off at the
+                    // bottom edge, and since he walks up a slope the clipped
+                    // figure looked like it rose out of the ground instead of
+                    // walking in from the left. These bounds are the union over
+                    // every frame's channel data, which is what the renderer
+                    // actually draws.
+                    let _ = (&bitmap_dim_rect, &animated_bounds);
+                    let full_rect = crate::rendering::filmloop_offscreen_rect(
+                        player,
+                        &member_ref,
+                        base_rect.clone(),
+                    );
+
+                    filmloop_base_size = (base_rect.width(), base_rect.height());
+                    filmloop_expand = (
+                        base_rect.left - full_rect.left,
+                        base_rect.top - full_rect.top,
+                        full_rect.right - base_rect.right,
+                        full_rect.bottom - base_rect.bottom,
+                    );
+
+                    let width = full_rect.width().max(1);
+                    let height = full_rect.height().max(1);
 
                     TextureSource::FilmLoop {
-                        initial_rect,
+                        initial_rect: full_rect,
                         width: width as u32,
                         height: height as u32,
                     }
@@ -3400,20 +3441,59 @@ impl WebGL2Renderer {
             TextureSource::FilmLoop { initial_rect, width, height } => {
                 let w = width as i32;
                 let h = height as i32;
-                let should_override = if filmloop_sprite_dims_match {
+                // A sprite that OWNS its size (stretch) keeps it: Director
+                // scales the loop into the authored rect. Overriding with the
+                // loop's natural size and re-centring it on loc pushed this
+                // game's credits animation down past the stage bottom - the
+                // walking creature entered with only its head above the edge,
+                // where the original walks in at mid-frame.
+                let sprite_owns_size = player
+                    .movie
+                    .score
+                    .get_sprite(channel_num)
+                    .map(|sp| sp.stretch != 0)
+                    .unwrap_or(false)
+                    && sprite_width > 0
+                    && sprite_height > 0;
+                let should_override = if sprite_owns_size {
+                    false
+                } else if filmloop_sprite_dims_match {
                     sprite_width <= 0 || sprite_height <= 0
                 } else {
                     sprite_width <= 0 || sprite_height <= 0
                         || (sprite_width - w).abs() > 1 || (sprite_height - h).abs() > 1
                 };
                 if should_override {
-                    let reg_x = w / 2;
-                    let reg_y = h / 2;
+                    // Centre on the AUTHORED size. The texture may be larger
+                    // now that it covers the whole animation, and that growth
+                    // is added back below, so this keeps its old placement.
+                    let base_w = if filmloop_base_size.0 > 0 { filmloop_base_size.0 } else { w };
+                    let base_h = if filmloop_base_size.1 > 0 { filmloop_base_size.1 } else { h };
+                    let reg_x = base_w / 2;
+                    let reg_y = base_h / 2;
                     sprite_rect = IntRect::from(
                         raw_loc.0 as i32 - reg_x,
                         raw_loc.1 as i32 - reg_y,
-                        raw_loc.0 as i32 - reg_x + w,
-                        raw_loc.1 as i32 - reg_y + h,
+                        raw_loc.0 as i32 - reg_x + base_w,
+                        raw_loc.1 as i32 - reg_y + base_h,
+                    );
+                }
+
+                // The sprite's rectangle corresponds to the AUTHORED rect, so
+                // stretch it by the same amount the texture grew, in stage
+                // units. Scale and anchor stay exactly as before; the figure
+                // simply stops being cut off.
+                if filmloop_base_size.0 > 0
+                    && filmloop_base_size.1 > 0
+                    && filmloop_expand != (0, 0, 0, 0)
+                {
+                    let sx = sprite_rect.width() as f32 / filmloop_base_size.0 as f32;
+                    let sy = sprite_rect.height() as f32 / filmloop_base_size.1 as f32;
+                    sprite_rect = IntRect::from(
+                        sprite_rect.left - (filmloop_expand.0 as f32 * sx).round() as i32,
+                        sprite_rect.top - (filmloop_expand.1 as f32 * sy).round() as i32,
+                        sprite_rect.right + (filmloop_expand.2 as f32 * sx).round() as i32,
+                        sprite_rect.bottom + (filmloop_expand.3 as f32 * sy).round() as i32,
                     );
                 }
 
