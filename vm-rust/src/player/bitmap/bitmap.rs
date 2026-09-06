@@ -45,9 +45,7 @@ impl PaletteRef {
             match BuiltInPalette::from_i16(i) {
                 Some(palette) => PaletteRef::BuiltIn(palette),
                 None => {
-                    web_sys::console::warn_1(
-                        &format!("Unknown built-in palette ID: {}, defaulting to SystemWin", i).into()
-                    );
+                    crate::console_warn!("Unknown built-in palette ID: {}, defaulting to SystemWin", i);
                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
                 }
             }
@@ -893,10 +891,10 @@ pub fn decompress_bitmap(
                         // Check bounds
                         if line_offset + x + 3 * scan_width as usize >= result.len() {
                             if !oob_warned {
-                                web_sys::console::warn_1(&format!(
+                                crate::console_warn!(
                                     "32-bit decode: Out of bounds at y={}, x={}. line_offset={}, result.len()={} (further warnings suppressed)",
                                     y, x, line_offset, result.len()
-                                ).into());
+                                );
                                 oob_warned = true;
                             }
                             continue;
