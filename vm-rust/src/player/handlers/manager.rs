@@ -1337,6 +1337,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(args),
             Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(args),
             Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(args),
+            Some(BuiltInSymbol::PrintFrom) => MovieHandlers::print_from(args),
             Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(args),
             Some(BuiltInSymbol::Pass) => MovieHandlers::pass(args),
             Some(BuiltInSymbol::Union) => TypeHandlers::union(args),

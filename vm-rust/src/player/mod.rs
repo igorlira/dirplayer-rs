@@ -3309,7 +3309,9 @@ impl DirPlayer {
             // the load-time logic in `load_movie_from_dir`. Label sources
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
-            BuiltInSymbol::MoviePath => {
+            // `the pathName` is the classic synonym of `the moviePath` —
+            // same folder-with-trailing-separator value.
+            BuiltInSymbol::MoviePath | BuiltInSymbol::PathName => {
                 let label = self.movie_path_label_effective();
                 if let Some(path) = label {
                     let base_path = dir_part_of_path(&path);
