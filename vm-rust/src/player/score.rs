@@ -3482,9 +3482,20 @@ impl Score {
             // This prevents stale ScriptInstanceRef objects from pointing to deleted instances
             channel.sprite.script_instance_list.clear();
 
-            if channel.sprite.puppet {
-                channel.sprite.reset();
-            }
+            // Reset EVERY channel, not just puppeted ones. reset() only runs
+            // when a movie is torn down (player reset and both movie
+            // transitions), and Director hands the incoming movie a fresh
+            // score: a channel the new movie does not author must not inherit
+            // the old one's ink, blend, size or stretch.
+            //
+            // The measured movie showed why: its map labels sit in channel 10 with ink
+            // 36, and every task scene reuses channel 10 for the blueprint
+            // drawing. Entering a task through gotoNetMovie left the label's
+            // ink and stale size behind, so the drawing rendered invisible
+            // while the answer blocks sat too high and too far left. Loading
+            // the same task movie directly was always correct, which is what
+            // pinned the difference on the leftovers.
+            channel.sprite.reset();
         }
 
         self.invalidate_render_channel_cache();
