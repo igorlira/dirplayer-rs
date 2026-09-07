@@ -1,0 +1,6 @@
+[movie]
+path = "dcr_intel/ChickenChasin.dcr"
+
+[test]
+suite = "intel"
+tags = ["3d"]

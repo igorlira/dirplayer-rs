@@ -6,3 +6,5 @@ mod sub_div_surfaces;
 mod do_not_push;
 mod mrm_lod;
 mod dummy;
+mod carousel;
+mod chicken_chasin;
