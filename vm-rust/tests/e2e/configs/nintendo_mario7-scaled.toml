@@ -1,0 +1,12 @@
+[movie]
+path = "dcr_nintendo/Mario-7.dcr"
+
+[external_params]
+# The layout fullscreen uses — canvas sized to the container, movie scaled into
+# it with the aspect preserved. Lets the scaled render path be exercised without
+# a real Fullscreen API, which the browser harness cannot drive.
+swStretchStyle = "meet"
+
+[test]
+suite = "nintendo"
+tags = ["2d"]
