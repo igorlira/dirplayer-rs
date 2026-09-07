@@ -1,0 +1,13 @@
+[movie]
+# Miniclip "Age of Speed 2" — the sequel to `misc_age_of_speed.toml`, same
+# Shockwave 3D + Havok engine. Streams level_1.w3d / sky_all1.w3d off the
+# movie path.
+path = "dcr_misc/age_of_speed2/age_of_speed2.dcr"
+
+[external_params]
+_moviePath = "http://miniclip.com/"
+
+[test]
+suite = "misc"
+tags = ["3d", "havok"]
+default_timeout = 400.0

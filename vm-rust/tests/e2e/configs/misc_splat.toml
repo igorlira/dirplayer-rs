@@ -1,0 +1,15 @@
+[movie]
+path = "dcr_misc/splat/splat.dcr"
+
+# The title screen's domain gate (BehaviorScript 7 - titleJump) needs BOTH:
+#   urls = string(the moviePath)     -> must contain "jellygames2.com"
+#   externalParamValue("src")        -> must NOT contain "jellygames", or it
+#                                       sets okToPlay = 0 and navigates away
+# so `src` is deliberately left unset.
+[external_params]
+_moviePath = "http://jellygames2.com/splat.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d", "flash"]
+default_timeout = 300.0

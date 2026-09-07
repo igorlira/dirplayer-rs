@@ -1,0 +1,13 @@
+[movie]
+# Nestlé/Wonka "SweeTarts 3D Game" (SweeTarts3DGame.dcr) — Shockwave 3D, D8-era.
+#
+# Flow: frame 1 builds the world (`initworld`, BehaviorScript 43) and the menu
+# (`initGame`/`initMenu`, BehaviorScript 8), the menu loops on `menuupkeep`
+# until a click walks `menumode` 2 -> 3 -> `go(the frame + 1)`, and the game
+# frame then runs `initworld` again for the track.
+path = "dcr_misc/sweetarts/SweeTarts3DGame.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+default_timeout = 240.0

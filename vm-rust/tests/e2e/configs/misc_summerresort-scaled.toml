@@ -1,0 +1,14 @@
+[movie]
+# Same movie as misc_summerresort.toml, run with the stage SCALED — the
+# layout fullscreen uses. Reported defect: "in fullscreen the tiles do not
+# match like normal view".
+path = "dcr_misc/dcr_summerresort/summerresort.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d"]
+
+[external_params]
+_moviePath = "http://i.cartoonnetwork.com/games/cc/1.dcr"
+# The browser harness has no Fullscreen API; this is the layout fullscreen picks.
+swStretchStyle = "meet"

@@ -1,0 +1,18 @@
+[movie]
+# Cartoon Network "Summer Resort" (Director, 2D tile adventure).
+#
+# The room is not a background bitmap: `updateMap` in MovieScript "#main"
+# rebuilds channels 10..79 per room, one SPRITE PER 16x16 TILE, positioning
+# each by `sprite.loc = point(col * 16 + WSHIFT, row * 16 + HSHIFT)` and then
+# forcing `sprite.width`/`sprite.height` from the room data. That makes the
+# whole map a grid of adjacent STRETCHED sprites — the exact case where a
+# scaled stage can round each tile's position and size independently and open
+# seams between neighbours.
+path = "dcr_misc/dcr_summerresort/summerresort.dcr"
+
+[external_params]
+_moviePath = "http://i.cartoonnetwork.com/games/cc/1.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d"]

@@ -1,0 +1,46 @@
+[movie]
+# The COMPLETE archive, from the Flashpoint entry
+# 693da8e4-c96b-4531-bc1e-5f387aa89c7d, started through its real LAUNCH COMMAND:
+#
+#   "…/wrapper_silentbaystudios.dcr"
+#     --do "member('gameUrl').text = '…/agent_freeride.dcr'"
+#     --bugfixShockwave3DBadDriverList
+#
+# so the entry point is the leech-protection wrapper, not the game movie. The
+# wrapper reads member("gameUrl").text on its first exitFrame and redirects
+# there; the .dcr ships that member holding a "game-name" PLACEHOLDER, so the
+# launcher's --do is what points it at the real game.
+#
+# The previous corpus copy was `agent_freeride/agent_freeride-fix.dcr` — a
+# 3.3 MB re-save (vs 4.6 MB here) that had lost cast members 97 (ediM) /
+# 99 (ALFA) / 117 (Lscr), which is why the HUD had a gap. That directory is
+# left in place for comparison.
+# The COMPLETE archive started through its real LAUNCH COMMAND (Flashpoint entry
+# 693da8e4-c96b-4531-bc1e-5f387aa89c7d):
+#
+#   "…/wrapper_silentbaystudios.dcr"
+#     --do "member('gameUrl').text = '…/agent_freeride.dcr'"
+#     --bugfixShockwave3DBadDriverList
+#
+# so the entry point is the leech-protection wrapper, not the game. The wrapper
+# does the whole handoff in ONE exitFrame — go(1,"gameloader.dcr"), then builds
+# MiniclipGameManager from gameloader's SECOND cast, then go(1, togo) — which
+# only works because go(frame, movie) now mounts before the handler continues.
+#
+# The previous corpus copy, `agent_freeride/agent_freeride-fix.dcr`, is a 3.3 MB
+# re-save patched to run WITHOUT the launcher chain (the pristine 4.6 MB movie
+# sticks on the title at frame 85 if loaded directly — it needs gameloader's
+# "Start movie" to have built mcgm). That re-save paid for its independence by
+# losing cast members 97 (ediM) / 99 (ALFA) / 117 (Lscr), which is where the HUD
+# gap came from. This path uses the complete assets instead.
+path = "dcr_misc/agent_freeride_full/wrapper_silentbaystudios.dcr"
+startup_do = "member('gameUrl').text = 'http://www.miniclip.com/games/agent-freeride/en/agent_freeride.dcr'"
+
+# The Miniclip shell passes its whole game/session descriptor in sw2.
+[external_params]
+sw2 = "mc_gamename=Agent+Freeride&mc_hsname=2621&mc_shockwave=0&mc_scoreistime=0&mc_lowscore=0&mc_negativescore=0&mc_icon=agentfreeride20smallicon.jpg&mc_iconBig=agentfreeride20medicon.jpg&mc_players_site=1&mc_gameUrl=%2Fgames%2Fagent-freeride%2Fen%2F&mc_sessid=4534211538621300736-588049379-6007474806792912896&mc_v2=1&mc_ua=0492696&mc_geo=NapMia&mc_geoCode=US&loggedin=0&mc_width=590&mc_height=443"
+
+[test]
+suite = "misc"
+tags = ["3d", "physx", "flash"]
+default_timeout = 300.0

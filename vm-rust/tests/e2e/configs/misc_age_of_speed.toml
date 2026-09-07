@@ -1,0 +1,10 @@
+[movie]
+path = "dcr_misc/age_of_speed/age_of_speed.dcr"
+
+[external_params]
+_moviePath = "http://miniclip.com/"
+
+[test]
+suite = "misc"
+tags = ["3d", "havok"]
+default_timeout = 300.0

@@ -1,0 +1,15 @@
+[movie]
+# Zack Zeiler / "Street Sesh 2: Downhill" (Director 10.1, Shockwave 3D).
+#
+# NOT a physics-Xtra game: the Xtra list is INETURL / NETFILE / Netlingo / SWA /
+# DirectSound / Sound Control / Shockwave 3D Asset / Text + Font Asset. There is
+# no Havok cast member and no dynamiks.x32 — like the first Street Sesh, the
+# skater runs on the movie's own Lingo integrator, so this is tagged `3d` only.
+path = "dcr_misc/StreetSesh2Downhill-3D-W2.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+# `init_game` holds the frame until every `player_*` W3D member plus "world"
+# has loaded, then clones the skater and board out of `player_mike`.
+default_timeout = 300.0

@@ -1,0 +1,32 @@
+[movie]
+# "T.R.E.C.H." (urgames.com / mockworld, Paul Catanese — skeletonmoon),
+# Director 10, Shockwave 3D. The DEMO cut — `startMovie` sets
+# `gVersion = "demo"`.
+#
+# NOT a physics-Xtra game. The movie's XTRl list is INETURL / NETFILE /
+# Netlingo / swadcmpr / MacroMix / DirectSound / Sound Control /
+# "Shockwave 3D Asset" / Text Asset / TextXtra / Font Xtra / Flash Asset /
+# Font Asset / Windows Media Asset / FileIo / MoveCursor — no Havok.x32 and no
+# dynamiks.x32 (AGEIA PhysX). Movement, collision, the AA turrets and the hit
+# tests are all hand-rolled Lingo over `modelsUnderRay`.
+#
+# The demo keeps its geometry INSIDE the movie: castLib "mainScripts" carries
+# the Shockwave3D members level1 / level2 / mech / MSQMech / turret / zorno /
+# MSQZorno / weapons / pizzo / MSQPizzo, and `importW3D`'s demo branch
+# `cloneModels()` pulls them into the "3DMember" scene with
+# `cloneModelFromCastmember` / `cloneMotionFromCastmember`. So it plays fully
+# offline. (The FULL VERSION cut is the one that streams the same levels as
+# external .W3D files from urgames.com, and additionally gates on
+# `externalParamValue("src")` containing "http://www.urgames.com/".)
+path = "dcr_misc/trech.dcr"
+
+# No [external_params]. This cut has NO environment gate at all: nothing in it
+# reads `the runMode`, `the moviePath` or `externalParamValue`, and the
+# full-version domain check is absent because `gVersion` is "demo".
+
+[test]
+suite = "misc"
+tags = ["3d", "flash"]
+# Cloning ten W3D casts into the scene is the slow part of the boot, and the
+# boot itself is paced by a 4910 ms Director timeout.
+default_timeout = 300.0

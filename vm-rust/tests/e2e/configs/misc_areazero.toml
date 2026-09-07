@@ -1,0 +1,14 @@
+[movie]
+# Xform / AddictingGames "AreaZero" (Director 11.5, Shockwave 3D + AGEIA PhysX).
+# The movie pulls its external casts in at runtime from `Data/Libs/*.cct`, which
+# are staged alongside the .dcr, so only the .dcr needs loading here.
+#
+# Port notes and the menu/level flow: docs/areazero/README.md
+path = "dcr_misc/dcr_areazero/areazero-mod.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d", "physx"]
+# The menu builds a 3D world, four cameras and an ortho UI layer before the
+# level even starts, and the level start is behind a 12 s delayed event.
+default_timeout = 300.0

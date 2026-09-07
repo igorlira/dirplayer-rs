@@ -1,0 +1,6 @@
+[movie]
+path = "dcr_misc/BrickOut.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d"]

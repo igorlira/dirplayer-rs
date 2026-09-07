@@ -1,0 +1,30 @@
+[movie]
+# Kinelco / mohsye "Sewer Run 2" as published on shockwave.com
+# (Director 10, Shockwave 3D + Havok + a Flash UI).
+#
+# Same shape as Sewer Run 1: ONE Flash sprite in channel 1 drives the whole
+# movie through `getURL("event:<handler>")`, Lingo reads it back through the
+# `sprite(1).<var>` dot syntax, and channel 2 is the Shockwave 3D sprite that
+# also carries the "Havok Physics (No HKE)" behavior.
+#
+# Markers: "menu", "game", "restart", "over" (frame 1 is the loader loop).
+path = "dcr_misc/sr2.dcr"
+
+[external_params]
+# Two independent domain gates, both of which navigate AWAY from the movie:
+#
+#  * MovieScript's `checkLoc` compares `the moviePath` against a whitelist of
+#    kinelco / mohsye URLs and calls gotoNetPage("http://www.shockwave.com")
+#    when it does not match.
+#  * "SW Security" (channel 25) expects the shockwave.com `sw8` token param and
+#    round-trips it through validateToken.jsp, holding the playhead on the
+#    frame until it answers. It short-circuits on
+#    `the runMode contains "author"`, which is how we get past it offline.
+_moviePath = "http://www.mohsye.com/shockwave/sewerrun2/"
+_runMode = "Author"
+
+[test]
+suite = "misc"
+tags = ["3d", "havok", "flash"]
+# 6.5 MB .dcr, then five W3D track casts plus the character casts.
+default_timeout = 300.0

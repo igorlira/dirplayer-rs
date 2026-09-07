@@ -1,0 +1,14 @@
+[movie]
+# "Ed's Kart Attack" (D8-era, 2D + Flash intro). The intro is a loop=false
+# Flash sprite on channel 1; "Wait for Flash" (BehaviorScript 66) loops its
+# frame with `go(the frame)` and advances the INSTANT `sprite(1).playing = 0`,
+# so any window where the intro's instance reads not-playing skips the intro
+# outright. Regression movie for the pre-playback Flash warm path: the dev app
+# renders the stage BEFORE play (Fetch & Load preview), which used to activate
+# the SWF ahead of the Director playhead.
+path = "dcr_misc/eds_kart_attack/game.dcr"
+
+[test]
+suite = "misc"
+tags = ["2d", "flash"]
+default_timeout = 300.0

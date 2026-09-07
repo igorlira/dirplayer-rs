@@ -1,0 +1,31 @@
+[movie]
+# Rasterwerks "PHOSPHOR" beta2 build 043 — a full Shockwave 3D deathmatch FPS
+# (D11.5). The shipped page boots `3D_progbar.dcr` and hands it the real movie
+# through `sw1`; the game movie itself is what matters here, so it is loaded
+# directly.
+#
+# The movie pulls the rest of itself in at runtime, from paths relative to
+# `the moviePath`:
+#   base.ini / PHOSPHOR_BETA.ini  read through the FileIO xtra
+#   snd_core.cct act_core.cct     `castLib(n).fileName = moviePath & name`
+#   map_dm_acheron_bluffs.cct
+# so all of those are staged next to the .dcr.
+path = "dcr_misc/rasterwerks/phosphor_beta2_043.dcr"
+
+[external_params]
+# The security handshake ("Frame Security" / M_Security) wants `sw9`; without it
+# the movie parks on the security frame.
+sw9 = "3849CBA20178E0EFAEDCF5A8822272E6081455597F6A829CA81103123E6F"
+# "Projector" is the run mode that reads the external casts as `.cct` off the
+# movie path and the .ini files through FileIO. "Plugin" would instead stream
+# them with preloadNetThing/getNetText.
+_runMode = "Projector"
+
+[test]
+suite = "misc"
+# Shockwave 3D only -- the FPS runs its own trajectory/raycast physics in
+# Lingo (C_Physics / C_PhysTrajectory / C_Collision), no physics xtra.
+tags = ["3d"]
+# Loading ~7 MB of external casts, building the 3D world, the nav net and the
+# bots takes a while before the first frame of gameplay.
+default_timeout = 600.0

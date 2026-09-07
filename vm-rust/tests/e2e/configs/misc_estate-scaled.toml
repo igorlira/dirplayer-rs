@@ -1,0 +1,11 @@
+[movie]
+path = "dcr_misc/estate.dcr"
+
+[external_params]
+# The layout fullscreen uses — see `nintendo_mario7-scaled.toml`.
+swStretchStyle = "meet"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+default_timeout = 300.0

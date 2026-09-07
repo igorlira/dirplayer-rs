@@ -1,0 +1,39 @@
+[movie]
+# "TRECH v2.0" (mockworld / onlinegameshq.com, credited to RazorMouse),
+# Director 10, Shockwave 3D, 800x600. A different engine ("MGE b1.49") from the
+# TRECH 1 demo in misc_trech.toml, by a different author.
+#
+# NOT a physics-Xtra game. The XTRl list is INETURL / NETFILE / Netlingo /
+# swadcmpr / MacroMix / DirectSound / Sound Control / Script Agent / Text Asset /
+# Mix Services / TextXtra / Font Xtra / Font Asset / Flash Asset /
+# "Shockwave 3D Asset" / "Animated GIF Asset" / 3DAuth / MoveCursor — no
+# Havok.x32 and no dynamiks.x32 (AGEIA PhysX).
+#
+# The 3D lives in the movie: castLib "graphics" carries the Shockwave3D members
+# items / level1 / level2 / level3 / mech / tank / turretB plus the MSQ* motion
+# members, so it plays entirely offline.
+path = "dcr_misc/trech2.dcr"
+
+# No [external_params]. `startScript`'s two startup gates both pass unset:
+#
+#  * the domain lock is `if gGame.gURLLock <> EMPTY then ... externalParamValue
+#    ("src") contains gGame.gURLLock`, and `gURLLock` is `gameValues()[15]`,
+#    which is EMPTY in this build — so the gate never runs and no `src` is
+#    needed.
+#  * `gGame.gCheckMoveCursor` IS 1 (`gameValues()[16]`), so `startGame` walks
+#    `the number of xtras` looking for an xtra named "MoveCursor" and, failing to
+#    find one, does `setStage("error")` + `halt()`. dirplayer registers
+#    MoveCursor, so this passes; it is the one environment dependency worth
+#    knowing about.
+#
+# Nothing on the boot path reads `the runMode` or `the moviePath`. The only two
+# places that do are inert here: the GameTrust loader (`gGameTrust` is hardcoded
+# to 0 in `startMovie`, so `gt_load()` never runs) and the "High Scores -
+# Standard" behaviour, which only picks a submission URL.
+
+[test]
+suite = "misc"
+tags = ["3d", "flash"]
+# Cloning the level plus the mech/tank/turret casts is the slow part, and the
+# boot is gated on a 2970 ms splash timeout.
+default_timeout = 300.0

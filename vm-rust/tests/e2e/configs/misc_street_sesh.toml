@@ -1,0 +1,16 @@
+[movie]
+# Zack Zeiler / "Street Sesh" (Director 10.0, Shockwave 3D).
+#
+# NOT a physics-Xtra game: the Xtra list is INETURL / NETFILE / Netlingo / SWA /
+# DirectSound / Sound Control / Shockwave 3D Asset / Text + Font Asset. There is
+# no Havok cast member and no dynamiks.x32 — the skater is driven by the movie's
+# own Lingo integrator (`_player_PHYSICSOBJ` + `_PhysO_groundcollision` /
+# `_PhysO_sidecollision` against a quadtree), so this is tagged `3d` only.
+path = "dcr_misc/street_sesh.dcr"
+
+[test]
+suite = "misc"
+tags = ["3d"]
+# Boot clones the player/board out of `player_mike` and builds the whole world
+# before the "start" marker (frame 43) is reachable.
+default_timeout = 300.0
