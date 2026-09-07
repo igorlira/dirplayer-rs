@@ -1,0 +1,21 @@
+[movie]
+path = "dcr_sulake/habbo_v26/habbo.dcr"
+
+[test]
+suite = "sulake"
+# Live multiuser: this movie logs a REAL account into the Habbo server, shared
+# across every habbo test. Pin them to one shard so they run in sequence --
+# concurrently they fight over the same user and one of them hangs.
+shard_group = "habbo"
+tags = ["2d"]
+
+[external_params]
+# The layout fullscreen uses — see `nintendo_mario7-scaled.toml`.
+swStretchStyle = "meet"
+sw1 = "connection.info.host=${HABBO_V26_INFO_HOST:127.0.0.1}"
+sw2 = "connection.info.port=${HABBO_V26_INFO_PORT:3091}"
+sw3 = "use.sso.ticket=1;sso.ticket=${HABBO_V26_SSO_TICKET}"
+sw4 = "external.texts.txt=/assets/dcr_sulake/habbo_v26/gamedata/external_texts.txt?"
+sw5 = "external.variables.txt=/assets/dcr_sulake/habbo_v26/gamedata/external_variables.txt?"
+multiuser_websocket_ssl = "${HABBO_V26_WS_SSL}"
+multiuser_websocket_path = "${HABBO_V26_WS_PATH}"
