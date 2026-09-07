@@ -1,0 +1,17 @@
+[movie]
+path = "dcr_coca-cola/furnifactory/FurniFactory.dcr"
+
+[external_params]
+# The same layout fullscreen uses: canvas sized to the container, movie scaled
+# into it with the aspect preserved. Reachable from a test without a real
+# Fullscreen API, which the browser harness has no way to drive.
+swStretchStyle = "meet"
+
+[test]
+suite = "coca_cola"
+# Live multiuser: this movie logs a REAL account into the Coke Studios server,
+# and every coca_cola test shares that one account. Pin them to a single shard
+# so they run one after another -- two of them side by side fight over the
+# login and the loser sits until it times out.
+shard_group = "cokestudios"
+tags = ["2d"]

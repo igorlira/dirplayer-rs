@@ -1,0 +1,73 @@
+[movie]
+# Coca-Cola "Coke Studios" (a.k.a. MyCoke Music) — the SF_Client shell. It
+# pulls the rest of the game in at runtime as external casts from the same
+# directory (see FileSet.txt: SF_Gateway, entry, cc_interface, isoengine, ...).
+path = "dcr_coca-cola/CokeStudios/SF_Client.dcr"
+
+[test]
+suite = "coca_cola"
+# Live multiuser: this movie logs a REAL account into the Coke Studios server,
+# and every coca_cola test shares that one account. Pin them to a single shard
+# so they run one after another -- two of them side by side fight over the
+# login and the loser sits until it times out.
+shard_group = "cokestudios"
+tags = ["2d", "flash"]
+# The shell loads ~9 MB of external casts before it shows anything.
+default_timeout = 180.0
+
+# ---------------------------------------------------------------------------
+# Everything account- and server-specific lives in `.env` (gitignored), which
+# both the browser runner and the native harness read. This file only names the
+# variables. Copy the block at the bottom of `.env.example` to get started.
+#
+#   COKESTUDIOS_SW1 / _SW2                 the account to log in as
+#   COKESTUDIOS_SF_HOST / _PORT / _PROTOCOL  the /sf backend
+#   COKESTUDIOS_GAME_HOST / _PORT          the game server the backend hands out
+#   COKESTUDIOS_WS_PROXY                   the WebSocket in front of that server
+#
+# An unset variable resolves to an empty string, so the test fails at the step
+# that needed it rather than silently using someone else's server.
+# ---------------------------------------------------------------------------
+
+[external_params]
+# What the site's <embed> passes (views/client-dirplayer.html):
+#   sw1 = base64(screen name)
+#   sw2 = the session secret (bcrypt hash) the gateway authenticates with
+sw1 = "${COKESTUDIOS_SW1}"
+sw2 = "${COKESTUDIOS_SW2}"
+
+# The backend the client talks to lives under `/sf` on the site's own origin
+# (Apache reverse-proxies it to the Java server — see the live vhost's
+# `<Location /sf/status>` / `<Location /sf/gateway>`):
+#
+#   /sf/status   Director-side `getNetText`; the "checking status" step the
+#                boot sequence blocks on
+#   /sf/gateway  Flash-side AMF `NetConnection` from the SWF in the shell
+#
+# Both go through the patched `window.fetch` in
+# `src/services/flashPlayerManager.ts`, so one path-prefix rewrite covers the
+# pair. The test server hosts only `public/`, so without this both 404 and the
+# movie parks on the status screen.
+[[flash.fetch_rewrite]]
+path_prefix = "/sf"
+target_host = "${COKESTUDIOS_SF_HOST}"
+target_port = "${COKESTUDIOS_SF_PORT}"
+target_protocol = "${COKESTUDIOS_SF_PROTOCOL}"
+
+# After login the backend hands the client the address of the game server to
+# connect to ("--> RECEIVED GAME SERVER"), which the client then dials as a raw
+# TCP socket. A browser cannot open one, so the host page maps it to a
+# WebSocket that a WS-TCP proxy terminates (on the live site
+# `wss://<site>/ws-flash`; locally ws-tcp-proxyDECIBEL.cjs, whose default
+# listener is ws://127.0.0.1:9001 -> tcp://127.0.0.1:9000). Without this the
+# client reports `connectionfailed(): iReasonID 5` and puts up the
+# "No connection with server" alert.
+#
+# This one goes to Ruffle's own socket layer as well as to the WASM Multiuser
+# Xtra, so keep the host/port concrete — Ruffle matches them itself and does
+# not understand the `*` / `0` wildcards the resolver in flashPlayerManager.ts
+# accepts.
+[[flash.socket_proxy]]
+host = "${COKESTUDIOS_GAME_HOST}"
+port = "${COKESTUDIOS_GAME_PORT}"
+proxy_url = "${COKESTUDIOS_WS_PROXY}"
