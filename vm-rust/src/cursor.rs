@@ -121,8 +121,15 @@ pub fn update_native_cursor(
     // 2x cursor than no cursor.
     const MAX_CURSOR_PX: u32 = 128;
     let scale_factor = {
+        // `stage_scale` is movie -> DEVICE pixels, because `stage_layout` folds
+        // in `stage_pixel_ratio`. A CSS cursor is not: the browser takes the
+        // image's intrinsic pixels as CSS pixels and applies the device ratio
+        // itself. Using the device scale therefore multiplied by the ratio
+        // twice, and on a Retina Mac (dpr 2) every custom cursor came out at
+        // double size. What is wanted is the movie -> CSS scale.
         let (sx, sy) = crate::player::stage::stage_scale(player);
-        let want = sx.min(sy).round().max(1.0) as u32;
+        let dpr = crate::player::stage::stage_pixel_ratio(player).max(1.0);
+        let want = (sx.min(sy) / dpr).round().max(1.0) as u32;
         let w = (cursor_bitmap_member.info.width as u32).max(1);
         let h = (cursor_bitmap_member.info.height as u32).max(1);
         let fit_w = (MAX_CURSOR_PX / w).max(1);
