@@ -1,0 +1,6 @@
+[movie]
+path = "dcr_heatwave/daytona.dcr"
+
+[test]
+suite = "heatwave"
+tags = ["3d"]
