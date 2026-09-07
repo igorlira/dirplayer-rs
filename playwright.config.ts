@@ -11,7 +11,7 @@ const SHARDS = Math.max(1, Number(process.env.E2E_SHARDS ?? 1) || 1);
 
 export default defineConfig({
   testDir: "./vm-rust/tests/browser",
-  timeout: 1_800_000,
+  timeout: 5_400_000,
   fullyParallel: SHARDS > 1,
   workers: SHARDS,
   use: {

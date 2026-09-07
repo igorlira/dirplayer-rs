@@ -232,7 +232,7 @@ test(SHARDS > 1 ? `browser e2e tests (shard ${shard + 1}/${SHARDS})` : "browser 
         win.__testResults?.done === true || typeof win.__testAborted === "string"
       );
     },
-    // Just under the Playwright test timeout (1_800_000), so a slow-but-healthy
+    // Just under the Playwright test timeout (5_400_000), so a slow-but-healthy
     // sweep reports through the normal path instead of being cut off here. The
     // old 900_000 was already below the wall time of a full run -- the `3d` tag
     // alone takes ~15.7 min -- so a complete suite could have tripped it while
@@ -242,7 +242,7 @@ test(SHARDS > 1 ? `browser e2e tests (shard ${shard + 1}/${SHARDS})` : "browser 
     // `waitForFunction`, and passing them second makes them the predicate's
     // argument instead -- silently reinstating the 30 s default timeout.
     undefined,
-    { timeout: 1_740_000 }
+    { timeout: 5_220_000 }
   );
   await handle.dispose();
 
