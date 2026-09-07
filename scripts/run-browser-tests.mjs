@@ -412,6 +412,13 @@ console.log("Running Playwright tests...");
 const playwrightEnv = { ...process.env };
 if (updateSnapshots) playwrightEnv.SNAPSHOT_UPDATE = "1";
 if (keepOpen) playwrightEnv.E2E_KEEP_OPEN = "1";
+// `E2E_PROXY` configures the same-origin reverse proxy in
+// `scripts/serve-browser-runner.mjs` (see the comment there for why a movie's
+// live backend needs one). Playwright starts that server, so the value has to
+// reach it through this env -- and it is read from `loadedEnv`, not
+// `process.env`, so a movie's backend can be declared once in `.env` beside the
+// credentials it goes with rather than exported by hand on every run.
+if (loadedEnv.E2E_PROXY) playwrightEnv.E2E_PROXY = loadedEnv.E2E_PROXY;
 
 const pw = spawnSync("npx", ["playwright", "test", ...forwardArgs], {
   cwd: REPO_ROOT,
