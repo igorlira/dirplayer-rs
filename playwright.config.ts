@@ -4,9 +4,16 @@ import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// One worker per shard (see E2E_SHARDS in vm-rust/tests/browser/e2e.spec.ts).
+// Each worker drives its own browser page, so the shards genuinely run side by
+// side rather than taking turns.
+const SHARDS = Math.max(1, Number(process.env.E2E_SHARDS ?? 1) || 1);
+
 export default defineConfig({
   testDir: "./vm-rust/tests/browser",
   timeout: 1_800_000,
+  fullyParallel: SHARDS > 1,
+  workers: SHARDS,
   use: {
     headless: !!process.env.CI,
     baseURL: "http://127.0.0.1:9101",

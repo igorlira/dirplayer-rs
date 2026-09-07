@@ -59,6 +59,24 @@ export function onClearAllTimeouts() {
   }
 }
 
+/// Drop every piece of JS-side state that still points at the wasm instance.
+///
+/// Called by the runner when it re-instantiates the module after a Rust panic.
+/// A wasm trap doesn't unwind, so the dying instance never gets to run its own
+/// teardown (`dispatch_clear_timeouts`, `dispatch_flash_reset_all`, sound
+/// stop) — those all execute INSIDE wasm and can't be reached on a corpse. The
+/// JS side has to do it from the outside instead, or the dead instance keeps
+/// being re-entered by its own timers and Ruffle callbacks.
+export function __resetHostState() {
+  // setInterval handles created for the dead instance's `timeout` objects.
+  // Each tick calls `window.__wasm_trigger_timeout`, which the template
+  // repoints at the new instance — so leaving these alive would fire the OLD
+  // movie's timeouts against the NEW player.
+  onClearAllTimeouts();
+  // Ruffle players, their per-frame capture RAF loops, and SWF audio.
+  onFlashResetAll();
+}
+
 export function onDatumSnapshot() {}
 export function onScriptInstanceSnapshot() {}
 export function onExternalEvent() {}
@@ -154,6 +172,7 @@ export {
   setXtraMovieBase,
   setXtraHostBase,
   setVmModule,
+  reregisterExternalXtras,
   loadDefaultXtraRegistry,
   resolveAndLoadMovieXtras,
 } from './dirplayer-js-api-real.js';

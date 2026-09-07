@@ -50,6 +50,17 @@ impl BrowserTestPlayer {
     /// (`BrowserTestPlayer::new`), so a movie's params cannot reach the next
     /// test — see the note there.
     async fn reset_player_with(preserve_external_params: bool) {
+        // `ACTIVE_PLAYER_ID` selects which player `reserve_player_*` resolves
+        // to, and it is set-and-restored around a poll (`WithActivePlayer`,
+        // `player/mod.rs`) with no guard. A panic traps rather than unwinding,
+        // so the restore never runs: a test that dies inside a nested movie
+        // leaves the id pointing at a sub-player this reset is about to clear,
+        // and `active_player_ptr()` resolves it with `unwrap_unchecked()` — so
+        // every later access is UB, not a clean failure. Nothing else resets
+        // it, so do it here, at the test boundary, before reading PLAYER_OPT.
+        unsafe {
+            crate::player::ACTIVE_PLAYER_ID = 0;
+        }
         let preserved_external_params = if preserve_external_params {
             unsafe { PLAYER_OPT.as_ref().map(|p| p.external_params.clone()).unwrap_or_default() }
         } else {
@@ -118,6 +129,23 @@ impl BrowserTestPlayer {
             }
             Self::next_frame().await;
         }
+        // `handler_stack_depth` is a hand-incremented counter with no RAII
+        // guard, so a panic inside a handler leaves it elevated permanently and
+        // the drain above can never converge — burning its full 120 frames on
+        // every subsequent reset. Zero it so the next test doesn't pay for the
+        // previous one's crash, and say so, because a non-zero count here after
+        // a clean test would be a real leak worth chasing.
+        unsafe {
+            if let Some(player) = PLAYER_OPT.as_mut() {
+                if player.handler_stack_depth != 0 {
+                    crate::console_warn!(
+                        "reset_player: handler_stack_depth still {} after drain - forcing to 0",
+                        player.handler_stack_depth
+                    );
+                    player.handler_stack_depth = 0;
+                }
+            }
+        }
         // Give loops one more tick to process the generation-change and exit.
         for _ in 0..4 {
             Self::next_frame().await;
@@ -147,6 +175,14 @@ impl BrowserTestPlayer {
         });
 
         unsafe {
+            // Nested players (`#movie` cast members) live in their own tables
+            // and are NOT reachable from PLAYER_OPT, so dropping the root
+            // leaves them — and the sub-movies' scopes, timeouts and bitmaps —
+            // alive across the test boundary.
+            crate::player::NESTED_PLAYERS.clear();
+            crate::player::NESTED_PLAYER_KEYS.clear();
+            crate::player::NESTED_EVENT_TX.clear();
+
             if let Some(old) = PLAYER_OPT.take() {
                 // Actually free the previous player. `DirPlayer` has no `Drop`
                 // impl, and the drain loop above already waited for every

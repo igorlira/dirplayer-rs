@@ -17,6 +17,7 @@
     #output summary.running { color: #888; }
     #output summary.pass { color: #4caf50; }
     #output summary.fail { color: #f44336; }
+    #output summary.skip { color: #9e9e9e; }
     #output .test-log { padding: 2px 8px 4px 20px; color: #666; }
     #output .test-log div { white-space: pre-wrap; line-height: 1.4; }
     #output .test-error { padding: 2px 8px 4px 20px; color: #c0392b; white-space: pre-wrap; }
@@ -30,6 +31,38 @@
       if (!window._audioContext) window._audioContext = new AudioContext();
       return window._audioContext;
     };
+    // Generation counter for the wasm instance. Bumped every time the module
+    // is (re-)instantiated — see the panic-recovery block in the module script
+    // below.
+    window.__wasmGeneration = 0;
+    // A Rust panic on wasm traps rather than unwinding, so the dying instance
+    // never gets to cancel the animation frame its draw loop has outstanding.
+    // That callback is a closure over the dead instance's memory, and firing it
+    // re-enters a trapped module: at best a stray page error, at worst the
+    // dead instance's panic hook sets `__testPanic` and the runner blames
+    // whichever innocent test is running by then.
+    //
+    // We can't cancel it from here — `cancelAnimationFrame` needs the handle,
+    // which lives in the dead heap. So stamp every registration with the
+    // generation that made it and swallow callbacks from an older one.
+    //
+    // ONLY wasm-bindgen closures, identified by the `_wbg_cb_unref` property
+    // `makeMutClosure` hangs off every one it builds. The guard must not touch
+    // anything else on the page: Playwright's own `waitForFunction` polls on
+    // requestAnimationFrame, so a blanket guard silences the poller at the
+    // first restart and the run then times out with "Target page, context or
+    // browser has been closed" even though the harness finished normally.
+    (function () {
+      var raf = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = function (cb) {
+        if (!cb || !cb._wbg_cb_unref) return raf(cb);
+        var gen = window.__wasmGeneration;
+        return raf(function (t) {
+          if (gen !== window.__wasmGeneration) return;
+          return cb(t);
+        });
+      };
+    })();
     window.__scriptErrors = [];
     window.__onScriptError = function(msg) {
       window.__scriptErrors.push(msg);
@@ -90,6 +123,10 @@
     // therefore excluded whenever a tag filter is active.
     window.__testTags = "$TEST_TAGS";
     window.__testTagMap = $TEST_TAGS_JSON;
+    // test -> shard affinity group (`[test] shard_group` in the movie's TOML).
+    // Tests sharing a group are pinned to the SAME shard so they never run
+    // concurrently — see the sharding block below.
+    window.__testShardGroups = $SHARD_GROUPS_JSON;
     // Interpreter opcode/escape counters — see E2E_INTERP_STATS in
     // scripts/run-browser-tests.mjs.
     window.__interpStatsEnabled = $INTERP_STATS;
@@ -111,7 +148,7 @@
   {
     "imports": {
       "dirplayer-js-api": "./dirplayer-js-api.js",
-      "vm-rust": "./$WASM_JS_FILE"
+      "vm-rust": "./vm-rust-live.js"
     }
   }
   </script>
@@ -122,7 +159,163 @@
     <div id="output"></div>
   </div>
   <script type="module">
-    import init, * as wasm from './$WASM_JS_FILE';
+    import * as vmLive from './vm-rust-live.js';
+
+    // The wasm instance is COMPILED once and RE-INSTANTIATED on demand, because
+    // a Rust panic leaves the instance unusable and there is no way to repair it
+    // from the inside (see `restartWasm` below). `wasm` is therefore a mutable
+    // binding holding the current generation's module namespace, not a static
+    // import -- everything downstream must read it through this variable.
+    const WASM_GLUE_URL = new URL('./$WASM_JS_FILE', import.meta.url).href;
+    const WASM_BIN_URL = new URL('./$WASM_BG_FILE', import.meta.url).href;
+    let wasm = null;           // current generation's module namespace
+    let wasmGlueRecord = null; // ...and its module record, for __detach()
+    let compiledModule = null; // WebAssembly.Module, compiled once, reused
+    let api = null;            // the dirplayer-js-api stub, imported once
+    let wasmRestarts = 0;
+
+    /// Instantiate a fresh wasm module and wire every JS-side consumer to it.
+    ///
+    /// `initSync` reuses `compiledModule`, so only the first call pays for
+    /// compilation; a restart costs an instantiation (milliseconds) plus the
+    /// system-font load the player reset does.
+    async function bootWasm(isRestart) {
+      if (!compiledModule) {
+        // Compile ONCE. Every later generation instantiates this same module,
+        // so a restart costs an instantiation (milliseconds), not a recompile.
+        compiledModule = await WebAssembly.compileStreaming(fetch(WASM_BIN_URL));
+      }
+      const gen = ++window.__wasmGeneration;
+      // wasm-bindgen's `init`/`initSync` refuse to run twice on one module
+      // record (`if (wasm !== undefined) return wasm`) and expose no reset, so
+      // a cache-busting query is what buys a fresh record -- with its own
+      // `wasm` binding, its own memory-view caches, and its own
+      // FinalizationRegistry callbacks. That last one is why we do NOT simply
+      // re-point the old record: its finalizers call `wasm.__wbg_*_free(ptr)`,
+      // and a late GC after a swap would free a stale pointer in the LIVE heap.
+      const glue = await import(WASM_GLUE_URL + '?gen=' + gen);
+      // Async instantiate, not `initSync`: Chrome disallows the synchronous
+      // `new WebAssembly.Instance` on the main thread for modules over 8 MB,
+      // and this one is ~9 MB. Passing the already-compiled `WebAssembly.Module`
+      // still skips the recompile — only instantiation is repeated.
+      await glue.default({ module_or_path: compiledModule });
+      wasmGlueRecord = glue;
+      wasm = glue;
+
+      // Wire up timeout triggering now that wasm exports are available
+      window.__wasm_trigger_timeout = wasm.trigger_timeout;
+      // Tell the real dirplayer-js-api bridge which wasm module to call
+      // back into. The bridge's webpack-style `require('vm-rust')` path
+      // can't resolve here (we're pure ESM + importmap), so the bridge
+      // would throw on the first plugin operation without this. After
+      // this call, `loadExternalXtra(url)`, `new(xtra "...")` on-demand
+      // loads, registry resolution, etc. all work normally in tests.
+      if (!api) {
+        api = await import('./dirplayer-js-api.js');
+        // Prime the xtra registry from /assets/xtra-registry.json so movies
+        // that declare an external Xtra (Groove, BobbaXtra) get their wasm
+        // plugin auto-loaded, exactly like the dev host does. The harness
+        // calls `window.dirplayer_resolveAndLoadMovieXtras()` after each movie
+        // load. The registry is JS-side state, so it survives a restart and is
+        // primed only once.
+        api.setXtraHostBase(new URL('./assets/', document.baseURI).href);
+        await api.loadDefaultXtraRegistry();
+        window.dirplayer_resolveAndLoadMovieXtras = api.resolveAndLoadMovieXtras;
+      }
+      api.setVmModule(wasm);
+      // Static importers of the `vm-rust` specifier (flashPlayerManager) reach
+      // the VM through the forwarding shim; point it at the new instance too.
+      vmLive.__setLive(wasm);
+      if (isRestart) {
+        // Already-loaded Xtra plugins are host-agnostic, but the new instance
+        // has never heard of them, and `onRequestXtraLoad` short-circuits on
+        // the plugin cache so it would never re-register them either.
+        const names = api.reregisterExternalXtras();
+        if (names && names.length) {
+          statusLine('  re-registered xtra(s): ' + names.join(', '));
+        }
+      }
+
+      // Interpreter instrumentation, opt-in via E2E_INTERP_STATS=1. Counters
+      // are process-global in the wasm module and every test runs against this
+      // one instance, so they accumulate across all movies without any
+      // per-test aggregation -- which is the entire reason to sample here
+      // rather than in a single title. A restart necessarily zeroes them; the
+      // final report says so rather than quietly under-reporting.
+      if (window.__interpStatsEnabled && typeof wasm.set_interp_stats_enabled === 'function') {
+        wasm.reset_interp_stats();
+        wasm.set_interp_stats_enabled(true);
+      }
+    }
+
+    /// Replace a panicked wasm instance with a fresh one.
+    ///
+    /// A panic on wasm traps instead of unwinding: no destructor runs, no
+    /// function epilogue runs, and the damage is OUTSIDE the player, where
+    /// `BrowserTestPlayer::reset_player_with` cannot reach it. At minimum:
+    /// `wasm-bindgen-futures`' `Task::run` holds `inner.borrow_mut()` across
+    /// the poll, so the trapped task's RefCell stays mutably borrowed forever
+    /// and the next wake of it panics "already borrowed" -- inside somebody
+    /// else's test; and the `__stack_pointer` global is never restored, so the
+    /// shadow stack shrinks by however deep the trap was and never grows back.
+    /// Neither is repairable from inside the instance, which is why the runner
+    /// used to give up and skip the rest of the shard.
+    ///
+    /// Throwing the instance away costs an instantiation and starts the next
+    /// test on a zeroed heap -- which incidentally also clears the cumulative
+    /// heap pressure that killed long single-page sweeps around movie 48.
+    async function restartWasm(reason) {
+      wasmRestarts++;
+      statusLine('RESTARTING wasm instance (#' + wasmRestarts + ') after ' + reason);
+      const dead = wasmGlueRecord;
+      wasm = null;
+      wasmGlueRecord = null;
+
+      // Kill the JS-side callbacks still aimed at the dead instance BEFORE the
+      // new one exists, so nothing re-enters it in between. The instance's own
+      // teardown (`dispatch_clear_timeouts`, `dispatch_flash_reset_all`,
+      // `sound_manager.stop_all`) all runs INSIDE wasm and is unreachable on a
+      // corpse, so the JS side has to do it from the outside.
+      try {
+        if (api && api.__resetHostState) api.__resetHostState();
+      } catch (e) {
+        console.error('__resetHostState failed:', e);
+      }
+      // Looping sounds are AudioContext nodes that outlive their Rust owners;
+      // closing the context is the only way to stop them without the instance.
+      try {
+        if (window._audioContext) {
+          await window._audioContext.close();
+          window._audioContext = null;
+        }
+      } catch (e) { /* already closed */ }
+      // The old renderer's canvas; the new instance builds its own.
+      const container = document.getElementById('stage_canvas_container');
+      if (container) container.replaceChildren();
+
+      // Yield a macrotask. Microtasks queued by the dying instance --
+      // wasm-bindgen-futures drains its task queue on a microtask -- run before
+      // this resolves, so they hit the old generation and are finished making
+      // noise before the replacement exists.
+      await new Promise(r => setTimeout(r, 0));
+
+      // Release the dead instance's exports and memory views. Module records
+      // are never evicted, so without this every restart would pin a whole dead
+      // heap (hundreds of MB after a bitmap-heavy movie) for the rest of the
+      // run. `__detach` is appended to the glue by run-browser-tests.mjs.
+      try {
+        if (dead && dead.__detach) dead.__detach();
+      } catch (e) {
+        console.error('__detach failed:', e);
+      }
+
+      await bootWasm(true);
+
+      // Anything the corpse recorded on its way out belongs to the test that
+      // already failed, not to the next one.
+      window.__testPanic = undefined;
+    }
+
     const output = document.getElementById('output');
 
     function statusLine(msg) {
@@ -204,46 +397,25 @@
       }
     }
 
-    const results = { tests: [], passed: 0, failed: 0, done: false };
+    const results = { tests: [], passed: 0, failed: 0, skipped: 0, done: false };
+    // Published UP FRONT and mutated in place, so the spec can always read the
+    // tests that have already finished. It used to be assigned only after the
+    // loop, so a Rust panic anywhere threw away every passing result in the run:
+    // the spec stops waiting the moment it sees a panic, read a still-null
+    // __testResults, and reported "harness exited without publishing test
+    // results" for a sweep that had 47 green tests behind it.
+    window.__testResults = results;
 
     try {
-      await init();
-      // Wire up timeout triggering now that wasm exports are available
-      window.__wasm_trigger_timeout = wasm.trigger_timeout;
-      // Tell the real dirplayer-js-api bridge which wasm module to call
-      // back into. The bridge's webpack-style `require('vm-rust')` path
-      // can't resolve here (we're pure ESM + importmap), so the bridge
-      // would throw on the first plugin operation without this. After
-      // this call, `loadExternalXtra(url)`, `new(xtra "...")` on-demand
-      // loads, registry resolution, etc. all work normally in tests.
-      const api = await import('./dirplayer-js-api.js');
-      api.setVmModule(wasm);
-      // Prime the xtra registry from /assets/xtra-registry.json so movies
-      // that declare an external Xtra (Groove, BobbaXtra) get their wasm
-      // plugin auto-loaded, exactly like the dev host does. The harness
-      // calls `window.dirplayer_resolveAndLoadMovieXtras()` after each
-      // movie load.
-      api.setXtraHostBase(new URL('./assets/', document.baseURI).href);
-      await api.loadDefaultXtraRegistry();
-      window.dirplayer_resolveAndLoadMovieXtras = api.resolveAndLoadMovieXtras;
+      await bootWasm(false);
       statusLine('Module loaded. Running tests...');
-
-      // Interpreter instrumentation, opt-in via E2E_INTERP_STATS=1. Counters
-      // are process-global in the wasm module and every test runs against this
-      // one instance, so they accumulate across all movies without any
-      // per-test aggregation — which is the entire reason to sample here
-      // rather than in a single title.
-      if (window.__interpStatsEnabled && typeof wasm.set_interp_stats_enabled === 'function') {
-        wasm.reset_interp_stats();
-        wasm.set_interp_stats_enabled(true);
-      }
 
       const testFilter = (window.__testFilter || '').trim().toLowerCase();
       const filterParts = testFilter ? testFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
       const tagFilter = (window.__testTags || '').trim().toLowerCase();
       const wantedTags = tagFilter ? tagFilter.split(',').map(s => s.trim()).filter(Boolean) : [];
       const tagMap = window.__testTagMap || {};
-      const testFns = Object.keys(wasm)
+      let testFns = Object.keys(wasm)
         .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function')
         .filter(k => filterParts.length === 0 || filterParts.some(f => k.toLowerCase().includes(f)))
         // Tag filter is ANDed with the name filter, so the two compose.
@@ -253,13 +425,110 @@
         statusLine('E2E_TAGS=' + tagFilter + ' -> ' + testFns.length + ' test(s)');
       }
 
-      for (const name of testFns) {
+      // Sharding. The spec opens this page once per shard as
+      // `/index.html?shard=<i>&shards=<n>`, and each page keeps only its slice.
+      // Every shard is its own browser page and therefore its own wasm
+      // instance, which buys two things beyond wall-clock: a panic can only
+      // kill the shard it happens in, and no single heap has to survive the
+      // whole corpus -- a full sweep died at movie 48 on dlmalloc's own
+      // heap-metadata assertion, which is a cumulative-state failure.
+      //
+      // Sliced round-robin rather than in contiguous blocks so the slow titles
+      // (the 3D and Havok ones cluster together by name) spread across shards
+      // instead of landing in one.
+      const shardParams = new URLSearchParams(location.search);
+      const shardCount = Math.max(1, parseInt(shardParams.get('shards') || '1', 10) || 1);
+      const shardIndex = Math.min(shardCount - 1,
+        Math.max(0, parseInt(shardParams.get('shard') || '0', 10) || 0));
+      if (shardCount > 1) {
+        // Deal the tests out round-robin, EXCEPT that everything sharing a
+        // `shard_group` is dealt as one unit and lands on a single shard.
+        //
+        // The group exists for movies holding a live multiuser session: Coke
+        // Studios and Habbo each log one real account into a real server, so two
+        // of their tests running side by side fight over that user. Measured at
+        // E2E_SHARDS=3, `test_cokestudios_jukebox` waited out its full 180 s on
+        // `oIsoScene` while another shard held the login, then failed.
+        //
+        // Every shard runs this same loop over the same list in the same order,
+        // so they agree on the assignment without talking to each other.
+        const groupMap = window.__testShardGroups || {};
+        const groupShard = {};
+        let cursor = 0;
+        testFns = testFns.filter((name) => {
+          const group = groupMap[name];
+          let target;
+          if (group) {
+            if (!(group in groupShard)) groupShard[group] = cursor++ % shardCount;
+            target = groupShard[group];
+          } else {
+            target = cursor++ % shardCount;
+          }
+          return target === shardIndex;
+        });
+        statusLine('shard ' + (shardIndex + 1) + '/' + shardCount
+          + ' -> ' + testFns.length + ' test(s)');
+      }
+
+      // A Rust panic does NOT reject the test's promise. On wasm the panic hook
+      // runs (recording the message on `window.__testPanic`) and then the panic
+      // TRAPS -- so the Promise wasm-bindgen handed us is simply never settled,
+      // and `await wasm[name]()` parks forever. That is what made a panicking
+      // test hang the whole runner: the spec only escaped because it watched
+      // `__testPanic` itself and gave up, discarding every result behind it.
+      //
+      // So watch the flag here, where the loop can act on it: the hook sets it
+      // before the trap, so the moment it appears we know this test is dead and
+      // can reject on its behalf. The `await` beneath is abandoned, not
+      // cancelled -- there is no way to cancel it -- but nothing waits on it.
+      //
+      // `timeoutMs` is the backstop for the other way a test can park: a
+      // poisoned instance that hangs WITHOUT panicking. Deliberately far above
+      // any movie's own `default_timeout` (the longest is 300 s), so it only
+      // ever catches a genuine hang.
+      function runGuarded(fn, timeoutMs) {
+        window.__testPanic = undefined;
+        let done = false;
+        const watchdog = new Promise((_, reject) => {
+          const started = Date.now();
+          const id = setInterval(() => {
+            if (done) { clearInterval(id); return; }
+            if (typeof window.__testPanic === 'string') {
+              clearInterval(id);
+              reject(new Error(window.__testPanic));
+            } else if (Date.now() - started > timeoutMs) {
+              clearInterval(id);
+              reject(new Error('test did not finish within '
+                + Math.round(timeoutMs / 1000) + 's and did not panic -- '
+                + 'the wasm instance is hung'));
+            }
+          }, 50);
+        });
+        return Promise.race([
+          Promise.resolve().then(fn).finally(() => { done = true; }),
+          watchdog,
+        ]);
+      }
+
+      // A Rust panic used to end the shard. It no longer does: the instance is
+      // thrown away and replaced (`restartWasm`), so the next test starts on a
+      // fresh heap and the remaining tests still run. What follows is only the
+      // fallback for when that replacement itself fails.
+      for (let i = 0; i < testFns.length; i++) {
+        const name = testFns[i];
+        window.__currentTest = name;
+        // A boundary marker in the CONSOLE stream (not just the DOM), so the
+        // per-shard log the spec writes can be split by movie. Everything the
+        // corpus warns about -- unimplemented built-ins, value parse failures --
+        // arrives on this same pipe, and without a marker there is no way to say
+        // which movie produced it.
+        console.log('=== TEST ' + name + ' (' + (i + 1) + '/' + testFns.length + ') ===');
         const group = startTest(name);
         try {
-          await wasm[name]();
+          await runGuarded(() => wasm[name](), 600000);
           const snapErrors = await drainSnapshots();
           if (snapErrors.length > 0) {
-            const error = snapErrors.join('\n');
+            const error = snapErrors.join(String.fromCharCode(10));
             results.tests.push({ name, status: 'fail', error });
             results.failed++;
             endTest(group, name, false, error);
@@ -270,15 +539,48 @@
           }
         } catch (e) {
           await drainSnapshots(); // flush log entries even on failure
-          // Check for a Rust panic message (set by our panic hook)
-          const panicMsg = window.__testPanic;
+          // `runGuarded` already turned a panic into this rejection, and its
+          // message IS the panic text; `__testPanic` may also still be set.
+          const panicMsg = window.__testPanic || undefined;
           const error = panicMsg || e.message || String(e);
           window.__testPanic = undefined;
           results.tests.push({ name, status: 'fail', error });
           results.failed++;
           endTest(group, name, false, error);
+
+          // A Rust panic is a wasm trap: nothing unwinds, so the instance is
+          // left with state no player reset can reach (a permanently borrowed
+          // task RefCell in wasm-bindgen-futures, a shadow stack that never
+          // came back up). Rather than guess whether it is survivable and skip
+          // the rest of the shard, replace it -- see `restartWasm`.
+          if (panicMsg) {
+            try {
+              await restartWasm('the panic in ' + name);
+            } catch (restartError) {
+              // The replacement failed, so there is genuinely nothing left to
+              // run on. Report the remainder as skipped rather than failing
+              // innocent tests against a dead instance.
+              const why = restartError && restartError.message
+                ? restartError.message : String(restartError);
+              for (let j = i + 1; j < testFns.length; j++) {
+                results.tests.push({
+                  name: testFns[j],
+                  status: 'skip',
+                  error: 'not run -- could not replace the wasm instance after the '
+                    + 'panic in ' + name + ': ' + why,
+                });
+                results.skipped++;
+              }
+              window.__testAborted = 'could not replace the wasm instance after the '
+                + 'panic in ' + name + ' (' + why + ') -- '
+                + (testFns.length - i - 1) + ' test(s) skipped';
+              statusLine('ABORTED after ' + name + ' -- wasm restart failed: ' + why);
+              break;
+            }
+          }
         }
       }
+      window.__currentTest = undefined;
     } catch (e) {
       results.tests.push({ name: '__init', status: 'fail', error: e.message });
       results.failed++;
@@ -288,9 +590,17 @@
     // Publish BEFORE `done`, so the spec is guaranteed to see it — the spec
     // stops waiting the moment `done` flips.
     try {
-      if (window.__interpStatsEnabled && typeof wasm !== 'undefined'
+      if (window.__interpStatsEnabled && wasm
           && typeof wasm.get_interp_stats_report === 'function') {
-        window.__interpStats = wasm.get_interp_stats_report();
+        // Counters live in the wasm module's own statics, so every restart
+        // zeroes them: this report covers only the tests since the last one.
+        // Say so, rather than presenting a partial total as a full sweep.
+        window.__interpStats = (wasmRestarts > 0
+          ? '(PARTIAL: the wasm instance was restarted ' + wasmRestarts
+            + ' time(s) after a panic, which zeroes these counters -- the '
+            + 'numbers below cover only the tests after the last restart)'
+            + String.fromCharCode(10) + String.fromCharCode(10)
+          : '') + wasm.get_interp_stats_report();
       }
     } catch (e) {
       window.__interpStats = 'interp stats unavailable: ' + (e && e.message ? e.message : e);
@@ -299,9 +609,11 @@
     results.done = true;
     window.__testResults = results;
     statusLine('');
-    statusLine(results.failed === 0
+    statusLine((results.failed === 0
       ? results.passed + ' passed'
-      : results.failed + ' failed, ' + results.passed + ' passed');
+      : results.failed + ' failed, ' + results.passed + ' passed')
+      + (results.skipped ? ', ' + results.skipped + ' skipped' : '')
+      + (wasmRestarts ? ' (wasm instance restarted ' + wasmRestarts + 'x)' : ''));
   </script>
 </body>
 </html>
