@@ -429,6 +429,28 @@ impl TextMemberHandlers {
         cast_member_ref: &CastMemberRef,
         text_data: &TextMember,
     ) -> Result<crate::player::bitmap::bitmap::Bitmap, ScriptError> {
+        Self::render_text_image_scaled(player, cast_member_ref, text_data, 1.0)
+    }
+
+    /// `render_text_image` for the hi-res twin, which re-runs the layout with
+    /// every metric already multiplied by `scale` (see
+    /// `scale_text_member_metrics`).
+    ///
+    /// The scale has to be passed as well as baked into the metrics because one
+    /// length in the layout is not a metric at all: the underline is a literal
+    /// one-pixel rule, so it has nothing to be scaled BY and stayed 1px while
+    /// the glyphs around it grew. On a 2x stage that is a hairline under chunky
+    /// text; on a Retina Mac, where the device scale is higher again, it all but
+    /// disappears. Everything else here derives from `text_data`, so `scale` is
+    /// used for that alone.
+    pub fn render_text_image_scaled(
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
+        text_data: &TextMember,
+        scale: f64,
+    ) -> Result<crate::player::bitmap::bitmap::Bitmap, ScriptError> {
+        // Rows of underline. 1 at the authored size, N on an Nx twin.
+        let underline_rows: i32 = (scale.round() as i32).max(1);
         // The member's authored foreground colour. Read here rather than taken
         // as an argument so the two runs (authored / stage-scaled) cannot
         // disagree about it — only METRICS differ between them.
@@ -1432,8 +1454,10 @@ impl TextMemberHandlers {
                                     None => y_pos + line_height - 1,
                                 };
                                 let run_end = (x + adv + char_spacing).max(x);
-                                for ux in x..run_end {
-                                    bitmap.set_pixel(ux, underline_y, per.color, &palettes);
+                                for row in 0..underline_rows {
+                                    for ux in x..run_end {
+                                        bitmap.set_pixel(ux, underline_y + row, per.color, &palettes);
+                                    }
                                 }
                             }
                             x += adv + char_spacing;
@@ -1578,7 +1602,7 @@ impl TextMemberHandlers {
             None => return,
         };
         let scaled = Self::scale_text_member_metrics(&text_data, scale);
-        if let Ok(hi) = Self::render_text_image(player, &member_ref, &scaled) {
+        if let Ok(hi) = Self::render_text_image_scaled(player, &member_ref, &scaled, scale) {
             bitmap.set_hi_res(hi, scale);
         }
     }

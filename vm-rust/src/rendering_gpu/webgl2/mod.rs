@@ -6463,6 +6463,11 @@ impl WebGL2Renderer {
         // rule below compares against THIS (Director's rule is in member units).
         let member_font_size = font_size;
         let font_size = ((font_size as f64) * scale).round().max(1.0) as u16;
+        // The underline is the one length here that is a literal pixel count
+        // rather than a scaled metric, so it stayed a single row while the type
+        // around it grew — a hairline under 2x text, and thinner still on a
+        // hi-DPI display, where `stage_scale` also carries the device ratio.
+        let underline_rows: i32 = (scale.round() as i32).max(1);
         let line_spacing = ((line_spacing as f64) * scale).round() as u16;
         let top_spacing = ((top_spacing as f64) * scale).round() as i16;
         let member_top_spacing = ((member_top_spacing as f64) * scale).round() as i16;
@@ -7289,8 +7294,10 @@ impl WebGL2Renderer {
                         8,
                     );
                     let underline_y = y_pos + line_height - 1;
-                    for ux in start_x..(start_x + line_width).max(start_x) {
-                        bitmap.set_pixel(ux, underline_y, (r, g, b), &palettes);
+                    for row in 0..underline_rows {
+                        for ux in start_x..(start_x + line_width).max(start_x) {
+                            bitmap.set_pixel(ux, underline_y + row, (r, g, b), &palettes);
+                        }
                     }
                 }
             };
@@ -7794,8 +7801,10 @@ impl WebGL2Renderer {
                                 &PaletteRef::BuiltIn(get_system_default_palette()),
                                 8,
                             );
-                            for ux in run_start_x..x {
-                                text_bitmap.set_pixel(ux, underline_y, (r, g, b), &palettes);
+                            for row in 0..underline_rows {
+                                for ux in run_start_x..x {
+                                    text_bitmap.set_pixel(ux, underline_y + row, (r, g, b), &palettes);
+                                }
                             }
                         }
                     }
