@@ -49,6 +49,38 @@ env:
   HABBO_V31_INFO_PORT: ${{ secrets.HABBO_V31_INFO_PORT }}
   HABBO_V31_WS_SSL: ${{ vars.HABBO_V31_WS_SSL }}
   HABBO_V31_WS_PATH: ${{ vars.HABBO_V31_WS_PATH }}
+  # Coke Studios. The account is secret (sw1 = base64 screen name, sw2 = the
+  # session secret the gateway authenticates with); the server addresses are
+  # repo variables, and the three SF_* values below are literals because they
+  # no longer point at the backend at all.
+  COKESTUDIOS_SW1: ${{ secrets.COKESTUDIOS_SW1 }}
+  COKESTUDIOS_SW2: ${{ secrets.COKESTUDIOS_SW2 }}
+  # `/sf` is served from the test runner's OWN origin: the movie calls it from
+  # the page, so a cross-origin call is subject to CORS, and the real backend
+  # sends no Access-Control-Allow-Origin (and answers /sf/gateway with a 302,
+  # which fails a preflight outright). These therefore address the reverse
+  # proxy in scripts/serve-browser-runner.mjs, whose port is the runner's own
+  # default — see E2E_PROXY below for where the requests actually go.
+  COKESTUDIOS_SF_PROTOCOL: 'http:'
+  COKESTUDIOS_SF_HOST: '127.0.0.1'
+  COKESTUDIOS_SF_PORT: '9101'
+  # Route(s) that proxy forwards, as `<prefix>=<origin>`. Unset simply means no
+  # proxying, so the Coke Studios tests fail at the status step rather than the
+  # whole run breaking.
+  E2E_PROXY: ${{ vars.E2E_PROXY }}
+  # After login the backend hands out the game server, which the client dials
+  # as a raw TCP socket; a browser cannot, so the host page maps host:port onto
+  # a WebSocket that a WS-TCP proxy terminates. The host and port must match
+  # what the backend hands out, since Ruffle matches them literally.
+  COKESTUDIOS_GAME_HOST: ${{ vars.COKESTUDIOS_GAME_HOST }}
+  COKESTUDIOS_GAME_PORT: ${{ vars.COKESTUDIOS_GAME_PORT }}
+  COKESTUDIOS_WS_PROXY: ${{ vars.COKESTUDIOS_WS_PROXY }}
+  # Split the browser corpus across n Playwright workers (see E2E_SHARDS in
+  # vm-rust/tests/browser/e2e.spec.ts). Unset or empty is 1, i.e. the old
+  # single-page behaviour; set the repo variable to turn it on. Left off by
+  # default because a few tests are timing-sensitive and a shared runner under
+  # parallel load is exactly where that bites.
+  E2E_SHARDS: ${{ vars.E2E_SHARDS }}
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   S3_BUCKET: ${{ secrets.S3_BUCKET }}
