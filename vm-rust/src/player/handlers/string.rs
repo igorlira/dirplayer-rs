@@ -19,9 +19,11 @@ impl StringHandlers {
     /// reference — Rasterwerks PHOSPHOR's dropdown does exactly that to trim
     /// leftover rows off its list member:
     ///
-    ///     repeat with I = pDropDownItemCount + 1 to pDropDownItemMax
-    ///       delete(sprite(pDropDownSprHi).member.line[pDropDownItemCount + 1])
-    ///     end repeat
+    /// ```text
+    /// repeat with I = pDropDownItemCount + 1 to pDropDownItemMax
+    ///   delete(sprite(pDropDownSprHi).member.line[pDropDownItemCount + 1])
+    /// end repeat
+    /// ```
     ///
     /// Without it every dropdown kept the PREVIOUS menu's surplus lines, so a
     /// two-entry list still drew ten rows.
