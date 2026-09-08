@@ -398,6 +398,16 @@ fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
     }
 }
 
+/// Find an existing task for this URL, comparing WITHOUT case.
+///
+/// Director ran on Windows, where a file name is a file name whatever its
+/// case, and the measured movie leans on that: it preloads "main.dcr" from startMovie
+/// and then asks for "Main.dcr" from the OK button. Comparing exactly made
+/// those two different tasks, so the player downloaded the same 34.5 MB twice
+/// and parsed it twice - measured on a session that walks to the city map.
+///
+/// Merging by case cannot confuse two real files here: they came off a Windows
+/// disk, which could not have held both spellings.
 pub fn find_task_with_url<'a>(
     tasks: &'a HashMap<u32, NetTask>,
     url: &str,
@@ -407,17 +417,19 @@ pub fn find_task_with_url<'a>(
         .unwrap_or_else(|_| url.into());
     tasks
         .iter()
-        .find(|(_, x)| x.url == decoded_url)
+        .find(|(_, x)| x.url.eq_ignore_ascii_case(&decoded_url))
         .map(|x| x.1)
 }
 
+/// As `find_task_with_url`, on the resolved URL. Same reason, same rule.
 pub fn find_task_with_resolved_url<'a>(
     tasks: &'a HashMap<u32, NetTask>,
     resolved_url: &Url,
 ) -> Option<&'a NetTask> {
+    let wanted = resolved_url.as_str();
     tasks
         .iter()
-        .find(|(_, x)| x.resolved_url == *resolved_url)
+        .find(|(_, x)| x.resolved_url.as_str().eq_ignore_ascii_case(wanted))
         .map(|x| x.1)
 }
 

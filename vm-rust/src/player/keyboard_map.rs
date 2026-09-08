@@ -51,6 +51,10 @@ pub fn get_keyboard_key_map_js_to_sw() -> &'static HashMap<u16, u16> {
             (17, 55),   // ctrl
             (18, 58),   // alt
             (27, 53),   // esc
+            // Forward-delete. The measured movie's net mode tells the player to press
+            // 'Del' for the save menu (`case the keyCode of 117`), which did
+            // nothing because the browser's 46 was never translated.
+            (46, 117),  // delete
             (112, 122), // f1
             (113, 120), // f2
             (114, 99),  // f3

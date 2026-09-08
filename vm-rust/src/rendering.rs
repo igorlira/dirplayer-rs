@@ -518,8 +518,13 @@ pub fn render_preview_bitmap(
             Some(bitmap)
         }
         CastMemberType::FilmLoop(loop_member) => {
-            let width = loop_member.info.width as i32;
-            let height = loop_member.info.height as i32;
+            // FilmLoopInfo's four leading fields are the member's RECT in Mac
+            // order, not a position and a size: `width`/`height` hold its RIGHT
+            // and BOTTOM edges. Reading them as a size gave a measured credits
+            // loop a 355x793 preview instead of 559x341.
+            let info_rect = filmloop_base_rect(player, member_ref);
+            let width = info_rect.width().max(1);
+            let height = info_rect.height().max(1);
             let member_ref = member_ref.clone();
 
             let mut bitmap = Bitmap::new(
@@ -637,6 +642,7 @@ pub fn render_preview_bitmap(
                 fore_color_explicit: false,
                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 floor_rule: false,
+                erase_transparent_source: false,
             };
 
             for char_code in 0u16..256 {
@@ -665,6 +671,7 @@ pub fn render_preview_bitmap(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
                         bitmap.draw_text(
                             &label,
@@ -1080,6 +1087,7 @@ fn render_filmloop_from_channel_data(
     let mut sorted_data = channel_data;
     sorted_data.sort_by_key(|(_, channel_idx, _)| *channel_idx);
 
+
     for (_frame_idx, channel_idx, data) in sorted_data {
         let channel_num = get_channel_number_from_index(channel_idx as u32);
 
@@ -1167,7 +1175,9 @@ fn render_filmloop_from_channel_data(
         let (pos_x, pos_y) = if let Some(channel_keyframes) = keyframes_cache.get(&(channel_num as u16)) {
             if let Some(path_keyframes) = &channel_keyframes.path {
                 // Debug: log path keyframes for this channel
-                if current_frame <= 5 || current_frame >= 95 {
+                if (current_frame <= 5 || current_frame >= 95)
+                    && log::log_enabled!(log::Level::Debug)
+                {
                     let kf_summary: Vec<String> = path_keyframes.keyframes.iter()
                         .take(5)
                         .map(|kf| format!("f{}:({},{})", kf.frame, kf.x, kf.y))
@@ -1205,6 +1215,28 @@ fn render_filmloop_from_channel_data(
             }
             // For shapes and other non-bitmap members, pos_x/pos_y is the top-left corner.
             // Use (0,0) registration — shapes don't have a registration point like bitmaps.
+            // A NESTED film loop is anchored by its own registration point,
+            // exactly like a bitmap is by reg_point. Treating it as a top-left
+            // anchor put a measured walking figure 233 px below the
+            // spot he is supposed to walk to.
+            CastMemberType::FilmLoop(inner) => {
+                // A film loop has no separate registration point: the four
+                // fields we call reg_point/width/height are its bounding RECT
+                // (left, top, right, bottom - see the note on FilmLoopInfo in
+                // the WebGL2 renderer). Director therefore CENTRES a film loop
+                // sprite on its loc, the way it does a shape. Anchoring at the
+                // rect's top-left instead drew a measured walking
+                // figure a full body-height too low: verified against the
+                // original projector, where his head sits at stage y 511 and
+                // his feet at 732 throughout the walk, while ours started
+                // 243 px lower - almost exactly his 310 px height scaled by
+                // the loop's 0.789 stage scale.
+                let r = filmloop_base_rect(player, &sprite_member_ref);
+                let _ = inner;
+                let w = r.width().max(1);
+                let h = r.height().max(1);
+                (w as u16, h as u16, w / 2, h / 2)
+            }
             _ => (data.width, data.height, 0, 0),
         };
 
@@ -1213,6 +1245,22 @@ fn render_filmloop_from_channel_data(
         // filmloop shows full bitmap content and bitmap dims are more accurate.
         // Otherwise the filmloop is a viewport/crop and sprite dims represent
         // the intended display size within that viewport.
+        // Choose between channel data dims (sprite dims) and actual bitmap dims.
+        // When the filmloop's info_rect matches the bitmap bounding box, the
+        // filmloop shows full bitmap content and bitmap dims are more accurate.
+        // Otherwise the filmloop is a viewport/crop and sprite dims represent
+        // the intended display size within that viewport.
+        //
+        // The preference is about BITMAPS, as its name says. For a nested film
+        // loop, `member_width/height` is not a bitmap size at all - it is that
+        // loop's own coordinate box - so preferring it drew a measured walking
+        // figure's three parts at 2.6x to 2.8x their scored size and
+        // anchored them up and to the left, which spilled them out of the walk
+        // cycle's offscreen and clipped it at the left, the top and the bottom.
+        // The clipped remainder then filled the box, so the figure also came
+        // out 244 px tall where the projector draws 228.
+        let prefer_bitmap_dims = prefer_bitmap_dims
+            && matches!(member.member_type, CastMemberType::Bitmap(_));
         let (use_width, use_height) = if prefer_bitmap_dims {
             if member_width > 0 && member_height > 0 {
                 (member_width, member_height)
@@ -1255,6 +1303,7 @@ fn render_filmloop_from_channel_data(
             rel_x + rel_w,
             rel_y + rel_h,
         );
+
 
         debug!(
             "  channel {}: member {}:{} type {:?} orig ({}, {}) interp ({}, {}) data_size {}x{} use_size {}x{} reg ({}, {}) sprite_left {} initial_left {} -> rect ({}, {}, {}, {})",
@@ -1474,6 +1523,7 @@ fn render_filmloop_from_channel_data(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     floor_rule: true,
+                    erase_transparent_source: false,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1558,6 +1608,7 @@ fn render_filmloop_from_channel_data(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     bitmap.draw_text(
@@ -1637,6 +1688,7 @@ fn render_filmloop_from_channel_data(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     bitmap.draw_text(
@@ -1687,6 +1739,7 @@ fn render_filmloop_from_channel_data(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -1705,7 +1758,45 @@ fn render_filmloop_from_channel_data(
                 // parent filmloop's working bitmap using the resolved
                 // ink/fore/bgColor (child's own when parent_ink==0, else
                 // parent override).
-                let inner_initial_rect = inner_film_loop.initial_rect.clone();
+                // Must be the rect the recursive call below derives its child
+                // offsets from, or the inner animation is drawn outside the
+                // bitmap we allocate for it. This used to be the member's
+                // load-time initial_rect while the callee used the info rect.
+                // A nested loop must be drawn into a rect that covers its WHOLE
+                // animation, not just its authored box. A measured credits
+                // figure is a walk cycle inside the credits loop, and his
+                // stride carries him outside that box: clipped to it he came
+                // out cut at the top, the bottom AND the leading edge, and
+                // because the box is then scaled up into his sprite rectangle
+                // the clipped figure also looked too big (measured 244 px tall
+                // against the projector's 228).
+                let inner_base_rect = filmloop_base_rect(player, &sprite_member_ref);
+                let inner_initial_rect = filmloop_offscreen_rect(
+                    player,
+                    &sprite_member_ref,
+                    inner_base_rect.clone(),
+                );
+                // The child's sprite rectangle was sized from the AUTHORED box,
+                // so grow it by however much the offscreen grew. Scale and
+                // anchor stay put; the figure simply stops being cut.
+                let sprite_rect = {
+                    let sx = sprite_rect.width() as f64 / inner_base_rect.width().max(1) as f64;
+                    let sy = sprite_rect.height() as f64 / inner_base_rect.height().max(1) as f64;
+                    IntRect::from(
+                        sprite_rect.left
+                            - ((inner_base_rect.left - inner_initial_rect.left) as f64 * sx)
+                                .round() as i32,
+                        sprite_rect.top
+                            - ((inner_base_rect.top - inner_initial_rect.top) as f64 * sy)
+                                .round() as i32,
+                        sprite_rect.right
+                            + ((inner_initial_rect.right - inner_base_rect.right) as f64 * sx)
+                                .round() as i32,
+                        sprite_rect.bottom
+                            + ((inner_initial_rect.bottom - inner_base_rect.bottom) as f64 * sy)
+                                .round() as i32,
+                    )
+                };
 
                 let (child_ink, child_color, child_bg_color) = if parent_ink == 0 {
                     let (fg, bg) = resolve_filmloop_child_colors(&data);
@@ -1775,6 +1866,7 @@ fn render_filmloop_from_channel_data(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 bitmap.copy_pixels_with_params(
@@ -1837,21 +1929,16 @@ pub fn render_score_to_bitmap_with_offset(
         let info_rect = get_filmloop_info_rect(player, member_ref);
         let bitmap_dim_rect = compute_filmloop_initial_rect_with_members(player, member_ref);
 
-        let initial_rect = info_rect.clone()
-            .or_else(|| bitmap_dim_rect.clone())
-            .unwrap_or_else(|| {
-                // Fall back to load-time computed initial_rect
-                let member = player.movie.cast_manager.find_member_by_ref(member_ref);
-                if let Some(member) = member {
-                    if let CastMemberType::FilmLoop(film_loop) = &member.member_type {
-                        film_loop.initial_rect.clone()
-                    } else {
-                        IntRect::from(0, 0, 1, 1)
-                    }
-                } else {
-                    IntRect::from(0, 0, 1, 1)
-                }
-            });
+        // Trust the caller. It allocated this bitmap, so the rect it sized it
+        // from is the only one the child offsets can be measured against.
+        // This used to be recomputed here, which meant a caller that sized the
+        // bitmap differently drew its contents outside it.
+        let initial_rect = IntRect::from(
+            offset.0,
+            offset.1,
+            offset.0 + dest_rect.width(),
+            offset.1 + dest_rect.height(),
+        );
 
         // When the info_rect matches the bitmap bounding box, the filmloop
         // shows full bitmap content — use bitmap dims for internal sprites.
@@ -2140,6 +2227,7 @@ pub fn render_score_to_bitmap_with_offset(
                     ink9_mask_bitmap: ink9_mask.as_ref().map(|(bmp, _)| bmp),
                     ink9_mask_offset: ink9_mask.as_ref().map(|(_, off)| *off).unwrap_or((0, 0)),
                     floor_rule: true,
+                    erase_transparent_source: false,
                 };
 
                 if let Some(mask) = mask {
@@ -2330,6 +2418,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     let is_focused = player.keyboard_focus_sprite == sprite.number as i16;
@@ -2534,6 +2623,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     let wrap_w = if field.word_wrap { text_area_w } else { 0 };
@@ -2703,6 +2793,7 @@ pub fn render_score_to_bitmap_with_offset(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 if let Some(mask) = mask {
@@ -2843,6 +2934,7 @@ pub fn render_score_to_bitmap_with_offset(
                         fore_color_explicit: false,
                         ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                         floor_rule: false,
+                        erase_transparent_source: false,
                     };
 
                     // Use styled text rendering if html_styled_spans is populated
@@ -3112,6 +3204,7 @@ pub fn render_score_to_bitmap_with_offset(
                     fore_color_explicit: false,
                     ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                     floor_rule: false,
+                    erase_transparent_source: false,
                 };
 
                 // Debug: log filmloop bitmap properties before compositing
@@ -3188,6 +3281,7 @@ pub fn render_score_to_bitmap_with_offset(
                             fore_color_explicit: false,
                             ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                             floor_rule: false,
+                            erase_transparent_source: false,
                         };
 
                         bitmap.copy_pixels_with_params(
@@ -3527,6 +3621,7 @@ impl PlayerCanvasRenderer {
                 fore_color_explicit: false,
                 ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
                 floor_rule: false,
+                erase_transparent_source: false,
             };
 
             bitmap.draw_text(
@@ -4284,4 +4379,298 @@ pub fn has_swf_signature(data: &[u8]) -> bool {
     }
     let sig = &data[0..3];
     sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
+}
+
+thread_local! {
+    /// Cache for `compute_filmloop_animated_bounds`. A film loop's authored
+    /// animation never changes at runtime, so this is computed once per member.
+    static FILMLOOP_ANIMATED_BOUNDS: std::cell::RefCell<
+        std::collections::HashMap<(i32, i32), Option<IntRect>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The area a film loop's children occupy across its WHOLE animation, in the
+/// loop's own coordinates.
+///
+/// `compute_filmloop_initial_rect_with_members` unions every channel entry
+/// without regard for which frame it belongs to or where path keyframes carry
+/// the sprite, so a loop whose figure walks across the frame reports only the
+/// area around its start. Sizing the offscreen from that clips the moving
+/// figure against the texture edge.
+///
+/// Path interpolation is linear, so the extremes always land on a recorded
+/// frame or a keyframe; sampling those instead of all 900-odd frames is exact
+/// and far cheaper.
+pub fn compute_filmloop_animated_bounds(
+    player: &DirPlayer,
+    member_ref: &CastMemberRef,
+) -> Option<IntRect> {
+    let key = (member_ref.cast_lib, member_ref.cast_member);
+    if let Some(cached) = FILMLOOP_ANIMATED_BOUNDS.with(|c| c.borrow().get(&key).cloned()) {
+        return cached;
+    }
+    // Seed the cache BEFORE recursing. A film loop child makes this function
+    // reentrant, and a loop that (directly or indirectly) contains itself would
+    // otherwise recurse until the stack gives out; the seeded None makes the
+    // inner call return immediately instead.
+    FILMLOOP_ANIMATED_BOUNDS.with(|c| c.borrow_mut().insert(key, None));
+    let result = compute_filmloop_animated_bounds_uncached(player, member_ref);
+    FILMLOOP_ANIMATED_BOUNDS.with(|c| c.borrow_mut().insert(key, result.clone()));
+    result
+}
+
+fn compute_filmloop_animated_bounds_uncached(
+    player: &DirPlayer,
+    member_ref: &CastMemberRef,
+) -> Option<IntRect> {
+    let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+    let film_loop = match &member.member_type {
+        CastMemberType::FilmLoop(fl) => fl,
+        _ => return None,
+    };
+
+    let frame_intervals = &film_loop.score_chunk.frame_intervals;
+    let has_spans = !frame_intervals.is_empty();
+    let keyframes_cache = &film_loop.score.keyframes_cache;
+
+    // Sample the frames where something can change: every recorded delta and
+    // every path keyframe, plus the first and last frame.
+    let mut frames: Vec<u32> = vec![1];
+    if let Some(total) = film_loop.cached_total_frames {
+        frames.push(total.max(1));
+    }
+    for (frame_idx, _, _) in film_loop.score.channel_initialization_data.iter() {
+        frames.push(frame_idx + 1);
+    }
+    for channel_keyframes in keyframes_cache.values() {
+        if let Some(path) = &channel_keyframes.path {
+            for kf in path.keyframes.iter() {
+                frames.push(kf.frame.max(1));
+            }
+        }
+    }
+    frames.sort_unstable();
+    frames.dedup();
+
+    let mut bounds: Option<IntRect> = None;
+
+    for frame in frames {
+        let frame_idx_target = frame.saturating_sub(1);
+        let mut channel_map: std::collections::HashMap<
+            u16,
+            (u32, crate::director::chunks::score::ScoreFrameChannelData),
+        > = std::collections::HashMap::new();
+
+        for (frame_idx, channel_idx, data) in film_loop.score.channel_initialization_data.iter() {
+            if *channel_idx < 6 {
+                continue;
+            }
+            let is_inline_shape = data.cast_lib == 0xFFFE
+                && data.cast_member == 0
+                && (data.width > 0 || data.height > 0);
+            if data.cast_member == 0 && !is_inline_shape {
+                continue;
+            }
+            if *frame_idx > frame_idx_target {
+                continue;
+            }
+            if has_spans {
+                let in_span = frame_intervals.iter().any(|(primary, _)| {
+                    primary.channel_index == *channel_idx as u32
+                        && primary.start_frame <= frame
+                        && frame <= primary.end_frame
+                });
+                if !in_span {
+                    continue;
+                }
+            }
+            channel_map
+                .entry(*channel_idx)
+                .and_modify(|(existing_frame, existing_data)| {
+                    if *frame_idx > *existing_frame {
+                        *existing_frame = *frame_idx;
+                        *existing_data = data.clone();
+                    }
+                })
+                .or_insert((*frame_idx, data.clone()));
+        }
+
+        for (channel_idx, (_, data)) in channel_map.into_iter() {
+            let channel_num =
+                crate::player::score::get_channel_number_from_index(channel_idx as u32);
+            let (pos_x, pos_y) = keyframes_cache
+                .get(&(channel_num as u16))
+                .and_then(|ck| ck.path.as_ref())
+                .and_then(|path| interpolate_path_position(path, frame))
+                .map(|(x, y)| (x as i16, y as i16))
+                .unwrap_or((data.pos_x, data.pos_y));
+
+            let sprite_member_ref = CastMemberRef {
+                cast_lib: if data.cast_lib == 65535 {
+                    member_ref.cast_lib
+                } else {
+                    data.cast_lib as i32
+                },
+                cast_member: data.cast_member as i32,
+            };
+
+            let (member_w, member_h, reg_x, reg_y) = match player
+                .movie
+                .cast_manager
+                .find_filmloop_inner_member(&sprite_member_ref)
+                .map(|m| &m.member_type)
+            {
+                Some(CastMemberType::Bitmap(bm)) => {
+                    let (w, h) = match player.bitmap_manager.get_bitmap(bm.image_ref) {
+                        Some(bitmap) => (bitmap.width as i32, bitmap.height as i32),
+                        None => (bm.info.width as i32, bm.info.height as i32),
+                    };
+                    (w, h, bm.reg_point.0 as i32, bm.reg_point.1 as i32)
+                }
+                // A film loop child is CENTRED on its position and occupies the
+                // rect it is actually drawn into, growth included. Measuring it
+                // as a top-left-anchored `data` rect instead put the bounds
+                // half a body out and far too small: a measured walking
+                // figure is a loop of loops, and its 483x442 child
+                // was measured into a 378x484 offscreen starting at x = -123,
+                // so the figure lost its leading edge and its feet, and the
+                // clipped remainder was then scaled up and looked too big.
+                // A film loop child is drawn at the size the SCORE gives it,
+                // centred on its position, and grown by whatever its own
+                // animation adds outside its authored rect. Measuring it any
+                // other way makes the offscreen disagree with the drawing:
+                // a measured walking figure is a loop of loops, and
+                // measuring its children by their authored rects instead of
+                // their scored size both misplaced the offscreen and let the
+                // figure fill its whole box, which is where the 7 % came from
+                // (399/372, the box height over the creature inside it).
+                Some(CastMemberType::FilmLoop(_)) => {
+                    let base = filmloop_base_rect(player, &sprite_member_ref);
+                    let grown =
+                        filmloop_offscreen_rect(player, &sprite_member_ref, base.clone());
+                    let base_w = base.width().max(1);
+                    let base_h = base.height().max(1);
+                    // Same choice the renderer makes: the scored size wins when
+                    // the score has one.
+                    let use_w = if data.width > 0 { data.width as i32 } else { base_w };
+                    let use_h = if data.height > 0 { data.height as i32 } else { base_h };
+                    let sx = use_w as f64 / base_w as f64;
+                    let sy = use_h as f64 / base_h as f64;
+                    let left = pos_x as i32 - use_w / 2
+                        - (((base.left - grown.left) as f64) * sx).round() as i32;
+                    let top = pos_y as i32 - use_h / 2
+                        - (((base.top - grown.top) as f64) * sy).round() as i32;
+                    let right = pos_x as i32 + use_w - use_w / 2
+                        + (((grown.right - base.right) as f64) * sx).round() as i32;
+                    let bottom = pos_y as i32 + use_h - use_h / 2
+                        + (((grown.bottom - base.bottom) as f64) * sy).round() as i32;
+                    let rect = IntRect::from(left, top, right, bottom);
+                    bounds = Some(match bounds {
+                        None => rect,
+                        Some(b) => IntRect::from(
+                            b.left.min(rect.left),
+                            b.top.min(rect.top),
+                            b.right.max(rect.right),
+                            b.bottom.max(rect.bottom),
+                        ),
+                    });
+                    continue;
+                }
+                _ => (data.width as i32, data.height as i32, 0, 0),
+            };
+
+            // The scored size wins when the score has one - the same choice
+            // render_filmloop_from_channel_data makes. Taking the member's own
+            // size instead inflated the bounds badly here (a measured credits
+            // draw a 440x557 bitmap at 187x236), and an offscreen sized from
+            // inflated bounds turns the content extent into the scale
+            // denominator, which is what made the figure too big.
+            let width = if data.width > 0 { data.width as i32 } else { member_w };
+            let height = if data.height > 0 { data.height as i32 } else { member_h };
+            if width <= 0 || height <= 0 {
+                continue;
+            }
+
+            // The registration point is in the member's own pixels, so it
+            // scales with the member when the score draws it at another size.
+            let (reg_x, reg_y) = if member_w > 0 && member_h > 0
+                && (member_w != width || member_h != height)
+            {
+                (reg_x * width / member_w, reg_y * height / member_h)
+            } else {
+                (reg_x, reg_y)
+            };
+
+            let left = pos_x as i32 - reg_x;
+            let top = pos_y as i32 - reg_y;
+            let rect = IntRect::from(left, top, left + width, top + height);
+            bounds = Some(match bounds {
+                None => rect,
+                Some(b) => IntRect::from(
+                    b.left.min(rect.left),
+                    b.top.min(rect.top),
+                    b.right.max(rect.right),
+                    b.bottom.max(rect.bottom),
+                ),
+            });
+        }
+    }
+
+    bounds
+}
+
+/// The offscreen rect a film loop must be drawn into: the authored rect grown
+/// to cover the whole animation. Both the WebGL2 texture sizing and
+/// `render_score_to_bitmap_with_offset` call this, because if they disagree
+/// the loop is drawn at one offset into a bitmap sized for another.
+pub fn filmloop_offscreen_rect(
+    player: &DirPlayer,
+    member_ref: &CastMemberRef,
+    base_rect: IntRect,
+) -> IntRect {
+    let animated = match compute_filmloop_animated_bounds(player, member_ref) {
+        Some(a) => a,
+        None => return base_rect,
+    };
+    let grown = IntRect::from(
+        base_rect.left.min(animated.left),
+        base_rect.top.min(animated.top),
+        base_rect.right.max(animated.right),
+        base_rect.bottom.max(animated.bottom),
+    );
+    // A runaway path would ask for a texture no GPU will allocate.
+    if grown.width() > 4096 || grown.height() > 4096 {
+        base_rect
+    } else {
+        grown
+    }
+}
+
+/// The rect a film loop is rendered into, from the outside. Every caller that
+/// allocates an offscreen for a film loop must use this, because the drawing
+/// code derives its child offsets from the same rect: size the bitmap from one
+/// rect and draw with another, and the contents land outside it.
+pub fn filmloop_render_rect(player: &DirPlayer, member_ref: &CastMemberRef) -> IntRect {
+    let base = filmloop_base_rect(player, member_ref);
+    filmloop_offscreen_rect(player, member_ref, base)
+}
+
+/// The film loop's AUTHORED rect, before it is grown to fit the animation.
+/// This is the rect a sprite's on-stage rectangle corresponds to, so anything
+/// that grows the offscreen must grow the destination by the same amount
+/// measured against this.
+pub fn filmloop_base_rect(player: &DirPlayer, member_ref: &CastMemberRef) -> IntRect {
+    get_filmloop_info_rect(player, member_ref)
+        .or_else(|| compute_filmloop_initial_rect_with_members(player, member_ref))
+        .or_else(|| {
+            player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+                .and_then(|m| match &m.member_type {
+                    CastMemberType::FilmLoop(fl) => Some(fl.initial_rect.clone()),
+                    _ => None,
+                })
+        })
+        .unwrap_or_else(|| IntRect::from(0, 0, 1, 1))
 }

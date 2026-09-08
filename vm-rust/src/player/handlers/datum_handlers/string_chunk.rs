@@ -43,27 +43,41 @@ pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usi
 }
 
 impl StringChunkUtils {
+    /// Read the source text behind a chunk, for BOTH Field and Text members
+    /// (the old `.as_field().unwrap()` panicked the whole VM when a chunk of
+    /// a #text member was mutated — MX 2004 movies do that routinely).
+    fn source_text(
+        player: &DirPlayer,
+        original_str_src: &StringChunkSource,
+    ) -> Result<String, ScriptError> {
+        match original_str_src {
+            StringChunkSource::Datum(original_str_ref) => {
+                player.get_datum(original_str_ref).string_value()
+            }
+            StringChunkSource::Member(member_ref) => {
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .ok_or_else(|| ScriptError::new("Chunk source member not found".to_string()))?;
+                match &member.member_type {
+                    crate::player::cast_member::CastMemberType::Field(f) => Ok(f.text.clone()),
+                    crate::player::cast_member::CastMemberType::Text(t) => Ok(t.text.clone()),
+                    _ => Err(ScriptError::new(
+                        "Chunk source member is not a text member".to_string(),
+                    )),
+                }
+            }
+        }
+    }
+
     pub fn delete(
         player: &mut DirPlayer,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_deleting_chunk(&original_str, &chunk_expr)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -77,21 +91,7 @@ impl StringChunkUtils {
         new_string: String,
     ) -> Result<(), ScriptError> {
         let new_string = {
-            let original_str = match original_str_src {
-                StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
-                }
-                StringChunkSource::Member(member_ref) => player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .unwrap()
-                    .member_type
-                    .as_field()
-                    .unwrap()
-                    .text
-                    .clone(),
-            };
+            let original_str = Self::source_text(player, original_str_src)?;
             Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
         Self::set_value(player, original_str_src, chunk_expr, new_string)?;
@@ -128,7 +128,21 @@ impl StringChunkUtils {
                     .member_type;
                 match member {
                     CastMemberType::Field(field) => field.set_text_preserving_caret(new_string),
-                    CastMemberType::Text(member) => member.set_text_preserving_caret(new_string),
+                    CastMemberType::Text(member) => {
+                        member.set_text_preserving_caret(new_string);
+                        // Same cleanup the plain `.text` setter does. The
+                        // renderer prefers html_styled_spans when present, so
+                        // leaving the old spans in place kept drawing the
+                        // PREVIOUS content: the measured movie localises its labels
+                        // with `member("Tekst 3").line[1] = "Klods-lageret"`,
+                        // and the screen went on showing the cast's English
+                        // "Mayor's house" while the member held Danish text.
+                        // Clearing lets the next render synthesise spans from
+                        // the new text; that movie applies chunk styles after
+                        // writing content, so nothing it sets is lost.
+                        member.html_styled_spans.clear();
+                        member.text_set_at_runtime = true;
+                    }
                     _ => {
                         return Err(ScriptError::new(
                             "Cannot set contents for non-text member".to_string(),
@@ -769,6 +783,43 @@ impl StringChunkHandlers {
         *spans = new_spans;
     }
 
+    fn is_chunk_symbol(datum_ref: &DatumRef) -> bool {
+        crate::player::reserve_player_ref(|player| {
+            let name = player.get_datum(datum_ref).string_value().unwrap_or_default();
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
+            )
+        })
+    }
+
+    /// `chunk.word[a..b] = v` compiles to setProp(chunk, #word, a, b, v):
+    /// put v into that part of the chunk's text, then the chunk back into
+    /// its source. Before this the write was dropped as an unknown property.
+    pub fn set_nested_chunk(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        reserve_player_mut(|player| {
+            let (source, outer, text) = player.get_datum(datum).to_string_chunk()?;
+            let (source, outer, text) = (source.clone(), outer.clone(), text.to_owned());
+            let kind = player.get_datum(&args[0]).symbol_value()?;
+            let first = player.get_datum(&args[1]).int_value()?;
+            let (last, value_ref) = if args.len() >= 4 {
+                (player.get_datum(&args[2]).int_value()?, &args[3])
+            } else {
+                (first, &args[2])
+            };
+            let replacement = player.get_datum(value_ref).string_value()?;
+            let inner = StringChunkExpr {
+                chunk_type: StringChunkType::from(kind),
+                start: first,
+                end: last,
+                item_delimiter: player.movie.item_delimiter,
+            };
+            let new_text = StringChunkUtils::string_by_putting_into_chunk(&text, &inner, &replacement)?;
+            StringChunkUtils::set_contents(player, &source, &outer, new_text)?;
+            Ok(DatumRef::Void)
+        })
+    }
+
     pub fn set_prop(
         player: &mut DirPlayer,
         datum_ref: &DatumRef,
@@ -784,6 +835,18 @@ impl StringChunkHandlers {
             // the whole body rendered at 18.
             "font" | "fontstyle" | "color" | "hyperlink" | "fontsize" => {
                 return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
+            }
+            // `chunk.setProp(#text, s)` / `chunk.text = s` — replace the
+            // chunk's contents, same semantics as `put s into <chunk>`.
+            // A Director MX 2004 movie rewrites per-line template text this way;
+            // the previous warn-and-ignore fallback left original/template
+            // words visible in the rendered story text.
+            "text" => {
+                let (source, chunk_expr, ..) = player.get_datum(datum_ref).to_string_chunk()?;
+                let source = source.clone();
+                let chunk_expr = chunk_expr.clone();
+                let new_str = player.get_datum(value_ref).string_value()?;
+                return StringChunkUtils::set_contents(player, &source, &chunk_expr, new_str);
             }
             "charspacing" => {
                 // Update the source member's char_spacing
@@ -818,9 +881,10 @@ impl StringChunkHandlers {
                 }
             }
             _ => {
-                return Err(ScriptError::new(format!(
-                    "Cannot set property {prop} for string chunk datum"
-                )))
+                // Unknown chunk property: warn-and-continue instead of erroring.
+                // A ScriptError here reaches on_script_error which stops the
+                // whole movie; a missed style tweak is strictly less damage.
+                log::warn!("Ignoring set of unknown property {prop} for string chunk datum");
             }
         }
         Ok(())
@@ -1124,6 +1188,29 @@ impl StringChunkHandlers {
                 }
             }
             Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
+            // Explicit `setProp(chunk, #prop, value)` handler-call form.
+            // The dot-syntax path (`chunk.color = v`) already routes through
+            // script.rs::set_obj_prop -> Self::set_prop; this wires the same
+            // implementation into the generic handler-call dispatch, which
+            // a Director MX 2004 movie hits on startup.
+            Some(BuiltInSymbol::SetProp) => {
+                if args.len() < 2 {
+                    return Err(ScriptError::new(
+                        "setProp requires 2 arguments for string chunk datum".to_string(),
+                    ));
+                }
+                if args.len() >= 3 && Self::is_chunk_symbol(&args[0]) {
+                    return Self::set_nested_chunk(datum, args);
+                }
+                let datum = datum.clone();
+                let prop_ref = args[0].clone();
+                let value_ref = args[1].clone();
+                reserve_player_mut(|player| {
+                    let prop_name = player.get_datum(&prop_ref).string_value()?;
+                    Self::set_prop(player, &datum, Symbol::from_str(&prop_name), &value_ref)?;
+                    Ok(DatumRef::Void)
+                })
+            }
             Some(BuiltInSymbol::Delete) => Self::delete(datum, args),
             Some(BuiltInSymbol::SetContents) => Self::set_contents(datum, args),
             Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(datum, args),
@@ -1350,6 +1437,53 @@ mod tests {
         assert_eq!(del_word("a b c", 3, 0), "a b");
         // Interior runs of whitespace: only the deleted gap goes.
         assert_eq!(del_word("a   b   c", 2, 0), "a   c");
+    }
+}
+
+#[cfg(test)]
+mod nested_chunk_write_tests {
+    use super::*;
+    use crate::player::testing::{run_test, TestPlayer};
+
+    fn sym(player: &mut DirPlayer, s: &str) -> DatumRef {
+        player.alloc_datum(Datum::Symbol(Symbol::from_str(s)))
+    }
+
+    #[test]
+    fn a_word_of_a_line_is_written_back_into_the_source() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            // member("Tekst 4").line[3].word[1] = "4/4" on a three-line text.
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("Den Dybe\r\n(gange)\r\n0/4 x".to_string()));
+                let line = StringChunkExpr { chunk_type: StringChunkType::Line, start: 3, end: 3, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), line, "0/4 x".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(1)), player.alloc_datum(Datum::String("4/4".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "Den Dybe\r\n(gange)\r\n4/4 x");
+        });
+    }
+
+    #[test]
+    fn a_range_form_writes_the_whole_range() {
+        crate::player::init_symbol_table();
+        run_test(async {
+            let _p = TestPlayer::new();
+            let (source, chunk, args) = reserve_player_mut(|player| {
+                let source = player.alloc_datum(Datum::String("a b c d".to_string()));
+                let whole = StringChunkExpr { chunk_type: StringChunkType::Line, start: 1, end: 1, item_delimiter: ',' };
+                let chunk = player.alloc_datum(Datum::StringChunk(StringChunkSource::Datum(source.clone()), whole, "a b c d".to_string()));
+                let args = vec![sym(player, "word"), player.alloc_datum(Datum::Int(2)), player.alloc_datum(Datum::Int(3)), player.alloc_datum(Datum::String("X".to_string()))];
+                (source, chunk, args)
+            });
+            StringChunkHandlers::set_nested_chunk(&chunk, &args).unwrap();
+            let text = reserve_player_mut(|player| player.get_datum(&source).string_value().unwrap());
+            assert_eq!(text, "a X d");
+        });
     }
 }
 

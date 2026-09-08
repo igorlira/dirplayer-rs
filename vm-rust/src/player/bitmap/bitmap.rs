@@ -1,6 +1,5 @@
 use std::{sync::Arc, vec};
 
-use binary_reader::BinaryReader;
 use log::warn;
 use num::ToPrimitive;
 use num_derive::{FromPrimitive, ToPrimitive};
@@ -46,9 +45,7 @@ impl PaletteRef {
             match BuiltInPalette::from_i16(i) {
                 Some(palette) => PaletteRef::BuiltIn(palette),
                 None => {
-                    web_sys::console::warn_1(
-                        &format!("Unknown built-in palette ID: {}, defaulting to SystemWin", i).into()
-                    );
+                    crate::console_warn!("Unknown built-in palette ID: {}, defaulting to SystemWin", i);
                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
                 }
             }
@@ -591,44 +588,30 @@ fn decode_generic_bitmap(
                 width as usize * height as usize * num_channels as usize * bytes_per_pixel as usize
             ];
 
-        // FIX: The indexing was wrong - channels and bytes should be multiplied, not added
-        for y in 0..scan_height {
-            for x in 0..scan_width {
-                if x >= width {
-                    continue;
-                }
-                for c in 0..num_channels {
-                    for b in 0..bytes_per_pixel {
-                        let scan_index = (y as usize
-                            * scan_width as usize
-                            * num_channels as usize
-                            * bytes_per_pixel as usize)
-                            + (x as usize * num_channels as usize * bytes_per_pixel as usize)
-                            + (c as usize * bytes_per_pixel as usize)
-                            + b as usize;
-
-                        let result_index = (y as usize
-                            * width as usize
-                            * num_channels as usize
-                            * bytes_per_pixel as usize)
-                            + (x as usize * num_channels as usize * bytes_per_pixel as usize)
-                            + (c as usize * bytes_per_pixel as usize)
-                            + b as usize;
-
-                        if scan_index >= data.len() || result_index >= result.len() {
-                            warn!(
-                                "decode_generic_bitmap: scan_index {} >= data.len() {} or result_index {} >= result.len() {}",
-                                scan_index,
-                                data.len(),
-                                result_index,
-                                result.len()
-                            );
-                            continue;
-                        }
-                        result[result_index] = data[scan_index];
-                    }
-                }
+        // One memcpy per ROW instead of one indexed write per byte. The source
+        // is the same picture at a wider stride (scan_width vs width), so each
+        // destination row is a contiguous prefix of the matching source row.
+        // The old form recomputed two multiply-heavy indices and ran two bounds
+        // comparisons for every single byte; on the measured movie's 271 bitmaps
+        // (6.0 million pixels) that was the largest remaining piece of the
+        // loading screen after the hex-dump fix.
+        let px = num_channels as usize * bytes_per_pixel as usize;
+        let src_stride = scan_width as usize * px;
+        let dst_stride = width as usize * px;
+        // Columns past `width` are dropped, and rows past `height` have nowhere
+        // to go - exactly what the per-byte bounds checks used to do silently.
+        let rows = (scan_height as usize).min(height as usize);
+        let row_len = dst_stride.min(src_stride);
+        for y in 0..rows {
+            let s = y * src_stride;
+            let d = y * dst_stride;
+            let n = row_len
+                .min(data.len().saturating_sub(s))
+                .min(result.len().saturating_sub(d));
+            if n == 0 {
+                break;
             }
+            result[d..d + n].copy_from_slice(&data[s..s + n]);
         }
 
         let actual_bit_depth = bit_depth * num_channels;
@@ -695,12 +678,13 @@ pub fn decompress_bitmap(
         cast_lib
     };
 
-    let mut result = Vec::new();
-    let mut _current_index = 0;
     let num_channels = get_num_channels(info.bit_depth)?;
     let alignment_width = get_alignment_width(info.bit_depth)?;
 
-    let mut reader = BinaryReader::from_u8(data);
+    // Read straight off `data`. `BinaryReader::from_u8` copies the whole chunk,
+    // and its `read_u8` returns an io::Result per byte; the run decoder below
+    // reads every byte of every bitmap in the movie through it.
+    let mut pos: usize = 0;
 
     let scan_height = info.height;
     let mut scan_width = if info.pitch > 0 && info.bit_depth > 0 {
@@ -728,45 +712,50 @@ pub fn decompress_bitmap(
         scan_width as usize * scan_height as usize * num_channels as usize
     };
 
-    let data_was_uncompressed = reader.length >= expected_len;
+    let data_was_uncompressed = data.len() >= expected_len;
+
+    // Reserve the output up front. The loop always fills exactly `expected_len`,
+    // and growing from empty copies the buffer roughly twice over. Capped so a
+    // bitmap header claiming a nonsense size cannot ask for a huge allocation.
+    let mut result: Vec<u8> = Vec::with_capacity(expected_len.min(32 << 20));
 
     if data_was_uncompressed {
-        result.extend_from_slice(&reader.data[..expected_len]);
+        result.extend_from_slice(&data[..expected_len]);
     } else {
         while result.len() < expected_len {
-            let control = match reader.read_u8() {
-                Ok(v) => v as u16,
-                Err(_) => break, // truncated stream is OK in Director
+            let control = match data.get(pos) {
+                Some(v) => {
+                    pos += 1;
+                    *v as u16
+                }
+                None => break, // truncated stream is OK in Director
             };
 
             if control < 0x80 {
-                // Literal run: copy next (control + 1) bytes
-                let count = control + 1;
-                for _ in 0..count {
-                    if result.len() >= expected_len {
-                        break;
-                    }
-                    match reader.read_u8() {
-                        Ok(v) => result.push(v),
-                        Err(_) => break,
-                    }
+                // Literal run: copy the next (control + 1) bytes in one go,
+                // clamped exactly as the per-byte loop clamped it.
+                let count = (control as usize + 1).min(expected_len - result.len());
+                let end = (pos + count).min(data.len());
+                if end <= pos {
+                    break;
                 }
+                result.extend_from_slice(&data[pos..end]);
+                pos = end;
             } else if control == 0x80 {
                 // No-op: skip this byte (PackBits standard)
                 continue;
             } else {
                 // Repeat run: repeat next byte (257 - control) times
-                let count = 257 - control;
-                let val = match reader.read_u8() {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
-                for _ in 0..count {
-                    if result.len() >= expected_len {
-                        break;
+                let count = (257 - control) as usize;
+                let val = match data.get(pos) {
+                    Some(v) => {
+                        pos += 1;
+                        *v
                     }
-                    result.push(val);
-                }
+                    None => break,
+                };
+                let n = count.min(expected_len - result.len());
+                result.resize(result.len() + n, val);
             }
         }
     }
@@ -902,10 +891,10 @@ pub fn decompress_bitmap(
                         // Check bounds
                         if line_offset + x + 3 * scan_width as usize >= result.len() {
                             if !oob_warned {
-                                web_sys::console::warn_1(&format!(
+                                crate::console_warn!(
                                     "32-bit decode: Out of bounds at y={}, x={}. line_offset={}, result.len()={} (further warnings suppressed)",
                                     y, x, line_offset, result.len()
-                                ).into());
+                                );
                                 oob_warned = true;
                             }
                             continue;

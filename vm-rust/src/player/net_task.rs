@@ -231,7 +231,7 @@ async fn maybe_hold_dcr_for_preloader(url: &str) {
     }
     // Only while a Flash preloader is actually loading. The hold is for DGS,
     // and unqualified it delayed every movie in every game by three seconds:
-    // in Matematik i Maaneby a scene took 3.4 to 4.7 s to open with its movie
+    // in the measured title a scene took 3.4 to 4.7 s to open with its movie
     // already in Cache Storage, where the bytes come back in about 20 ms, and
     // `netDone` stayed false for exactly this timeout.
     if !crate::player::is_flash_loading().unwrap_or(false) {

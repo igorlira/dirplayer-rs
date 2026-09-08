@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DatumRef, DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::{bitmap::BitmapDatumHandlers, cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
 };
 use num_traits::FromPrimitive;
@@ -9,6 +9,29 @@ use num_traits::FromPrimitive;
 pub struct BitmapMemberHandlers {}
 
 impl BitmapMemberHandlers {
+    /// Method calls on a bitmap MEMBER. Director exposes the image methods on
+    /// the member too (`member("x").crop(rect)` is as valid as
+    /// `member("x").image.crop(rect)`), so forward to the image the member
+    /// holds. Without this a bitmap member reached the generic "No handler"
+    /// error: a Director MX 2004 movie halts its whole scene on the first
+    /// `crop` call, leaving a black stage.
+    pub fn call(
+        player: &mut DirPlayer,
+        cast_member_ref: &CastMemberRef,
+        handler_name: &str,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let bitmap_ref = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(cast_member_ref)
+            .and_then(|m| m.member_type.as_bitmap())
+            .map(|b| b.image_ref)
+            .ok_or_else(|| ScriptError::new("Cannot call handler on invalid bitmap".to_string()))?;
+        let image_datum = player.alloc_datum(Datum::BitmapRef(bitmap_ref));
+        BitmapDatumHandlers::call(&image_datum, Symbol::from_str(handler_name), args)
+    }
+
     pub fn get_prop(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
@@ -151,6 +174,35 @@ impl BitmapMemberHandlers {
                     let reg_y = (new_height as i32) / 2;
                     bitmap_member.reg_point = (reg_x as i16, reg_y as i16);
                     cast_member.reg_point = (reg_x, reg_y);
+
+                    // A sprite that does not own its size follows its member.
+                    // The measured movie builds its scrolling sky in `on startMovie` by
+                    // cropping one wide bitmap into eight 199-wide members; the
+                    // sprites were authored before that crop, so they kept the
+                    // source's 1600x342 and each tile covered the whole stage
+                    // eight times over. The member itself was already correct -
+                    // only the sprites showing it were stale.
+                    let mut resized = false;
+                    for channel in player.movie.score.channels.iter_mut() {
+                        if channel.number == 0 {
+                            continue;
+                        }
+                        if channel.sprite.member.as_ref() != Some(member_ref) {
+                            continue;
+                        }
+                        if channel.sprite.stretch != 0 || channel.sprite.explicit_lingo_size {
+                            continue;
+                        }
+                        channel.sprite.width = new_width as i32;
+                        channel.sprite.height = new_height as i32;
+                        channel.sprite.base_width = new_width as i32;
+                        channel.sprite.base_height = new_height as i32;
+                        resized = true;
+                    }
+                    if resized {
+                        player.movie.score.invalidate_render_channel_cache();
+                        player.stage_dirty = true;
+                    }
 
                     Ok(())
                 })

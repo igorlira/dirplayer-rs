@@ -98,6 +98,7 @@ features = [
   'Headers',
   'Request',
   'RequestInit',
+  'XmlHttpRequest',
   'RequestMode',
   'Response',
   'ReadableStream',

@@ -523,7 +523,7 @@ pub struct DirPlayer {
     /// the next exitFrame has run. While it is set the stage is not redrawn:
     /// Director draws once per frame, after the handlers of that frame and
     /// its exitFrame have both run, so a handler's half-finished state is
-    /// never on screen. Matematik i Maaneby's crane shows a claw sprite from
+    /// never on screen. A measured movie's crane shows a claw sprite from
     /// mouseUp and moves it into place in exitFrame; drawing in between put
     /// the claw where that sprite last was for one frame. A timestamp, so a
     /// hold can never outlive a stalled frame loop.
@@ -2347,54 +2347,101 @@ impl DirPlayer {
             }
         }
 
-        let mut channel_numbers = self.movie.score.active_channel_numbers_for_frame(frame_num);
-        let mut seen_channels = channel_numbers
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        for channel in self.movie.score.channels.iter() {
-            if channel.number != 0
-                && channel.sprite.puppet
-                && channel.sprite.visible
-                && seen_channels.insert(channel.number)
-            {
-                channel_numbers.push(channel.number);
-            }
-        }
+        // Ask the RENDERER which channels are on stage, instead of rebuilding
+        // an "active channel" set here. The two lists disagreed: a film loop
+        // the renderer was drawing (a walking figure, member 185) was
+        // absent from this list, so it never advanced a frame and stood still,
+        // while an off-stage member (461) got advanced ~30 times a second
+        // forever. One list means the thing you see is the thing that animates.
+        let candidates: Vec<CastMemberRef> = self
+            .movie
+            .score
+            .get_sorted_channels(frame_num)
+            .into_iter()
+            .filter_map(|channel| channel.sprite.member.clone())
+            .collect();
 
         let mut member_refs = Vec::new();
         let mut seen_members = std::collections::HashSet::new();
-        for channel_number in channel_numbers {
-            let Some(channel) = self.movie.score.channels.get(channel_number) else {
-                continue;
-            };
-
-            if channel.number == 0 || !channel.sprite.visible {
-                continue;
-            }
-            let Some(member_ref) = channel.sprite.member.as_ref() else {
-                continue;
-            };
-
+        for member_ref in candidates {
             if !seen_members.insert(member_ref.clone()) {
                 continue;
             }
-
             let is_filmloop = self
                 .movie
                 .cast_manager
-                .find_member_by_ref(member_ref)
+                .find_member_by_ref(&member_ref)
                 .is_some_and(|member| {
                     member.member_type.member_type_id() == cast_member::CastMemberTypeId::FilmLoop
                 });
             if is_filmloop {
-                member_refs.push(member_ref.clone());
+                member_refs.push(member_ref);
+            }
+        }
+
+        // Film loops NEST, and only the stage's own channels were collected.
+        // The measured movie's walking figure is a walk cycle inside the credits
+        // loop, and each of its feet is a loop inside that again; none of them
+        // were ever advanced, so they sat frozen on frame 1 while the outer
+        // loop carried the frozen pose across the screen. The figure slid
+        // instead of walking.
+        let mut queue: Vec<CastMemberRef> = member_refs.clone();
+        let mut visited: std::collections::HashSet<CastMemberRef> =
+            member_refs.iter().cloned().collect();
+        while let Some(parent_ref) = queue.pop() {
+            for child_ref in self.filmloop_child_member_refs(&parent_ref) {
+                if !visited.insert(child_ref.clone()) {
+                    continue;
+                }
+                let is_filmloop = self
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&child_ref)
+                    .is_some_and(|member| {
+                        member.member_type.member_type_id()
+                            == cast_member::CastMemberTypeId::FilmLoop
+                    });
+                if is_filmloop {
+                    member_refs.push(child_ref.clone());
+                    queue.push(child_ref);
+                }
             }
         }
 
         self.active_stage_filmloop_members_cache =
             Some((frame_num, generation, member_refs.clone()));
         member_refs
+    }
+
+    /// The members a film loop's own score puts in its channels. Resolved the
+    /// same way the renderer does, including the 65535 sentinel that means
+    /// "the cast library the loop itself lives in".
+    fn filmloop_child_member_refs(&self, member_ref: &CastMemberRef) -> Vec<CastMemberRef> {
+        let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) else {
+            return Vec::new();
+        };
+        let CastMemberType::FilmLoop(film_loop) = &member.member_type else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (_frame, channel_idx, data) in film_loop.score.channel_initialization_data.iter() {
+            if *channel_idx < 6 || data.cast_member == 0 {
+                continue;
+            }
+            let child = CastMemberRef {
+                cast_lib: if data.cast_lib == 65535 {
+                    member_ref.cast_lib
+                } else {
+                    data.cast_lib as i32
+                },
+                cast_member: data.cast_member as i32,
+            };
+            if seen.insert(child.clone()) {
+                out.push(child);
+            }
+        }
+        out
     }
 
     pub fn active_stage_script_instance_ids(&mut self) -> Vec<ScriptInstanceRef> {
@@ -3262,7 +3309,9 @@ impl DirPlayer {
             // the load-time logic in `load_movie_from_dir`. Label sources
             // do NOT trigger URL rewriting in net handlers — that's
             // reserved for `movie_path_override`. See `set_movie_path_label`.
-            BuiltInSymbol::MoviePath => {
+            // `the pathName` is the classic synonym of `the moviePath` —
+            // same folder-with-trailing-separator value.
+            BuiltInSymbol::MoviePath | BuiltInSymbol::PathName => {
                 let label = self.movie_path_label_effective();
                 if let Some(path) = label {
                     let base_path = dir_part_of_path(&path);
@@ -3336,7 +3385,7 @@ impl DirPlayer {
                                 Some(if prop.eq_ignore_ascii_case("frame") {
                                     film_loop.current_frame.max(1)
                                 } else {
-                                    film_loop.score.frame_count.unwrap_or(1).max(1)
+                                    film_loop.cached_total_frames.or(film_loop.score.frame_count).unwrap_or(1).max(1)
                                 })
                             }
                             _ => None,
@@ -3918,7 +3967,16 @@ impl DirPlayer {
                         if let CastMemberType::FilmLoop(film_loop) = &m.member_type {
                             let current = film_loop.current_frame;
 
-                            let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
+                            // Use the length the RENDERER uses. The score's own
+                            // frame_count is only filled in by a D5 branch that a
+                            // D8.5 film loop never takes, so it stayed 1 and every
+                            // loop froze on its first frame while the renderer was
+                            // prepared to draw all 62 (or 190) of them.
+                            let frame_count = film_loop
+                                .cached_total_frames
+                                .or(film_loop.score.frame_count)
+                                .unwrap_or(1)
+                                .max(1);
 
                             let next = current + 1;
                             // `info.loops` is already the DECODED flag (1 = loop,
@@ -3942,7 +4000,8 @@ impl DirPlayer {
                     })
             })
             .collect();
-        
+
+
         // Process each filmloop
         for (member_ref, old_frame, new_frame) in active_filmloops {
             // Skip if frame didn't change
@@ -3991,7 +4050,16 @@ impl DirPlayer {
         for member_ref in active_filmloop_refs {
             if let Some(member) = self.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                 if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                    let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
+                            // Use the length the RENDERER uses. The score's own
+                            // frame_count is only filled in by a D5 branch that a
+                            // D8.5 film loop never takes, so it stayed 1 and every
+                            // loop froze on its first frame while the renderer was
+                            // prepared to draw all 62 (or 190) of them.
+                            let frame_count = film_loop
+                                .cached_total_frames
+                                .or(film_loop.score.frame_count)
+                                .unwrap_or(1)
+                                .max(1);
 
                     let old_frame = film_loop.current_frame;
                     film_loop.current_frame += 1;
@@ -4361,7 +4429,7 @@ pub fn hold_draw_for_input_handler() {
 /// Director runs one handler at a time: input that arrives while a frame
 /// handler is busy-waiting (`repeat while ... updateStage()`) is queued until
 /// the handler returns. The busy-wait yield lets the command and event loops
-/// run inside that wait, so a mouseEnter fired mid-animation on Maaneby's map
+/// run inside that wait, so a mouseEnter fired mid-animation on a measured map
 /// build sequence, where the original ignores the mouse until it is over.
 /// Waits for the gap; never drops the input.
 pub async fn wait_for_handler_gap() {

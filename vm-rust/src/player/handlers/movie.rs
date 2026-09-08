@@ -1039,6 +1039,73 @@ impl MovieHandlers {
         Ok(DatumRef::Void)
     }
 
+    /// `printFrom startFrame, endFrame` - Director's stage printer.
+    ///
+    /// Without this the call fell through to "No built-in handler", which is a
+    /// script error, which halts the movie. The measured movie binds it to Ctrl+P
+    /// on its map screen (a movie-script keyDown, key code 35 with
+    /// `the controlDown`), so a player following its own manual froze
+    /// the whole thing.
+    ///
+    /// Director rendered the named frames to the printer. We cannot re-render a
+    /// frame we are not standing on, and the only call measured asks for the
+    /// frame it is already showing (`printFrom(label("ByScene"), label(
+    /// "ByScene"))`), so hand the current stage to the host page and let it
+    /// print the canvas. Deferred through setTimeout for the same reason
+    /// `goToNetPage` defers its eval: the host callback re-enters WASM, and
+    /// that trips the recursive-closure guard if the call stack is still live.
+    pub fn print_from(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let (from, to) = reserve_player_ref(|player| {
+            let get = |i: usize| -> i32 {
+                args.get(i)
+                    .map(|a| player.get_datum(a).int_value().unwrap_or(0))
+                    .unwrap_or(0)
+            };
+            Ok::<(i32, i32), ScriptError>((get(0), get(1)))
+        })?;
+        // Grab the stage HERE, not from the host page. The stage canvas is
+        // WebGL without `preserveDrawingBuffer`, so its drawing buffer is
+        // already cleared by the time any page code can read it - measured:
+        // `toDataURL` from the page returned a blank 1024x768 sheet while the
+        // game was plainly rendering. Drawing a frame and reading it in the
+        // same turn is what the browser test harness does
+        // (`testing_browser::canvas_to_snapshot`), and it is the only moment
+        // the buffer is guaranteed to hold the picture.
+        let data_url = {
+            use crate::rendering::{with_renderer_mut, RENDERER_LOCK};
+            use crate::rendering_gpu::Renderer;
+            with_renderer_mut(|renderer_lock| {
+                if let Some(renderer) = renderer_lock {
+                    reserve_player_mut(|player| renderer.draw_frame(player));
+                }
+            });
+            RENDERER_LOCK.with(|lock| {
+                lock.borrow()
+                    .as_ref()
+                    .and_then(|r| r.canvas().to_data_url_with_type("image/png").ok())
+            })
+        };
+        if let Some(url) = data_url {
+            if let Some(window) = web_sys::window() {
+                let _ = js_sys::Reflect::set(
+                    &window,
+                    &wasm_bindgen::JsValue::from_str("__mimStagePng"),
+                    &wasm_bindgen::JsValue::from_str(&url),
+                );
+            }
+        }
+        // Deferred for the same reason `goToNetPage` defers its eval: the host
+        // callback runs page code, and doing that while this call stack is
+        // still live trips the recursive-closure guard.
+        let code = format!(
+            "setTimeout(function(){{try{{if(window.dirplayer_printStage)window.dirplayer_printStage({from},{to});}}catch(e){{console.warn('printFrom:',e);}}}},0);"
+        );
+        if let Err(e) = js_sys::eval(&code) {
+            log::warn!("printFrom: schedule failed: {:?}", e);
+        }
+        Ok(DatumRef::Void)
+    }
+
     pub fn go_to_net_movie(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // LeechProtectionRemovalHelp `disableGoToNetMovie` — see
         // `go_to_net_page`. Note this pins the CURRENT movie in place, so a
