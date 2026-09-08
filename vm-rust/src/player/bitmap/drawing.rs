@@ -2368,6 +2368,63 @@ impl Bitmap {
         // Check for skew-based flip (skew=±180° combined with rotation produces a mirror)
         let has_skew_flip = is_skew_flip(params.skew);
 
+        // Fast path — the INVERSE of the 32 -> 8 grayscale copy directly below:
+        // an 8-bit GRAYSCALE source into a 32-bit destination writes the stored
+        // byte as the grey level (N -> (N, N, N), opaque), not through the CLUT.
+        //
+        // These two have to agree, and until now only one of them was raw. An
+        // 8-bit #grayscale bitmap in dirplayer holds a RAW ALPHA/luminance byte:
+        // `extractAlpha()` writes the source alpha into it verbatim, `setAlpha()`
+        // reads it back verbatim, and the 32 -> 8 path below writes luminance
+        // verbatim. But READING one as colour resolved it through the built-in
+        // #grayscale CLUT, which is REVERSED (index 0 is white, 255 is black), so
+        // a value round-tripped 8 -> 32 -> 8 came back INVERTED: 0x00 -> 0xFF,
+        // 0xAA -> 0x55.
+        //
+        // Movies do exactly that round trip to scroll an alpha channel, because
+        // there is no other way to shift an 8-bit image: build a 32-bit scratch,
+        // copy the mask into it, copy it back at an offset. Tetris' line clear
+        // (BehaviorScript 5) shifts the board's alpha that way --
+        //     temp_alpha = image(10 * block_size, (ylist[num] - 2) * block_size, 32)
+        //     temp_alpha.copyPixels(alpha_image, temp_alpha.rect, temp_alpha.rect)
+        //     alpha_image.copyPixels(temp_alpha, temp_alpha.rect.offset(0, block_size), temp_alpha.rect)
+        // -- so from the first cleared row the board's alpha inverted, and the
+        // white sheet the board is filled with (`image.fill(rect, rgb(1,1,1) * 240 * 2)`)
+        // turned opaque over the play area, hiding the falling piece behind it.
+        if ink == 0
+            && !has_sprite_rotation
+            && !has_skew_flip
+            && self.bit_depth == 32
+            && src.bit_depth == 8
+            && matches!(src.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+        {
+            let dw = self.width as usize;
+            let sw = src.width as usize;
+            for dy in min_dst_y..max_dst_y {
+                if dy < 0 || dy >= self.height as i32 { continue; }
+                for dx in min_dst_x..max_dst_x {
+                    if dx < 0 || dx >= self.width as i32 { continue; }
+                    let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
+                    let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
+                    let sx = (src_left_f + rel_x * scale_x).floor() as i32;
+                    let sy = (src_top_f + rel_y * scale_y).floor() as i32;
+                    if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { continue; }
+                    let si = (sy as usize) * sw + sx as usize;
+                    if si >= src.data.len() { continue; }
+                    let v = src.data[si];
+                    let di = ((dy as usize) * dw + dx as usize) * 4;
+                    if di + 3 < self.data.len() {
+                        self.data[di] = v;
+                        self.data[di + 1] = v;
+                        self.data[di + 2] = v;
+                        self.data[di + 3] = 255;
+                    }
+                }
+            }
+            self.matte = None;
+            return;
+        }
+
         // Fast path — copy a 32-bit RGBA source into an 8-bit GRAYSCALE destination
         // for Director's text→alpha-mask→texture HUD pattern
         // (`grayImage.copyPixels(textImage)` then `rgba.setAlpha(grayImage)`): the
