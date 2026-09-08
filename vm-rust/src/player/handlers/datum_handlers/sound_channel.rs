@@ -226,7 +226,7 @@ impl SoundChannelDatumHandlers {
                     ));
                 }
                 // Director's order is fadeTo(volume, milliseconds). Read the
-                // other way round, Matematik i Maaneby's music button,
+                // other way round, a measured movie's music button,
                 // `sound(1).fadeTo(200 * musik, 1500)`, turned the music OFF by
                 // fading to 1500 over 0 ticks: 1500 clamps to 255, so the button
                 // meant to silence the music set it to full, instantly.
@@ -2710,8 +2710,8 @@ impl SoundChannel {
         self.elapsed_time = 0.0;
         self.loops_remaining = 0;
         self.is_fading = false;
-        // A stopped channel keeps nothing queued. Matematik i Maaneby's
-        // Gentag button stops channel 4 and queues the narration again; with
+        // A stopped channel keeps nothing queued. A measured movie's
+        // repeat button stops channel 4 and queues the narration again; with
         // the old entries left in place they played before the new ones.
         self.playlist_segments.clear();
         self.playlist.clear();
@@ -3727,7 +3727,7 @@ impl SoundChannel {
     }
 
     /// fadeOut({ms}): fade to silence and then stop, as Director does. Left
-    /// playing at volume 0 the channel stayed busy, and Matematik i Maaneby's
+    /// playing at volume 0 the channel stayed busy, and a measured movie's
     /// map, which fades the previous house's voice out and sets the volume
     /// back to 255 for the next, had every voice after the first swallowed.
     pub fn fade_out(&mut self, ms: i32) {

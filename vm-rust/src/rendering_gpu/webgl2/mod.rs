@@ -4701,7 +4701,7 @@ impl WebGL2Renderer {
         // only. An indexed bitmap under Lighten keeps its palette colours
         // (Habbo's navigator buttons: 8-bit, ink 40, foreColor light grey, and
         // the real client leaves their black outlines black), while a 32-bit
-        // one is lifted by the foreColor (Matematik i Maaneby's stones).
+        // one is lifted by the foreColor (a measured movie's stones).
         if effective_ink == InkMode::Darken || effective_ink == InkMode::Lighten {
             let fg = if effective_ink == InkMode::Lighten && bitmap_bit_depth <= 8 {
                 (0, 0, 0)

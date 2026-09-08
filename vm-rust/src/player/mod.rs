@@ -523,7 +523,7 @@ pub struct DirPlayer {
     /// the next exitFrame has run. While it is set the stage is not redrawn:
     /// Director draws once per frame, after the handlers of that frame and
     /// its exitFrame have both run, so a handler's half-finished state is
-    /// never on screen. Matematik i Maaneby's crane shows a claw sprite from
+    /// never on screen. A measured movie's crane shows a claw sprite from
     /// mouseUp and moves it into place in exitFrame; drawing in between put
     /// the claw where that sprite last was for one frame. A timestamp, so a
     /// hold can never outlive a stalled frame loop.
@@ -4429,7 +4429,7 @@ pub fn hold_draw_for_input_handler() {
 /// Director runs one handler at a time: input that arrives while a frame
 /// handler is busy-waiting (`repeat while ... updateStage()`) is queued until
 /// the handler returns. The busy-wait yield lets the command and event loops
-/// run inside that wait, so a mouseEnter fired mid-animation on Maaneby's map
+/// run inside that wait, so a mouseEnter fired mid-animation on a measured map
 /// build sequence, where the original ignores the mouse until it is over.
 /// Waits for the gap; never drops the input.
 pub async fn wait_for_handler_gap() {
