@@ -1590,7 +1590,7 @@ impl WebGL2Renderer {
                 sprite.flip_v,
                 sprite.rotation,
                 sprite.skew,
-                sprite.bg_color.clone(),
+                bg_color,
                 sprite.color.clone(),
                 sprite.has_fore_color,
                 sprite.has_back_color,
