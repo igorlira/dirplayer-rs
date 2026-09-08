@@ -18,11 +18,13 @@ const CONFIG_DIR = path.join(VM_RUST_DIR, "tests", "e2e", "configs");
 const DOTENV_PATH = path.join(REPO_ROOT, ".env");
 const IS_WIN = process.platform === "win32";
 
-// TEMPORARY: build the e2e wasm with the dev profile (faster compiles,
-// much slower interpreter). Set E2E_PROFILE=release to restore the
-// normal build, or flip this default back to "release".
+// Release by default. The dev profile compiles far quicker but the
+// interpreter it produces is several times slower to RUN, which on a corpus
+// this size costs much more wall clock than it saves -- and on a CPU-bound CI
+// runner the difference is the whole job. `E2E_PROFILE=dev` opts into the fast
+// compile when you are iterating on one movie.
 const CARGO_PROFILE =
-  (process.env.E2E_PROFILE ?? "dev") === "release" ? "release" : "dev";
+  (process.env.E2E_PROFILE ?? "release") === "dev" ? "dev" : "release";
 
 const dotenvResult = dotenv.config({ path: DOTENV_PATH, quiet: true });
 const loadedEnv = {
