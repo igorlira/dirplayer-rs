@@ -436,21 +436,33 @@ impl TextMemberHandlers {
     /// every metric already multiplied by `scale` (see
     /// `scale_text_member_metrics`).
     ///
-    /// The scale has to be passed as well as baked into the metrics because one
-    /// length in the layout is not a metric at all: the underline is a literal
-    /// one-pixel rule, so it has nothing to be scaled BY and stayed 1px while
-    /// the glyphs around it grew. On a 2x stage that is a hairline under chunky
-    /// text; on a Retina Mac, where the device scale is higher again, it all but
-    /// disappears. Everything else here derives from `text_data`, so `scale` is
-    /// used for that alone.
+    /// The scale has to be passed as well as baked into the metrics because a
+    /// few lengths in the layout are not metrics at all but literal pixel
+    /// counts, with nothing of their own to be scaled BY (see `one_px`):
+    ///
+    ///  * the underline is a one-pixel rule, and stayed 1px while the glyphs
+    ///    around it grew -- a hairline under chunky text on a 2x stage, and all
+    ///    but invisible at a Retina Mac's higher device scale;
+    ///  * the two -1 nudges in the first line's vertical origin, which left the
+    ///    whole block `scale - 1` device pixels low.
+    ///
+    /// Everything else here derives from `text_data`, which arrives already
+    /// scaled.
     pub fn render_text_image_scaled(
         player: &mut DirPlayer,
         cast_member_ref: &CastMemberRef,
         text_data: &TextMember,
         scale: f64,
     ) -> Result<crate::player::bitmap::bitmap::Bitmap, ScriptError> {
+        // ONE AUTHORED PIXEL, expressed in the pixels this pass renders into:
+        // 1 at the authored size, N on an Nx twin. Every length in the layout
+        // that is a literal pixel count rather than a member metric has to be
+        // measured in this unit, because `scale_text_member_metrics` has
+        // already multiplied the metrics and a bare `1` alongside them is a
+        // different physical distance on the twin than it is at 1x.
+        let one_px: i32 = (scale.round() as i32).max(1);
         // Rows of underline. 1 at the authored size, N on an Nx twin.
-        let underline_rows: i32 = (scale.round() as i32).max(1);
+        let underline_rows: i32 = one_px;
         // The member's authored foreground colour. Read here rather than taken
         // as an argument so the two runs (authored / stage-scaled) cannot
         // disagree about it — only METRICS differ between them.
@@ -1177,9 +1189,19 @@ impl TextMemberHandlers {
                         // by ~1px, so applying the raw topSpacing dropped the room rows
                         // 1px below Shockwave. Calibrated against the v7 Navigator room
                         // list (topSpacing=9 -> 8px effective).
+                        //
+                        // Both nudges are ONE AUTHORED PIXEL, so on a twin they are
+                        // `one_px`, not 1. Everything else here has been multiplied by
+                        // the scale already (the metrics by
+                        // `scale_text_member_metrics`, `db` by rasterising the strike
+                        // at the scaled size), so a bare 1 left the first line
+                        // `scale - 1` device pixels low -- measured on the v7 room
+                        // list as a first baseline of 134.00 / 134.50 / 134.67 / 134.75
+                        // movie px at 1x / 2x / 3x / 4x, a perfect fit to 135s - 1.
+                        // The last row of the list was clipped out of its element by it.
                         (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
-                            (text_data.fixed_line_space as i32 - 1 - db).max(0)
-                                + (text_data.top_spacing as i32 - 1).max(0)
+                            (text_data.fixed_line_space as i32 - one_px - db).max(0)
+                                + (text_data.top_spacing as i32 - one_px).max(0)
                         }
                         (Some(_), _) => text_data.top_spacing as i32,
                         (None, _) => text_data.top_spacing as i32,
@@ -2480,8 +2502,34 @@ impl TextMemberHandlers {
                 // Nothing script-visible changes: `bitmap` is still the
                 // movie-unit image, and the twin is dropped by any imaging
                 // operation that cannot maintain it.
+                //
+                // The twin is only ever built at an INTEGER magnification, the
+                // same rule a custom cursor follows (`cursor.rs`).
+                //
+                // `scale_text_member_metrics` has to round every length it
+                // scales to a whole pixel, and at a fractional stage scale those
+                // roundings stop agreeing with each other. Measured on Habbo v7's
+                // navigator (`sulake/v7_hidpi`), font size 9 on an 18px
+                // fixedLineSpace, row stride in movie units:
+                //
+                //     ratio   1.0    1.5    2.0    2.5    3.0    4.0
+                //     stride  18.00  18.67  18.00  18.40  18.00  18.00
+                //
+                // At 1.5 the size rounds 13.5 -> 14, the glyphs no longer fit
+                // the scaled 27px line box and each line takes 28 device pixels
+                // instead. One pixel per line accumulates: by the tenth room in
+                // the list the text has walked 6.7 movie pixels down and the last
+                // row is clipped out of the element entirely. macOS "scaled"
+                // display modes report exactly these fractional ratios.
+                //
+                // Rounding the FACTOR instead makes every scaled metric an exact
+                // multiple, so the twin's layout is the authored layout magnified
+                // and cannot disagree with it. A 1.5x stage then draws a 2x twin
+                // slightly reduced, which is still far sharper than magnifying
+                // the 1x bake, and below 1.5 there is nothing to gain so no twin
+                // is promised at all.
                 let (sx, sy) = crate::player::stage::stage_scale(player);
-                let scale = sx.min(sy);
+                let scale = sx.min(sy).round();
                 if scale > 1.0 + 1e-3 {
                     // Only PROMISE the twin. Rasterising it here would double
                     // the cost of every `.image` call, and most of them never
