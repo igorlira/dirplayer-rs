@@ -41,6 +41,8 @@ use binary_reader::Endian;
 pub struct DirectorFile {
     pub base_path: Url,
     pub file_name: String,
+    /// Byte length of the source `.dcr`/`.dir` buffer (`the movieFileSize`).
+    pub file_size: u32,
     pub endian: Endian,
     pub after_burned: bool,
     pub version: u16,
@@ -158,6 +160,7 @@ impl DirectorFile {
         return Ok(DirectorFile {
             base_path,
             file_name,
+            file_size: 0,
             endian,
             after_burned,
             version: rifx.dir_version,
@@ -1138,11 +1141,13 @@ pub fn read_director_file_bytes(
 ) -> Result<DirectorFile, String> {
     let mut reader = binary_reader::BinaryReader::from_vec(bytes);
 
-    return DirectorFile::read(
+    let mut dir = DirectorFile::read(
         file_name.to_owned(),
         Url::from_str(base_path).unwrap(),
         &mut reader,
-    );
+    )?;
+    dir.file_size = bytes.len().min(u32::MAX as usize) as u32;
+    Ok(dir)
 }
 
 fn get_chunk_data(

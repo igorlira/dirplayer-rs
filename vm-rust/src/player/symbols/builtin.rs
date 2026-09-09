@@ -95,6 +95,8 @@ define_builtin_symbols! {
     "windowList" => WindowList,
     "freeBytes" => FreeBytes,
     "freeBlock" => FreeBlock,
+    "movieFileSize" => MovieFileSize,
+    "movieFileFreeSize" => MovieFileFreeSize,
     "emulateMultibuttonMouse" => EmulateMultibuttonMouse,
     "enableFlashLingo" => EnableFlashLingo,
     "preLoadEventAbort" => PreLoadEventAbort,
